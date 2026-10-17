@@ -155,8 +155,11 @@ class GuardTimerTest(unittest.TestCase):
 
 class ApnsTest(unittest.TestCase):
     def setUp(self):
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives import serialization
+        try:
+            from cryptography.hazmat.primitives.asymmetric import ec
+            from cryptography.hazmat.primitives import serialization
+        except ImportError:
+            self.skipTest('cryptography is not installed')
         self.key = ec.generate_private_key(ec.SECP256R1())
         d = Path(mkdtemp())
         self.kp = d / 'k.p8'
