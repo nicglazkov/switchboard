@@ -78,7 +78,8 @@ impl Recorder {
         std::fs::create_dir_all(dir)?;
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let label: String = label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(40).collect();
+        let label: String =
+            label.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).take(40).collect();
         let stamp = chrono::Local::now().format("%Y%m%d-%H%M%S");
         let path = dir.join(format!("{stamp}-{}-{n}-{label}.rec", std::process::id()));
         let mut out = BufWriter::new(File::create(&path)?);

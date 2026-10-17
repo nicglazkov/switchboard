@@ -2,7 +2,10 @@
 //! bar per day since the reset with today in the accent, and the chats that would cost the most to go back to. The tiles read the live plan numbers
 //! the chip shows; the history comes from GET /api/usage, read each time the panel opens.
 
-use gpui::{FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, prelude::*, px, relative};
+use gpui::{
+    FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, prelude::*, px, relative,
+};
 use sb_core::usage::{self, DaySlot};
 use sb_core::{Session, Tone, fmt};
 
@@ -30,11 +33,14 @@ impl BoardView {
             .pt(px(ui::header() + 4.))
             .pr(px(right))
             .pl(px(8.))
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.plan_open = false;
-                this.usage_hover = None;
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.plan_open = false;
+                    this.usage_hover = None;
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .id("plan")
@@ -59,8 +65,13 @@ impl BoardView {
         let t = c.t;
         let p = &c.app.snap.plan;
         // The chats board::tally counts as costly to go back to (gone cold with a big context), the 3 biggest.
-        let mut costly: Vec<&Session> =
-            c.app.snap.sessions().into_iter().filter(|s| !s.stale && !c.app.is_hidden(&s.key) && s.needs_fresh(c.now)).collect();
+        let mut costly: Vec<&Session> = c
+            .app
+            .snap
+            .sessions()
+            .into_iter()
+            .filter(|s| !s.stale && !c.app.is_hidden(&s.key) && s.needs_fresh(c.now))
+            .collect();
         costly.sort_by_key(|s| std::cmp::Reverse(s.ctx));
         costly.truncate(3);
         div()
@@ -74,8 +85,14 @@ impl BoardView {
                     .gap(px(8.))
                     .child(div().text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.ink).child("Usage"))
                     .child(ui::spacer())
-                    .when(c.app.usage_loading, |d| d.child(div().text_size(px(12.)).text_color(t.faint).child("Updating")))
-                    .children(p.as_of(c.now).filter(|_| !c.app.usage_loading).map(|a| div().text_size(px(12.)).text_color(t.faint).child(cap(&a)))),
+                    .when(c.app.usage_loading, |d| {
+                        d.child(div().text_size(px(12.)).text_color(t.faint).child("Updating"))
+                    })
+                    .children(
+                        p.as_of(c.now)
+                            .filter(|_| !c.app.usage_loading)
+                            .map(|a| div().text_size(px(12.)).text_color(t.faint).child(cap(&a))),
+                    ),
             )
             .child(div().flex().gap(px(8.)).child(self.five_tile(c)).child(self.week_tile(c)).child(self.weeks_tile(c)))
             .child(self.day_chart(c))
@@ -89,7 +106,9 @@ impl BoardView {
                     .line_height(relative(1.45))
                     .text_color(t.faint)
                     .child(div().flex_none().mt(px(1.)).child(ui::icon("info", 13., t.faint)))
-                    .child(ui::wrap("Numbers update when a session replies, so use in the Claude apps shows up later.")),
+                    .child(ui::wrap(
+                        "Numbers update when a session replies, so use in the Claude apps shows up later.",
+                    )),
             )
     }
 
@@ -121,14 +140,28 @@ impl BoardView {
                     }))
                     .child(crate::chrome::live_dot(&t, &l, ("uc-live", i), 7.))
                     .child(ui::line(s.topic.clone()).flex_1().text_size(px(12.5)).text_color(t.ink2))
-                    .child(div().flex_none().font_features(ui::tnum()).text_size(px(12.)).text_color(t.dim).child(format!("re-reads {}", fmt::k(s.ctx)))),
+                    .child(
+                        div()
+                            .flex_none()
+                            .font_features(ui::tnum())
+                            .text_size(px(12.))
+                            .text_color(t.dim)
+                            .child(format!("re-reads {}", fmt::k(s.ctx))),
+                    ),
             );
         }
         div()
             .flex()
             .flex_col()
             .gap(px(4.))
-            .child(div().px(px(8.)).text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2).child("Costly to go back to"))
+            .child(
+                div()
+                    .px(px(8.))
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.ink2)
+                    .child("Costly to go back to"),
+            )
             .child(rows)
     }
 
@@ -139,7 +172,9 @@ impl BoardView {
         let live = p.five_live(c.now);
         let pct = if live { p.five_hour } else { None };
         let sub = if live {
-            p.five_hour_reset.map(|r| format!("Resets {}", fmt::when(r, c.now))).unwrap_or_else(|| "Reset time not known".into())
+            p.five_hour_reset
+                .map(|r| format!("Resets {}", fmt::when(r, c.now)))
+                .unwrap_or_else(|| "Reset time not known".into())
         } else if p.five_hour.is_some() {
             "The window has reset since".into()
         } else {
@@ -167,11 +202,24 @@ impl BoardView {
                     .flex()
                     .items_end()
                     .gap(px(5.))
-                    .when(at_least, |d| d.child(div().pb(px(3.)).text_size(px(11.5)).text_color(t.dim).child("at least")))
+                    .when(at_least, |d| {
+                        d.child(div().pb(px(3.)).text_size(px(11.5)).text_color(t.dim).child("at least"))
+                    })
                     .child(big(&t, label.trim_start_matches("at least ").to_string(), p.limits_old(c.now))),
             )
-            .child(ui::meter(&t, (shown / 100.0) as f32, tone_color(&t, p.week_tone()), pace.map(|x| (x / 100.0) as f32), 4.))
-            .child(small(&t, reset.map(|r| format!("Resets {}", fmt::when(r, c.now))).unwrap_or_else(|| "Reset not known yet".into())))
+            .child(ui::meter(
+                &t,
+                (shown / 100.0) as f32,
+                tone_color(&t, p.week_tone()),
+                pace.map(|x| (x / 100.0) as f32),
+                4.,
+            ))
+            .child(small(
+                &t,
+                reset
+                    .map(|r| format!("Resets {}", fmt::when(r, c.now)))
+                    .unwrap_or_else(|| "Reset not known yet".into()),
+            ))
             .children(pace.map(|x| small(&t, format!("On pace for {}%", x.round() as i64))))
     }
 
@@ -199,7 +247,13 @@ impl BoardView {
                 None => t.track,
                 Some(x) if x >= 95.0 => t.bad,
                 Some(x) if x >= 80.0 => t.cold,
-                Some(_) => if on { t.ink2 } else { t.fill.alpha(0.55) },
+                Some(_) => {
+                    if on {
+                        t.ink2
+                    } else {
+                        t.fill.alpha(0.55)
+                    }
+                }
             };
             bars = bars.child(
                 div()
@@ -216,7 +270,11 @@ impl BoardView {
         }
         let sub = match (hover, weeks.is_empty()) {
             (Some(w), _) => {
-                let when = w.reset.filter(|r| *r > 0.0).map(|r| format!("Week to {}", fmt::md(r))).unwrap_or_else(|| "That week".into());
+                let when = w
+                    .reset
+                    .filter(|r| *r > 0.0)
+                    .map(|r| format!("Week to {}", fmt::md(r)))
+                    .unwrap_or_else(|| "That week".into());
                 match w.pct {
                     Some(x) => format!("{when}: {}%", x.round() as i64),
                     None => format!("{when}: no number"),
@@ -238,7 +296,8 @@ impl BoardView {
         let cx = c.cx;
         let u = c.app.usage.as_ref();
         let offset = chrono::Local::now().offset().local_minus_utc();
-        let slots: Vec<DaySlot> = u.map(|u| usage::week_days(u, c.app.snap.plan.week_reset, c.now, offset)).unwrap_or_default();
+        let slots: Vec<DaySlot> =
+            u.map(|u| usage::week_days(u, c.app.snap.plan.week_reset, c.now, offset)).unwrap_or_default();
         let scale = usage::day_scale(&slots);
         let total: f64 = slots.iter().filter_map(|s| s.used).sum();
         let hovered = match self.usage_hover {
@@ -255,7 +314,13 @@ impl BoardView {
             (Some(d), Some(x)) => Some(format!("Today {}% of {}% budget", usage::pts(x), usage::pts(d))),
             _ => None,
         };
-        let today_c = if bst.over_hard() && !bst.lifted() { t.bad } else if bst.over_daily() { t.cold } else { t.accent };
+        let today_c = if bst.over_hard() && !bst.lifted() {
+            t.bad
+        } else if bst.over_daily() {
+            t.cold
+        } else {
+            t.accent
+        };
         let readout = match hovered {
             _ if help => "Each bar is how much of your weekly limit that day used.".to_string(),
             Some(s) if s.future => format!("{}: still to come", s.label),
@@ -278,7 +343,14 @@ impl BoardView {
             .flex()
             .items_center()
             .gap(px(8.))
-            .child(div().flex_none().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2).child("This week by day"))
+            .child(
+                div()
+                    .flex_none()
+                    .text_size(px(12.5))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.ink2)
+                    .child("This week by day"),
+            )
             .child(
                 div()
                     .id("uhelp")
@@ -337,7 +409,13 @@ impl BoardView {
                 } else {
                     t.fill.alpha(0.5)
                 };
-                let label_c = if s.today { today_c } else if on { t.ink } else { t.faint };
+                let label_c = if s.today {
+                    today_c
+                } else if on {
+                    t.ink
+                } else {
+                    t.faint
+                };
                 cols = cols.child(
                     div()
                         .id(("ud", i))
@@ -349,14 +427,15 @@ impl BoardView {
                         .cursor_default()
                         .on_hover(cx.listener(move |this, h: &bool, _, cx| this.hover_bar(UsageBar::Day(i), *h, cx)))
                         .child(
-                            div()
-                                .w_full()
-                                .h(px(CHART_H))
-                                .flex()
-                                .flex_col()
-                                .justify_end()
-                                .items_center()
-                                .child(div().w(relative(0.72)).max_w(px(34.)).h(px(h)).rounded_t(px(4.)).rounded_b(px(1.5)).bg(color)),
+                            div().w_full().h(px(CHART_H)).flex().flex_col().justify_end().items_center().child(
+                                div()
+                                    .w(relative(0.72))
+                                    .max_w(px(34.))
+                                    .h(px(h))
+                                    .rounded_t(px(4.))
+                                    .rounded_b(px(1.5))
+                                    .bg(color),
+                            ),
                         )
                         .child(
                             div()

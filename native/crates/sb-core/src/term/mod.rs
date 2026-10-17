@@ -129,14 +129,20 @@ pub fn parse_ticket(status: u16, body: &[u8], base: &str, req: &TermRequest) -> 
             let message = r.error.unwrap_or_else(|| default_need_message(need).to_string());
             return Err(TermError::Need { need, message });
         }
-        if status == 404 && r.need.is_none() && r.error.as_deref().map(|e| e.contains("not found") || e.is_empty()).unwrap_or(true) {
+        if status == 404
+            && r.need.is_none()
+            && r.error.as_deref().map(|e| e.contains("not found") || e.is_empty()).unwrap_or(true)
+        {
             return Err(TermError::Core(CoreError::Server { status, message: NO_TERMINALS.into() }));
         }
         let message = r.error.unwrap_or_else(|| format!("Request failed ({status})"));
         return Err(TermError::Core(CoreError::Server { status, message }));
     }
     let r = reply.ok_or_else(|| TermError::Core(CoreError::Bad("Unexpected reply from /api/term".into())))?;
-    let ws = r.ws.as_deref().filter(|w| !w.is_empty()).ok_or_else(|| TermError::Core(CoreError::Bad("The server sent no terminal address.".into())))?;
+    let ws =
+        r.ws.as_deref()
+            .filter(|w| !w.is_empty())
+            .ok_or_else(|| TermError::Core(CoreError::Bad("The server sent no terminal address.".into())))?;
     Ok(TermTicket {
         ws: absolute_ws(ws, base),
         bg: r.bg.filter(|b| !b.is_empty()).or_else(|| req.bg.clone()),
@@ -197,8 +203,14 @@ mod tests {
 
     #[test]
     fn request_has_sid_or_bg_only() {
-        assert_eq!(serde_json::to_string(&TermRequest::chat("studio", "abc")).unwrap(), r#"{"machine":"studio","sid":"abc"}"#);
-        assert_eq!(serde_json::to_string(&TermRequest::bg("studio", "c03ef0d9")).unwrap(), r#"{"machine":"studio","bg":"c03ef0d9"}"#);
+        assert_eq!(
+            serde_json::to_string(&TermRequest::chat("studio", "abc")).unwrap(),
+            r#"{"machine":"studio","sid":"abc"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&TermRequest::bg("studio", "c03ef0d9")).unwrap(),
+            r#"{"machine":"studio","bg":"c03ef0d9"}"#
+        );
     }
 
     #[test]
@@ -210,7 +222,10 @@ mod tests {
         assert_eq!(t.title.as_deref(), Some("Fix login bug"));
         assert_eq!(t.label.as_deref(), Some("Studio"));
         assert_eq!(ws_url(&t.ws, 120, 36, true), "ws://192.0.2.10:8132/term?t=abc.def&cols=120&rows=36&proto=2");
-        assert_eq!(ws_url(&t.ws, 80, 24, false), "ws://192.0.2.10:8132/term?t=abc.def&cols=80&rows=24&proto=2&history=0");
+        assert_eq!(
+            ws_url(&t.ws, 80, 24, false),
+            "ws://192.0.2.10:8132/term?t=abc.def&cols=80&rows=24&proto=2&history=0"
+        );
     }
 
     #[test]
@@ -228,7 +243,10 @@ mod tests {
         let body = br#"{"ok":false,"error":"This chat is open in a terminal on Studio, so it can't be opened here.","need":"terminal"}"#;
         assert_eq!(
             parse_ticket(409, body, BASE, &req()),
-            Err(TermError::Need { need: Need::Terminal, message: "This chat is open in a terminal on Studio, so it can't be opened here.".into() })
+            Err(TermError::Need {
+                need: Need::Terminal,
+                message: "This chat is open in a terminal on Studio, so it can't be opened here.".into()
+            })
         );
         let body = br#"{"ok":false,"need":"resume"}"#;
         assert!(matches!(parse_ticket(200, body, BASE, &req()), Err(TermError::Need { need: Need::Resume, .. })));

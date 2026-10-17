@@ -1,6 +1,7 @@
 # Runs ON the Windows build host (called by scripts/build-windows.sh). Unpacks the source tarball, builds
 # Switchboard.exe, checks it is a GUI-subsystem exe with the icon embedded, zips it to
-# dist\Switchboard-windows.zip. Never launches the app. Windows PowerShell 5.1 compatible.
+# dist\Switchboard-windows.zip (with THIRD-PARTY-NOTICES.txt next to the exe). The .pdb files go to
+# dist\symbols\<version>-<build>\, outside the zip. Never launches the app. Windows PowerShell 5.1 compatible.
 param([string]$Tarball = "$env:USERPROFILE\src\switchboard-native.tar.gz")
 
 $ErrorActionPreference = 'Continue'
@@ -21,6 +22,8 @@ Set-Location $root
 # The build id the app compares with the download page's latest.json ("Restart to update").
 if (-not $env:SB_BUILD) { $env:SB_BUILD = (Get-Date).ToUniversalTime().ToString('yyyyMMddHHmmss') }
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
+# Any strip on MSVC also drops the .pdb; the exe holds no debug info anyway (Cargo.toml's release profile).
+$env:CARGO_PROFILE_RELEASE_STRIP = 'none'
 cargo build --release --locked -q -p sb-desktop
 if ($LASTEXITCODE -ne 0) { Fail 'cargo build' }
 $secs = [int]$sw.Elapsed.TotalSeconds
@@ -66,7 +69,8 @@ if ($manifest -lt 1) { Fail 'GPUI manifest missing (no PerMonitorV2 DPI awarenes
 New-Item -ItemType Directory -Force -Path (Join-Path $root 'dist') | Out-Null
 $zip = Join-Path $root 'dist\Switchboard-windows.zip'
 if (Test-Path $zip) { Remove-Item -LiteralPath $zip -Force }
-Compress-Archive -LiteralPath $exe -DestinationPath $zip -CompressionLevel Optimal
+$notices = Join-Path $root 'packaging\THIRD-PARTY-NOTICES.txt'
+Compress-Archive -LiteralPath $exe, $notices -DestinationPath $zip -CompressionLevel Optimal
 Set-Content -LiteralPath (Join-Path $root 'dist\Switchboard-windows.zip.build') -Value $env:SB_BUILD -NoNewline
 
 $exeSize = (Get-Item $exe).Length
@@ -76,5 +80,20 @@ $fv = (Get-Item $exe).VersionInfo.FileVersion
 cargo build --release --locked -q -p sb-node
 if ($LASTEXITCODE -ne 0) { Fail 'cargo build sb-node' }
 Copy-Item -LiteralPath (Join-Path $root 'target\release\switchboard-node.exe') -Destination (Join-Path $root 'dist\switchboard-node.exe') -Force
+
+# Symbols for reading crash backtraces (docs/building.md), with the exes they match. Only this build's are kept here;
+# build-windows.sh copies them.
+$ver = (Select-String -LiteralPath (Join-Path $root 'Cargo.toml') -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches[0].Groups[1].Value
+$symRoot = Join-Path $root 'dist\symbols'
+if (Test-Path $symRoot) { Remove-Item -LiteralPath $symRoot -Recurse -Force }
+$sym = Join-Path $symRoot "$ver-$env:SB_BUILD"
+New-Item -ItemType Directory -Force -Path $sym | Out-Null
+foreach ($b in 'Switchboard', 'switchboard-node') {
+    $pdb = Join-Path $root "target\release\$b.pdb"
+    if (-not (Test-Path $pdb)) { Fail "missing $pdb" }
+    Copy-Item -LiteralPath $pdb -Destination $sym -Force
+    Copy-Item -LiteralPath (Join-Path $root "target\release\$b.exe") -Destination $sym -Force
+}
+Write-Output "symbols: dist\symbols\$ver-$env:SB_BUILD"
 Write-Output "node windows: $((Get-Item (Join-Path $root 'dist\switchboard-node.exe')).Length) bytes"
 Write-Output "windows: v$fv subsystem=$subsystem icon_groups=$groups icons=$icons version_res=$version manifest=$manifest build=${secs}s exe=$exeSize bytes zip=$zipSize bytes"

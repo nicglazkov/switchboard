@@ -173,8 +173,14 @@ mod tests {
 
     #[test]
     fn appearance_reads_what_the_server_sends() {
-        let a: Appearance = serde_json::from_str(r#"{"theme":"dark","term":{"scheme":"nord","size":null,"size_phone":12,"cursor":"bar","blink":false}}"#).unwrap();
+        let a: Appearance = serde_json::from_str(
+            r#"{"theme":"dark","term":{"scheme":"nord","size":null,"size_phone":12,"cursor":"bar","blink":false}}"#,
+        )
+        .unwrap();
         let t = a.term.unwrap();
-        assert_eq!((a.theme.as_deref(), t.scheme.as_str(), t.size_phone, t.cursor.as_str(), t.blink), (Some("dark"), "nord", Some(12), "bar", false));
+        assert_eq!(
+            (a.theme.as_deref(), t.scheme.as_str(), t.size_phone, t.cursor.as_str(), t.blink),
+            (Some("dark"), "nord", Some(12), "bar", false)
+        );
     }
 }

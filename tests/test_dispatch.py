@@ -48,6 +48,7 @@ class DispatchServer(unittest.TestCase):
         app = server.App(fleet.Fleet(MACH, self.f), state_dir=self.state, web_dir=self.state, sleep=lambda s: None, poll_every=0,
                          retry_waits=(0, 0), cfg_dir=cfg, pusher=lambda *a: None)
         app._refresh_soon = lambda *a, **k: None
+        app.post('/api/prefs', {'ai_auto_machine': True})
         app.fleet.poll()
         app.feat.auto.refresh(app.fleet.snapshot()['machines'], wait=5)
         app.feat.dispatch._poll_soon = lambda name: app.fleet.poll_one(name)

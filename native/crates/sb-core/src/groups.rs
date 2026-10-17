@@ -93,7 +93,12 @@ impl Group {
         if g.id.is_empty() {
             return None;
         }
-        Some(Group { id: g.id.clone(), name: g.name.clone(), color: GroupColor::parse(&g.color), members: g.members.clone() })
+        Some(Group {
+            id: g.id.clone(),
+            name: g.name.clone(),
+            color: GroupColor::parse(&g.color),
+            members: g.members.clone(),
+        })
     }
 }
 
@@ -118,22 +123,43 @@ pub fn clean_name(s: &str) -> String {
 pub enum Op {
     /// A new group; `id` is made here so the tab row can show it before the server answers (the server makes its
     /// own, and its answer replaces this one).
-    Create { name: String, color: GroupColor, members: Vec<String> },
-    Update { id: String, name: Option<String>, color: Option<GroupColor> },
+    Create {
+        name: String,
+        color: GroupColor,
+        members: Vec<String>,
+    },
+    Update {
+        id: String,
+        name: Option<String>,
+        color: Option<GroupColor>,
+    },
     /// Ungroups its chats (none close).
-    Delete { id: String },
+    Delete {
+        id: String,
+    },
     /// Into group `id` at `index` (of its members once `thread` is out of it); out of any other group.
-    Add { id: String, thread: String, index: Option<usize> },
-    Remove { thread: String },
+    Add {
+        id: String,
+        thread: String,
+        index: Option<usize>,
+    },
+    Remove {
+        thread: String,
+    },
     /// Group `id` to place `index` among the groups.
-    Move { id: String, index: usize },
+    Move {
+        id: String,
+        index: usize,
+    },
 }
 
 impl Op {
     pub fn body(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
-            Op::Create { name, color, members } => json!({"op": "create", "name": name, "color": color.name(), "members": members}),
+            Op::Create { name, color, members } => {
+                json!({"op": "create", "name": name, "color": color.name(), "members": members})
+            }
             Op::Update { id, name, color } => {
                 let mut b = json!({"op": "update", "id": id});
                 if let Some(n) = name {
@@ -213,7 +239,12 @@ mod tests {
     use super::*;
 
     fn g(id: &str, members: &[&str]) -> Group {
-        Group { id: id.into(), name: id.to_uppercase(), color: GroupColor::Blue, members: members.iter().map(|s| s.to_string()).collect() }
+        Group {
+            id: id.into(),
+            name: id.to_uppercase(),
+            color: GroupColor::Blue,
+            members: members.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     #[test]
@@ -225,7 +256,8 @@ mod tests {
         assert_eq!(GroupColor::next_unused(&gs), GroupColor::Red);
         gs[0].color = GroupColor::Red;
         assert_eq!(GroupColor::next_unused(&gs), GroupColor::Blue);
-        let all: Vec<Group> = GroupColor::ALL.iter().enumerate().map(|(i, c)| Group { color: *c, ..g(&i.to_string(), &["x"]) }).collect();
+        let all: Vec<Group> =
+            GroupColor::ALL.iter().enumerate().map(|(i, c)| Group { color: *c, ..g(&i.to_string(), &["x"]) }).collect();
         assert_eq!(GroupColor::next_unused(&all), GroupColor::Blue, "all taken: the first again");
     }
 
@@ -238,8 +270,12 @@ mod tests {
         assert_eq!(gs[1].members, vec!["3", "1"]);
         Op::Remove { thread: "2".into() }.apply(&mut gs, "");
         assert_eq!(gs.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), vec!["b"], "emptied: gone");
-        Op::Create { name: "  New   one ".into(), color: GroupColor::Green, members: vec!["3".into(), "3".into()] }.apply(&mut gs, "tmp");
-        assert_eq!((gs[1].id.as_str(), gs[1].name.as_str(), gs[1].members.clone()), ("tmp", "New one", vec!["3".to_string()]));
+        Op::Create { name: "  New   one ".into(), color: GroupColor::Green, members: vec!["3".into(), "3".into()] }
+            .apply(&mut gs, "tmp");
+        assert_eq!(
+            (gs[1].id.as_str(), gs[1].name.as_str(), gs[1].members.clone()),
+            ("tmp", "New one", vec!["3".to_string()])
+        );
         assert_eq!(gs[0].members, vec!["1"]);
         Op::Move { id: "tmp".into(), index: 0 }.apply(&mut gs, "");
         assert_eq!(gs[0].id, "tmp");
@@ -253,8 +289,14 @@ mod tests {
 
     #[test]
     fn bodies_are_what_the_server_reads() {
-        assert_eq!(Op::Add { id: "a".into(), thread: "t".into(), index: None }.body(), serde_json::json!({"op": "add", "id": "a", "thread": "t"}));
-        assert_eq!(Op::Update { id: "a".into(), name: None, color: Some(GroupColor::Red) }.body(), serde_json::json!({"op": "update", "id": "a", "color": "red"}));
+        assert_eq!(
+            Op::Add { id: "a".into(), thread: "t".into(), index: None }.body(),
+            serde_json::json!({"op": "add", "id": "a", "thread": "t"})
+        );
+        assert_eq!(
+            Op::Update { id: "a".into(), name: None, color: Some(GroupColor::Red) }.body(),
+            serde_json::json!({"op": "update", "id": "a", "color": "red"})
+        );
         assert_eq!(
             Op::Create { name: "".into(), color: GroupColor::Grey, members: vec!["t".into()] }.body(),
             serde_json::json!({"op": "create", "name": "", "color": "grey", "members": ["t"]})

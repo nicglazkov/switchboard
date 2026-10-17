@@ -5,11 +5,11 @@
 use std::collections::HashSet;
 
 use gpui::{
-    AnimationExt,
-    AnyElement, App, AppContext, ClickEvent, Context, Decorations, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
-    KeyBinding, MouseButton, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TitlebarOptions, Window, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions,
-    div, point, prelude::*, px, relative, size,
+    AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, Decorations, Entity, FocusHandle, FontWeight,
+    InteractiveElement, IntoElement, KeyBinding, MouseButton, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, actions, div, point, prelude::*, px,
+    relative, size,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sb_core::actions::{self as acts, ActionId, Confirm};
@@ -27,8 +27,42 @@ use crate::ui::{self, MAC};
 actions!(
     switchboard,
     [
-        Next, Prev, Left, Right, Activate, Fresh, Resume, Continue, NewSession, TogglePalette, Escape, StartNew, PalNext, PalPrev, SwapField,
-        Quit, CloseWindow, CloseTab, ChatPalette, Browse, OpenWindow, OpenFloat, ToggleTheme, Settings, About, Tab1, Tab2, Tab3, Tab4, Tab5, Tab6, Tab7, Tab8, Tab9
+        Next,
+        Prev,
+        Left,
+        Right,
+        Activate,
+        Fresh,
+        Resume,
+        Continue,
+        NewSession,
+        TogglePalette,
+        Escape,
+        StartNew,
+        PalNext,
+        PalPrev,
+        SwapField,
+        Quit,
+        CloseWindow,
+        CloseTab,
+        ChatPalette,
+        Browse,
+        OpenWindow,
+        OpenFloat,
+        ToggleTheme,
+        Settings,
+        About,
+        Tab1,
+        Tab2,
+        Tab3,
+        Tab4,
+        Tab5,
+        Tab6,
+        Tab7,
+        Tab8,
+        Tab9,
+        FocusNext,
+        FocusPrev
     ]
 );
 
@@ -46,6 +80,11 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("l", Right, k),
         KeyBinding::new("right", Right, k),
         KeyBinding::new("enter", Activate, b),
+        // Tab walks the buttons; the focus ring shows only once the keyboard is in use (ui::focusable).
+        KeyBinding::new("tab", FocusNext, k),
+        KeyBinding::new("shift-tab", FocusPrev, k),
+        KeyBinding::new("tab", FocusNext, Some("Settings")),
+        KeyBinding::new("shift-tab", FocusPrev, Some("Settings")),
         KeyBinding::new("shift-enter", OpenWindow, k),
         KeyBinding::new("alt-enter", OpenFloat, k),
         KeyBinding::new("secondary-shift-l", ToggleTheme, None),
@@ -107,7 +146,10 @@ pub fn bind_keys(cx: &mut App) {
 /// Opens the board window, or a lane on its own (`solo`).
 pub fn open_window(solo: Option<String>, cx: &mut App) -> Option<gpui::WindowId> {
     let main = solo.is_none();
-    let (w, h) = match std::env::var("SB_SIZE").ok().and_then(|v| v.split_once('x').map(|(a, b)| (a.parse::<f32>(), b.parse::<f32>()))) {
+    let (w, h) = match std::env::var("SB_SIZE")
+        .ok()
+        .and_then(|v| v.split_once('x').map(|(a, b)| (a.parse::<f32>(), b.parse::<f32>())))
+    {
         Some((Ok(w), Ok(h))) if main => (w, h),
         _ if main => (1440., 900.),
         _ => (560., 760.),
@@ -120,7 +162,8 @@ pub fn open_window(solo: Option<String>, cx: &mut App) -> Option<gpui::WindowId>
     let centered = gpui::Bounds::centered(None, size(px(w), px(h)), cx);
     // The board reopens where it was left, at its last size, unless SB_SIZE asks for one (shots) or that spot is
     // no longer on any screen (a display was unplugged).
-    let saved = (main && std::env::var("SB_SIZE").is_err()).then(|| crate::state::app(cx).read(cx).settings.window).flatten();
+    let saved =
+        (main && std::env::var("SB_SIZE").is_err()).then(|| crate::state::app(cx).read(cx).settings.window).flatten();
     let window_bounds = match saved {
         Some(s) if s.w >= 900. && s.h >= 600. => {
             let b = gpui::Bounds::new(point(px(s.x), px(s.y)), size(px(s.w), px(s.h)));
@@ -159,7 +202,10 @@ pub enum Overlay {
     None,
     Palette,
     New(Entity<NewSheet>),
-    Archive { tab: ArcTab, key: Option<String> },
+    Archive {
+        tab: ArcTab,
+        key: Option<String>,
+    },
     /// "This continues...": pick the older chat the selected one carries on from.
     Link(Entity<LinkSheet>),
 }
@@ -273,9 +319,16 @@ pub struct BoardView {
     pub hint: Option<SharedString>,
     pub pal: Entity<InputState>,
     pub pal_idx: usize,
-    pub pal_scroll: ScrollHandle,
+    pub pal_scroll: gpui::UniformListScrollHandle,
     pub board_scroll: ScrollHandle,
-    pub arc_scroll: ScrollHandle,
+    /// The details panel, the flags drawer, the notices tray and the stopped list: each wears the shared scrollbar.
+    pub ins_scroll: ScrollHandle,
+    pub flags_scroll: ScrollHandle,
+    pub tray_scroll: ScrollHandle,
+    pub clean_scroll: ScrollHandle,
+    pub arc_scroll: gpui::UniformListScrollHandle,
+    /// The open dropdown on the board (the flags drawer's effort or permissions), if any.
+    pub drop: ui::Drop,
     /// Rows per cell before "n more", from the window height.
     pub cap: usize,
     /// Terminal tabs, after the board. `tab` 0 is the board, n is `tabs[n - 1]`.
@@ -364,7 +417,9 @@ impl BoardView {
                 AppEvent::Flags(_) => {}
                 AppEvent::PasteInto { key, text } if this.solo.is_none() => {
                     this.open_terminal(key.clone(), false, cx);
-                    if let Some(tab) = this.tabs.iter().find(|t| t.read(cx).key.as_deref() == Some(key.as_str())).cloned() {
+                    if let Some(tab) =
+                        this.tabs.iter().find(|t| t.read(cx).key.as_deref() == Some(key.as_str())).cloned()
+                    {
                         let text = text.clone();
                         tab.update(cx, |t, cx| t.paste_when_open(text, cx));
                     }
@@ -407,7 +462,7 @@ impl BoardView {
             cx.subscribe_in(&pal, window, |this, _, ev: &InputEvent, _, cx| {
                 if let InputEvent::Change = ev {
                     this.pal_idx = 0;
-                    this.pal_scroll.scroll_to_item(0);
+                    this.pal_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
                     cx.notify();
                 }
             }),
@@ -435,7 +490,13 @@ impl BoardView {
                     WindowBounds::Maximized(b) => (b, true),
                     WindowBounds::Fullscreen(b) => (b, false),
                 };
-                let saved = crate::state::SavedWindow { x: b.origin.x.into(), y: b.origin.y.into(), w: b.size.width.into(), h: b.size.height.into(), maximized };
+                let saved = crate::state::SavedWindow {
+                    x: b.origin.x.into(),
+                    y: b.origin.y.into(),
+                    w: b.size.width.into(),
+                    h: b.size.height.into(),
+                    maximized,
+                };
                 this.app.update(cx, |s, _| {
                     if s.settings.window != Some(saved) {
                         s.settings.window = Some(saved);
@@ -502,9 +563,14 @@ impl BoardView {
             hint: None,
             pal,
             pal_idx: 0,
-            pal_scroll: ScrollHandle::new(),
+            pal_scroll: gpui::UniformListScrollHandle::new(),
             board_scroll: ScrollHandle::new(),
-            arc_scroll: ScrollHandle::new(),
+            ins_scroll: ScrollHandle::new(),
+            flags_scroll: ScrollHandle::new(),
+            tray_scroll: ScrollHandle::new(),
+            clean_scroll: ScrollHandle::new(),
+            arc_scroll: gpui::UniformListScrollHandle::new(),
+            drop: ui::Drop::default(),
             cap: 4,
             tabs: Vec::new(),
             tab: 0,
@@ -528,7 +594,10 @@ impl BoardView {
                 let chats = v.app.read(cx).snap.sessions().len();
                 window.on_next_frame(move |_, _| {
                     let ms = crate::STARTED.get().map(|t| t.elapsed().as_secs_f64() * 1000.0).unwrap_or(-1.0);
-                    let epoch = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0);
+                    let epoch = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs_f64())
+                        .unwrap_or(0.0);
                     eprintln!("sb-timing first-frame main_ms={ms:.1} epoch={epoch:.3} chats_from_cache={chats}");
                 });
             }
@@ -600,6 +669,9 @@ impl BoardView {
     }
 
     pub fn select(&mut self, key: Option<String>, cx: &mut Context<Self>) {
+        if key != self.sel {
+            self.ins_scroll.set_offset(gpui::point(px(0.), px(0.)));
+        }
         self.cont_open = None;
         self.hint = None;
         if let Some(k) = &key {
@@ -622,7 +694,7 @@ impl BoardView {
     fn step(&mut self, d: i32, cx: &mut Context<Self>) {
         if let Overlay::Archive { tab, key } = &self.overlay {
             let (tab, key) = (*tab, key.clone());
-            let list = crate::archive::rows(&self.app.read(cx), tab);
+            let list = crate::archive::rows(self.app.read(cx), tab);
             if list.is_empty() {
                 return;
             }
@@ -632,7 +704,7 @@ impl BoardView {
                 Some(i) => (i as i32 + d).clamp(0, list.len() as i32 - 1) as usize,
             };
             self.overlay = Overlay::Archive { tab, key: Some(list[n].clone()) };
-            self.arc_scroll.scroll_to_item(n);
+            self.arc_scroll.scroll_to_item(n, gpui::ScrollStrategy::Nearest);
             self.cont_open = None;
             cx.notify();
             return;
@@ -646,7 +718,13 @@ impl BoardView {
         }
         let i = self.sel.as_ref().and_then(|k| order.iter().position(|x| x == k));
         let n = match i {
-            None => if d > 0 { 0 } else { order.len() - 1 },
+            None => {
+                if d > 0 {
+                    0
+                } else {
+                    order.len() - 1
+                }
+            }
             Some(i) => (i as i32 + d).clamp(0, order.len() as i32 - 1) as usize,
         };
         self.select(Some(order[n].clone()), cx);
@@ -683,7 +761,13 @@ impl BoardView {
     }
 
     fn on_activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
-        if self.app.read(cx).busy_ask.is_some() {  // Enter takes the default: when they finish
+        // A button reached with Tab has the focus: Enter presses that button, not the selected card.
+        if self.key_context().contains("keys") && window.focused(cx).is_some_and(|f| f != self.focus) {
+            cx.propagate();
+            return;
+        }
+        if self.app.read(cx).busy_ask.is_some() {
+            // Enter takes the default: when they finish
             self.app.update(cx, |s, cx| s.answer_busy(Some("idle"), cx));
             return;
         }
@@ -720,7 +804,14 @@ impl BoardView {
             let app = self.app.read(cx);
             match app.snap.session(&key) {
                 Some(s) if s.alive && s.background() => Some(false),
-                Some(s) if !s.alive && acts::for_session(s, &app.snap, AppState::now()).iter().any(|a| a.id == ActionId::Resume && !a.disabled) => Some(true),
+                Some(s)
+                    if !s.alive
+                        && acts::for_session(s, &app.snap, AppState::now())
+                            .iter()
+                            .any(|a| a.id == ActionId::Resume && !a.disabled) =>
+                {
+                    Some(true)
+                }
                 _ => None,
             }
         };
@@ -759,11 +850,11 @@ impl BoardView {
         if matches!(self.overlay, Overlay::Palette | Overlay::New(_)) {
             return;
         }
-        if let Some(k) = self.target() {
-            if self.app.read(cx).snap.session(&k).is_some() {
-                self.cont_open = Some(k);
-                cx.notify();
-            }
+        if let Some(k) = self.target()
+            && self.app.read(cx).snap.session(&k).is_some()
+        {
+            self.cont_open = Some(k);
+            cx.notify();
         }
     }
 
@@ -874,7 +965,14 @@ impl BoardView {
     }
 
     /// New session with "Open its terminal": a tab that waits for the job, then attaches.
-    pub fn open_job_terminal(&mut self, job: String, machine: String, label: String, title: String, cx: &mut Context<Self>) {
+    pub fn open_job_terminal(
+        &mut self,
+        job: String,
+        machine: String,
+        label: String,
+        title: String,
+        cx: &mut Context<Self>,
+    ) {
         let tab = cx.new(|cx| TermTab::new(Start::Job { id: job, machine, label, title }, cx));
         self.add_tab(tab, cx);
     }
@@ -909,7 +1007,13 @@ impl BoardView {
         // that is working stops once its reply is done; Keep running and a chat open on its machine stay.
         if let Some(key) = key {
             let now = crate::state::AppState::now();
-            let stop = self.app.read(cx).snap.session(&key).filter(|s| s.background() && s.alive && !s.keep).map(|s| matches!(s.lamp(now), sb_core::Lamp::Run | sb_core::Lamp::Stall));
+            let stop = self
+                .app
+                .read(cx)
+                .snap
+                .session(&key)
+                .filter(|s| s.background() && s.alive && !s.keep)
+                .map(|s| matches!(s.lamp(now), sb_core::Lamp::Run | sb_core::Lamp::Stall));
             if let Some(working) = stop {
                 self.app.update(cx, |s, cx| s.act_when(ActionId::Stop, &key, working.then_some("idle"), cx));
             }
@@ -953,7 +1057,12 @@ impl BoardView {
     /// Saves the board window's terminal tabs (their chats, in order) and which one shows, for the next launch. Only
     /// tabs that know their chat count: one still waiting on a job is saved once the job names it.
     pub fn remember_tabs(&mut self, cx: &mut Context<Self>) {
-        if self.solo.is_some() || self.shot.is_some() || std::env::var("SB_SIZE").is_ok() || self.restoring || self.restore_due {
+        if self.solo.is_some()
+            || self.shot.is_some()
+            || std::env::var("SB_SIZE").is_ok()
+            || self.restoring
+            || self.restore_due
+        {
             return;
         }
         let keys: Vec<Option<String>> = self.tabs.iter().map(|t| t.read(cx).key.clone()).collect();
@@ -1062,7 +1171,7 @@ impl BoardView {
         self.overlay = Overlay::Palette;
         self.pal_chats = true;
         self.pal_idx = 0;
-        self.pal_scroll.scroll_to_item(0);
+        self.pal_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.pal.update(cx, |p, cx| {
             p.set_placeholder("Open a chat in a terminal", window, cx);
             p.set_value("", window, cx);
@@ -1073,7 +1182,9 @@ impl BoardView {
 
     pub fn open_new(&mut self, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_open = false;
-        let machine = machine.or_else(|| self.solo.clone()).or_else(|| self.sel.as_ref().and_then(|k| k.split_once(':').map(|(m, _)| m.to_string())));
+        let machine = machine
+            .or_else(|| self.solo.clone())
+            .or_else(|| self.sel.as_ref().and_then(|k| k.split_once(':').map(|(m, _)| m.to_string())));
         let app = self.app.clone();
         let sheet = cx.new(|cx| NewSheet::new(app, machine, window, cx));
         let sub = cx.subscribe_in(&sheet, window, |this, _, ev: &SheetEvent, window, cx| match ev {
@@ -1117,7 +1228,7 @@ impl BoardView {
 
     pub fn open_archive(&mut self, tab: ArcTab, key: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_open = false;
-        let key = key.or_else(|| crate::archive::rows(&self.app.read(cx), tab).into_iter().next());
+        let key = key.or_else(|| crate::archive::rows(self.app.read(cx), tab).into_iter().next());
         self.overlay = Overlay::Archive { tab, key };
         self.cont_open = None;
         window.focus(&self.focus, cx);
@@ -1183,8 +1294,13 @@ impl BoardView {
         kc.add("Board");
         // History embeds the browser, whose search box takes letters: c, f, r, n... must type there, not act.
         // The details card's fields too (askcard.rs).
-        if self.tab == 0 && self.main == Main::Board && matches!(self.overlay, Overlay::None | Overlay::Archive { .. }) && self.confirm.is_none() && !self.ask_focus
-            && self.group_edit.is_none() && self.chat_edit.is_none()
+        if self.tab == 0
+            && self.main == Main::Board
+            && matches!(self.overlay, Overlay::None | Overlay::Archive { .. })
+            && self.confirm.is_none()
+            && !self.ask_focus
+            && self.group_edit.is_none()
+            && self.chat_edit.is_none()
         {
             kc.add("keys");
         }
@@ -1201,7 +1317,11 @@ impl BoardView {
             let (what, arg) = part.split_once('=').unwrap_or((part, ""));
             match what {
                 "inspector" => {
-                    let key = if arg.is_empty() { self.order(cx).into_iter().nth(2) } else { Some(arg.replacen('/', ":", 1)) };
+                    let key = if arg.is_empty() {
+                        self.order(cx).into_iter().nth(2)
+                    } else {
+                        Some(arg.replacen('/', ":", 1))
+                    };
                     self.select(key, cx);
                 }
                 "palette" => {
@@ -1216,7 +1336,9 @@ impl BoardView {
                         s.update(cx, |s, cx| s.set_mode("ultracode", cx));
                     }
                 }
-                "archive" => self.open_archive(if arg == "rep" { ArcTab::Replaced } else { ArcTab::Older }, None, window, cx),
+                "archive" => {
+                    self.open_archive(if arg == "rep" { ArcTab::Replaced } else { ArcTab::Older }, None, window, cx)
+                }
                 "plan" => self.open_plan(cx),
                 "confirm" => {
                     if let Some(k) = self.sel.clone() {
@@ -1297,7 +1419,13 @@ impl BoardView {
                 "menu" => {
                     let now = AppState::now();
                     let k = if arg.is_empty() {
-                        self.order(cx).into_iter().find(|k| self.app.read(cx).snap.session(k).is_some_and(|s| s.cost.is_some() && s.cache_left(now) == 0 && !s.alive))
+                        self.order(cx).into_iter().find(|k| {
+                            self.app
+                                .read(cx)
+                                .snap
+                                .session(k)
+                                .is_some_and(|s| s.cost.is_some() && s.cache_left(now) == 0 && !s.alive)
+                        })
                     } else {
                         Some(arg.replacen('/', ":", 1))
                     };
@@ -1316,11 +1444,13 @@ impl BoardView {
                 "add" => self.add_open = true,
                 "appmenu" => self.app_menu_open = true,
                 "stopped" => self.stopped_open = true,
-                "files" => cx.defer(|cx| crate::files::open_files(cx)),
+                "files" => cx.defer(crate::files::open_files),
                 "update" => {
                     self.app.update(cx, |s, _| {
                         s.update = Some(sb_core::update::Offer {
-                            version: "0.1.0".into(),
+                            from: sb_core::version().into(),
+                            version: "9.0.0".into(),
+                            size: 1,
                             build: "20261013120000".into(),
                             built: Some(AppState::now() - 3600.),
                             url: String::new(),
@@ -1334,7 +1464,11 @@ impl BoardView {
                 // settings=machine/<name> opens a machine's page; settings=pick/<name>/<path> its folder picker there.
                 "settings" if arg.starts_with("machine/") || arg.starts_with("pick/") => {
                     let mut it = arg.splitn(3, '/');
-                    let (what, name, path) = (it.next().unwrap_or_default().to_string(), it.next().unwrap_or_default().to_string(), it.next().unwrap_or_default().to_string());
+                    let (what, name, path) = (
+                        it.next().unwrap_or_default().to_string(),
+                        it.next().unwrap_or_default().to_string(),
+                        it.next().unwrap_or_default().to_string(),
+                    );
                     cx.defer(move |cx| crate::settings::open_machine_at(name, (what == "pick").then_some(path), cx));
                 }
                 "settings" => {
@@ -1346,6 +1480,8 @@ impl BoardView {
                         "chrome" => crate::settings::Section::Chrome,
                         "library" => crate::settings::Section::Library,
                         "budget" => crate::settings::Section::Budget,
+                        "updates" => crate::settings::Section::Updates,
+                        "privacy" => crate::settings::Section::Privacy,
                         _ => crate::settings::Section::Appearance,
                     };
                     cx.defer(move |cx| crate::settings::open_at(sec, cx));
@@ -1444,9 +1580,15 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
             let verb = it.next().unwrap_or("");
             let rest = it.next().unwrap_or("").trim().to_string();
             let nums: Vec<f32> = rest.split_whitespace().filter_map(|n| n.parse().ok()).collect();
-            let at = |i: usize| gpui::point(px(nums.get(i).copied().unwrap_or(0.)), px(nums.get(i + 1).copied().unwrap_or(0.)));
+            let at = |i: usize| {
+                gpui::point(px(nums.get(i).copied().unwrap_or(0.)), px(nums.get(i + 1).copied().unwrap_or(0.)))
+            };
             match verb {
-                "wait" => cx.background_executor().timer(Duration::from_millis(nums.first().copied().unwrap_or(300.) as u64)).await,
+                "wait" => {
+                    cx.background_executor()
+                        .timer(Duration::from_millis(nums.first().copied().unwrap_or(300.) as u64))
+                        .await
+                }
                 "browse" => {
                     let _ = cx.update(|_, cx| crate::browser::open(cx));
                 }
@@ -1470,7 +1612,9 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                         }
                         match window.render_to_image() {
                             Ok(img) => match img.save(&path) {
-                                Ok(()) => eprintln!("sb-shot saved {} ({}x{})", path.display(), img.width(), img.height()),
+                                Ok(()) => {
+                                    eprintln!("sb-shot saved {} ({}x{})", path.display(), img.width(), img.height())
+                                }
                                 Err(e) => eprintln!("sb-shot could not save {}: {e}", path.display()),
                             },
                             // Linux has no offscreen frame: grab the X screen instead (tests run alone on Xvfb).
@@ -1501,7 +1645,9 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                         });
                         match r {
                             Ok(Ok(img)) => match img.save(&path) {
-                                Ok(()) => eprintln!("sb-shot saved {} ({}x{})", path.display(), img.width(), img.height()),
+                                Ok(()) => {
+                                    eprintln!("sb-shot saved {} ({}x{})", path.display(), img.width(), img.height())
+                                }
                                 Err(e) => eprintln!("sb-shot could not save {}: {e}", path.display()),
                             },
                             Ok(Err(e)) => eprintln!("sb-shot could not render: {e:#}"),
@@ -1532,7 +1678,11 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                     let p = at(0);
                     let _ = cx.update(|window, cx| {
                         window.dispatch_event(
-                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: p, pressed_button: None, modifiers: Default::default() }),
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: p,
+                                pressed_button: None,
+                                modifiers: Default::default(),
+                            }),
                             cx,
                         );
                     });
@@ -1543,7 +1693,11 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                     let count = nums.get(2).copied().unwrap_or(1.) as usize;
                     let _ = cx.update(|window, cx| {
                         window.dispatch_event(
-                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: p, pressed_button: None, modifiers: Default::default() }),
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: p,
+                                pressed_button: None,
+                                modifiers: Default::default(),
+                            }),
                             cx,
                         );
                     });
@@ -1561,7 +1715,12 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                                 cx,
                             );
                             window.dispatch_event(
-                                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent { button, position: p, modifiers: Default::default(), click_count: n }),
+                                gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                    button,
+                                    position: p,
+                                    modifiers: Default::default(),
+                                    click_count: n,
+                                }),
                                 cx,
                             );
                         });
@@ -1585,12 +1744,29 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                 "drag" => {
                     // A left-button drag in eight steps; a trailing word ("shift", "alt") holds that modifier.
                     let (p0, p1) = (at(0), at(2));
-                    let mods = gpui::Modifiers { shift: rest.contains("shift"), alt: rest.contains("alt"), ..Default::default() };
+                    let mods = gpui::Modifiers {
+                        shift: rest.contains("shift"),
+                        alt: rest.contains("alt"),
+                        ..Default::default()
+                    };
                     let button = gpui::MouseButton::Left;
                     let _ = cx.update(|window, cx| {
-                        window.dispatch_event(gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: p0, pressed_button: None, modifiers: mods }), cx);
                         window.dispatch_event(
-                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent { button, position: p0, modifiers: mods, click_count: 1, first_mouse: false }),
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: p0,
+                                pressed_button: None,
+                                modifiers: mods,
+                            }),
+                            cx,
+                        );
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                                button,
+                                position: p0,
+                                modifiers: mods,
+                                click_count: 1,
+                                first_mouse: false,
+                            }),
                             cx,
                         );
                     });
@@ -1599,32 +1775,54 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                         let p = p0 + (p1 - p0) * (i as f32 / 8.);
                         let _ = cx.update(|window, cx| {
                             window.dispatch_event(
-                                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent { position: p, pressed_button: Some(button), modifiers: mods }),
+                                gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                    position: p,
+                                    pressed_button: Some(button),
+                                    modifiers: mods,
+                                }),
                                 cx,
                             );
                         });
                     }
                     let _ = cx.update(|window, cx| {
-                        window.dispatch_event(gpui::PlatformInput::MouseUp(gpui::MouseUpEvent { button, position: p1, modifiers: mods, click_count: 1 }), cx);
+                        window.dispatch_event(
+                            gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                                button,
+                                position: p1,
+                                modifiers: mods,
+                                click_count: 1,
+                            }),
+                            cx,
+                        );
                     });
                 }
                 "drop" => {
                     // Files dragged in from the system and dropped at x y: the same events X11's XDND, Wayland's data
                     // device and Windows' IDropTarget deliver. The paths are the rest of the step, split on spaces.
                     let p = at(0);
-                    let paths: Vec<std::path::PathBuf> = rest.split_whitespace().skip(2).map(std::path::PathBuf::from).collect();
+                    let paths: Vec<std::path::PathBuf> =
+                        rest.split_whitespace().skip(2).map(std::path::PathBuf::from).collect();
                     let _ = cx.update(|window, cx| {
                         use gpui::{FileDropEvent as F, PlatformInput as I};
-                        window.dispatch_event(I::FileDrop(F::Entered { position: p, paths: gpui::ExternalPaths(paths.into()) }), cx);
+                        window.dispatch_event(
+                            I::FileDrop(F::Entered { position: p, paths: gpui::ExternalPaths(paths.into()) }),
+                            cx,
+                        );
                         window.dispatch_event(I::FileDrop(F::Pending { position: p }), cx);
                     });
                     cx.background_executor().timer(Duration::from_millis(300)).await;
                     let _ = cx.update(|window, cx| {
-                        window.dispatch_event(gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position: p }), cx);
+                        window.dispatch_event(
+                            gpui::PlatformInput::FileDrop(gpui::FileDropEvent::Submit { position: p }),
+                            cx,
+                        );
                     });
                 }
                 "resize" => {
-                    let s = gpui::size(px(nums.first().copied().unwrap_or(1200.)), px(nums.get(1).copied().unwrap_or(800.)));
+                    let s = gpui::size(
+                        px(nums.first().copied().unwrap_or(1200.)),
+                        px(nums.get(1).copied().unwrap_or(800.)),
+                    );
                     let _ = cx.update(|window, _| window.resize(s));
                 }
                 other => eprintln!("sb-drive unknown step: {other}"),
@@ -1683,7 +1881,8 @@ impl Render for BoardView {
                 Overlay::Archive { key, .. } => key.clone(),
                 _ => None,
             };
-            let want: Vec<String> = self.sel.iter().chain(arc.iter()).filter(|k| app.needs_thread(k)).cloned().collect();
+            let want: Vec<String> =
+                self.sel.iter().chain(arc.iter()).filter(|k| app.needs_thread(k)).cloned().collect();
             if !want.is_empty() {
                 let app = self.app.clone();
                 cx.defer(move |cx| {
@@ -1706,7 +1905,8 @@ impl Render for BoardView {
         };
         self.ask_inputs(ask_key, window, cx);
         // A tab drag that ended anywhere (dropped, or let go outside the window) leaves no gap marked.
-        if (self.tab_drop.is_some() || self.drop_group.is_some() || self.group_drop.is_some()) && !cx.has_active_drag() {
+        if (self.tab_drop.is_some() || self.drop_group.is_some() || self.group_drop.is_some()) && !cx.has_active_drag()
+        {
             self.tab_drop = None;
             self.drop_group = None;
             self.group_drop = None;
@@ -1735,7 +1935,13 @@ impl Render for BoardView {
         let term_tab = self.tab.checked_sub(1).and_then(|i| self.tabs.get(i)).cloned();
         let vp = window.viewport_size();
         let (w, h) = (f32::from(vp.width), f32::from(vp.height));
-        self.cap = if h >= 860. { 4 } else if h >= 700. { 3 } else { 2 };
+        self.cap = if h >= 860. {
+            4
+        } else if h >= 700. {
+            3
+        } else {
+            2
+        };
         let decorations = match crate::frame::client(window) {
             Some(tiling) => Decorations::Client { tiling },
             None => window.window_decorations(),
@@ -1747,12 +1953,22 @@ impl Render for BoardView {
         let cx = &*cx;
         let app = app_e.read(cx);
         let now = AppState::now();
-        let selected = self.sel.as_ref().filter(|k| app.snap.session(k).is_some() || app.snap.replaced_row(k).is_some()).cloned();
+        let selected =
+            self.sel.as_ref().filter(|k| app.snap.session(k).is_some() || app.snap.replaced_row(k).is_some()).cloned();
         let sheet_w = if w >= 1280. { 452. } else { 400. };
-        // The sheet floats over the board's right side; the columns keep the whole width.
-        let g = crate::lanes::Geo::at(w, self.solo.is_some(), 0.);
+        // Details dock beside the board when the five columns still fit next to them (a wide window), at the width
+        // their drag handle left; otherwise the sheet floats over the board's right side and the columns keep the
+        // whole width.
+        let ins_w = app.settings.inspector_w.unwrap_or(sheet_w).clamp(INS_MIN, INS_MAX);
+        let shows_details = term_tab.is_none() && self.main == Main::Board && self.detached.is_none();
+        let dock_w = w - ins_w - INS_HANDLE;
+        let docked = shows_details
+            && selected.is_some()
+            && !crate::lanes::Geo::at(dock_w, self.solo.is_some(), 0.).scrolls(dock_w);
+        let bw = if docked { dock_w } else { w };
+        let g = crate::lanes::Geo::at(bw, self.solo.is_some(), 0.);
         // The board's geometry, worked out once: a Quiet row puts its time under the name when the column is narrow.
-        let grid_w = (g.board_w(w) - g.pad * 2.).max(g.grid_min);
+        let grid_w = (g.board_w(bw) - g.pad * 2.).max(g.grid_min);
         let card_w = ((grid_w - g.label - 50.) / 4.85 - 16.).max(80.);
         let c = Ctx { t, app, now, cx, card_w };
 
@@ -1765,6 +1981,8 @@ impl Render for BoardView {
             .on_action(cx.listener(Self::on_left))
             .on_action(cx.listener(Self::on_right))
             .on_action(cx.listener(Self::on_activate))
+            .on_action(|_: &FocusNext, window, cx| window.focus_next(cx))
+            .on_action(|_: &FocusPrev, window, cx| window.focus_prev(cx))
             .on_action(cx.listener(Self::on_fresh))
             .on_action(cx.listener(Self::on_resume))
             .on_action(cx.listener(Self::on_continue))
@@ -1807,6 +2025,21 @@ impl Render for BoardView {
             .on_action(cx.listener(|this, _: &Tab9, _, cx| this.tab_key(9, cx)))
             .on_action(cx.listener(|this, _: &PalNext, _, cx| this.pal_move(1, cx)))
             .on_action(cx.listener(|this, _: &PalPrev, _, cx| this.pal_move(-1, cx)))
+            // The docked details' drag handle: the panel follows the pointer, and the width is saved on release.
+            .on_drag_move(cx.listener(|this, e: &gpui::DragMoveEvent<InsResize>, window, cx| {
+                let w = f32::from(window.viewport_size().width);
+                let x = f32::from(e.event.position.x);
+                let nw = (w - x - INS_HANDLE / 2.).clamp(INS_MIN, INS_MAX);
+                this.app.update(cx, |s, cx| {
+                    if s.settings.inspector_w != Some(nw) {
+                        s.settings.inspector_w = Some(nw);
+                        cx.notify();
+                    }
+                });
+            }))
+            .on_drop::<InsResize>(cx.listener(|this, _: &InsResize, _, cx| {
+                this.app.update(cx, |s, _| s.save_settings());
+            }))
             .relative()
             .size_full()
             .flex()
@@ -1821,34 +2054,60 @@ impl Render for BoardView {
         root = match term_tab {
             Some(tab) => root.child(div().flex_1().min_h_0().flex().flex_col().child(tab)),
             None if self.main == Main::History => root.child(self.history_view(&c, w)).child(self.statusbar(&c, w)),
-            None => root.child(div().flex_1().min_h_0().flex().flex_col().child(self.board_area(&c, g, w))).child(self.statusbar(&c, w)),
-        };
-        // Details float in a sheet over the board, which stays usable underneath; popped out, they live in their own window.
-        if on_board && self.main == Main::Board && self.detached.is_none() {
-            if let Some(k) = &selected {
-                root = root.child(
+            None if docked => root
+                .child(
                     div()
-                        .id("detail-sheet")
-                        .absolute()
-                        .top(px(ui::header() + 56.))
-                        .right(px(12.))
-                        .bottom(px(ui::FOOTER + 12.))
-                        .w(px(sheet_w))
-                        .rounded(px(ui::R_SHEET))
-                        .border_1()
-                        .border_color(t.line2)
-                        .bg(t.panel)
-                        .shadow(t.drop())
-                        .overflow_hidden()
-                        .occlude()
-                        .child(self.inspector_panel(&c, Some(k), false))
-                        .with_animation(
-                            SharedString::from(format!("sheet-in-{k}")),
-                            gpui::Animation::new(std::time::Duration::from_millis(260)).with_easing(gpui::ease_out_quint()),
-                            |d, e| d.opacity(e).mr(px(-28. * (1. - e))),
+                        .flex_1()
+                        .min_h_0()
+                        .flex()
+                        .child(div().flex_1().min_w_0().flex().flex_col().child(self.board_area(&c, g, bw)))
+                        .child(self.ins_handle(&c))
+                        .child(
+                            div()
+                                .id("detail-dock")
+                                .flex_none()
+                                .w(px(ins_w))
+                                .h_full()
+                                .min_h_0()
+                                .bg(t.panel)
+                                .child(self.inspector_panel(&c, selected.as_deref(), true)),
                         ),
-                );
-            }
+                )
+                .child(self.statusbar(&c, w)),
+            None => root
+                .child(div().flex_1().min_h_0().flex().flex_col().child(self.board_area(&c, g, w)))
+                .child(self.statusbar(&c, w)),
+        };
+        // Narrow windows: details float in a sheet over the board, which stays usable underneath; popped out, they
+        // live in their own window.
+        if on_board
+            && !docked
+            && self.main == Main::Board
+            && self.detached.is_none()
+            && let Some(k) = &selected
+        {
+            root = root.child(
+                div()
+                    .id("detail-sheet")
+                    .absolute()
+                    .top(px(ui::header() + 56.))
+                    .right(px(12.))
+                    .bottom(px(ui::FOOTER + 12.))
+                    .w(px(sheet_w))
+                    .rounded(px(ui::R_SHEET))
+                    .border_1()
+                    .border_color(t.line2)
+                    .bg(t.panel)
+                    .shadow(t.drop())
+                    .overflow_hidden()
+                    .occlude()
+                    .child(self.inspector_panel(&c, Some(k), false))
+                    .with_animation(
+                        SharedString::from(format!("sheet-in-{k}")),
+                        gpui::Animation::new(ui::FADE).with_easing(gpui::ease_out_quint()),
+                        |d, e| d.opacity(e).mr(px(-28. * (1. - e))),
+                    ),
+            );
         }
         if self.stopped_open {
             root = root.children(self.stopped_popover(&c));
@@ -1856,7 +2115,13 @@ impl Render for BoardView {
         if self.plan_open {
             // Under the Week chip and the gear, which move left when the header holds window buttons (Linux CSD 82,
             // Windows 138).
-            let right = if ui::win() { 154. } else if matches!(decorations, Decorations::Client { .. }) { 98. } else { 16. };
+            let right = if ui::win() {
+                154.
+            } else if matches!(decorations, Decorations::Client { .. }) {
+                98.
+            } else {
+                16.
+            };
             let right = right + crate::chrome::app_menu_room();
             root = root.child(self.plan_popover(&c, right));
         }
@@ -1900,7 +2165,35 @@ impl Render for BoardView {
     }
 }
 
+/// The docked details panel: its narrowest and widest, and its drag handle's width.
+const INS_MIN: f32 = 320.;
+const INS_MAX: f32 = 640.;
+const INS_HANDLE: f32 = 7.;
+
+/// What the docked details' handle drags (the width follows the pointer; see the root's on_drag_move).
+#[derive(Clone, Copy)]
+pub struct InsResize;
+
 impl BoardView {
+    /// The line between the board and the docked details: drag it to make them wider or narrower.
+    fn ins_handle(&self, c: &Ctx) -> impl IntoElement {
+        let t = c.t;
+        let (rule, accent) = (t.rule, t.accent);
+        div()
+            .id("ins-handle")
+            .flex_none()
+            .w(px(INS_HANDLE))
+            .h_full()
+            .flex()
+            .justify_center()
+            .cursor_col_resize()
+            .group("ins-handle")
+            .child(
+                div().w(px(1.)).h_full().bg(rule).group_hover("ins-handle", move |s| s.w(px(3.)).bg(accent.alpha(0.6))),
+            )
+            .on_drag(InsResize, |_, _, _, cx| cx.new(|_| gpui::EmptyView))
+    }
+
     // ---------- popover, scrim, confirm, toasts ----------
 
     /// A dimmed backdrop with a sheet hung under the title bar. A click on the backdrop closes it.
@@ -1954,18 +2247,20 @@ impl BoardView {
         let choice = |id: &'static str, title: String, note: &'static str, primary: bool| {
             let b = if primary { ui::primary_btn(&t, id, 52.) } else { ui::line_btn(&t, id, 52.) };
             let ink = if primary { t.on_accent } else { t.ink };
-            b.w_full()
-                .px(px(14.))
-                .justify_start()
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .items_start()
-                        .gap(px(2.))
-                        .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(title))
-                        .child(div().text_size(px(12.)).text_color(if primary { t.on_accent.alpha(0.85) } else { t.dim }).child(note)),
-                )
+            b.w_full().px(px(14.)).justify_start().child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .items_start()
+                    .gap(px(2.))
+                    .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(ink).child(title))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(if primary { t.on_accent.alpha(0.85) } else { t.dim })
+                            .child(note),
+                    ),
+            )
         };
         let finish = if reply { "when it finishes" } else { "when they finish" };
         div()
@@ -1976,7 +2271,10 @@ impl BoardView {
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.app.update(cx, |s, cx| s.answer_busy(None, cx))))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.app.update(cx, |s, cx| s.answer_busy(None, cx))),
+            )
             .child(
                 div()
                     .id("busy-ask")
@@ -1993,14 +2291,23 @@ impl BoardView {
                     .flex_col()
                     .gap(px(8.))
                     // one chat: just what is running (the buttons say the rest); several: the server's sentence
-                    .child(ui::wrap(match ask.busy.as_slice() {
-                        [one] if one.title.is_none() && !one.summary.is_empty() => one.summary.clone(),
-                        _ => ask.message.clone(),
-                    }).text_size(px(15.)).line_height(relative(1.4)).font_weight(FontWeight::BOLD).text_color(t.ink))
+                    .child(
+                        ui::wrap(match ask.busy.as_slice() {
+                            [one] if one.title.is_none() && !one.summary.is_empty() => one.summary.clone(),
+                            _ => ask.message.clone(),
+                        })
+                        .text_size(px(15.))
+                        .line_height(relative(1.4))
+                        .font_weight(FontWeight::BOLD)
+                        .text_color(t.ink),
+                    )
                     .children((!rows.is_empty()).then(|| {
-                        div().flex().flex_col().gap(px(3.)).children(
-                            rows.into_iter().map(|n| ui::wrap(format!("\u{2022}  {n}")).text_size(px(12.5)).line_height(relative(1.4)).text_color(t.dim)),
-                        )
+                        div().flex().flex_col().gap(px(3.)).children(rows.into_iter().map(|n| {
+                            ui::wrap(format!("\u{2022}  {n}"))
+                                .text_size(px(12.5))
+                                .line_height(relative(1.4))
+                                .text_color(t.dim)
+                        }))
                     }))
                     .child(
                         div()
@@ -2008,15 +2315,33 @@ impl BoardView {
                             .flex()
                             .flex_col()
                             .gap(px(8.))
-                            .child(choice("busy-idle", format!("{} {finish}", ask.what), "Waits, then does it and tells you", true).on_click(answer(Some("idle"))))
                             .child(
-                                choice("busy-now", format!("{} now", ask.what), if reply { "Stops the reply where it is" } else { "Stops them. Their results may be lost." }, false)
-                                    .on_click(answer(Some("now"))),
+                                choice(
+                                    "busy-idle",
+                                    format!("{} {finish}", ask.what),
+                                    "Waits, then does it and tells you",
+                                    true,
+                                )
+                                .on_click(answer(Some("idle"))),
                             )
                             .child(
-                                div().flex().justify_end().child(
-                                    ui::ghost(&t, "busy-cancel", Some("Cancel"), None).on_click(answer(None)),
-                                ),
+                                choice(
+                                    "busy-now",
+                                    format!("{} now", ask.what),
+                                    if reply {
+                                        "Stops the reply where it is"
+                                    } else {
+                                        "Stops them. Their results may be lost."
+                                    },
+                                    false,
+                                )
+                                .on_click(answer(Some("now"))),
+                            )
+                            .child(
+                                div()
+                                    .flex()
+                                    .justify_end()
+                                    .child(ui::ghost(&t, "busy-cancel", Some("Cancel"), None).on_click(answer(None))),
                             ),
                     ),
             )
@@ -2045,10 +2370,13 @@ impl BoardView {
             .flex()
             .items_center()
             .justify_center()
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.confirm = None;
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    this.confirm = None;
+                    cx.notify();
+                }),
+            )
             .child(
                 div()
                     .id("confirm")
@@ -2065,22 +2393,47 @@ impl BoardView {
                     .flex()
                     .flex_col()
                     .gap(px(10.))
-                    .child(div().min_w_0().text_size(px(16.)).font_weight(FontWeight::BOLD).text_color(t.ink).child(conf.title.clone()))
-                    .child(div().min_w_0().text_size(px(13.)).line_height(relative(1.55)).text_color(t.dim).child(conf.body.clone()))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(16.))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(t.ink)
+                            .child(conf.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .line_height(relative(1.55))
+                            .text_color(t.dim)
+                            .child(conf.body.clone()),
+                    )
                     .child(
                         div()
                             .mt(px(10.))
                             .flex()
                             .justify_end()
                             .gap(px(8.))
-                            .child(ui::line_btn(&t, "cf-no", 36.).px(px(14.)).gap(px(8.)).child(conf.cancel.clone()).child(div().font_family(NUM).text_size(px(11.)).text_color(t.faint).child("Esc")).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.confirm = None;
-                                cx.notify();
-                            })))
+                            .child(
+                                ui::line_btn(&t, "cf-no", 36.)
+                                    .px(px(14.))
+                                    .gap(px(8.))
+                                    .child(conf.cancel.clone())
+                                    .child(div().font_family(NUM).text_size(px(11.)).text_color(t.faint).child("Esc"))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                        this.confirm = None;
+                                        cx.notify();
+                                    })),
+                            )
                             .child(
                                 ui::primary_btn(&t, "cf-ok", 36.)
                                     .px(px(14.))
-                                    .child(ui::icon(if self.confirm_chrome { "relaunch" } else { "fresh" }, 15., t.on_accent))
+                                    .child(ui::icon(
+                                        if self.confirm_chrome { "relaunch" } else { "fresh" },
+                                        15.,
+                                        t.on_accent,
+                                    ))
                                     .child(conf.ok.clone())
                                     .child(ui::kbd_in("↵", t.on_accent, t.on_accent.alpha(0.5)))
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.confirm_ok(cx))),
@@ -2094,6 +2447,8 @@ impl BoardView {
         let t = c.t;
         let cx = c.cx;
         let now = c.now;
+        // Let Claude pick for Auto is off: an Auto card says its pick came from the rules, and where to turn it on.
+        let rules_only = c.app.prefs.as_ref().and_then(|p| p.option("ai_auto_machine")).is_some_and(|o| !o.on);
         let jobs: Vec<AnyElement> = c
             .app
             .jobs
@@ -2107,7 +2462,11 @@ impl BoardView {
                 let id = j.id.clone();
                 let url = j.url.clone();
                 let steps = j.kind.steps(&j.label).len().max(2) as f32 - 1.0;
-                let frac = if done { 1.0 } else { ((j.at(now) as f32 + ((now - j.started) as f32 / 45.0).min(0.85)) / steps).clamp(0.06, 0.96) };
+                let frac = if done {
+                    1.0
+                } else {
+                    ((j.at(now) as f32 + ((now - j.started) as f32 / 45.0).min(0.85)) / steps).clamp(0.06, 0.96)
+                };
                 let el = (now - j.started).max(0.0) as u64;
                 let calling_off = c.app.busy.contains(&format!("job-off:{}", j.id));
                 let kind_icon = match j.kind {
@@ -2145,13 +2504,14 @@ impl BoardView {
                             .child(if off {
                                 ui::icon("info", 16., t.dim).into_any_element()
                             } else if done || bad {
-                                ui::icon(if done { "check" } else { "warn" }, 16., if done { t.warm } else { t.bad }).into_any_element()
+                                ui::icon(if done { "check" } else { "warn" }, 16., if done { t.warm } else { t.bad })
+                                    .into_any_element()
                             } else if waiting {
                                 // Queued behind the chat's own work: it breathes rather than spins.
                                 ui::pulse_icon(SharedString::from(format!("job-wait-{}", j.id)), kind_icon, 16., t.ink2)
                             } else {
-                                // Still going: the spiral keeps turning until the job finishes.
-                                ui::spin_icon(SharedString::from(format!("job-spin-{}", j.id)), "fresh", 16., t.run)
+                                // Still going: the ring keeps turning until the job finishes.
+                                ui::spinner(SharedString::from(format!("job-spin-{}", j.id)), 16., t.run)
                             })
                             .child(
                                 div()
@@ -2160,60 +2520,84 @@ impl BoardView {
                                     .flex()
                                     .flex_col()
                                     .gap(px(2.))
-                                    .child(div().text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(if bad { t.bad } else { t.ink }).child(j.headline()))
-                                    .child(ui::wrap(j.detail(now)).text_size(px(12.)).line_height(relative(1.4)).text_color(t.dim)),
+                                    .child(
+                                        div()
+                                            .text_size(px(12.5))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(if bad { t.bad } else { t.ink })
+                                            .child(j.headline()),
+                                    )
+                                    .child(
+                                        ui::wrap(j.detail(now))
+                                            .text_size(px(12.))
+                                            .line_height(relative(1.4))
+                                            .text_color(t.dim),
+                                    ),
                             )
-                            .child(if let (true, sb_core::JobKind::Stop, Some((m, s))) = (done, j.kind, j.key.as_deref().and_then(|k| k.split_once(':'))) {
-                                // Stopped: one click brings it back.
-                                let jid = j.id.clone();
-                                let (m, s, from) = (m.to_string(), s.to_string(), j.from.clone());
-                                ui::line_btn(&t, SharedString::from(format!("job-resume-{}", j.id)), 28.)
-                                    .px(px(10.))
-                                    .text_size(px(12.5))
-                                    .child(ui::icon("resume", 13., t.dim))
-                                    .child("Resume")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        let (id, m, s, f) = (jid.clone(), m.clone(), s.clone(), from.clone());
-                                        this.app.update(cx, |st, cx| {
-                                            st.drop_job(&id, false, cx);
-                                            st.resume_chat(&m, &s, f, cx);
-                                        });
-                                    }))
-                                    .into_any_element()
-                            } else if let (true, Some(nk)) = (done, j.new_machine.as_ref().zip(j.new_sid.as_ref()).map(|(m, s)| format!("{m}:{s}")).filter(|_| j.kind != sb_core::JobKind::Handoff)) {
-                                // A fresh start, a resume or a new session is ready: its terminal, one click away.
-                                let jid = j.id.clone();
-                                ui::line_btn(&t, SharedString::from(format!("job-term-{}", j.id)), 28.)
-                                    .px(px(10.))
-                                    .text_size(px(12.5))
-                                    .child(ui::icon("term", 13., t.dim))
-                                    .child("Open terminal")
-                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        let id = jid.clone();
-                                        this.app.update(cx, |s, cx| s.drop_job(&id, false, cx));
-                                        this.open_terminal(nk.clone(), false, cx);
-                                    }))
-                                    .into_any_element()
-                            } else if done && j.url.is_some() {
-                                div().text_size(px(12.)).text_color(t.accent).child("Open").into_any_element()
-                            } else if ended {
-                                div().into_any_element()
-                            } else {
-                                // How long it has been at it (or, queued, how long it has waited).
-                                ui::num(fmt::clock(el), 12., t.faint).into_any_element()
-                            })
+                            .child(
+                                if let (true, sb_core::JobKind::Stop, Some((m, s))) =
+                                    (done, j.kind, j.key.as_deref().and_then(|k| k.split_once(':')))
+                                {
+                                    // Stopped: one click brings it back.
+                                    let jid = j.id.clone();
+                                    let (m, s, from) = (m.to_string(), s.to_string(), j.from.clone());
+                                    ui::line_btn(&t, SharedString::from(format!("job-resume-{}", j.id)), 28.)
+                                        .px(px(10.))
+                                        .text_size(px(12.5))
+                                        .child(ui::icon("resume", 13., t.dim))
+                                        .child("Resume")
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            let (id, m, s, f) = (jid.clone(), m.clone(), s.clone(), from.clone());
+                                            this.app.update(cx, |st, cx| {
+                                                st.drop_job(&id, false, cx);
+                                                st.resume_chat(&m, &s, f, cx);
+                                            });
+                                        }))
+                                        .into_any_element()
+                                } else if let (true, Some(nk)) = (
+                                    done,
+                                    j.new_machine
+                                        .as_ref()
+                                        .zip(j.new_sid.as_ref())
+                                        .map(|(m, s)| format!("{m}:{s}"))
+                                        .filter(|_| j.kind != sb_core::JobKind::Handoff),
+                                ) {
+                                    // A fresh start, a resume or a new session is ready: its terminal, one click away.
+                                    let jid = j.id.clone();
+                                    ui::line_btn(&t, SharedString::from(format!("job-term-{}", j.id)), 28.)
+                                        .px(px(10.))
+                                        .text_size(px(12.5))
+                                        .child(ui::icon("term", 13., t.dim))
+                                        .child("Open terminal")
+                                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            let id = jid.clone();
+                                            this.app.update(cx, |s, cx| s.drop_job(&id, false, cx));
+                                            this.open_terminal(nk.clone(), false, cx);
+                                        }))
+                                        .into_any_element()
+                                } else if done && j.url.is_some() {
+                                    div().text_size(px(12.)).text_color(t.accent).child("Open").into_any_element()
+                                } else if ended {
+                                    div().into_any_element()
+                                } else {
+                                    // How long it has been at it (or, queued, how long it has waited).
+                                    ui::num(fmt::clock(el), 12., t.faint).into_any_element()
+                                },
+                            )
                             .when(ended, |d| {
                                 // A finished card says plainly how it goes away (a click anywhere on it does too).
                                 let jid = j.id.clone();
-                                d.child(ui::icon_btn(&t, SharedString::from(format!("job-x-{}", j.id)), "x", 24.).on_click(cx.listener(
-                                    move |this, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        let id = jid.clone();
-                                        this.app.update(cx, |s, cx| s.drop_job(&id, true, cx));
-                                    },
-                                )))
+                                d.child(
+                                    ui::icon_btn(&t, SharedString::from(format!("job-x-{}", j.id)), "x", 24.).on_click(
+                                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            let id = jid.clone();
+                                            this.app.update(cx, |s, cx| s.drop_job(&id, true, cx));
+                                        }),
+                                    ),
+                                )
                             }),
                     )
                     .when_some(j.pick(), |d, (who, what)| {
@@ -2222,6 +2606,12 @@ impl BoardView {
                             None => (what.trim_end_matches('.').to_string(), None),
                         };
                         let waiting = j.label == sb_core::jobs::AUTO;
+                        let what = if waiting && rules_only {
+                            "Auto is checking what each machine can do.".to_string()
+                        } else {
+                            what
+                        };
+                        let by_rules = rules_only && !waiting && j.by.as_deref() != Some("claude");
                         d.child(
                             div()
                                 .mx(px(12.))
@@ -2234,21 +2624,55 @@ impl BoardView {
                                 .gap(px(3.))
                                 .rounded(px(ui::R_CTRL))
                                 .bg(t.accent.alpha(if t.dark { 0.10 } else { 0.06 }))
-                                .child(div().flex().items_center().gap(px(5.)).child(ui::icon("auto", 11., t.accent)).child(ui::lbl(&who, t.accent)))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(5.))
+                                        .child(ui::icon("auto", 11., t.accent))
+                                        .child(ui::lbl(&who, t.accent)),
+                                )
                                 .child(if waiting {
                                     div().text_size(px(12.)).text_color(t.ink2).child(what)
                                 } else {
-                                    div()
-                                        .text_size(px(12.))
-                                        .line_height(relative(1.4))
-                                        .text_color(t.ink2)
-                                        .child(ui::runs_text(
+                                    div().text_size(px(12.)).line_height(relative(1.4)).text_color(t.ink2).child(
+                                        ui::runs_text(
                                             &[
                                                 sb_core::TextRun { text: label, bold: true },
-                                                sb_core::TextRun { text: why.map(|w| format!(". {w}")).unwrap_or_default(), bold: false },
+                                                sb_core::TextRun {
+                                                    text: why.map(|w| format!(". {w}")).unwrap_or_default(),
+                                                    bold: false,
+                                                },
                                             ],
                                             t.ink,
-                                        ))
+                                        ),
+                                    )
+                                })
+                                .when(by_rules, |d| {
+                                    d.child(
+                                        div()
+                                            .flex()
+                                            .flex_col()
+                                            .items_start()
+                                            .gap(px(2.))
+                                            .text_size(px(11.5))
+                                            .line_height(relative(1.4))
+                                            .text_color(t.dim)
+                                            .child(ui::wrap(crate::sheet::rules_note()))
+                                            .child(
+                                                ui::link(
+                                                    &t,
+                                                    SharedString::from(format!("job-ai-{}", j.id)),
+                                                    "Open Settings",
+                                                )
+                                                .on_click(
+                                                    |_, _, cx| {
+                                                        cx.stop_propagation();
+                                                        crate::settings::open_at(crate::settings::Section::Privacy, cx)
+                                                    },
+                                                ),
+                                            ),
+                                    )
                                 }),
                         )
                     })
@@ -2302,7 +2726,9 @@ impl BoardView {
                                 ),
                         )
                     })
-                    .when(!ended && !waiting, |d| d.child(div().absolute().left_0().bottom_0().h(px(2.)).w(relative(frac)).bg(t.run)));
+                    .when(!ended && !waiting, |d| {
+                        d.child(div().absolute().left_0().bottom_0().h(px(2.)).w(relative(frac)).bg(t.run))
+                    });
                 ui::rise(card, SharedString::from(format!("job-in-{}", j.id)))
             })
             .collect();
@@ -2340,7 +2766,12 @@ impl BoardView {
                             .flex_col()
                             .gap(px(4.))
                             .child(ui::wrap(title).text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(t.ink))
-                            .child(ui::wrap(i.text.clone()).text_size(px(12.)).line_height(relative(1.45)).text_color(t.dim))
+                            .child(
+                                ui::wrap(i.text.clone())
+                                    .text_size(px(12.))
+                                    .line_height(relative(1.45))
+                                    .text_color(t.dim),
+                            )
                             .when_some(i.fix.clone(), |d, fix| {
                                 let (m2, id2) = (m.clone(), i.id.clone());
                                 d.child(
@@ -2360,12 +2791,12 @@ impl BoardView {
                                 )
                             }),
                     )
-                    .child(ui::icon_btn(&t, SharedString::from(format!("setup-x-{m}-{}", i.id)), "x", 22.).on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
+                    .child(ui::icon_btn(&t, SharedString::from(format!("setup-x-{m}-{}", i.id)), "x", 22.).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
                             let (m, id) = (mx.clone(), idx.clone());
                             this.app.update(cx, |s, cx| s.park_setup(&m, &id, cx));
-                        },
-                    )));
+                        }),
+                    ));
                 ui::rise(card, SharedString::from(format!("setup-in-{m}-{}", i.id)))
             })
             .collect();
@@ -2375,7 +2806,13 @@ impl BoardView {
             .iter()
             .map(|to| {
                 let id = to.id;
-                let (icon, ic) = if to.bad { ("warn", t.bad) } else if to.ok { ("check", t.warm) } else { ("info", t.dim) };
+                let (icon, ic) = if to.bad {
+                    ("warn", t.bad)
+                } else if to.ok {
+                    ("check", t.warm)
+                } else {
+                    ("info", t.dim)
+                };
                 let card = div()
                     .id(SharedString::from(format!("toast-{}", to.id)))
                     .relative()
@@ -2390,8 +2827,14 @@ impl BoardView {
                     .shadow(t.drop())
                     .cursor_pointer()
                     // It stays while the pointer is on it.
-                    .on_hover(cx.listener(move |this, on: &bool, _, cx| this.app.update(cx, |s, _| s.hover_toast(id, *on))))
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.drop_toast(id, cx))))
+                    .on_hover(
+                        cx.listener(move |this, on: &bool, _, cx| this.app.update(cx, |s, _| s.hover_toast(id, *on))),
+                    )
+                    .on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.app.update(cx, |s, cx| s.drop_toast(id, cx))
+                        }),
+                    )
                     .flex()
                     .items_start()
                     .gap(px(10.))
@@ -2403,8 +2846,15 @@ impl BoardView {
                             .flex()
                             .flex_col()
                             .gap(px(3.))
-                            .child(ui::wrap(to.title.clone()).text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(if to.bad { t.bad } else { t.ink }))
-                            .when_some(to.sub.clone(), |d, s| d.child(ui::wrap(s).text_size(px(12.)).line_height(relative(1.4)).text_color(t.dim))),
+                            .child(
+                                ui::wrap(to.title.clone())
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if to.bad { t.bad } else { t.ink }),
+                            )
+                            .when_some(to.sub.clone(), |d, s| {
+                                d.child(ui::wrap(s).text_size(px(12.)).line_height(relative(1.4)).text_color(t.dim))
+                            }),
                     )
                     .when_some(to.act.as_ref().map(|a| a.label()), |d, label| {
                         d.child(
@@ -2418,14 +2868,26 @@ impl BoardView {
                                 })),
                         )
                     })
-                    .child(ui::icon_btn(&t, SharedString::from(format!("toast-x-{}", to.id)), "x", 22.).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.app.update(cx, |s, cx| s.drop_toast(id, cx));
-                    })));
+                    .child(ui::icon_btn(&t, SharedString::from(format!("toast-x-{}", to.id)), "x", 22.).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.app.update(cx, |s, cx| s.drop_toast(id, cx));
+                        }),
+                    ));
                 ui::rise(card, SharedString::from(format!("toast-in-{}", to.id)))
             })
             .collect();
-        div().absolute().right(px(12.)).bottom(px(34.)).flex().flex_col().items_end().gap(px(8.)).children(setup).children(jobs).children(toasts)
+        div()
+            .absolute()
+            .right(px(12.))
+            .bottom(px(34.))
+            .flex()
+            .flex_col()
+            .items_end()
+            .gap(px(8.))
+            .children(setup)
+            .children(jobs)
+            .children(toasts)
     }
 }
 

@@ -6,9 +6,16 @@ use std::collections::HashMap;
 use crate::api::ApiSetup;
 
 /// Permissions: the flag's value and the button's name ("" is Claude Code's own default, which asks first).
-pub const PERMS: [(&str, &str); 5] = [("", "Asks first"), ("acceptEdits", "Accept edits"), ("plan", "Plan"), ("auto", "Auto"), ("bypassPermissions", "Bypass")];
+pub const PERMS: [(&str, &str); 5] = [
+    ("", "Asks first"),
+    ("acceptEdits", "Accept edits"),
+    ("plan", "Plan"),
+    ("auto", "Auto"),
+    ("bypassPermissions", "Bypass"),
+];
 /// Effort: "" leaves it to the machine; Max and UltraCode set their own.
-pub const EFFORTS: [(&str, &str); 5] = [("", "Default"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra high")];
+pub const EFFORTS: [(&str, &str); 5] =
+    [("", "Default"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra high")];
 /// Extra folders (--add-dir) at most.
 pub const DIRS_MAX: usize = 8;
 
@@ -40,19 +47,29 @@ impl Opts {
 
     /// What a setup (the last one used, or a preset) sets here. Flags without a control of their own go to Other.
     pub fn from_setup(s: &ApiSetup) -> Opts {
-        let mut o = Opts { effort: s.effort.clone().filter(|e| EFFORTS.iter().any(|x| !x.0.is_empty() && x.0 == e)).unwrap_or_default(), ..Default::default() };
+        let mut o = Opts {
+            effort: s
+                .effort
+                .clone()
+                .filter(|e| EFFORTS.iter().any(|x| !x.0.is_empty() && x.0 == e))
+                .unwrap_or_default(),
+            ..Default::default()
+        };
         let mut rest = Vec::new();
         for f in &s.flags {
             match (f.first().map(String::as_str), f.get(1)) {
                 (Some("--chrome"), _) => o.chrome = true,
-                (Some("--permission-mode"), Some(v)) if PERMS.iter().any(|p| !p.0.is_empty() && p.0 == v) => o.perm = v.clone(),
+                (Some("--permission-mode"), Some(v)) if PERMS.iter().any(|p| !p.0.is_empty() && p.0 == v) => {
+                    o.perm = v.clone()
+                }
                 (Some("--add-dir"), Some(v)) if o.dirs.len() < DIRS_MAX => o.dirs.push(v.clone()),
                 (Some(name), Some(v)) => rest.push(format!("{name} {}", shq(v))),
                 (Some(name), None) => rest.push(name.to_string()),
                 (None, _) => {}
             }
         }
-        let mut other: Vec<String> = s.other.iter().filter(|x| !x.trim().is_empty()).map(|x| x.trim().to_string()).collect();
+        let mut other: Vec<String> =
+            s.other.iter().filter(|x| !x.trim().is_empty()).map(|x| x.trim().to_string()).collect();
         other.extend(rest);
         o.other = other.join(" ").trim().to_string();
         o
@@ -102,7 +119,13 @@ pub fn words(text: &str) -> Result<Vec<String>, String> {
 
 /// What is wrong with "Other flags", in words, or None. `takes` is every flag the server passes and whether it
 /// takes a value; empty (an older server) leaves the check to Start.
-pub fn check_other(o: &Opts, model: &str, mode: &str, takes: &HashMap<String, bool>, aliases: &HashMap<String, String>) -> Option<String> {
+pub fn check_other(
+    o: &Opts,
+    model: &str,
+    mode: &str,
+    takes: &HashMap<String, bool>,
+    aliases: &HashMap<String, String>,
+) -> Option<String> {
     let text = o.other.trim();
     if text.is_empty() {
         return None;
@@ -218,17 +241,33 @@ mod tests {
     use super::*;
 
     fn takes() -> (HashMap<String, bool>, HashMap<String, String>) {
-        let t = [("--chrome", false), ("--add-dir", true), ("--agent", true), ("--permission-mode", true), ("--worktree", true), ("--verbose", false)]
-            .into_iter()
-            .map(|(k, v)| (k.to_string(), v))
-            .collect();
+        let t = [
+            ("--chrome", false),
+            ("--add-dir", true),
+            ("--agent", true),
+            ("--permission-mode", true),
+            ("--worktree", true),
+            ("--verbose", false),
+        ]
+        .into_iter()
+        .map(|(k, v)| (k.to_string(), v))
+        .collect();
         (t, [("-w".to_string(), "--worktree".to_string())].into_iter().collect())
     }
 
     #[test]
     fn command_preview_reads_like_the_web() {
-        let o = Opts { chrome: true, perm: "plan".into(), effort: "high".into(), dirs: vec!["My Notes".into()], other: "--agent reviewer".into() };
-        assert_eq!(cmd_text(&o, "sonnet", "normal"), "claude --bg --model sonnet --effort high --chrome --permission-mode plan --add-dir 'My Notes' --agent reviewer");
+        let o = Opts {
+            chrome: true,
+            perm: "plan".into(),
+            effort: "high".into(),
+            dirs: vec!["My Notes".into()],
+            other: "--agent reviewer".into(),
+        };
+        assert_eq!(
+            cmd_text(&o, "sonnet", "normal"),
+            "claude --bg --model sonnet --effort high --chrome --permission-mode plan --add-dir 'My Notes' --agent reviewer"
+        );
         assert_eq!(cmd_text(&Opts::default(), "", "ultracode"), "claude --bg --model opus --effort ultracode");
     }
 
@@ -240,18 +279,32 @@ mod tests {
         assert_eq!(chk("--nope", Opts::default()).unwrap(), "--nope is not a flag Switchboard passes to Claude Code.");
         assert_eq!(chk("--agent", Opts::default()).unwrap(), "--agent needs a value.");
         assert_eq!(chk("--agent 'x", Opts::default()).unwrap(), "A quote is not closed.");
-        assert_eq!(chk("--chrome", Opts { chrome: true, ..Default::default() }).unwrap(), "Claude in Chrome is already on above.");
+        assert_eq!(
+            chk("--chrome", Opts { chrome: true, ..Default::default() }).unwrap(),
+            "Claude in Chrome is already on above."
+        );
         assert_eq!(chk("--verbose=1", Opts::default()).unwrap(), "--verbose takes no value.");
         assert_eq!(chk("--agent a --agent b", Opts::default()).unwrap(), "--agent is given twice.");
-        assert_eq!(check_other(&Opts { other: "--model opus".into(), ..Default::default() }, "sonnet", "normal", &t, &a).unwrap(), "The model is already picked above.");
+        assert_eq!(
+            check_other(&Opts { other: "--model opus".into(), ..Default::default() }, "sonnet", "normal", &t, &a)
+                .unwrap(),
+            "The model is already picked above."
+        );
         assert!(chk("-w feat --agent \"code reviewer\" --add-dir a --add-dir=b", Opts::default()).is_none());
-        assert!(check_other(&Opts { other: "--anything".into(), ..Default::default() }, "", "normal", &HashMap::new(), &a).is_none());
+        assert!(
+            check_other(&Opts { other: "--anything".into(), ..Default::default() }, "", "normal", &HashMap::new(), &a)
+                .is_none()
+        );
     }
 
     #[test]
     fn setups_round_trip() {
         let s = ApiSetup {
-            flags: vec![vec!["--chrome".into()], vec!["--add-dir".into(), "notes".into()], vec!["--agent".into(), "code reviewer".into()]],
+            flags: vec![
+                vec!["--chrome".into()],
+                vec!["--add-dir".into(), "notes".into()],
+                vec!["--agent".into(), "code reviewer".into()],
+            ],
             effort: Some("high".into()),
             other: Some("--verbose".into()),
             ..Default::default()

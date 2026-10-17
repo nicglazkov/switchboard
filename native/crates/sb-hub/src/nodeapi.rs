@@ -83,7 +83,12 @@ async fn pair(State(hub): State<Arc<Hub>>, ConnectInfo(peer): ConnectInfo<Socket
         .and_then(|f| f.machines.into_iter().find(|m| m.name == req.name))
         .map(|m| m.label().to_string())
         // ... and so does a linked machine's, unless the one asking holds its token (never a hijack with a stray code)
-        .or_else(|| hub.nodes.get(&req.name).filter(|n| hub.nodes.find(&req.token).is_none_or(|f| f.name != n.name)).map(|n| n.label().to_string()));
+        .or_else(|| {
+            hub.nodes
+                .get(&req.name)
+                .filter(|n| hub.nodes.find(&req.token).is_none_or(|f| f.name != n.name))
+                .map(|n| n.label().to_string())
+        });
     let label = if req.label.trim().is_empty() { req.name.clone() } else { req.label.clone() };
     match hub.nodes.pair_from(peer.ip(), &req.code, &req.name, &label, &req.os, taken.as_deref(), unix_now()) {
         Ok((node, token)) => {
@@ -101,7 +106,11 @@ async fn pair(State(hub): State<Arc<Hub>>, ConnectInfo(peer): ConnectInfo<Socket
     }
 }
 
-async fn internal_unpair(State(hub): State<Arc<Hub>>, ConnectInfo(peer): ConnectInfo<SocketAddr>, Path(machine): Path<String>) -> Response {
+async fn internal_unpair(
+    State(hub): State<Arc<Hub>>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Path(machine): Path<String>,
+) -> Response {
     if let Some(r) = not_local(&peer) {
         return r;
     }

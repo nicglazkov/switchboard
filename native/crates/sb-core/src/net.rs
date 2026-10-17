@@ -11,7 +11,8 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::api::{
-    ApiBrowse, ApiChatSummary, ApiChats, ApiFiles, ApiGroupsReply, ApiPair, ApiFolders, ApiJob, ApiKeep, ApiPostReply, ApiPrefs, ApiRoute, ApiSessions, ApiSummary, ApiThread,
+    ApiBrowse, ApiChatSummary, ApiChats, ApiFiles, ApiFolders, ApiGroupsReply, ApiJob, ApiKeep, ApiPair, ApiPostReply,
+    ApiPrefs, ApiRoute, ApiSessions, ApiSummary, ApiThread,
 };
 
 /// The server's port when an address leaves it out.
@@ -41,14 +42,17 @@ pub fn is_lan(base: &str) -> bool {
 pub fn normalize_base(typed: &str) -> Option<String> {
     let t = typed.trim().trim_end_matches('/');
     let (scheme, rest) = match t.split_once("://") {
-        Some((s, r)) if s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https") => (s.to_ascii_lowercase(), r),
+        Some((s, r)) if s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https") => {
+            (s.to_ascii_lowercase(), r)
+        }
         Some(_) => return None,
         None => ("http".to_string(), t),
     };
     if rest.is_empty() || rest.contains(char::is_whitespace) || rest.contains(['/', '?', '#', '@']) {
         return None;
     }
-    let host_ok = |h: &str| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
+    let host_ok =
+        |h: &str| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
     match rest.rsplit_once(':') {
         Some((h, p)) if host_ok(h) && p.parse::<u16>().is_ok_and(|p| p > 0) => Some(format!("{scheme}://{h}:{p}")),
         Some(_) => None,
@@ -100,7 +104,10 @@ impl std::fmt::Display for CoreError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             CoreError::Unreachable => {
-                write!(f, "Switchboard is not reachable. Check that the computer that runs Switchboard is on and that this one can reach it.")
+                write!(
+                    f,
+                    "Switchboard is not reachable. Check that the computer that runs Switchboard is on and that this one can reach it."
+                )
             }
             CoreError::Server { message, .. } => write!(f, "{message}"),
             CoreError::Bad(m) => write!(f, "{m}"),
@@ -180,7 +187,14 @@ pub struct Resolver {
 
 impl Resolver {
     pub fn new(candidates: Vec<String>, ttl: Duration, probe: Probe) -> Resolver {
-        Resolver { candidates: Mutex::new(candidates), ttl, grace: Duration::from_millis(400), probe, discover: None, cached: Mutex::new(None) }
+        Resolver {
+            candidates: Mutex::new(candidates),
+            ttl,
+            grace: Duration::from_millis(400),
+            probe,
+            discover: None,
+            cached: Mutex::new(None),
+        }
     }
 
     pub fn with_discovery(mut self, discover: Discover) -> Resolver {
@@ -202,10 +216,10 @@ impl Resolver {
     }
 
     pub fn resolve(&self) -> Option<String> {
-        if let Some((url, at)) = self.cached.lock().ok()?.as_ref() {
-            if at.elapsed() < self.ttl {
-                return Some(url.clone());
-            }
+        if let Some((url, at)) = self.cached.lock().ok()?.as_ref()
+            && at.elapsed() < self.ttl
+        {
+            return Some(url.clone());
         }
         let mut candidates = self.candidates();
         if candidates.is_empty()
@@ -388,14 +402,19 @@ impl Client {
             found
         });
         Client {
-            resolver: Resolver::new(candidates, Duration::from_secs(60), http_probe(user_agent.to_string())).with_discovery(discover),
+            resolver: Resolver::new(candidates, Duration::from_secs(60), http_probe(user_agent.to_string()))
+                .with_discovery(discover),
             agent: agent(Duration::from_secs(20), user_agent),
             stream_agent: agent(STREAM_FOR, user_agent),
         }
     }
 
     pub fn with_resolver(resolver: Resolver, user_agent: &str) -> Client {
-        Client { resolver, agent: agent(Duration::from_secs(20), user_agent), stream_agent: agent(STREAM_FOR, user_agent) }
+        Client {
+            resolver,
+            agent: agent(Duration::from_secs(20), user_agent),
+            stream_agent: agent(STREAM_FOR, user_agent),
+        }
     }
 
     /// The server in use, if one was found.
@@ -421,9 +440,15 @@ impl Client {
     }
 
     fn get_bytes(&self, base: &str, path: &str) -> Result<Vec<u8>, CoreError> {
-        let mut r = self.agent.get(&format!("{base}{path}")).header("X-Switchboard", "1").call().map_err(|_| CoreError::Unreachable)?;
+        let mut r = self
+            .agent
+            .get(&format!("{base}{path}"))
+            .header("X-Switchboard", "1")
+            .call()
+            .map_err(|_| CoreError::Unreachable)?;
         let status = r.status().as_u16();
-        let body = r.body_mut().with_config().limit(64 * 1024 * 1024).read_to_vec().map_err(|_| CoreError::Unreachable)?;
+        let body =
+            r.body_mut().with_config().limit(64 * 1024 * 1024).read_to_vec().map_err(|_| CoreError::Unreachable)?;
         check(status, &body)?;
         Ok(body)
     }
@@ -461,7 +486,8 @@ impl Client {
     pub fn sessions(&self) -> Result<(ApiSessions, Vec<u8>, String), CoreError> {
         self.with_base(|base| {
             let raw = self.get_bytes(base, "/api/sessions")?;
-            let parsed: ApiSessions = serde_json::from_slice(&raw).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
+            let parsed: ApiSessions =
+                serde_json::from_slice(&raw).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
             Ok((parsed, raw, base.to_string()))
         })
     }
@@ -506,14 +532,31 @@ impl Client {
     }
 
     /// POST /api/action. `verb` is one of resume, fresh, handoff, stop, dismiss, pass.
-    pub fn action(&self, machine: &str, verb: &str, sid: &str, close: Option<bool>, when: Option<&str>) -> Result<ApiPostReply, CoreError> {
+    pub fn action(
+        &self,
+        machine: &str,
+        verb: &str,
+        sid: &str,
+        close: Option<bool>,
+        when: Option<&str>,
+    ) -> Result<ApiPostReply, CoreError> {
         let body = ActionBody { machine, verb, sid, close, on: None, to: None, older: None, name: None, when };
         self.with_base(|base| parse_reply(&self.post_json(base, "/api/action", &body)?))
     }
 
     /// v2: Keep running on or off. Returns what the server stored.
     pub fn keep(&self, machine: &str, sid: &str, on: bool) -> Result<bool, CoreError> {
-        let body = ActionBody { machine, verb: "keep", sid, close: None, on: Some(on), to: None, older: None, name: None, when: None };
+        let body = ActionBody {
+            machine,
+            verb: "keep",
+            sid,
+            close: None,
+            on: Some(on),
+            to: None,
+            older: None,
+            name: None,
+            when: None,
+        };
         self.with_base(|base| {
             let raw = self.post_json(base, "/api/action", &body)?;
             let r: ApiKeep = serde_json::from_slice(&raw).unwrap_or_default();
@@ -523,7 +566,8 @@ impl Client {
 
     /// Star on or off (`on` None toggles). Returns what the server stored.
     pub fn star(&self, machine: &str, sid: &str, on: Option<bool>) -> Result<bool, CoreError> {
-        let body = ActionBody { machine, verb: "star", sid, close: None, on, to: None, older: None, name: None, when: None };
+        let body =
+            ActionBody { machine, verb: "star", sid, close: None, on, to: None, older: None, name: None, when: None };
         self.with_base(|base| {
             let raw = self.post_json(base, "/api/action", &body)?;
             let r: ApiKeep = serde_json::from_slice(&raw).unwrap_or_default();
@@ -533,14 +577,38 @@ impl Client {
 
     /// v2: "This continues...": links (machine, sid) to the older chat (to_machine, to_sid). Returns the thread.
     pub fn link(&self, machine: &str, sid: &str, to_machine: &str, to_sid: &str) -> Result<ApiThread, CoreError> {
-        let body = ActionBody { machine, verb: "link", sid, close: None, on: None, to: Some(ChatRef { machine: to_machine, sid: to_sid }), older: None, name: None, when: None };
-        self.with_base(|base| Ok(serde_json::from_slice(&self.post_json(base, "/api/action", &body)?).unwrap_or_default()))
+        let body = ActionBody {
+            machine,
+            verb: "link",
+            sid,
+            close: None,
+            on: None,
+            to: Some(ChatRef { machine: to_machine, sid: to_sid }),
+            older: None,
+            name: None,
+            when: None,
+        };
+        self.with_base(|base| {
+            Ok(serde_json::from_slice(&self.post_json(base, "/api/action", &body)?).unwrap_or_default())
+        })
     }
 
     /// v2: "Not the same topic". `older`: on a replaced (older) chat, the chats that carry on from it split off.
     pub fn unlink(&self, machine: &str, sid: &str, older: bool) -> Result<ApiThread, CoreError> {
-        let body = ActionBody { machine, verb: "unlink", sid, close: None, on: None, to: None, older: older.then_some(true), name: None, when: None };
-        self.with_base(|base| Ok(serde_json::from_slice(&self.post_json(base, "/api/action", &body)?).unwrap_or_default()))
+        let body = ActionBody {
+            machine,
+            verb: "unlink",
+            sid,
+            close: None,
+            on: None,
+            to: None,
+            older: older.then_some(true),
+            name: None,
+            when: None,
+        };
+        self.with_base(|base| {
+            Ok(serde_json::from_slice(&self.post_json(base, "/api/action", &body)?).unwrap_or_default())
+        })
     }
 
     /// v2: GET /api/thread/<machine>/<sid>
@@ -565,7 +633,14 @@ impl Client {
     }
 
     /// v2: POST /api/route. `rules`: the instant rule-based pick only (the New session preview).
-    pub fn route(&self, prompt: &str, folder: &str, rules: bool, chrome: bool, chrome_machine: Option<&str>) -> Result<ApiRoute, CoreError> {
+    pub fn route(
+        &self,
+        prompt: &str,
+        folder: &str,
+        rules: bool,
+        chrome: bool,
+        chrome_machine: Option<&str>,
+    ) -> Result<ApiRoute, CoreError> {
         let body = RouteBody { prompt, folder, rules, chrome, chrome_machine };
         self.with_base(|base| {
             let raw = self.post_json(base, "/api/route", &body)?;
@@ -582,7 +657,9 @@ impl Client {
 
     /// v2: POST /api/cleanup, as the card sends it (stop a list, or keep one).
     pub fn cleanup(&self, body: &serde_json::Value) -> Result<serde_json::Value, CoreError> {
-        self.with_base(|base| Ok(serde_json::from_slice(&self.post_json(base, "/api/cleanup", body)?).unwrap_or_default()))
+        self.with_base(|base| {
+            Ok(serde_json::from_slice(&self.post_json(base, "/api/cleanup", body)?).unwrap_or_default())
+        })
     }
 
     /// POST /api/tabs: the chats a desktop app has open in tabs.
@@ -592,7 +669,13 @@ impl Client {
 
     /// v2: POST /api/upload?machine=&name= with the file as the body. `sent` counts the bytes as they go out, for a
     /// progress bar.
-    pub fn upload(&self, machine: &str, name: &str, data: &[u8], sent: &std::sync::atomic::AtomicU64) -> Result<crate::api::ApiUpload, CoreError> {
+    pub fn upload(
+        &self,
+        machine: &str,
+        name: &str,
+        data: &[u8],
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> Result<crate::api::ApiUpload, CoreError> {
         use std::sync::atomic::Ordering;
         self.with_base(|base| {
             sent.store(0, Ordering::Relaxed);
@@ -610,7 +693,8 @@ impl Client {
             let status = r.status().as_u16();
             let out = r.body_mut().read_to_vec().map_err(|_| CoreError::Unreachable)?;
             check(status, &out)?;
-            let u: crate::api::ApiUpload = serde_json::from_slice(&out).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
+            let u: crate::api::ApiUpload =
+                serde_json::from_slice(&out).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
             if u.path.is_empty() {
                 return Err(CoreError::Bad("The machine did not say where it put the file.".into()));
             }
@@ -657,7 +741,12 @@ impl Client {
     }
 
     /// v2: POST /api/flags {machine, sid, want}
-    pub fn flags_plan(&self, machine: &str, sid: &str, want: &serde_json::Value) -> Result<crate::api::ApiFlagsPlan, CoreError> {
+    pub fn flags_plan(
+        &self,
+        machine: &str,
+        sid: &str,
+        want: &serde_json::Value,
+    ) -> Result<crate::api::ApiFlagsPlan, CoreError> {
         let body = serde_json::json!({"machine": machine, "sid": sid, "want": want});
         self.with_base(|base| {
             let raw = self.post_json(base, "/api/flags", &body)?;
@@ -692,12 +781,18 @@ impl Client {
 
     /// POST /api/budget with {op: set|lift|unlift, ...}: the budget after the change.
     pub fn budget_op(&self, body: &serde_json::Value) -> Result<crate::api::ApiBudget, CoreError> {
-        self.with_base(|base| serde_json::from_slice(&self.post_json(base, "/api/budget", body)?).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}"))))
+        self.with_base(|base| {
+            serde_json::from_slice(&self.post_json(base, "/api/budget", body)?)
+                .map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))
+        })
     }
 
     /// POST /api/groups with {op, ...} (groups.rs builds it).
     pub fn groups(&self, body: &serde_json::Value) -> Result<ApiGroupsReply, CoreError> {
-        self.with_base(|base| serde_json::from_slice(&self.post_json(base, "/api/groups", body)?).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}"))))
+        self.with_base(|base| {
+            serde_json::from_slice(&self.post_json(base, "/api/groups", body)?)
+                .map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))
+        })
     }
 
     pub fn set_prefs(&self, body: &serde_json::Value) -> Result<(), CoreError> {
@@ -753,7 +848,17 @@ impl Client {
 
     /// v2: rename a chat (the machine writes it into a stopped chat's transcript too).
     pub fn rename(&self, machine: &str, sid: &str, name: &str) -> Result<(), CoreError> {
-        let body = ActionBody { machine, verb: "rename", sid, close: None, on: None, to: None, older: None, name: Some(name), when: None };
+        let body = ActionBody {
+            machine,
+            verb: "rename",
+            sid,
+            close: None,
+            on: None,
+            to: None,
+            older: None,
+            name: Some(name),
+            when: None,
+        };
         self.with_base(|base| self.post_json(base, "/api/action", &body).map(|_| ()))
     }
 
@@ -779,7 +884,9 @@ impl Client {
         for line in std::io::BufReader::new(r.body_mut().as_reader()).lines() {
             let line = line.map_err(|_| CoreError::Unreachable)?;
             if let Some(data) = line.strip_prefix("data:") {
-                let v = serde_json::from_str::<serde_json::Value>(data.trim()).ok().and_then(|j| j.get("v").and_then(|v| v.as_u64()));
+                let v = serde_json::from_str::<serde_json::Value>(data.trim())
+                    .ok()
+                    .and_then(|j| j.get("v").and_then(|v| v.as_u64()));
                 if !seen(v.unwrap_or(0)) {
                     break;
                 }
@@ -1023,16 +1130,28 @@ mod tests {
 
     #[test]
     fn errors_read_like_the_web_app() {
-        assert_eq!(check(400, br#"{"ok":false,"error":"bad session id"}"#), Err(CoreError::Server { status: 400, message: "bad session id".into() }));
+        assert_eq!(
+            check(400, br#"{"ok":false,"error":"bad session id"}"#),
+            Err(CoreError::Server { status: 400, message: "bad session id".into() })
+        );
         assert_eq!(check(500, b"oops"), Err(CoreError::Server { status: 500, message: "Request failed (500)".into() }));
-        assert_eq!(check(200, br#"{"ok":false,"error":"machine is offline"}"#).unwrap_err().to_string(), "machine is offline");
+        assert_eq!(
+            check(200, br#"{"ok":false,"error":"machine is offline"}"#).unwrap_err().to_string(),
+            "machine is offline"
+        );
         assert!(check(200, br#"{"ok":true}"#).is_ok());
         assert_eq!(enc("a b/c"), "a%20b%2Fc");
     }
 
     #[test]
     fn a_start_sends_tools_only_when_there_are_some() {
-        let mut r = NewRequest { machine: "studio".into(), folder: "x".into(), prompt: "hi".into(), mode: "normal".into(), ..Default::default() };
+        let mut r = NewRequest {
+            machine: "studio".into(),
+            folder: "x".into(),
+            prompt: "hi".into(),
+            mode: "normal".into(),
+            ..Default::default()
+        };
         let plain = serde_json::to_value(&r).unwrap();
         assert!(plain.get("tools").is_none());
         r.tools = Tools::Pick(vec!["web-fetch".into()]);

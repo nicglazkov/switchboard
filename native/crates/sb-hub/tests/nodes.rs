@@ -30,7 +30,11 @@ impl Drop for Lab {
 
 async fn lab() -> Lab {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!("sbnode-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let dir = std::env::temp_dir().join(format!(
+        "sbnode-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let machines = dir.join("machines.json");
@@ -71,7 +75,9 @@ impl Lab {
     async fn pair(&self, name: &str) -> String {
         let (_, v) = self.http("POST", "/internal/pair", "").await;
         let code = v["code"].as_str().unwrap().to_string();
-        let (st, v) = self.http("POST", "/pair", &json!({"code": code, "name": name, "label": "Lab box", "os": "linux"}).to_string()).await;
+        let (st, v) = self
+            .http("POST", "/pair", &json!({"code": code, "name": name, "label": "Lab box", "os": "linux"}).to_string())
+            .await;
         assert_eq!(st, 200, "{v}");
         v["token"].as_str().unwrap().to_string()
     }
@@ -168,9 +174,12 @@ async fn pairing_rules() {
     let (st, v2) = lab.http("POST", "/pair", &json!({"code": c2["code"], "name": "lab"}).to_string()).await;
     assert_eq!(st, 409, "{v2}");
     assert!(v2["error"].as_str().unwrap().starts_with("lab already uses that name"));
-    let (st, _) = lab.http("POST", "/pair", &json!({"code": c2["code"], "name": "lab", "token": "0".repeat(64)}).to_string()).await;
+    let (st, _) = lab
+        .http("POST", "/pair", &json!({"code": c2["code"], "name": "lab", "token": "0".repeat(64)}).to_string())
+        .await;
     assert_eq!(st, 409, "a wrong token is no token");
-    let (st, v2) = lab.http("POST", "/pair", &json!({"code": c2["code"], "name": "lab", "token": first}).to_string()).await;
+    let (st, v2) =
+        lab.http("POST", "/pair", &json!({"code": c2["code"], "name": "lab", "token": first}).to_string()).await;
     assert_eq!(st, 200, "the machine itself pairs again: {v2}");
     let v = v2;
 
@@ -216,16 +225,21 @@ async fn rpcs_and_terminals_over_the_link() {
 
     // a terminal: opened on the node, bytes both ways, resize, exit
     let mut term = lab.term("c03ef0d9").await;
-    let Got::Msg(ToNode::TermOpen { ch, bg, cols, rows }) = from_hub(&mut node).await else { panic!("expected term.open") };
+    let Got::Msg(ToNode::TermOpen { ch, bg, cols, rows }) = from_hub(&mut node).await else {
+        panic!("expected term.open")
+    };
     assert_eq!((bg.as_str(), cols, rows), ("c03ef0d9", 90, 30));
     node.send(Message::Binary(link_proto::frame(ch, b"hello from lab\r\n").into())).await.unwrap();
     let (texts, out, _) = viewer(&mut term, |_, o| o.contains("hello from lab")).await;
-    assert_eq!(texts, vec![
-        json!({"type": "status", "state": "connecting"}),
-        json!({"type": "size", "cols": 90, "rows": 30}),
-        json!({"type": "owner", "owner": true}),
-        json!({"type": "status", "state": "open"}),
-    ]);
+    assert_eq!(
+        texts,
+        vec![
+            json!({"type": "status", "state": "connecting"}),
+            json!({"type": "size", "cols": 90, "rows": 30}),
+            json!({"type": "owner", "owner": true}),
+            json!({"type": "status", "state": "open"}),
+        ]
+    );
     assert!(out.contains("hello from lab"));
     let (_, v) = lab.http("GET", "/internal/open", "").await;
     assert_eq!(v["open"][0]["machine"], "lab", "the reaper sees it");
@@ -237,8 +251,12 @@ async fn rpcs_and_terminals_over_the_link() {
     assert_eq!(m, ToNode::TermResize { ch, cols: 70, rows: 20 });
     node.send(Message::Text(link_proto::encode(&FromNode::TermExit { ch, code: Some(0) }).into())).await.unwrap();
     let (texts, _, close) = viewer(&mut term, |t, _| t.iter().any(|t| t["type"] == "exit")).await;
-    assert_eq!(texts.last().unwrap(), &json!({"type": "exit", "code": 0, "note": "Detached. The session keeps running."}));
-    let (_, _, close) = if close.is_none() { viewer(&mut term, |_, _| false).await } else { (vec![], String::new(), close) };
+    assert_eq!(
+        texts.last().unwrap(),
+        &json!({"type": "exit", "code": 0, "note": "Detached. The session keeps running."})
+    );
+    let (_, _, close) =
+        if close.is_none() { viewer(&mut term, |_, _| false).await } else { (vec![], String::new(), close) };
     assert_eq!(close, Some(1000));
 
     // the viewer leaves: the node is told to hang up
@@ -309,14 +327,27 @@ async fn internal_routes_refuse_pages() {
     let ok = format!("POST /internal/pair HTTP/1.1\r\nHost: 127.0.0.1:8132\r\n{json}");
     assert_eq!(raw_status(lab.addr, &ok).await, 200);
     for (what, head) in [
-        ("a page's Origin", format!("POST /internal/pair HTTP/1.1\r\nHost: 127.0.0.1:8132\r\nOrigin: https://evil.example\r\n{json}")),
-        ("a fetch", format!("POST /internal/pair HTTP/1.1\r\nHost: 127.0.0.1:8132\r\nSec-Fetch-Site: cross-site\r\n{json}")),
+        (
+            "a page's Origin",
+            format!("POST /internal/pair HTTP/1.1\r\nHost: 127.0.0.1:8132\r\nOrigin: https://evil.example\r\n{json}"),
+        ),
+        (
+            "a fetch",
+            format!("POST /internal/pair HTTP/1.1\r\nHost: 127.0.0.1:8132\r\nSec-Fetch-Site: cross-site\r\n{json}"),
+        ),
         ("a rebound name", format!("POST /internal/pair HTTP/1.1\r\nHost: evil.example:8132\r\n{json}")),
         ("a rebound read", "GET /internal/nodes HTTP/1.1\r\nHost: rebind.evil.example\r\n".to_string()),
-        ("text/plain", "POST /internal/rpc/lab HTTP/1.1\r\nHost: localhost:8132\r\nContent-Type: text/plain\r\n".to_string()),
+        (
+            "text/plain",
+            "POST /internal/rpc/lab HTTP/1.1\r\nHost: localhost:8132\r\nContent-Type: text/plain\r\n".to_string(),
+        ),
     ] {
         assert_eq!(raw_status(lab.addr, &head).await, 403, "{what}");
     }
     assert_eq!(raw_status(lab.addr, "GET /internal/nodes HTTP/1.1\r\nHost: [::1]:8132\r\n").await, 200);
-    assert_eq!(raw_status(lab.addr, "GET /healthz HTTP/1.1\r\nHost: studio.local\r\n").await, 200, "other routes as before");
+    assert_eq!(
+        raw_status(lab.addr, "GET /healthz HTTP/1.1\r\nHost: studio.local\r\n").await,
+        200,
+        "other routes as before"
+    );
 }

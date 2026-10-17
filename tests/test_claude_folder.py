@@ -129,13 +129,14 @@ class RootDirsTest(RpcBase):
             with self.subTest(bad=bad):
                 self.assertFalse(self.sb.rpc({'verb': 'root_dirs', 'path': bad}, NOW, agents=[])['ok'])
 
-    def test_suggestion(self):
-        with mock.patch.object(self.sb.sys, 'platform', 'darwin'):
-            self.assertEqual(self.sb.root_suggest(), '~/Desktop/Claude')
-        with mock.patch.object(self.sb.sys, 'platform', 'linux'):
-            self.assertEqual(self.sb.root_suggest(), '~')
-            (self.home / 'Claude').mkdir()
-            self.assertEqual(self.sb.root_suggest(), '~/Claude')
+    def test_suggestion_is_home_whatever_folders_exist(self):
+        (self.home / 'Claude').mkdir()
+        for plat in ('darwin', 'linux', 'win32'):
+            with self.subTest(plat=plat), mock.patch.object(self.sb.sys, 'platform', plat):
+                self.assertEqual(self.sb.root_suggest(), '~')
+        r = self.sb.rpc({'verb': 'root_dirs', 'path': ''}, NOW, agents=[])
+        self.assertEqual(r['suggest'], '~')
+        self.assertIn('Claude', [f['name'] for f in r['folders']])  # the folders that exist are listed to pick from
 
 
 class VersionsTest(RpcBase):

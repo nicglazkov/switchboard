@@ -35,7 +35,14 @@ impl BoardView {
             return None;
         }
         let keys: Vec<String> = later.iter().map(clean_key).collect();
-        let mut body = div().id("stopped-list").max_h(px(420.)).overflow_y_scroll().pb(px(6.)).flex().flex_col();
+        let mut body = div()
+            .id("stopped-list")
+            .max_h(px(420.))
+            .overflow_y_scroll()
+            .track_scroll(&self.clean_scroll)
+            .pb(px(6.))
+            .flex()
+            .flex_col();
         if !later.is_empty() {
             body = body.child(
                 div()
@@ -48,13 +55,16 @@ impl BoardView {
                     .child(ui::lbl("Not in use", t.faint))
                     .child(div().flex_1())
                     .child(
-                        ui::ghost(&t, "cln-unfold", None, None).h(px(22.)).px(px(8.)).text_size(px(12.)).child("Show on the board").on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
+                        ui::ghost(&t, "cln-unfold", None, None)
+                            .h(px(22.))
+                            .px(px(8.))
+                            .text_size(px(12.))
+                            .child("Show on the board")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.stopped_open = false;
                                 let k = keys.clone();
                                 this.app.update(cx, |s, cx| s.clean_fold(k, false, cx));
-                            },
-                        )),
+                            })),
                     ),
             );
             for d in later {
@@ -62,7 +72,8 @@ impl BoardView {
             }
         }
         if !stopped.is_empty() {
-            body = body.child(div().pl(px(20.)).pr(px(14.)).pt(px(12.)).pb(px(4.)).child(ui::lbl("Stopped today", t.faint)));
+            body = body
+                .child(div().pl(px(20.)).pr(px(14.)).pt(px(12.)).pb(px(4.)).child(ui::lbl("Stopped today", t.faint)));
             for d in stopped {
                 body = body.child(self.clean_done_row(c, d));
             }
@@ -93,7 +104,7 @@ impl BoardView {
                         .shadow(t.drop())
                         .overflow_hidden()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(body),
+                        .child(div().relative().child(body).child(ui::scrollbar(&self.clean_scroll))),
                 )
                 .into_any_element(),
         )
@@ -109,8 +120,10 @@ impl BoardView {
             (Some(_), Some(t)) => names::split(t).0.to_string(),
             (Some(_), None) => "Untitled".into(),
         };
-        let board_key = d.sid.as_ref().map(|s| format!("{}:{s}", d.machine)).filter(|k| c.app.snap.session(k).is_some());
-        let meta = format!("{} · {}", d.label.clone().unwrap_or_else(|| d.machine.clone()), d.why.clone().unwrap_or_default());
+        let board_key =
+            d.sid.as_ref().map(|s| format!("{}:{s}", d.machine)).filter(|k| c.app.snap.session(k).is_some());
+        let meta =
+            format!("{} · {}", d.label.clone().unwrap_or_else(|| d.machine.clone()), d.why.clone().unwrap_or_default());
         let hover = t.hover;
         let (keep_d, stop_d) = (d.clone(), d.clone());
         div()
@@ -134,22 +147,36 @@ impl BoardView {
                     .py(px(3.))
                     .rounded(px(ui::R_ITEM))
                     .when_some(board_key, |e, bk| {
-                        e.cursor_pointer().hover(move |s| s.bg(hover)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select(Some(bk.clone()), cx)))
+                        e.cursor_pointer()
+                            .hover(move |s| s.bg(hover))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select(Some(bk.clone()), cx)))
                     })
                     .child(ui::wrap(title).text_size(px(13.)).text_color(t.ink).line_height(relative(1.3)))
                     .child(ui::wrap(meta).text_size(px(11.5)).text_color(t.faint)),
             )
-            .child(div().flex_none().w(px(64.)).flex().justify_end().font_family(NUM).text_size(px(12.)).text_color(t.dim).children(d.mb.map(fmt::mem)))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(64.))
+                    .flex()
+                    .justify_end()
+                    .font_family(NUM)
+                    .text_size(px(12.))
+                    .text_color(t.dim)
+                    .children(d.mb.map(fmt::mem)),
+            )
             .child(
                 ui::ghost(&t, SharedString::from(format!("cln-k-{k}")), None, None)
                     .h(px(26.))
                     .px(px(10.))
                     .text_size(px(12.5))
                     .child("Keep")
-                    .when(!busy, |e| e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let d = keep_d.clone();
-                        this.app.update(cx, |s, cx| s.clean_keep(d, cx));
-                    }))),
+                    .when(!busy, |e| {
+                        e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let d = keep_d.clone();
+                            this.app.update(cx, |s, cx| s.clean_keep(d, cx));
+                        }))
+                    }),
             )
             .child(
                 ui::line_btn(&t, SharedString::from(format!("cln-s-{k}")), 26.)
@@ -157,10 +184,12 @@ impl BoardView {
                     .text_size(px(12.5))
                     .text_color(t.bad)
                     .child(if busy { "Stopping" } else { "Stop" })
-                    .when(!busy, |e| e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let d = stop_d.clone();
-                        this.app.update(cx, |s, cx| s.clean_stop(vec![d], cx));
-                    }))),
+                    .when(!busy, |e| {
+                        e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let d = stop_d.clone();
+                            this.app.update(cx, |s, cx| s.clean_stop(vec![d], cx));
+                        }))
+                    }),
             )
             .into_any_element()
     }
@@ -169,7 +198,11 @@ impl BoardView {
         let t = c.t;
         let cx = c.cx;
         let title = d.title.as_deref().map(|x| names::split(x).0.to_string()).unwrap_or_else(|| "Untitled".into());
-        let mut meta = format!("{} · stopped {} ago", d.label.clone().unwrap_or_else(|| d.machine.clone()), fmt::sago(d.at.unwrap_or(c.now), c.now));
+        let mut meta = format!(
+            "{} · stopped {} ago",
+            d.label.clone().unwrap_or_else(|| d.machine.clone()),
+            fmt::sago(d.at.unwrap_or(c.now), c.now)
+        );
         if let Some(mb) = d.mb.filter(|m| *m > 0.0) {
             meta.push_str(&format!(", freed {}", fmt::mem(mb)));
         }
@@ -199,10 +232,12 @@ impl BoardView {
                     .text_size(px(12.5))
                     .child(ui::icon("resume", 13., t.dim))
                     .child(if busy { "Resuming" } else { "Resume" })
-                    .when(!busy, |e| e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let (m, sid, tt) = (m.clone(), sid.clone(), tt.clone());
-                        this.app.update(cx, |s, cx| s.resume_chat(&m, &sid, tt, cx));
-                    }))),
+                    .when(!busy, |e| {
+                        e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let (m, sid, tt) = (m.clone(), sid.clone(), tt.clone());
+                            this.app.update(cx, |s, cx| s.resume_chat(&m, &sid, tt, cx));
+                        }))
+                    }),
             )
             .into_any_element()
     }

@@ -5,8 +5,9 @@
 //! summary and one button (`card_quick`). Every text sits at min width 0 and wraps; controls never shrink; chips wrap.
 
 use gpui::{
-    AnyElement, AppContext, ClickEvent, Context, Entity, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Subscription, Window, WindowId, div, prelude::*, px, relative,
+    AnyElement, AppContext, ClickEvent, Context, Entity, FontWeight, Hsla, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, WindowId, div, prelude::*,
+    px, relative,
 };
 use gpui_base::input::{InputEvent, InputState, TextareaState};
 use sb_core::Session;
@@ -62,9 +63,14 @@ pub fn kind_tag(t: &Theme, k: AskKind) -> gpui::Div {
 /// A button whose label wraps instead of running out of a narrow card: never wider than its row, at least `h` tall.
 fn btn(t: &Theme, id: impl Into<gpui::ElementId>, primary: bool, on: bool) -> gpui::Stateful<gpui::Div> {
     let b = if primary { ui::primary_btn(t, id, 32.) } else { ui::line_btn(t, id, 32.) };
-    b.h_auto().min_h(px(32.)).py(px(5.)).max_w_full().text_size(px(13.)).line_height(relative(1.35)).when(on && !primary, |d| {
-        d.bg(t.accent.alpha(if t.dark { 0.2 } else { 0.1 })).shadow(vec![Theme::ring(t.accent)]).font_weight(FontWeight::SEMIBOLD)
-    })
+    b.h_auto().min_h(px(32.)).py(px(5.)).max_w_full().text_size(px(13.)).line_height(relative(1.35)).when(
+        on && !primary,
+        |d| {
+            d.bg(t.accent.alpha(if t.dark { 0.2 } else { 0.1 }))
+                .shadow(vec![Theme::ring(t.accent)])
+                .font_weight(FontWeight::SEMIBOLD)
+        },
+    )
 }
 
 fn label(text: impl Into<SharedString>) -> gpui::Div {
@@ -99,7 +105,11 @@ fn check_row(t: &Theme, id: SharedString, on: bool, text: &str) -> gpui::Statefu
                 .when(!on, |d| d.shadow(vec![Theme::ring(t.line2)]))
                 .when(on, |d| d.child(ui::icon("check", 10., t.on_accent))),
         )
-        .child(ui::wrap(text.to_string()).flex_1().text_size(px(12.5)).line_height(relative(1.45)).text_color(if on { t.ink } else { t.ink2 }))
+        .child(ui::wrap(text.to_string()).flex_1().text_size(px(12.5)).line_height(relative(1.45)).text_color(if on {
+            t.ink
+        } else {
+            t.ink2
+        }))
 }
 
 /// A one-line field (the note, "Or type it...").
@@ -139,7 +149,8 @@ impl BoardView {
         // The same ask in another window: keep what was picked and typed.
         let carry = self.ask.take().filter(|f| f.key == key && f.sig == sig);
         let val = |e: &Entity<InputState>, cx: &Context<Self>| e.read(cx).value().to_string();
-        let typed_carry: Vec<String> = carry.as_ref().map(|f| f.typed.iter().map(|e| val(e, cx)).collect()).unwrap_or_default();
+        let typed_carry: Vec<String> =
+            carry.as_ref().map(|f| f.typed.iter().map(|e| val(e, cx)).collect()).unwrap_or_default();
         let note_carry = carry.as_ref().map(|f| val(&f.note, cx)).unwrap_or_default();
         let free_carry = carry.as_ref().map(|f| f.free.read(cx).value().to_string()).unwrap_or_default();
 
@@ -230,14 +241,22 @@ impl BoardView {
         let Some(s) = self.app.read(cx).snap.session(&key) else { return };
         let k = |n: f64| fmt::k(n.max(0.0).round() as u64);
         let cost = match &s.cost {
-            Some(c) if s.cache_left(now) > 0 => format!("About {} up front, because the cache is warm.", k(c.resume.warm)),
-            Some(c) => format!("About {} up front, because the cache is cold and all {} is read again.", k(c.resume.cold), s.ctx_label()),
+            Some(c) if s.cache_left(now) > 0 => {
+                format!("About {} up front, because the cache is warm.", k(c.resume.warm))
+            }
+            Some(c) => format!(
+                "About {} up front, because the cache is cold and all {} is read again.",
+                k(c.resume.cold),
+                s.ctx_label()
+            ),
             None if s.cache_left(now) > 0 => "The cache is warm, so it is cheap right now.".to_string(),
             None => format!("It re-reads {} of context.", s.ctx_label()),
         };
         let conf = Confirm {
             title: format!("Restart {} with Chrome?", s.topic),
-            body: format!("Relaunches the chat with --chrome and --resume, so it keeps its history and can drive the browser. {cost}"),
+            body: format!(
+                "Relaunches the chat with --chrome and --resume, so it keeps its history and can drive the browser. {cost}"
+            ),
             ok: "Restart with Chrome".into(),
             cancel: "Cancel".into(),
         };
@@ -273,7 +292,9 @@ impl BoardView {
                         if let Some(f) = v.form_mut(&key) {
                             f.sent = None;
                         }
-                        v.app.update(cx, |s, cx| s.toast(format!("Could not restart it with Chrome: {e}"), None, true, cx));
+                        v.app.update(cx, |s, cx| {
+                            s.toast(format!("Could not restart it with Chrome: {e}"), None, true, cx)
+                        });
                     }
                 }
                 cx.notify();
@@ -338,9 +359,17 @@ impl BoardView {
                 .gap_y(px(4.))
                 .child(kind_tag(&t, a.kind))
                 .children(a.caption().map(|cap| div().min_w_0().text_size(px(12.)).text_color(t.dim).child(cap)))
-                .child(div().min_w_0().text_size(px(12.)).text_color(if parked { t.dim } else { t.need }).child(waited)),
+                .child(
+                    div().min_w_0().text_size(px(12.)).text_color(if parked { t.dim } else { t.need }).child(waited),
+                ),
         );
-        card = card.child(ui::wrap(a.summary.clone()).text_size(px(13.5)).line_height(relative(1.45)).font_weight(FontWeight::MEDIUM).text_color(t.ink));
+        card = card.child(
+            ui::wrap(a.summary.clone())
+                .text_size(px(13.5))
+                .line_height(relative(1.45))
+                .font_weight(FontWeight::MEDIUM)
+                .text_color(t.ink),
+        );
         let Some(f) = form else {
             // The fields are made on the next frame (they need the window).
             return Some(card.into_any_element());
@@ -383,23 +412,22 @@ impl BoardView {
                         .text_color(t.ink)
                         .child(gpui_base::Textarea::new(&f.free)),
                 )
-                .child(
-                    div()
-                        .flex()
-                        .flex_wrap()
-                        .gap(px(6.))
-                        .child(send_btn(id, "Send", ask::compose_free(&text)))
-                        .when(cancel, |d| {
-                            d.child(ui::ghost(&t, SharedString::from(format!("ask-cancel-{}", s.key)), Some("Cancel"), None).h(px(32.)).px(px(10.)).on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
+                .child(div().flex().flex_wrap().gap(px(6.)).child(send_btn(id, "Send", ask::compose_free(&text))).when(
+                    cancel,
+                    |d| {
+                        d.child(
+                            ui::ghost(&t, SharedString::from(format!("ask-cancel-{}", s.key)), Some("Cancel"), None)
+                                .h(px(32.))
+                                .px(px(10.))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if let Some(f) = this.form_mut(&k2) {
                                         f.free_open = false;
                                     }
                                     cx.notify();
-                                },
-                            )))
-                        }),
-                )
+                                })),
+                        )
+                    },
+                ))
         };
         match a.kind {
             AskKind::Choose => {
@@ -410,7 +438,16 @@ impl BoardView {
                     row = row.child(
                         btn(&t, SharedString::from(format!("ask-opt-{i}-{}", s.key)), false, on)
                             .child(label(o.label.clone()).text_color(if on { t.ink } else { t.ink2 }))
-                            .when(o.recommended, |d| d.child(div().flex_none().text_size(px(11.)).font_weight(FontWeight::NORMAL).text_color(t.dim).child("Claude recommends")))
+                            .when(o.recommended, |d| {
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .text_size(px(11.))
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(t.dim)
+                                        .child("Claude recommends"),
+                                )
+                            })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 if let Some(f) = this.form_mut(&k) {
                                     f.pick = i;
@@ -422,24 +459,37 @@ impl BoardView {
                 card = card.child(row);
                 let mut sec = section(&t);
                 if !a.assumptions.is_empty() {
-                    sec = sec.child(ui::wrap("Its assumptions (untick any that are wrong)").text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2));
+                    sec = sec.child(
+                        ui::wrap("Its assumptions (untick any that are wrong)")
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.ink2),
+                    );
                     for (i, text) in a.assumptions.iter().enumerate() {
                         let k = key.clone();
                         let on = f.ticked.get(i).copied().unwrap_or(true);
-                        sec = sec.child(check_row(&t, SharedString::from(format!("ask-as-{i}-{}", s.key)), on, text).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            if let Some(f) = this.form_mut(&k) {
-                                if let Some(x) = f.ticked.get_mut(i) {
-                                    *x = !*x;
-                                }
-                            }
-                            cx.notify();
-                        })));
+                        sec = sec.child(
+                            check_row(&t, SharedString::from(format!("ask-as-{i}-{}", s.key)), on, text).on_click(
+                                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    if let Some(f) = this.form_mut(&k)
+                                        && let Some(x) = f.ticked.get_mut(i)
+                                    {
+                                        *x = !*x;
+                                    }
+                                    cx.notify();
+                                }),
+                            ),
+                        );
                     }
                 }
                 sec = sec.child(field(&t, &f.note));
                 card = card.child(sec);
                 let note = f.note.read(cx).value().to_string();
-                card = card.child(div().flex().child(send_btn("send", "Send", ask::compose_choose(&a, f.pick, &f.ticked, &note))));
+                card = card.child(div().flex().child(send_btn(
+                    "send",
+                    "Send",
+                    ask::compose_choose(&a, f.pick, &f.ticked, &note),
+                )));
             }
             AskKind::Questions => {
                 let typed: Vec<String> = f.typed.iter().map(|e| e.read(cx).value().to_string()).collect();
@@ -465,8 +515,14 @@ impl BoardView {
                                 .line_height(relative(1.35))
                                 .cursor_pointer()
                                 .when(on, |d| d.bg(t.accent).text_color(t.on_accent).font_weight(FontWeight::SEMIBOLD))
-                                .when(!on, |d| d.shadow(vec![Theme::ring(t.line2)]).text_color(t.ink).hover(move |s| s.bg(hover)))
-                                .child(label(if q.recommended == Some(oi) { format!("{o} · suggested") } else { o.clone() }))
+                                .when(!on, |d| {
+                                    d.shadow(vec![Theme::ring(t.line2)]).text_color(t.ink).hover(move |s| s.bg(hover))
+                                })
+                                .child(label(if q.recommended == Some(oi) {
+                                    format!("{o} · suggested")
+                                } else {
+                                    o.clone()
+                                }))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                     if let Some(v) = this.form_mut(&k).and_then(|f| f.answers.get_mut(qi)) {
                                         if v.contains(&oi) {
@@ -481,12 +537,21 @@ impl BoardView {
                                 })),
                         );
                     }
-                    let block = if qi == 0 { div().w_full().min_w_0().flex().flex_col().gap(px(6.)) } else { section(&t) };
+                    let block =
+                        if qi == 0 { div().w_full().min_w_0().flex().flex_col().gap(px(6.)) } else { section(&t) };
                     card = card.child(
                         block
-                            .child(ui::wrap(format!("{}. {}", qi + 1, q.q)).text_size(px(12.5)).line_height(relative(1.4)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2))
+                            .child(
+                                ui::wrap(format!("{}. {}", qi + 1, q.q))
+                                    .text_size(px(12.5))
+                                    .line_height(relative(1.4))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(t.ink2),
+                            )
                             .when(!q.options.is_empty(), |d| d.child(chips))
-                            .when(q.about_you, |d| d.child(div().text_size(px(11.5)).text_color(t.faint).child("About you, so no guess")))
+                            .when(q.about_you, |d| {
+                                d.child(div().text_size(px(11.5)).text_color(t.faint).child("About you, so no guess"))
+                            })
                             .children(f.typed.get(qi).map(|e| field(&t, e))),
                     );
                 }
@@ -502,7 +567,15 @@ impl BoardView {
                         .items_center()
                         .gap(px(8.))
                         .child(send_btn("send", &text, ask::compose_questions(&a, &f.answers, &typed)))
-                        .when(!ready, |d| d.child(div().min_w_0().text_size(px(12.)).text_color(t.faint).child("Answer every question first, by a chip or typing."))),
+                        .when(!ready, |d| {
+                            d.child(
+                                div()
+                                    .min_w_0()
+                                    .text_size(px(12.))
+                                    .text_color(t.faint)
+                                    .child("Answer every question first, by a chip or typing."),
+                            )
+                        }),
                 );
             }
             AskKind::Task => {
@@ -510,12 +583,16 @@ impl BoardView {
                 for (i, step) in a.steps.iter().enumerate() {
                     let k = key.clone();
                     let on = f.steps.get(i).copied().unwrap_or(false);
-                    list = list.child(check_row(&t, SharedString::from(format!("ask-st-{i}-{}", s.key)), on, step).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if let Some(x) = this.form_mut(&k).and_then(|f| f.steps.get_mut(i)) {
-                            *x = !*x;
-                        }
-                        cx.notify();
-                    })));
+                    list = list.child(
+                        check_row(&t, SharedString::from(format!("ask-st-{i}-{}", s.key)), on, step).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if let Some(x) = this.form_mut(&k).and_then(|f| f.steps.get_mut(i)) {
+                                    *x = !*x;
+                                }
+                                cx.notify();
+                            }),
+                        ),
+                    );
                 }
                 card = card.child(list);
                 let k = key.clone();
@@ -527,14 +604,16 @@ impl BoardView {
                         .gap(px(6.))
                         .child(send_btn("done", "Done", Some(ask::compose_task(&a))))
                         .when(!f.free_open, |d| {
-                            d.child(btn(&t, SharedString::from(format!("ask-problem-{}", s.key)), false, false).child(label("Hit a problem...")).on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
-                                    if let Some(f) = this.form_mut(&k) {
-                                        f.free_open = true;
-                                    }
-                                    cx.notify();
-                                },
-                            )))
+                            d.child(
+                                btn(&t, SharedString::from(format!("ask-problem-{}", s.key)), false, false)
+                                    .child(label("Hit a problem..."))
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(f) = this.form_mut(&k) {
+                                            f.free_open = true;
+                                        }
+                                        cx.notify();
+                                    })),
+                            )
                         }),
                 );
                 if f.free_open {
@@ -557,18 +636,32 @@ impl BoardView {
                                 .child(ui::icon("relaunch", 14., t.on_accent))
                                 .child(label(label_text))
                                 .when(!live, |d| d.opacity(0.45).cursor_default())
-                                .when(live, |d| d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.ask_fix(k.clone(), cx)))),
+                                .when(live, |d| {
+                                    d.on_click(
+                                        cx.listener(move |this, _: &ClickEvent, _, cx| this.ask_fix(k.clone(), cx)),
+                                    )
+                                }),
                         )
                         .children(ask::compose_fix_alt(&a).map(|alt| {
                             let k = key.clone();
                             btn(&t, SharedString::from(format!("ask-alt-{}", s.key)), false, false)
                                 .child(label(alt.clone()))
                                 .when(!live, |d| d.opacity(0.45).cursor_default())
-                                .when(live, |d| d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.ask_send(k.clone(), alt.clone(), cx))))
+                                .when(live, |d| {
+                                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.ask_send(k.clone(), alt.clone(), cx)
+                                    }))
+                                })
                         })),
                 );
                 card = card.child(
-                    ui::wrap(format!("Relaunches with --chrome and keeps its history. Re-reads {} of context.", s.ctx_label())).text_size(px(12.)).line_height(relative(1.45)).text_color(t.faint),
+                    ui::wrap(format!(
+                        "Relaunches with --chrome and keeps its history. Re-reads {} of context.",
+                        s.ctx_label()
+                    ))
+                    .text_size(px(12.))
+                    .line_height(relative(1.45))
+                    .text_color(t.faint),
                 );
             }
             AskKind::Open => {
@@ -576,11 +669,19 @@ impl BoardView {
             }
         }
         if offline {
-            card = card.child(ui::wrap(format!("{} is offline, so answers can't be sent right now.", s.machine_label)).text_size(px(12.)).text_color(t.dim));
+            card = card.child(
+                ui::wrap(format!("{} is offline, so answers can't be sent right now.", s.machine_label))
+                    .text_size(px(12.))
+                    .text_color(t.dim),
+            );
         } else if let Some(sent) = &f.sent {
             card = card.child(ui::wrap(sent.clone()).text_size(px(12.)).line_height(relative(1.45)).text_color(t.warm));
         } else if a.kind != AskKind::Fix {
-            card = card.child(ui::wrap("Send opens its terminal and types this in, as if you did.").text_size(px(11.5)).text_color(t.faint));
+            card = card.child(
+                ui::wrap("Send opens its terminal and types this in, as if you did.")
+                    .text_size(px(11.5))
+                    .text_color(t.faint),
+            );
         }
         Some(card.into_any_element())
     }
@@ -604,7 +705,17 @@ impl BoardView {
             .gap(px(6.))
             // The kind's tag on a line of its own: beside the state line a long one ("Do this, then confirm") squeezed it.
             .child(div().flex().child(kind_tag(&t, a.kind)))
-            .child(div().w_full().min_w_0().text_size(px(12.5)).line_height(relative(1.4)).text_color(ink).line_clamp(2).text_ellipsis().child(a.summary.clone()))
+            .child(
+                div()
+                    .w_full()
+                    .min_w_0()
+                    .text_size(px(12.5))
+                    .line_height(relative(1.4))
+                    .text_color(ink)
+                    .line_clamp(2)
+                    .text_ellipsis()
+                    .child(a.summary.clone()),
+            )
             .child(
                 div().w_full().min_w_0().flex().child(
                     btn(&t, SharedString::from(format!("quick-{}", s.key)), primary, false)
@@ -616,7 +727,14 @@ impl BoardView {
                         .child(ui::icon(icon, 13., if primary { t.on_accent } else { t.ink2 }))
                         // one line on the card: a long option label ends in an ellipsis instead of growing the
                         // card; a fixed label (Answer..., the fix) always shows whole
-                        .child(div().min_w_0().flex_shrink(1.).truncate().when(!matches!(q, Quick::Send(_)), |d| d.flex_none()).child(text))
+                        .child(
+                            div()
+                                .min_w_0()
+                                .flex_shrink(1.)
+                                .truncate()
+                                .when(!matches!(q, Quick::Send(_)), |d| d.flex_none())
+                                .child(text),
+                        )
                         .on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             this.ask_quick(key.clone(), q.clone(), cx);

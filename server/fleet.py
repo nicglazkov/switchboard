@@ -251,6 +251,7 @@ class Fleet:
         self.on_save = None  # called with the machine list after it changed (the server writes fleet.json and the hub's file)
         self.servers = []  # the server's own addresses, told to each machine's agent (where its hooks report)
         self.budget_view = None  # set by the server: the usage budget's status, sent with every poll (budget.py)
+        self.options = None  # set by the server: the opt-in settings, sent with every poll (options.py)
         self._digest = {}
         self._stopped = {}  # (machine, sid): when Stop succeeded; shown stopped at once, not at the next poll
 
@@ -390,6 +391,8 @@ class Fleet:
             req['servers'] = list(self.servers)
         if getattr(self, 'summary_model', None):
             req['summary_model'] = self.summary_model
+        if isinstance(getattr(self, 'options', None), dict):  # the opt-in settings (options.py), each true or false
+            req['options'] = dict(self.options)
         view = getattr(self, 'budget_view', None)  # the usage budget's status, cached by the agent for its hooks
         if view:
             try:

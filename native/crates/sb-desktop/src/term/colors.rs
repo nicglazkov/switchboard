@@ -81,7 +81,11 @@ pub fn current(cx: &App) -> Palette {
 
 /// The name a choice shows.
 pub fn name_of(id: &str) -> String {
-    if id == MATCH { "Match the app".into() } else { scheme::by_id(id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string()) }
+    if id == MATCH {
+        "Match the app".into()
+    } else {
+        scheme::by_id(id).map(|s| s.name.clone()).unwrap_or_else(|| id.to_string())
+    }
 }
 
 /// The app's own look as a terminal palette (the "Match the app" choice).
@@ -118,10 +122,10 @@ impl Palette {
     /// The color for index `i` of the terminal's color table (0..=255, then 256 foreground, 257 background,
     /// 258 cursor, the dim colors, bright and dim foreground).
     pub fn index(&self, i: usize, colors: &Colors) -> Hsla {
-        if i < COUNT {
-            if let Some(c) = colors[i] {
-                return from_rgb(c);
-            }
+        if i < COUNT
+            && let Some(c) = colors[i]
+        {
+            return from_rgb(c);
         }
         match i {
             0..=15 => self.ansi[i],

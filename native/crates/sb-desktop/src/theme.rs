@@ -204,12 +204,29 @@ impl Theme {
 
     /// The soft drop shadow under popovers, sheets and the floating inspector.
     pub fn drop(&self) -> Vec<BoxShadow> {
-        vec![BoxShadow { color: self.shadow, offset: point(px(0.), px(self.shadow_y)), blur_radius: px(self.shadow_blur), spread_radius: px(0.), inset: false }]
+        vec![BoxShadow {
+            color: self.shadow,
+            offset: point(px(0.), px(self.shadow_y)),
+            blur_radius: px(self.shadow_blur),
+            spread_radius: px(0.),
+            inset: false,
+        }]
     }
 
     /// A 1px ring drawn inside the box (no layout shift).
     pub fn ring(color: Hsla) -> BoxShadow {
         BoxShadow { color, offset: point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(1.), inset: true }
+    }
+
+    /// The keyboard focus ring: 2 px of the accent just outside the control, so it never covers the label.
+    pub fn focus_ring(accent: Hsla) -> Vec<BoxShadow> {
+        vec![BoxShadow {
+            color: accent.alpha(0.75),
+            offset: point(px(0.), px(0.)),
+            blur_radius: px(0.),
+            spread_radius: px(2.),
+            inset: false,
+        }]
     }
 }
 
@@ -219,7 +236,9 @@ pub fn set_mode(mode: Mode, window: &gpui::Window, cx: &mut App) {
     let dark = match mode {
         Mode::Dark => true,
         Mode::Light => false,
-        Mode::System => matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark),
+        Mode::System => {
+            matches!(window.appearance(), gpui::WindowAppearance::Dark | gpui::WindowAppearance::VibrantDark)
+        }
     };
     (if dark { Theme::dark() } else { Theme::light() }).install(cx);
     cx.refresh_windows();
@@ -244,5 +263,6 @@ pub fn set_term_colors(id: &str, cx: &mut App) {
 /// `a` moved toward `b` by `t`, in RGB.
 pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
-    Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }.into()
+    Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
+        .into()
 }

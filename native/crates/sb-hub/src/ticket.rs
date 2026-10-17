@@ -42,7 +42,9 @@ impl TicketError {
     /// What the person sees. Every one of these means: open the terminal again for a new ticket.
     pub fn message(self) -> &'static str {
         match self {
-            TicketError::Malformed | TicketError::BadSignature => "This terminal link is not valid. Open the terminal again.",
+            TicketError::Malformed | TicketError::BadSignature => {
+                "This terminal link is not valid. Open the terminal again."
+            }
             TicketError::Expired => "This terminal link expired. Open the terminal again.",
             TicketError::Used => "This terminal link was already used. Open the terminal again.",
         }
@@ -79,7 +81,8 @@ fn valid_nonce(n: &str) -> bool {
 pub fn mint(key: &[u8], machine: &str, bg: &str, now: u64, ttl: u64) -> String {
     let mut n = [0u8; 16];
     getrandom::fill(&mut n).expect("system randomness");
-    let claims = Claims { m: machine.into(), b: bg.into(), x: now + ttl, n: n.iter().map(|b| format!("{b:02x}")).collect() };
+    let claims =
+        Claims { m: machine.into(), b: bg.into(), x: now + ttl, n: n.iter().map(|b| format!("{b:02x}")).collect() };
     sign(key, &claims)
 }
 
@@ -287,7 +290,15 @@ mod tests {
         let key: Vec<u8> = (0u8..32).collect();
         let t = "eyJtIjogImRlc2siLCAiYiI6ICJjMDNlZjBkOSIsICJ4IjogMTc5MTAwMDA2MCwgIm4iOiAiMDAxMTIyMzM0NDU1NjY3Nzg4OTlhYWJiY2NkZGVlZmYifQ.5ttdVCRzjRL4eEeV7w6PyJnxf2sfnQwToqAVR-rojtU";
         let c = verify(&key, t, NOW).unwrap();
-        assert_eq!(c, Claims { m: "desk".into(), b: "c03ef0d9".into(), x: NOW + 60, n: "00112233445566778899aabbccddeeff".into() });
+        assert_eq!(
+            c,
+            Claims {
+                m: "desk".into(),
+                b: "c03ef0d9".into(),
+                x: NOW + 60,
+                n: "00112233445566778899aabbccddeeff".into()
+            }
+        );
         // padded base64 (Python's urlsafe_b64encode) is accepted too
         let (body, sig) = t.split_once('.').unwrap();
         assert!(verify(&key, &format!("{body}.{sig}="), NOW).is_ok());

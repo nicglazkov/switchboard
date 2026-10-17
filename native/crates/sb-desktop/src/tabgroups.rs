@@ -5,8 +5,8 @@
 //! sees the same groups); which tabs are open, and which groups are folded, stays on this Mac.
 
 use gpui::{
-    AnyElement, ClickEvent, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement, StatefulInteractiveElement, Styled,
-    div, prelude::*, px, relative, rgb,
+    AnyElement, ClickEvent, FontWeight, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    StatefulInteractiveElement, Styled, div, prelude::*, px, relative, rgb,
 };
 use sb_core::groups::{Group, GroupColor, Op};
 
@@ -160,7 +160,9 @@ impl BoardView {
             .tabs
             .iter()
             .map(|tb| {
-                let Some(s) = tb.read(cx).key.clone().and_then(|k| app.snap.session(&k).cloned()) else { return TabInfo::default() };
+                let Some(s) = tb.read(cx).key.clone().and_then(|k| app.snap.session(&k).cloned()) else {
+                    return TabInfo::default();
+                };
                 let thread = s.thread.clone().unwrap_or_else(|| s.sid.clone());
                 let group = if s.star { None } else { groups.iter().position(|g| g.members.contains(&thread)) };
                 TabInfo { star: s.star, thread: Some(thread), group }
@@ -206,7 +208,9 @@ impl BoardView {
         let (infos, groups) = self.tab_infos(cx);
         let Some(thread) = infos.get(i).and_then(|x| x.thread.clone()) else { return };
         let color = GroupColor::next_unused(&groups);
-        let id = self.app.update(cx, |s, cx| s.group_op(Op::Create { name: String::new(), color, members: vec![thread] }, cx));
+        let id = self
+            .app
+            .update(cx, |s, cx| s.group_op(Op::Create { name: String::new(), color, members: vec![thread] }, cx));
         self.edit_group_name(id, window, cx);
     }
 
@@ -253,7 +257,8 @@ impl BoardView {
             {
                 let folded = self.folded(cx);
                 let visible = |j: usize| infos[j].group.is_none_or(|g| !folded.contains(&groups[g].id));
-                let next = (shown + 1..infos.len()).find(|j| visible(*j)).or_else(|| (0..shown).rev().find(|j| visible(*j)));
+                let next =
+                    (shown + 1..infos.len()).find(|j| visible(*j)).or_else(|| (0..shown).rev().find(|j| visible(*j)));
                 self.set_tab(next.map(|j| j + 1).unwrap_or(0), cx);
             }
         }
@@ -263,7 +268,8 @@ impl BoardView {
     /// Types a group's name on its chip.
     pub fn edit_group_name(&mut self, gid: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         self.group_menu = None;
-        let name = self.app.read(cx).snap.groups.iter().find(|g| g.id == gid).map(|g| g.name.clone()).unwrap_or_default();
+        let name =
+            self.app.read(cx).snap.groups.iter().find(|g| g.id == gid).map(|g| g.name.clone()).unwrap_or_default();
         self.group_edit = Some(gid);
         self.focus_tab = false;
         self.group_name.update(cx, |n, cx| {
@@ -434,7 +440,16 @@ impl BoardView {
     /// A group's chip: its name in a pill of its color (or a dot when it has none), with the count of its tabs when
     /// folded. The name gives way to an ellipsis at `max` px; while it is being named, the field sits in the pill.
     #[allow(clippy::too_many_arguments)]
-    pub fn group_chip(&self, c: &Ctx, gi: usize, g: &Group, count: usize, folded: bool, max: f32, ring: bool) -> AnyElement {
+    pub fn group_chip(
+        &self,
+        c: &Ctx,
+        gi: usize,
+        g: &Group,
+        count: usize,
+        folded: bool,
+        max: f32,
+        ring: bool,
+    ) -> AnyElement {
         let t = c.t;
         let cx = c.cx;
         let col = group_color(&t, g.color);
@@ -492,7 +507,15 @@ impl BoardView {
                 .text_color(t.ink)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(div().flex_none().size(px(8.)).rounded_full().bg(col))
-                .child(div().flex_1().min_w_0().h_full().flex().items_center().child(gpui_base::Input::new(&self.group_name)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .h_full()
+                        .flex()
+                        .items_center()
+                        .child(gpui_base::Input::new(&self.group_name)),
+                )
                 .into_any_element()
         } else if (g.name.is_empty() || max < 40.) && !folded {
             div().flex_none().mx(px(4.)).size(px(12.)).rounded_full().bg(col).into_any_element()
@@ -534,21 +557,26 @@ impl BoardView {
             return chip.into_any_element();
         }
         chip.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_fold(&gid, cx)))
-            .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
-                cx.stop_propagation();
-                this.tab_menu = None;
-                this.add_open = false;
-                this.group_menu = Some((gid2.clone(), ev.position));
-                cx.notify();
-            }))
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                    cx.stop_propagation();
+                    this.tab_menu = None;
+                    this.add_open = false;
+                    this.group_menu = Some((gid2.clone(), ev.position));
+                    cx.notify();
+                }),
+            )
             .on_drag(drag, |d, _, _, cx| cx.new(|_| d.clone()))
-            .on_drag_move::<crate::chrome::TabDrag>(cx.listener(move |this, ev: &gpui::DragMoveEvent<crate::chrome::TabDrag>, _, cx| {
-                let (b, p) = (ev.bounds, ev.event.position);
-                if b.contains(&p) {
-                    let from = ev.drag(cx).0;
-                    this.tab_drag_over_chip(from, gi, cx);
-                }
-            }))
+            .on_drag_move::<crate::chrome::TabDrag>(cx.listener(
+                move |this, ev: &gpui::DragMoveEvent<crate::chrome::TabDrag>, _, cx| {
+                    let (b, p) = (ev.bounds, ev.event.position);
+                    if b.contains(&p) {
+                        let from = ev.drag(cx).0;
+                        this.tab_drag_over_chip(from, gi, cx);
+                    }
+                },
+            ))
             .on_drag_move::<GroupDrag>(cx.listener(move |this, ev: &gpui::DragMoveEvent<GroupDrag>, _, cx| {
                 let (b, p) = (ev.bounds, ev.event.position);
                 if b.contains(&p) {
@@ -588,39 +616,44 @@ impl BoardView {
                 .text_color(t.ink)
                 .child(ui::icon(ic, 15., t.dim))
                 .child(div().flex_1().child(title.to_string()))
-                .when_some(sub.map(str::to_string), |d, s| d.child(div().text_size(px(12.)).text_color(t.faint).child(s)))
+                .when_some(sub.map(str::to_string), |d, s| {
+                    d.child(div().text_size(px(12.)).text_color(t.faint).child(s))
+                })
         };
         let rule = || div().my(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule);
-        let swatches = GroupColor::ALL.iter().enumerate().fold(div().px(px(10.)).py(px(8.)).flex().items_center().gap(px(8.)), |d, (k, col)| {
-            let col = *col;
-            let on = col == g.color;
-            let id = g.id.clone();
-            d.child(
-                div()
-                    .id(("grp-color", k))
-                    .flex_none()
-                    .size(px(22.))
-                    .flex()
-                    .items_center()
-                    .justify_center()
-                    .rounded_full()
-                    .cursor_pointer()
-                    .when(on, |d| d.shadow(vec![Theme::ring(t.ink2)]))
-                    .child(
-                        div()
-                            .size(px(16.))
-                            .rounded_full()
-                            .bg(group_color(&t, col))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .when(on, |d| d.child(ui::icon("check", 11., group_ink(&t, col)))),
-                    )
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.group_do(Op::Update { id: id.clone(), name: None, color: Some(col) }, cx);
-                    })),
-            )
-        });
+        let swatches = GroupColor::ALL.iter().enumerate().fold(
+            div().px(px(10.)).py(px(8.)).flex().items_center().gap(px(8.)),
+            |d, (k, col)| {
+                let col = *col;
+                let on = col == g.color;
+                let id = g.id.clone();
+                d.child(
+                    div()
+                        .id(("grp-color", k))
+                        .flex_none()
+                        .size(px(22.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .cursor_pointer()
+                        .when(on, |d| d.shadow(vec![Theme::ring(t.ink2)]))
+                        .child(
+                            div()
+                                .size(px(16.))
+                                .rounded_full()
+                                .bg(group_color(&t, col))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .when(on, |d| d.child(ui::icon("check", 11., group_ink(&t, col)))),
+                        )
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.group_do(Op::Update { id: id.clone(), name: None, color: Some(col) }, cx);
+                        })),
+                )
+            },
+        );
         let (id1, id2, id3, id4, id5) = (g.id.clone(), g.id.clone(), g.id.clone(), g.id.clone(), g.id.clone());
         let n = groups.len();
         let title = if g.name.is_empty() { "Unnamed group".to_string() } else { g.name.clone() };
@@ -699,7 +732,15 @@ impl BoardView {
     }
 
     /// The tab menu's "Add to group" list, beside the menu (left of it when the window has no room on the right).
-    pub fn group_submenu(&self, c: &Ctx, i: usize, menu_x: f32, top: f32, w: f32, own: Option<&str>) -> Option<AnyElement> {
+    pub fn group_submenu(
+        &self,
+        c: &Ctx,
+        i: usize,
+        menu_x: f32,
+        top: f32,
+        w: f32,
+        own: Option<&str>,
+    ) -> Option<AnyElement> {
         if !self.tab_menu_sub {
             return None;
         }
@@ -759,7 +800,12 @@ mod tests {
     use super::*;
 
     fn g(id: &str, members: &[&str]) -> Group {
-        Group { id: id.into(), name: String::new(), color: GroupColor::Blue, members: members.iter().map(|s| s.to_string()).collect() }
+        Group {
+            id: id.into(),
+            name: String::new(),
+            color: GroupColor::Blue,
+            members: members.iter().map(|s| s.to_string()).collect(),
+        }
     }
 
     fn info(star: bool, thread: &str, group: Option<usize>) -> TabInfo {
@@ -769,7 +815,13 @@ mod tests {
     #[test]
     fn stars_then_groups_in_order_then_the_rest() {
         let groups = vec![g("a", &["t3", "t1"]), g("b", &["t2"])];
-        let infos = vec![info(false, "t9", None), info(false, "t1", Some(0)), info(false, "t2", Some(1)), info(true, "t5", None), info(false, "t3", Some(0))];
+        let infos = vec![
+            info(false, "t9", None),
+            info(false, "t1", Some(0)),
+            info(false, "t2", Some(1)),
+            info(true, "t5", None),
+            info(false, "t3", Some(0)),
+        ];
         let mut idx: Vec<usize> = (0..infos.len()).collect();
         idx.sort_by_key(|i| sort_key(&infos, &groups, *i));
         assert_eq!(idx, vec![3, 4, 1, 2, 0]);
@@ -778,12 +830,21 @@ mod tests {
     #[test]
     fn chips_come_before_each_group_and_folding_hides_its_tabs() {
         let groups = vec![g("a", &["t1", "t2"]), g("b", &["t3"])];
-        let infos = vec![info(true, "s", None), info(false, "t1", Some(0)), info(false, "t2", Some(0)), info(false, "t3", Some(1)), info(false, "x", None)];
+        let infos = vec![
+            info(true, "s", None),
+            info(false, "t1", Some(0)),
+            info(false, "t2", Some(0)),
+            info(false, "t3", Some(1)),
+            info(false, "x", None),
+        ];
         assert_eq!(
             slots(&infos, &groups, &[]),
             vec![Slot::Tab(0), Slot::Chip(0), Slot::Tab(1), Slot::Tab(2), Slot::Chip(1), Slot::Tab(3), Slot::Tab(4)]
         );
-        assert_eq!(slots(&infos, &groups, &["a".into()]), vec![Slot::Tab(0), Slot::Chip(0), Slot::Chip(1), Slot::Tab(3), Slot::Tab(4)]);
+        assert_eq!(
+            slots(&infos, &groups, &["a".into()]),
+            vec![Slot::Tab(0), Slot::Chip(0), Slot::Chip(1), Slot::Tab(3), Slot::Tab(4)]
+        );
     }
 
     #[test]

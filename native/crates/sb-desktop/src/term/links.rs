@@ -18,7 +18,9 @@ pub struct Found {
 
 /// Characters that never belong to a link: they end one.
 fn stops(c: char) -> bool {
-    c.is_whitespace() || c == '\0' || matches!(c, '"' | '\'' | '`' | '<' | '>' | '|' | '│' | '┃' | '║' | '{' | '}' | '^')
+    c.is_whitespace()
+        || c == '\0'
+        || matches!(c, '"' | '\'' | '`' | '<' | '>' | '|' | '│' | '┃' | '║' | '{' | '}' | '^')
 }
 
 const SCHEMES: [&str; 5] = ["https://", "http://", "file://", "ftp://", "ssh://"];
@@ -41,7 +43,11 @@ pub fn find(cells: &[char], col: usize) -> Option<Found> {
 
     // A web address may follow other text in the same word ("see:https://..."): start at its scheme.
     let lower = word.to_ascii_lowercase();
-    let at = SCHEMES.iter().filter_map(|s| lower.find(s)).min().or_else(|| lower.find("www.").filter(|&i| i == 0 || !chars[i - 1].is_alphanumeric()));
+    let at = SCHEMES
+        .iter()
+        .filter_map(|s| lower.find(s))
+        .min()
+        .or_else(|| lower.find("www.").filter(|&i| i == 0 || !chars[i - 1].is_alphanumeric()));
     let (mut s, mut e) = (0usize, chars.len());
     let url = if let Some(i) = at {
         s = lower[..i].chars().count();
@@ -94,7 +100,7 @@ pub fn find(cells: &[char], col: usize) -> Option<Found> {
         let target = if text.to_ascii_lowercase().starts_with("www.") { format!("https://{text}") } else { text };
         return Some(Found { start, end, target: Target::Url(target) });
     }
-    is_path(&text).then(|| Found { start, end, target: Target::Path(text) })
+    is_path(&text).then_some(Found { start, end, target: Target::Path(text) })
 }
 
 /// A file path: absolute, from home, relative with ./ or ../, or folders down to a file with an extension
@@ -111,7 +117,10 @@ fn is_path(t: &str) -> bool {
     let first = bare.split('/').next().unwrap_or("");
     match last.rsplit_once('.') {
         Some((name, ext)) => {
-            !name.is_empty() && (1..=8).contains(&ext.len()) && ext.chars().all(|c| c.is_ascii_alphanumeric()) && ext.chars().any(|c| c.is_alphabetic())
+            !name.is_empty()
+                && (1..=8).contains(&ext.len())
+                && ext.chars().all(|c| c.is_ascii_alphanumeric())
+                && ext.chars().any(|c| c.is_alphabetic())
                 && first.chars().any(|c| c.is_alphabetic())
         }
         None => false,
@@ -146,9 +155,15 @@ mod tests {
     fn web_addresses() {
         assert_eq!(url("open https://example.com/a?b=1 now", "example").as_deref(), Some("https://example.com/a?b=1"));
         assert_eq!(url("(see https://example.com/x).", "example").as_deref(), Some("https://example.com/x"));
-        assert_eq!(url("https://en.wikipedia.org/wiki/Rust_(language), ok", "wiki").as_deref(), Some("https://en.wikipedia.org/wiki/Rust_(language)"));
+        assert_eq!(
+            url("https://en.wikipedia.org/wiki/Rust_(language), ok", "wiki").as_deref(),
+            Some("https://en.wikipedia.org/wiki/Rust_(language)")
+        );
         assert_eq!(url("at www.example.com.", "example").as_deref(), Some("https://www.example.com"));
-        assert_eq!(url("Continue at https://claude.ai/code/session_01DM", "claude").as_deref(), Some("https://claude.ai/code/session_01DM"));
+        assert_eq!(
+            url("Continue at https://claude.ai/code/session_01DM", "claude").as_deref(),
+            Some("https://claude.ai/code/session_01DM")
+        );
         assert_eq!(url("url:http://x.io/p", "x.io").as_deref(), Some("http://x.io/p"));
         assert_eq!(url("│https://a.b/c│", "a.b").as_deref(), Some("https://a.b/c"));
         assert!(at("https:// nothing", "https").is_none());

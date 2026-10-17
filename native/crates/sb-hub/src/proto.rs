@@ -88,12 +88,17 @@ mod tests {
 
     #[test]
     fn controls() {
-        assert_eq!(parse_control(r#"{"type":"resize","cols":80,"rows":24}"#), Some(Control::Resize { cols: 80, rows: 24 }));
+        assert_eq!(
+            parse_control(r#"{"type":"resize","cols":80,"rows":24}"#),
+            Some(Control::Resize { cols: 80, rows: 24 })
+        );
         assert_eq!(parse_control(r#"{"type":"ping"}"#), Some(Control::Ping));
         assert_eq!(parse_control(r#"{"type":"focus"}"#), Some(Control::Focus));
         assert_eq!(parse_control(r#"{"type":"redraw"}"#), Some(Control::Redraw));
         assert_eq!(parse_control(r#"{"type":"ping","extra":1}"#), Some(Control::Ping));
-        for bad in [r#"{"type":"resize","cols":-1,"rows":24}"#, r#"{"type":"resize"}"#, r#"{"type":"nope"}"#, "", "[]", "hi"] {
+        for bad in
+            [r#"{"type":"resize","cols":-1,"rows":24}"#, r#"{"type":"resize"}"#, r#"{"type":"nope"}"#, "", "[]", "hi"]
+        {
             assert_eq!(parse_control(bad), None, "{bad}");
         }
     }
@@ -109,7 +114,8 @@ mod tests {
     fn outgoing_frames_match_the_spec() {
         let v: serde_json::Value = serde_json::from_str(&status("connecting")).unwrap();
         assert_eq!(v, json!({"type": "status", "state": "connecting"}));
-        let v: serde_json::Value = serde_json::from_str(&exit(Some(0), "Detached. The session keeps running.")).unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&exit(Some(0), "Detached. The session keeps running.")).unwrap();
         assert_eq!(v, json!({"type": "exit", "code": 0, "note": "Detached. The session keeps running."}));
         let v: serde_json::Value = serde_json::from_str(&error("x")).unwrap();
         assert_eq!(v, json!({"type": "error", "error": "x"}));

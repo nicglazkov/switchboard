@@ -1358,6 +1358,8 @@ def remember_identity(req):
             want['servers'] = urls
     if req.get('summary_model') in SUMMARY_MODELS:
         want['summary_model'] = req['summary_model']
+    if isinstance(req.get('options'), dict):  # the opt-in settings (server/options.py), each true or false
+        want['options'] = {k: req['options'].get(k) is True for k in OPTION_KEYS}
     cur = agent_conf()
     new = dict(cur, **want)
     if new != cur:
@@ -1366,6 +1368,24 @@ def remember_identity(req):
             _jput(SB_HOME / 'agent.json', new)
         except OSError:
             pass
+        setup_keys = [k for k in OPTION_KEYS if k.startswith('setup_')]
+        if 'options' in want and {k: (cur.get('options') or {}).get(k) for k in setup_keys} != \
+                {k: want['options'][k] for k in setup_keys}:
+            try:
+                if (claude_dir() / 'switchboard').resolve() == SB_HOME.resolve():  # only the Claude setup sb.py is installed in
+                    apply_setup(claude_dir(), want['options'])
+            except Exception:
+                log(f'setup options: {traceback.format_exc(limit=2)}')
+
+
+# The opt-in settings, as the server sends them with every poll. Until the first poll says, all are off.
+OPTION_KEYS = ('ai_ask_cards', 'ai_chat_names', 'ai_auto_machine', 'setup_subagent_rule', 'setup_explore_agent',
+               'setup_compact_window')
+
+
+def option(key):
+    """Whether the user turned this opt-in setting on (Settings on the server)."""
+    return (agent_conf().get('options') or {}).get(key) is True
 
 
 def machine_name():
@@ -1950,9 +1970,12 @@ def quick_title(prompt):
 
 
 def prompt_title(prompt, runner=None):
-    """A few words saying what a new session is for. Haiku names it; the first words of the message if that fails."""
-    runner = runner or (lambda text: run_claude_opus(text, TITLE_PROMPT, model='haiku', timeout=60))
+    """A few words saying what a new session is for. Haiku names it when the user turned that on (ai_chat_names);
+    the first words of the message otherwise, or if that fails."""
     quick = quick_title(prompt)
+    if runner is None and not option('ai_chat_names'):
+        return quick
+    runner = runner or (lambda text: run_claude_opus(text, TITLE_PROMPT, model='haiku', timeout=60))
     try:
         t = _name_clean(re.sub(r'["“”*`]', '', (runner(f'<message>\n{prompt[:4000]}\n</message>') or '').strip().splitlines()[0]))
         t = ' '.join(t.split()[:8]).rstrip(' .,:-')
@@ -2393,7 +2416,9 @@ def build_ask(transcript_path, sid, short=None, runner=None):
         ask = question_tool_ask(lines, mtime, needs)
         if ask is None:
             said = last_assistant_words(lines)
-            if not said.strip() and not needs:
+            if runner is None and not option('ai_ask_cards'):  # Claude summaries are opt-in: the session's own words
+                ask = ask_open(needs, 'claude_code', mtime)
+            elif not said.strip() and not needs:
                 ask = ask_open(None, 'claude_code', mtime)
             else:
                 msg = ("Claude's last message:\n<<<\n" + (said or '(none)') + '\n>>>\n\n'
@@ -2509,6 +2534,8 @@ def session_ask(sid, f, mtime, short, needs, now, busy=False):
             return c['ask']
     if busy or now - mtime < ASK_QUIET:
         return c['ask'] if isinstance(c, dict) and isinstance(c.get('ask'), dict) else ask_open(needs, 'claude_code', mtime)
+    if not option('ai_ask_cards'):  # a Haiku summary is opt-in (Settings): the card says what the session needs
+        return ask_open(needs, 'claude_code', mtime)
     if SID_RE.fullmatch(sid or '') and ask_slot(now):
         try:
             spawn_ask(f, sid, short if isinstance(short, str) and JOB_ID_RE.fullmatch(short) else None)
@@ -5136,12 +5163,9 @@ def root_text(root=None):
 
 
 def root_suggest():
-    """Where the Claude folder most likely is when nobody has picked one: ~/Desktop/Claude on a Mac when it exists,
-    else ~/Claude when that exists, else the home folder."""
-    home = user_home()
-    if sys.platform == 'darwin' and (home / 'Desktop' / 'Claude').is_dir():
-        return '~/Desktop/Claude'
-    return '~/Claude' if (home / 'Claude').is_dir() else '~'
+    """The Claude folder offered when nobody has picked one: the home folder. No folder name is special; Settings
+    lists the folders that exist (root_dirs) for the user to pick from."""
+    return '~'
 
 
 def root_dirs(rel):
@@ -7511,6 +7535,10 @@ CLAUDE_MD_RULE = ('- Subagent models: pick per task when launching an Agent. Use
                   '"sonnet" for search, reading-heavy exploration and summarizing, and the default (Opus) for design, '
                   'judgment calls and writing code.')
 
+CLAUDE_MD_OPEN = '<!-- switchboard: subagent models (turn off in Switchboard Settings) -->'
+CLAUDE_MD_CLOSE = '<!-- /switchboard -->'
+COMPACT_WINDOW = '300000'
+
 SB_EVENTS = {'UserPromptSubmit': 10, 'SessionStart': 120, 'SessionEnd': 10, 'Stop': 10, 'Notification': 10}
 
 
@@ -7525,7 +7553,6 @@ def _sb_hook(cmd):
 
 def merge_settings(settings, sb_path, python):
     s = json.loads(json.dumps(settings))
-    s.setdefault('env', {})['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = '300000'
     s['statusLine'] = {'type': 'command', 'command': _cmd(python, sb_path, 'statusline'), 'padding': 0}
     hooks = s.setdefault('hooks', {})
     hook_cmd = _cmd(python, sb_path, 'hook')
@@ -7541,6 +7568,121 @@ def _backup(p):
         shutil.copy2(p, p.with_name(p.name + '.bak-sb-' + _dt.datetime.now().strftime('%Y%m%d-%H%M%S')))
 
 
+# ---- the opt-in changes to the user's own Claude setup (Settings on the server: setup_subagent_rule,
+# setup_explore_agent, setup_compact_window). Each is made only while its setting is on; turning one off takes back
+# what Switchboard added and nothing else. setup.json (beside sb.py) records what Switchboard added.
+SETUP_ITEMS = ('setup_subagent_rule', 'setup_explore_agent', 'setup_compact_window')
+
+
+def _setup_have(cdir):
+    """Which of the three are in place now, written the way Switchboard writes them."""
+    sp, ex, cm = cdir / 'settings.json', cdir / 'agents' / 'Explore.md', cdir / 'CLAUDE.md'
+    try:
+        env = (json.loads(sp.read_text()) if sp.exists() else {}).get('env') or {}
+    except ValueError:
+        env = {}
+    text = cm.read_text() if cm.exists() else ''
+    return {'setup_compact_window': env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW') == COMPACT_WINDOW,
+            'setup_explore_agent': ex.exists() and ex.read_text() == EXPLORE_MD,
+            'setup_subagent_rule': _strip_rule(text) != text}
+
+
+def _setup_owned(cdir):
+    """What Switchboard added. Before setup.json existed, install added all three unasked, so whatever is in place
+    exactly as Switchboard writes it counts as its own (once, then it is written down)."""
+    p = cdir / 'switchboard' / 'setup.json'
+    d = _jget(p)
+    if isinstance(d, dict) and isinstance(d.get('added'), dict):
+        return {k: d['added'].get(k) is True for k in SETUP_ITEMS}
+    return _setup_have(cdir)
+
+
+def _strip_rule(text):
+    """CLAUDE.md without Switchboard's subagent rule: its marked block, or the bare line an older install wrote.
+    The text comes back unchanged when neither is there."""
+    lines = text.split('\n')
+    if CLAUDE_MD_OPEN not in lines and CLAUDE_MD_RULE not in lines:
+        return text
+    out, skip = [], False
+    for line in lines:
+        if line == CLAUDE_MD_OPEN:
+            skip = True
+        elif skip:
+            skip = line != CLAUDE_MD_CLOSE
+        elif line != CLAUDE_MD_RULE:
+            out.append(line)
+    body = re.sub(r'\n{3,}', '\n\n', '\n'.join(out)).rstrip('\n')
+    return body + '\n' if body.strip() else ''
+
+
+def apply_setup(cdir, opts, dry_run=False):
+    """Add or take back each opt-in change to the Claude folder `cdir` to match the settings, removing only what
+    Switchboard added. Returns {item: 'added'|'removed'} for what changed."""
+    cdir = Path(cdir)
+    owned, done = _setup_owned(cdir), {}
+    sp, ex, cm = cdir / 'settings.json', cdir / 'agents' / 'Explore.md', cdir / 'CLAUDE.md'
+    want = lambda k: opts.get(k) is True
+
+    s = json.loads(sp.read_text()) if sp.exists() else {}
+    env = s.get('env') if isinstance(s.get('env'), dict) else {}
+    have = env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
+    if want('setup_compact_window') and have is None:
+        env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = COMPACT_WINDOW
+        owned['setup_compact_window'], done['setup_compact_window'] = True, 'added'
+    elif want('setup_compact_window'):  # already set: Switchboard's only if it set it (a value the user picked stays theirs)
+        owned['setup_compact_window'] = owned['setup_compact_window'] and have == COMPACT_WINDOW
+    else:
+        if owned['setup_compact_window'] and have == COMPACT_WINDOW:
+            env.pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
+            done['setup_compact_window'] = 'removed'
+        owned['setup_compact_window'] = False
+    if 'setup_compact_window' in done and not dry_run:
+        s['env'] = env
+        if not env:
+            s.pop('env')
+        _backup(sp)
+        _jput_text(sp, json.dumps(s, indent=2))
+
+    mine = ex.exists() and ex.read_text() == EXPLORE_MD
+    if want('setup_explore_agent') and not ex.exists():
+        if not dry_run:
+            ex.parent.mkdir(parents=True, exist_ok=True)
+            ex.write_text(EXPLORE_MD)
+        owned['setup_explore_agent'], done['setup_explore_agent'] = True, 'added'
+    elif want('setup_explore_agent'):  # an Explore.md the user wrote is never replaced
+        owned['setup_explore_agent'] = owned['setup_explore_agent'] and mine
+    else:
+        if owned['setup_explore_agent'] and mine:
+            if not dry_run:
+                ex.unlink()
+            done['setup_explore_agent'] = 'removed'
+        owned['setup_explore_agent'] = False
+
+    text = cm.read_text() if cm.exists() else ''
+    present = _strip_rule(text) != text
+    if want('setup_subagent_rule') and '- Subagent models:' not in text:  # a rule the user wrote wins
+        if not dry_run:
+            _backup(cm)
+            cm.write_text((text.rstrip('\n') + '\n\n' if text.strip() else '') +
+                          f'{CLAUDE_MD_OPEN}\n{CLAUDE_MD_RULE}\n{CLAUDE_MD_CLOSE}\n')
+        owned['setup_subagent_rule'], done['setup_subagent_rule'] = True, 'added'
+    elif want('setup_subagent_rule'):
+        owned['setup_subagent_rule'] = owned['setup_subagent_rule'] and present
+    else:
+        if owned['setup_subagent_rule'] and present:
+            if not dry_run:
+                _backup(cm)
+                cm.write_text(_strip_rule(text))
+            done['setup_subagent_rule'] = 'removed'
+        owned['setup_subagent_rule'] = False
+
+    if not dry_run:
+        _jput(cdir / 'switchboard' / 'setup.json', {'added': owned})
+        if done:
+            log('setup options: ' + ', '.join(f'{k} {v}' for k, v in done.items()))
+    return done
+
+
 def install(dry_run=False, home=None):
     home = home or Path.home()
     cdir = home / '.claude'
@@ -7550,24 +7692,25 @@ def install(dry_run=False, home=None):
     sp = cdir / 'settings.json'
     cur = json.loads(sp.read_text()) if sp.exists() else {}
     new = merge_settings(cur, sb_path, python)
+    opts = agent_conf().get('options')  # what the server's last poll said; None before the first poll
     if dry_run:
-        print(json.dumps({k: new[k] for k in ('env', 'statusLine', 'hooks')}, indent=1))
+        print(json.dumps({k: new[k] for k in ('statusLine', 'hooks')}, indent=1))
+        if isinstance(opts, dict):
+            print(json.dumps({'setup': apply_setup(cdir, opts, dry_run=True)}, indent=1))
         return 0
     sbdir.mkdir(parents=True, exist_ok=True)
+    had_sb = any(_sb_hook(h.get('command')) for gs in (cur.get('hooks') or {}).values() for g in gs for h in g.get('hooks', []))
+    if not had_sb and not (sbdir / 'setup.json').exists():  # a first install: nothing in ~/.claude is Switchboard's yet
+        _jput(sbdir / 'setup.json', {'added': {k: False for k in SETUP_ITEMS}})
     prev = sbdir / 'statusline.prev.json'
     if 'statusLine' in cur and 'sb.py' not in cur['statusLine'].get('command', '') and not prev.exists():
         prev.write_text(json.dumps(cur['statusLine']))
     _backup(sp)
     _jput_text(sp, json.dumps(new, indent=2))
-    (cdir / 'agents').mkdir(exist_ok=True)
-    (cdir / 'agents' / 'Explore.md').write_text(EXPLORE_MD)
     install_launcher(home, sb_path)
     install_mcp(home, sb_path, python)  # v2: machines, run_on, check, continue_on in every chat
-    cm = cdir / 'CLAUDE.md'
-    text = cm.read_text() if cm.exists() else ''
-    if '- Subagent models:' not in text:
-        _backup(cm)
-        cm.write_text(text.rstrip('\n') + '\n\n' + CLAUDE_MD_RULE + '\n')
+    if isinstance(opts, dict):  # before the server has said, whatever is there stays as it is (the poll applies it)
+        apply_setup(cdir, opts)
     return 0
 
 
@@ -7595,8 +7738,10 @@ def uninstall(home=None):
     cdir = home / '.claude'
     sp = cdir / 'settings.json'
     s = json.loads(sp.read_text()) if sp.exists() else {}
+    owned = _setup_owned(cdir)
     _backup(sp)
-    s.get('env', {}).pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW', None)
+    if owned['setup_compact_window'] and (s.get('env') or {}).get('CLAUDE_CODE_AUTO_COMPACT_WINDOW') == COMPACT_WINDOW:
+        s['env'].pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
     prev = cdir / 'switchboard' / 'statusline.prev.json'
     if prev.exists():
         s['statusLine'] = json.loads(prev.read_text())
@@ -7607,12 +7752,16 @@ def uninstall(home=None):
         if not s['hooks'][ev]:
             del s['hooks'][ev]
     _jput_text(sp, json.dumps(s, indent=2))
-    ex = cdir / 'agents' / 'Explore.md'
-    if ex.exists() and ex.read_text() == EXPLORE_MD:
+    ex = cdir / 'agents' / 'Explore.md'  # only what Switchboard added; anything the user wrote stays
+    if owned['setup_explore_agent'] and ex.exists() and ex.read_text() == EXPLORE_MD:
         ex.unlink()
     cm = cdir / 'CLAUDE.md'
-    if cm.exists():
-        cm.write_text('\n'.join(l for l in cm.read_text().split('\n') if not l.startswith('- Subagent models:')))
+    if owned['setup_subagent_rule'] and cm.exists():
+        cm.write_text(_strip_rule(cm.read_text()))
+    try:
+        (cdir / 'switchboard' / 'setup.json').unlink()
+    except OSError:
+        pass
     uninstall_mcp(home)
     return 0
 

@@ -6,12 +6,13 @@
 //! The frame is built while the tab is borrowed, then painted, because painting text needs the app mutably.
 
 use alacritty_terminal::grid::Dimensions;
-use alacritty_terminal::term::{self, TermMode};
 use alacritty_terminal::term::cell::Flags;
+use alacritty_terminal::term::{self, TermMode};
 use alacritty_terminal::vte::ansi::CursorShape;
 use gpui::{
-    App, BorderStyle, Bounds, ContentMask, Font, FontFallbacks, FontFeatures, FontId, FontStyle, FontWeight, Hsla, Path, PathBuilder, Pixels,
-    Point, ShapedLine, SharedString, TextAlign, TextRun, Window, bounds, fill, outline, point, px, size,
+    App, BorderStyle, Bounds, ContentMask, Font, FontFallbacks, FontFeatures, FontId, FontStyle, FontWeight, Hsla,
+    Path, PathBuilder, Pixels, Point, ShapedLine, SharedString, TextAlign, TextRun, Window, bounds, fill, outline,
+    point, px, size,
 };
 
 use super::colors::Palette;
@@ -36,7 +37,9 @@ pub fn font() -> Font {
     Font {
         family: family.into(),
         // Every ligature off: a terminal pins one glyph to each cell.
-        features: FontFeatures(std::sync::Arc::new(["calt", "liga", "clig", "dlig", "rlig"].iter().map(|t| (t.to_string(), 0)).collect())),
+        features: FontFeatures(std::sync::Arc::new(
+            ["calt", "liga", "clig", "dlig", "rlig"].iter().map(|t| (t.to_string(), 0)).collect(),
+        )),
         fallbacks: Some(FontFallbacks::from_fonts(fallbacks)),
         weight: FontWeight::NORMAL,
         style: FontStyle::Normal,
@@ -169,11 +172,13 @@ impl<'a> Rows<'a> {
     }
 
     fn bg(&mut self, line: usize, col: usize, cells: usize, color: Hsla) {
-        if let Some((l, _, c1, c)) = &mut self.bg_run {
-            if *l == line && *c1 == col && *c == color {
-                *c1 = col + cells;
-                return;
-            }
+        if let Some((l, _, c1, c)) = &mut self.bg_run
+            && *l == line
+            && *c1 == col
+            && *c == color
+        {
+            *c1 = col + cells;
+            return;
         }
         self.flush_bg();
         self.bg_run = Some((line, col, col + cells, color));
@@ -184,7 +189,8 @@ impl<'a> Rows<'a> {
         if seg.text.is_empty() {
             return;
         }
-        let at = point(self.origin.x + px(seg.col as f32 * self.m.cell_w), self.origin.y + px(line as f32 * self.m.line_h));
+        let at =
+            point(self.origin.x + px(seg.col as f32 * self.m.cell_w), self.origin.y + px(line as f32 * self.m.line_h));
         let text = SharedString::from(seg.text);
         let shaped = window.text_system().shape_line(text.clone(), px(self.m.size), &seg.runs, Some(px(self.m.cell_w)));
         if shaped.runs.iter().map(|r| r.glyphs.len()).sum::<usize>() != text.len() {
@@ -194,7 +200,12 @@ impl<'a> Rows<'a> {
                 for k in 0..r.len {
                     let at = point(at.x + px((i + k) as f32 * self.m.cell_w), at.y);
                     let one = TextRun { len: 1, ..r.clone() };
-                    let shaped = window.text_system().shape_line(SharedString::from(text[i + k..i + k + 1].to_string()), px(self.m.size), &[one], None);
+                    let shaped = window.text_system().shape_line(
+                        SharedString::from(text[i + k..i + k + 1].to_string()),
+                        px(self.m.size),
+                        &[one],
+                        None,
+                    );
                     self.frame.lines.push((at, shaped));
                 }
                 i += r.len;
@@ -214,8 +225,17 @@ impl<'a> Rows<'a> {
         let seg = self.seg.as_mut().expect("segment");
         seg.text.push_str(s);
         match seg.runs.last_mut() {
-            Some(r) if r.color == look.fg && r.font.weight == font.weight && r.font.style == font.style => r.len += s.len(),
-            _ => seg.runs.push(TextRun { len: s.len(), font, color: look.fg, background_color: None, underline: None, strikethrough: None }),
+            Some(r) if r.color == look.fg && r.font.weight == font.weight && r.font.style == font.style => {
+                r.len += s.len()
+            }
+            _ => seg.runs.push(TextRun {
+                len: s.len(),
+                font,
+                color: look.fg,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }),
         }
     }
 
@@ -234,9 +254,21 @@ impl<'a> Rows<'a> {
     /// A character on its own (wide, a symbol from a fallback font, or with combining marks).
     fn single(&mut self, window: &Window, line: usize, col: usize, s: &str, look: &Look) {
         self.flush_seg(window, line);
-        let run = TextRun { len: s.len(), font: self.styled(look), color: look.fg, background_color: None, underline: None, strikethrough: None };
+        let run = TextRun {
+            len: s.len(),
+            font: self.styled(look),
+            color: look.fg,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
         let at = point(self.origin.x + px(col as f32 * self.m.cell_w), self.origin.y + px(line as f32 * self.m.line_h));
-        let shaped = window.text_system().shape_line(SharedString::from(s.to_string()), px(self.m.size), std::slice::from_ref(&run), None);
+        let shaped = window.text_system().shape_line(
+            SharedString::from(s.to_string()),
+            px(self.m.size),
+            std::slice::from_ref(&run),
+            None,
+        );
         self.frame.lines.push((at, shaped));
     }
 }
@@ -250,7 +282,14 @@ pub struct CursorLook {
     pub visible: bool,
 }
 
-pub fn build(t: &TermTab, m: &Metrics, pal: &Palette, look: CursorLook, clip: Bounds<Pixels>, window: &Window) -> Frame {
+pub fn build(
+    t: &TermTab,
+    m: &Metrics,
+    pal: &Palette,
+    look: CursorLook,
+    clip: Bounds<Pixels>,
+    window: &Window,
+) -> Frame {
     let origin = m.origin(clip);
     let content = t.term.renderable_content();
     let offset = content.display_offset;
@@ -263,7 +302,14 @@ pub fn build(t: &TermTab, m: &Metrics, pal: &Palette, look: CursorLook, clip: Bo
         cursor.shape = look.shape;
     }
     let cols = t.term.columns();
-    let mut rows = Rows { m, origin, font: font(), frame: Frame { clip: Some(clip), line_h: m.line_h, ..Default::default() }, seg: None, bg_run: None };
+    let mut rows = Rows {
+        m,
+        origin,
+        font: font(),
+        frame: Frame { clip: Some(clip), line_h: m.line_h, ..Default::default() },
+        seg: None,
+        bg_run: None,
+    };
     let mut cur_line = usize::MAX;
     let mut s = String::new();
     for cell in content.display_iter {
@@ -321,7 +367,11 @@ pub fn build(t: &TermTab, m: &Metrics, pal: &Palette, look: CursorLook, clip: Bo
             None => (None, false),
         };
         if let Some(u) = u.filter(|_| !look.hidden) {
-            let color = cell.underline_color().map(|c| pal.resolve(c, colors)).unwrap_or(if faint { mix(fg, bg, 0.5) } else { fg });
+            let color = cell.underline_color().map(|c| pal.resolve(c, colors)).unwrap_or(if faint {
+                mix(fg, bg, 0.5)
+            } else {
+                fg
+            });
             underline(if hovered { Under::Single } else { u }, r, color, m, &mut rows.frame);
         }
         if look.strike {
@@ -355,43 +405,61 @@ pub fn build(t: &TermTab, m: &Metrics, pal: &Palette, look: CursorLook, clip: Bo
     rows.flush_bg();
 
     // The cursor: a block when focused (the character redrawn in the background color), an outline when not.
-    let show = t.phase == Phase::Open && cursor.shape != CursorShape::Hidden && mode.contains(TermMode::SHOW_CURSOR) && (look.visible || !t.focused);
-    if show {
-        if let Some(vp) = term::point_to_viewport(offset, cursor.point) {
-            let cc = &t.term.grid()[cursor.point];
-            let cells = if cc.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
-            let r = rows.cell(vp.line, vp.column.0, cells);
-            let color = pal.index(258, colors);
-            let th = m.snap(2.0_f32.max(m.light()));
-            match (t.focused, cursor.shape) {
-                (true, CursorShape::Beam) => rows.frame.cursor.push((bounds(r.origin, size(px(th), r.size.height)), color)),
-                (true, CursorShape::Underline) => rows
-                    .frame
-                    .cursor
-                    .push((bounds(point(r.origin.x, r.origin.y + r.size.height - px(th)), size(r.size.width, px(th))), color)),
-                (true, _) => {
-                    rows.frame.cursor.push((r, color));
-                    if cc.c != ' ' && cc.c != '\0' && !cc.flags.contains(Flags::HIDDEN) {
-                        let mut txt = cc.c.to_string();
-                        if let Some(z) = cc.zerowidth() {
-                            txt.extend(z.iter());
-                        }
-                        let run = TextRun { len: txt.len(), font: rows.font.clone(), color: pal.bg, background_color: None, underline: None, strikethrough: None };
-                        let shaped = window.text_system().shape_line(SharedString::from(txt), px(m.size), &[run], None);
-                        rows.frame.top.push((r.origin, shaped));
+    let show = t.phase == Phase::Open
+        && cursor.shape != CursorShape::Hidden
+        && mode.contains(TermMode::SHOW_CURSOR)
+        && (look.visible || !t.focused);
+    if show && let Some(vp) = term::point_to_viewport(offset, cursor.point) {
+        let cc = &t.term.grid()[cursor.point];
+        let cells = if cc.flags.contains(Flags::WIDE_CHAR) { 2 } else { 1 };
+        let r = rows.cell(vp.line, vp.column.0, cells);
+        let color = pal.index(258, colors);
+        let th = m.snap(2.0_f32.max(m.light()));
+        match (t.focused, cursor.shape) {
+            (true, CursorShape::Beam) => rows.frame.cursor.push((bounds(r.origin, size(px(th), r.size.height)), color)),
+            (true, CursorShape::Underline) => rows.frame.cursor.push((
+                bounds(point(r.origin.x, r.origin.y + r.size.height - px(th)), size(r.size.width, px(th))),
+                color,
+            )),
+            (true, _) => {
+                rows.frame.cursor.push((r, color));
+                if cc.c != ' ' && cc.c != '\0' && !cc.flags.contains(Flags::HIDDEN) {
+                    let mut txt = cc.c.to_string();
+                    if let Some(z) = cc.zerowidth() {
+                        txt.extend(z.iter());
                     }
+                    let run = TextRun {
+                        len: txt.len(),
+                        font: rows.font.clone(),
+                        color: pal.bg,
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shaped = window.text_system().shape_line(SharedString::from(txt), px(m.size), &[run], None);
+                    rows.frame.top.push((r.origin, shaped));
                 }
-                (false, _) => rows.frame.hollow.push((r, color)),
             }
-            // Text being composed in an input method sits on the cursor, underlined.
-            if let Some(marked) = t.marked.as_ref().filter(|s| !s.is_empty()) {
-                let run = TextRun { len: marked.len(), font: rows.font.clone(), color: pal.fg, background_color: None, underline: None, strikethrough: None };
-                let shaped = window.text_system().shape_line(SharedString::from(marked.clone()), px(m.size), &[run], None);
-                let w = shaped.width().max(px(m.cell_w));
-                rows.frame.cursor.push((bounds(r.origin, size(w, r.size.height)), pal.bg));
-                rows.frame.cursor.push((bounds(point(r.origin.x, r.origin.y + r.size.height - px(m.light())), size(w, px(m.light()))), pal.fg));
-                rows.frame.top.push((r.origin, shaped));
-            }
+            (false, _) => rows.frame.hollow.push((r, color)),
+        }
+        // Text being composed in an input method sits on the cursor, underlined.
+        if let Some(marked) = t.marked.as_ref().filter(|s| !s.is_empty()) {
+            let run = TextRun {
+                len: marked.len(),
+                font: rows.font.clone(),
+                color: pal.fg,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let shaped = window.text_system().shape_line(SharedString::from(marked.clone()), px(m.size), &[run], None);
+            let w = shaped.width().max(px(m.cell_w));
+            rows.frame.cursor.push((bounds(r.origin, size(w, r.size.height)), pal.bg));
+            rows.frame.cursor.push((
+                bounds(point(r.origin.x, r.origin.y + r.size.height - px(m.light())), size(w, px(m.light()))),
+                pal.fg,
+            ));
+            rows.frame.top.push((r.origin, shaped));
         }
     }
     rows.frame
@@ -431,7 +499,9 @@ fn underline(u: Under, r: Bounds<Pixels>, color: Hsla, m: &Metrics, f: &mut Fram
     let th = m.light();
     let (x, w) = (f32::from(r.origin.x), f32::from(r.size.width));
     let base = m.snap(f32::from(r.origin.y) + m.line_h - m.line_h * 0.14);
-    let line = |x0: f32, x1: f32, y: f32, f: &mut Frame| f.shapes.push((bounds(point(px(x0), px(y)), size(px(x1 - x0), px(th))), color));
+    let line = |x0: f32, x1: f32, y: f32, f: &mut Frame| {
+        f.shapes.push((bounds(point(px(x0), px(y)), size(px(x1 - x0), px(th))), color))
+    };
     match u {
         Under::Single => line(x, x + w, base, f),
         Under::Double => {
@@ -440,7 +510,7 @@ fn underline(u: Under, r: Bounds<Pixels>, color: Hsla, m: &Metrics, f: &mut Fram
         }
         Under::Dotted => {
             let step = m.snap((th * 2.).max(2.));
-            let mut d = m.snap(x / step).ceil() * step;  // on a grid of its own, so the dots never bunch at a cell edge
+            let mut d = m.snap(x / step).ceil() * step; // on a grid of its own, so the dots never bunch at a cell edge
             while d + th <= x + w + 0.01 {
                 line(d, d + th, base, f);
                 d += step;
@@ -469,14 +539,22 @@ fn underline(u: Under, r: Bounds<Pixels>, color: Hsla, m: &Metrics, f: &mut Fram
 /// Arms of U+2500..U+257F as up, right, down, left: 0 none, 1 light, 2 heavy, 3 double. "x" marks the dashed,
 /// rounded and diagonal ones, drawn separately.
 const ARMS: [&str; 128] = [
-    "0101", "0202", "1010", "2020", "x", "x", "x", "x", "x", "x", "x", "x", "0110", "0210", "0120", "0220", // 2500
-    "0011", "0012", "0021", "0022", "1100", "1200", "2100", "2200", "1001", "1002", "2001", "2002", "1110", "1210", "2110", "1120", // 2510
-    "2120", "2210", "1220", "2220", "1011", "1012", "2011", "1021", "2021", "2012", "1022", "2022", "0111", "0112", "0211", "0212", // 2520
-    "0121", "0122", "0221", "0222", "1101", "1102", "1201", "1202", "2101", "2102", "2201", "2202", "1111", "1112", "1211", "1212", // 2530
-    "2111", "1121", "2121", "2112", "2211", "1122", "1221", "2212", "1222", "2122", "2221", "2222", "x", "x", "x", "x", // 2540
-    "0303", "3030", "0310", "0130", "0330", "0013", "0031", "0033", "1300", "3100", "3300", "1003", "3001", "3003", "1310", "3130", // 2550
-    "3330", "1013", "3031", "3033", "0313", "0131", "0333", "1303", "3101", "3303", "1313", "3131", "3333", "x", "x", "x", // 2560
-    "x", "x", "x", "x", "0001", "1000", "0100", "0010", "0002", "2000", "0200", "0020", "0201", "1020", "0102", "2010", // 2570
+    "0101", "0202", "1010", "2020", "x", "x", "x", "x", "x", "x", "x", "x", "0110", "0210", "0120",
+    "0220", // 2500
+    "0011", "0012", "0021", "0022", "1100", "1200", "2100", "2200", "1001", "1002", "2001", "2002", "1110", "1210",
+    "2110", "1120", // 2510
+    "2120", "2210", "1220", "2220", "1011", "1012", "2011", "1021", "2021", "2012", "1022", "2022", "0111", "0112",
+    "0211", "0212", // 2520
+    "0121", "0122", "0221", "0222", "1101", "1102", "1201", "1202", "2101", "2102", "2201", "2202", "1111", "1112",
+    "1211", "1212", // 2530
+    "2111", "1121", "2121", "2112", "2211", "1122", "1221", "2212", "1222", "2122", "2221", "2222", "x", "x", "x",
+    "x", // 2540
+    "0303", "3030", "0310", "0130", "0330", "0013", "0031", "0033", "1300", "3100", "3300", "1003", "3001", "3003",
+    "1310", "3130", // 2550
+    "3330", "1013", "3031", "3033", "0313", "0131", "0333", "1303", "3101", "3303", "1313", "3131", "3333", "x", "x",
+    "x", // 2560
+    "x", "x", "x", "x", "0001", "1000", "0100", "0010", "0002", "2000", "0200", "0020", "0201", "1020", "0102",
+    "2010", // 2570
 ];
 
 fn rect(x0: f32, y0: f32, x1: f32, y1: f32) -> Bounds<Pixels> {
@@ -567,8 +645,30 @@ fn draw_box(c: char, r: Bounds<Pixels>, fg: Hsla, bg: Hsla, m: &Metrics, f: &mut
         }
         return true;
     }
-    let vmax = [up, down].iter().map(|v| if *v == 3 { lt * 3. } else if *v > 0 { thick(*v) } else { 0. }).fold(0., f32::max);
-    let hmax = [left, right].iter().map(|v| if *v == 3 { lt * 3. } else if *v > 0 { thick(*v) } else { 0. }).fold(0., f32::max);
+    let vmax = [up, down]
+        .iter()
+        .map(|v| {
+            if *v == 3 {
+                lt * 3.
+            } else if *v > 0 {
+                thick(*v)
+            } else {
+                0.
+            }
+        })
+        .fold(0., f32::max);
+    let hmax = [left, right]
+        .iter()
+        .map(|v| {
+            if *v == 3 {
+                lt * 3.
+            } else if *v > 0 {
+                thick(*v)
+            } else {
+                0.
+            }
+        })
+        .fold(0., f32::max);
     // Horizontal arms.
     for (wgt, dir) in [(right, 1.), (left, -1.)] {
         if wgt == 0 {

@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Runs ON the Mac build host (called by scripts/build-mac.sh). Builds a universal Switchboard.app, signs it
-# ad hoc and zips it to dist/Switchboard-mac.zip. Never launches the app.
+# ad hoc and zips it to dist/Switchboard-mac.zip. Never launches the app. The debug symbols (one .dSYM per arch)
+# go to dist/symbols/<version>-<build>/, outside the zip.
 #   SHADERS=auto (default) | precompiled | runtime
 #     precompiled needs Xcode's Metal Toolchain (`xcrun metal`); runtime compiles the Metal shaders
 #     from source at first launch (GPUI's runtime_shaders feature). auto picks precompiled when it can.
@@ -36,6 +37,15 @@ lipo -create -output dist/Switchboard.app/Contents/MacOS/Switchboard \
   target/aarch64-apple-darwin/release/Switchboard target/x86_64-apple-darwin/release/Switchboard
 cp packaging/macos/Info.plist dist/Switchboard.app/Contents/Info.plist
 cp packaging/macos/AppIcon.icns dist/Switchboard.app/Contents/Resources/AppIcon.icns
+cp packaging/THIRD-PARTY-NOTICES.txt dist/Switchboard.app/Contents/Resources/THIRD-PARTY-NOTICES.txt
+# Symbols for reading crash backtraces (docs/building.md). Only this build's are kept here; build-mac.sh copies them.
+# cp -L: cargo's release/*.dSYM are symlinks into deps/.
+SYM=dist/symbols/$VER-$SB_BUILD
+rm -rf dist/symbols
+mkdir -p "$SYM"
+for t in "${TARGETS[@]}"; do
+  cp -RL "target/$t/release/Switchboard.dSYM" "$SYM/Switchboard-$t.dSYM"
+done
 # Bundle id and name come from branding.toml (build-mac.sh copies it into this folder); the plist only
 # holds placeholders.
 BRANDING=branding.toml; [ -f "$BRANDING" ] || BRANDING=../branding.toml
@@ -64,4 +74,8 @@ echo "mac: v$VER [$archs] shaders=$SHADERS build=${secs}s binary=$bin bytes zip=
 cargo build --release --locked -q -p sb-node --target aarch64-apple-darwin --target x86_64-apple-darwin
 lipo -create -output dist/switchboard-node-mac target/aarch64-apple-darwin/release/switchboard-node target/x86_64-apple-darwin/release/switchboard-node
 codesign --force -s - dist/switchboard-node-mac
+for t in "${TARGETS[@]}"; do
+  cp -RL "target/$t/release/switchboard-node.dSYM" "$SYM/switchboard-node-$t.dSYM"
+done
+echo "symbols: $SYM ($(du -sk "$SYM" | cut -f1) KB)"
 echo "node mac: [$(lipo -archs dist/switchboard-node-mac)] $(stat -f %z dist/switchboard-node-mac) bytes"

@@ -33,7 +33,10 @@ pub struct NodeConfig {
 }
 
 pub fn home() -> PathBuf {
-    std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."))
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn env(k: &str) -> Option<String> {
@@ -46,11 +49,15 @@ fn config_path() -> PathBuf {
 
 impl NodeConfig {
     pub fn sb(&self) -> String {
-        env("SWITCHBOARD_SB").or_else(|| self.sb.clone()).unwrap_or_else(|| home().join(".claude/switchboard/sb.py").display().to_string())
+        env("SWITCHBOARD_SB")
+            .or_else(|| self.sb.clone())
+            .unwrap_or_else(|| home().join(".claude/switchboard/sb.py").display().to_string())
     }
 
     pub fn python(&self) -> String {
-        env("SWITCHBOARD_PYTHON").or_else(|| self.python.clone()).unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into())
+        env("SWITCHBOARD_PYTHON")
+            .or_else(|| self.python.clone())
+            .unwrap_or_else(|| if cfg!(windows) { "python" } else { "python3" }.into())
     }
 }
 
@@ -91,7 +98,8 @@ pub fn hub_addr(s: &str) -> Result<String, String> {
         }
     }
     let h = h.split('/').next().unwrap_or("");
-    let ok = !h.is_empty() && h.bytes().all(|c| c.is_ascii_alphanumeric() || b".-:[]%_".contains(&c)) && !h.starts_with('-');
+    let ok =
+        !h.is_empty() && h.bytes().all(|c| c.is_ascii_alphanumeric() || b".-:[]%_".contains(&c)) && !h.starts_with('-');
     if !ok {
         return Err(format!("{s} is not a hub address. Use the hub's IP or name, like 192.0.2.10."));
     }
@@ -100,7 +108,10 @@ pub fn hub_addr(s: &str) -> Result<String, String> {
 }
 
 fn hostname() -> String {
-    let out = std::process::Command::new("hostname").output().ok().map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let out = std::process::Command::new("hostname")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
     out.filter(|h| !h.is_empty()).or_else(|| env("COMPUTERNAME")).unwrap_or_default()
 }
 
@@ -113,7 +124,8 @@ pub fn hostname_label() -> String {
 /// A machine name the hub accepts (1 to 32 lowercase letters and digits) made from the host name.
 pub fn name_from(host: &str) -> String {
     let short = host.split('.').next().unwrap_or("");
-    let n: String = short.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).take(32).collect();
+    let n: String =
+        short.chars().filter(|c| c.is_ascii_alphanumeric()).map(|c| c.to_ascii_lowercase()).take(32).collect();
     if n.is_empty() { "machine".into() } else { n }
 }
 
@@ -144,7 +156,8 @@ async fn post_json(addr: &str, path: &str, body: &Value) -> Result<(u16, Value),
         Ok(Ok(o)) => o,
     };
     let out = String::from_utf8_lossy(&out);
-    let (head, body) = out.split_once("\r\n\r\n").ok_or_else(|| format!("The hub at {addr} sent something that is not HTTP."))?;
+    let (head, body) =
+        out.split_once("\r\n\r\n").ok_or_else(|| format!("The hub at {addr} sent something that is not HTTP."))?;
     let status = head.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
     Ok((status, serde_json::from_str(body.trim()).unwrap_or(Value::Null)))
 }
@@ -170,7 +183,13 @@ async fn pair(args: &[String]) -> i32 {
     let label = label.unwrap_or_else(|| if host.is_empty() { name.clone() } else { host });
     // pairing again as the same machine shows the hub its current token; anyone else gets "that name is taken"
     let current = load().ok().filter(|o| o.machine == name).map(|o| o.token).unwrap_or_default();
-    let (status, v) = match post_json(&addr, "/pair", &json!({"code": code, "name": name, "label": label, "os": os_name(), "token": current})).await {
+    let (status, v) = match post_json(
+        &addr,
+        "/pair",
+        &json!({"code": code, "name": name, "label": label, "os": os_name(), "token": current}),
+    )
+    .await
+    {
         Ok(x) => x,
         Err(e) => return fail(&e, 1),
     };
@@ -181,10 +200,20 @@ async fn pair(args: &[String]) -> i32 {
     }
     let machine = v["machine"].as_str().unwrap_or(&name).to_string();
     let old = load().ok();
-    let cfg = NodeConfig { hub: addr.clone(), machine: machine.clone(), token: token.into(), sb: old.as_ref().and_then(|o| o.sb.clone()), python: old.and_then(|o| o.python) };
+    let cfg = NodeConfig {
+        hub: addr.clone(),
+        machine: machine.clone(),
+        token: token.into(),
+        sb: old.as_ref().and_then(|o| o.sb.clone()),
+        python: old.and_then(|o| o.python),
+    };
     match save(&cfg) {
         Ok(p) => {
-            println!("Linked as {machine} ({}) to the hub at {addr}. Settings: {}", v["label"].as_str().unwrap_or(&label), p.display());
+            println!(
+                "Linked as {machine} ({}) to the hub at {addr}. Settings: {}",
+                v["label"].as_str().unwrap_or(&label),
+                p.display()
+            );
             println!("Start it with: switchboard-node run");
             0
         }
@@ -211,7 +240,9 @@ fn fail(msg: &str, code: i32) -> i32 {
 /// Where `install` keeps the node: a fixed place the service can start it from.
 fn install_path() -> std::path::PathBuf {
     if cfg!(windows) {
-        let base = std::env::var_os("LOCALAPPDATA").map(std::path::PathBuf::from).unwrap_or_else(|| home().join("AppData/Local"));
+        let base = std::env::var_os("LOCALAPPDATA")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| home().join("AppData/Local"));
         base.join("Switchboard").join("switchboard-node.exe")
     } else {
         home().join(".local/bin/switchboard-node")
@@ -294,7 +325,10 @@ fn install() -> i32 {
             let vbs = dest.with_file_name("switchboard-node.vbs");
             std::fs::write(&vbs, text).map_err(|e| e.to_string())?;
             let run = format!("wscript.exe \"{}\"", vbs.display());
-            sh("schtasks", &["/Create", "/F", "/SC", "ONLOGON", "/TN", "SwitchboardNode", "/TR", &run, "/RL", "LIMITED"])?;
+            sh(
+                "schtasks",
+                &["/Create", "/F", "/SC", "ONLOGON", "/TN", "SwitchboardNode", "/TR", &run, "/RL", "LIMITED"],
+            )?;
             sh("schtasks", &["/Run", "/TN", "SwitchboardNode"])?;
             Ok("Runs at logon (task SwitchboardNode), with no window.".into())
         } else {
@@ -304,7 +338,8 @@ fn install() -> i32 {
             sh("systemctl", &["--user", "daemon-reload"])?;
             sh("systemctl", &["--user", "enable", "switchboard-node"])?;
             sh("systemctl", &["--user", "restart", "switchboard-node"])?;
-            Ok("Runs as the user service switchboard-node. To keep it up while logged out: loginctl enable-linger".into())
+            Ok("Runs as the user service switchboard-node. To keep it up while logged out: loginctl enable-linger"
+                .into())
         }
     })();
     match res {
@@ -331,7 +366,9 @@ async fn main() {
         Some("pair") => pair(&args[1..]).await,
         Some("run") => match load() {
             Ok(c) => link::run(c).await,
-            Err(e) => fail(&format!("{e} Get a code from Add a machine, then run: switchboard-node pair <hub> <code>"), 2),
+            Err(e) => {
+                fail(&format!("{e} Get a code from Add a machine, then run: switchboard-node pair <hub> <code>"), 2)
+            }
         },
         Some("status") => status(),
         Some("install") => install(),

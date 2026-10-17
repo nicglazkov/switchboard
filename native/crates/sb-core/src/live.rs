@@ -118,7 +118,9 @@ pub fn live(s: &Session, now: f64, link: bool, last_out: Option<f64>) -> Live {
         Activity::Stalled => LiveKind::Stall,
         Activity::Quiet => cache_kind,
     };
-    let stale = s.stale_data(now, link).then(|| if s.as_of > 0.0 { as_of_text(now - s.as_of) } else { "as of earlier".to_string() });
+    let stale = s
+        .stale_data(now, link)
+        .then(|| if s.as_of > 0.0 { as_of_text(now - s.as_of) } else { "as of earlier".to_string() });
     let left = if cache == Cache::Warm && stale.is_none() { (s.cache_until - now).ceil().max(0.0) as u64 } else { 0 };
     let hint = s.activity == Activity::Quiet && last_out.is_some_and(|t| now - t < QUIET && now >= t - 1.0);
     let cache_detail = match cache_kind {
@@ -168,7 +170,8 @@ pub fn live(s: &Session, now: f64, link: bool, last_out: Option<f64>) -> Live {
         },
     };
     let busy = matches!(s.activity, Activity::Working | Activity::Stalled);
-    let expensive = (s.ctx >= GUARD).then(|| if cache == Cache::Cold && !busy { format!("re-reads {k}") } else { "expensive".to_string() });
+    let expensive = (s.ctx >= GUARD)
+        .then(|| if cache == Cache::Cold && !busy { format!("re-reads {k}") } else { "expensive".to_string() });
     Live { kind, word, detail, pill, pill_kind, left, urgent: left > 0 && left <= 60, expensive, stale, hint }
 }
 
@@ -281,21 +284,32 @@ mod tests {
     #[test]
     fn the_board_and_the_terminal_agree() {
         // Cold needs 150k for the board's Cold column, but every view calls a small cold chat cold.
-        let small = one(json!({"sid": "a", "activity": "quiet", "cache": "cold", "cold_at": N - 60.0, "ctx": 41000}), N, N);
-        assert_eq!((small.lamp(N), live(&small, N, true, None).kind, live(&small, N, true, None).pill), (Lamp::Idle, LiveKind::Cold, Some("cold")));
-        let big = one(json!({"sid": "a", "activity": "quiet", "cache": "cold", "cold_at": N - 60.0, "ctx": 300000}), N, N);
+        let small =
+            one(json!({"sid": "a", "activity": "quiet", "cache": "cold", "cold_at": N - 60.0, "ctx": 41000}), N, N);
+        assert_eq!(
+            (small.lamp(N), live(&small, N, true, None).kind, live(&small, N, true, None).pill),
+            (Lamp::Idle, LiveKind::Cold, Some("cold"))
+        );
+        let big =
+            one(json!({"sid": "a", "activity": "quiet", "cache": "cold", "cold_at": N - 60.0, "ctx": 300000}), N, N);
         assert_eq!(big.lamp(N), Lamp::Cold);
         // Stalled says stalled on the card, not working.
-        let st = one(json!({"sid": "a", "activity": "stalled", "status": "busy", "cache": "unknown", "ctx": 1000}), N, N);
+        let st =
+            one(json!({"sid": "a", "activity": "stalled", "status": "busy", "cache": "unknown", "ctx": 1000}), N, N);
         assert_eq!((st.lamp(N), live(&st, N, true, None).pill), (Lamp::Stall, Some("stalled")));
         // Output never overrides a need.
-        let w = one(json!({"sid": "a", "activity": "needs", "status": "waiting", "cache": "unknown", "ctx": 1000}), N, N);
+        let w =
+            one(json!({"sid": "a", "activity": "needs", "status": "waiting", "cache": "unknown", "ctx": 1000}), N, N);
         assert_eq!(live(&w, N, true, Some(N - 0.5)).word, "Needs you");
     }
 
     #[test]
     fn unknown_cache_is_never_a_guess() {
-        let s = one(json!({"sid": "a", "activity": "quiet", "cache": "unknown", "active": N - 7200.0, "ctx": 200000}), N, N);
+        let s = one(
+            json!({"sid": "a", "activity": "quiet", "cache": "unknown", "active": N - 7200.0, "ctx": 200000}),
+            N,
+            N,
+        );
         assert_eq!(s.cache_left(N), 0);
         assert!(!s.is_cold(N) && !s.needs_fresh(N));
         let l = live(&s, N, true, None);

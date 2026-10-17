@@ -26,14 +26,26 @@ impl BoardView {
         let csd = matches!(decorations, Decorations::Client { .. });
         let ink = if active || !MAC { t.ink2 } else { t.faint };
         let updated: (String, gpui::Hsla) = if app.synced <= 0.0 {
-            (if app.error.is_some() { "Not connected".into() } else { "Connecting".into() }, if app.error.is_some() { t.cold } else { t.faint })
+            (
+                if app.error.is_some() { "Not connected".into() } else { "Connecting".into() },
+                if app.error.is_some() { t.cold } else { t.faint },
+            )
         } else if app.error.is_some() {
             (format!("Offline, from {}", fmt::ago(app.synced, c.now)), t.cold)
         } else if !app.live {
             (format!("Saved {}", fmt::ago(app.synced, c.now)), t.faint)
         } else {
             let s = (c.now - app.synced).max(0.0).round() as i64;
-            (if s < 15 { "Updated just now".into() } else if s < 90 { format!("Updated {s}s ago") } else { format!("Updated {}", fmt::ago(app.synced, c.now)) }, t.faint)
+            (
+                if s < 15 {
+                    "Updated just now".into()
+                } else if s < 90 {
+                    format!("Updated {s}s ago")
+                } else {
+                    format!("Updated {}", fmt::ago(app.synced, c.now))
+                },
+                t.faint,
+            )
         };
         div()
             .flex_none()
@@ -44,7 +56,13 @@ impl BoardView {
             .border_b_1()
             .border_color(t.rule)
             .pl(px(lead()))
-            .pr(px(if ui::win() { 0. } else if csd { 6. } else { ui::EDGE - 4. }))
+            .pr(px(if ui::win() {
+                0.
+            } else if csd {
+                6.
+            } else {
+                ui::EDGE - 4.
+            }))
             .child(
                 div()
                     .id("drag")
@@ -111,7 +129,16 @@ impl BoardView {
             )
             // Hidden while the tab row is crowded, unless it says the connection is down.
             .when(!self.tabs_crowded.get() || app.error.is_some(), |d| {
-                d.child(div().flex_shrink(1.).min_w_0().mx(px(12.)).truncate().text_size(px(12.)).text_color(updated.1).child(updated.0))
+                d.child(
+                    div()
+                        .flex_shrink(1.)
+                        .min_w_0()
+                        .mx(px(12.))
+                        .truncate()
+                        .text_size(px(12.))
+                        .text_color(updated.1)
+                        .child(updated.0),
+                )
             })
             .when(self.tabs_crowded.get() && app.error.is_none(), |d| d.child(div().w(px(12.))))
             .children(self.update_chip(c))
@@ -127,12 +154,15 @@ impl BoardView {
                     .child(ui::caption_btn(&t, "w-max", if maxed { "restore" } else { "max" }, A::Max, false))
                     .child(ui::caption_btn(&t, "w-close", "close", A::Close, true))
             })
-            .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                if this.add_open {
-                    this.add_open = false;
-                    cx.notify();
-                }
-            }))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| {
+                    if this.add_open {
+                        this.add_open = false;
+                        cx.notify();
+                    }
+                }),
+            )
     }
 
     /// Windows and Linux: the menu button at the end of the header, where the Mac has its menu bar.
@@ -169,7 +199,11 @@ impl BoardView {
         let t = c.t;
         let cx = c.cx;
         let rule = || div().my(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule);
-        let item = |id: &'static str, ic: &'static str, title: &'static str, keys: String, act: fn() -> Box<dyn gpui::Action>| {
+        let item = |id: &'static str,
+                    ic: &'static str,
+                    title: &'static str,
+                    keys: String,
+                    act: fn() -> Box<dyn gpui::Action>| {
             let hover = t.hover;
             div()
                 .id(id)
@@ -210,10 +244,16 @@ impl BoardView {
             .flex_col()
             .child(item("am-settings", "gear", "Settings", ui::mod_cap(","), || Box::new(crate::view::Settings)))
             .child(item("am-history", "history", "History", ui::mod_cap("B"), || Box::new(crate::view::Browse)))
-            .child(item("am-theme", "contrast", "Switch light and dark", ui::mod_cap("Shift L"), || Box::new(crate::view::ToggleTheme)))
+            .child(item("am-theme", "contrast", "Switch light and dark", ui::mod_cap("Shift L"), || {
+                Box::new(crate::view::ToggleTheme)
+            }))
             .child(rule())
-            .child(item("am-bigger", "zoomin", "Bigger terminal text", ui::mod_cap("+"), || Box::new(crate::term::TermBigger)))
-            .child(item("am-smaller", "zoomout", "Smaller terminal text", ui::mod_cap("-"), || Box::new(crate::term::TermSmaller)))
+            .child(item("am-bigger", "zoomin", "Bigger terminal text", ui::mod_cap("+"), || {
+                Box::new(crate::term::TermBigger)
+            }))
+            .child(item("am-smaller", "zoomout", "Smaller terminal text", ui::mod_cap("-"), || {
+                Box::new(crate::term::TermSmaller)
+            }))
             .child(item("am-actual", "fit", "Actual size", ui::mod_cap("0"), || Box::new(crate::term::TermSizeReset)))
             .child(rule())
             .child(item("am-about", "info", "About Switchboard", String::new(), || Box::new(crate::view::About)))
@@ -223,10 +263,13 @@ impl BoardView {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.app_menu_open = false;
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.app_menu_open = false;
+                        cx.notify();
+                    }),
+                )
                 .child(menu)
                 .into_any_element(),
         )
@@ -240,7 +283,8 @@ impl BoardView {
         let board_on = self.tab == 0 && self.main == crate::view::Main::Board;
         let hist_on = self.tab == 0 && self.main == crate::view::Main::History;
         // Parked chats (waiting more than a day) do not count.
-        let needs = c.app.snap.sessions().iter().filter(|s| !s.stale && !c.app.is_hidden(&s.key) && s.needs_you(c.now)).count();
+        let needs =
+            c.app.snap.sessions().iter().filter(|s| !s.stale && !c.app.is_hidden(&s.key) && s.needs_you(c.now)).count();
         let view = match &self.solo {
             Some(m) => format!("{} lane", c.app.snap.label_of(m).unwrap_or_else(|| m.clone())),
             None => "Board".into(),
@@ -305,7 +349,8 @@ impl BoardView {
         let mark: Option<(usize, bool)> = drop_at.and_then(|to| {
             let from = dragging?;
             let zone = |i: usize| infos.get(i).map(|x| if x.star { (0u8, None) } else { (1, x.group) });
-            let target = if infos.get(from).is_some_and(|x| x.star) { Some((0, None)) } else { Some((1, target_group)) };
+            let target =
+                if infos.get(from).is_some_and(|x| x.star) { Some((0, None)) } else { Some((1, target_group)) };
             if to < n_tabs && to != from && zone(to) == target {
                 Some((to, true))
             } else {
@@ -343,7 +388,8 @@ impl BoardView {
         let shown = self.tab.checked_sub(1);
         let line2 = t.line2;
         let divider = move |g: usize| {
-            let hide = [g.checked_sub(1), Some(g)].into_iter().flatten().any(|i| shown == Some(i) || hover == Some(i)) || drop_at == Some(g);
+            let hide = [g.checked_sub(1), Some(g)].into_iter().flatten().any(|i| shown == Some(i) || hover == Some(i))
+                || drop_at == Some(g);
             div().flex_none().w(px(1.)).h(px(16.)).rounded(px(0.5)).when(!hide, |d| d.bg(line2))
         };
         // About the room each terminal tab gets (the window less the brand, Board, History, "+", the group chips and
@@ -361,7 +407,14 @@ impl BoardView {
             slots
                 .iter()
                 .filter_map(|s| match s {
-                    crate::tabgroups::Slot::Chip(g) => Some(crate::tabgroups::chip_width(&groups[*g], folded.contains(&groups[*g].id), max, self.group_edit.as_deref() == Some(groups[*g].id.as_str())) + 5.),
+                    crate::tabgroups::Slot::Chip(g) => Some(
+                        crate::tabgroups::chip_width(
+                            &groups[*g],
+                            folded.contains(&groups[*g].id),
+                            max,
+                            self.group_edit.as_deref() == Some(groups[*g].id.as_str()),
+                        ) + 5.,
+                    ),
                     _ => None,
                 })
                 .sum()
@@ -370,7 +423,13 @@ impl BoardView {
         const RENAME_W: f32 = 200.;
         let renaming = slots.iter().any(|s| matches!(s, crate::tabgroups::Slot::Tab(i) if self.renaming_tab(*i)));
         let (n_share, held) = if renaming { (n_vis.saturating_sub(1), RENAME_W + 5.) } else { (n_vis, 0.) };
-        let room = |fixed: f32, max: f32| if n_share == 0 { 240. } else { (self.win_w - fixed - 16. * n_star - chip_room(max) - held) / n_share as f32 - 5. };
+        let room = |fixed: f32, max: f32| {
+            if n_share == 0 {
+                240.
+            } else {
+                (self.win_w - fixed - 16. * n_star - chip_room(max) - held) / n_share as f32 - 5.
+            }
+        };
         let is_crowded = room(fixed, 120.) < 120.;
         self.tabs_crowded.set(is_crowded);
         let fixed = if is_crowded { fixed - 100. } else { fixed };
@@ -405,7 +464,9 @@ impl BoardView {
                 }
             }))
             .on_drop::<TabDrag>(cx.listener(|this, d: &TabDrag, _, cx| this.drop_tab(d.0, cx)))
-            .on_drop::<crate::tabgroups::GroupDrag>(cx.listener(|this, d: &crate::tabgroups::GroupDrag, _, cx| this.drop_group_chip(&d.id, cx)));
+            .on_drop::<crate::tabgroups::GroupDrag>(
+                cx.listener(|this, d: &crate::tabgroups::GroupDrag, _, cx| this.drop_group_chip(&d.id, cx)),
+            );
         let mut prev_tab = false;
         for (si, slot) in slots.iter().enumerate() {
             let i = match *slot {
@@ -419,7 +480,8 @@ impl BoardView {
                         terms = terms.child(div().flex_none().w(px(3.)));
                         n_child += 1;
                     }
-                    let cm = chip_mark.filter(|(x, left)| *x == g && (*left || !next_tab_in(&slots, si, &infos, Some(g))));
+                    let cm =
+                        chip_mark.filter(|(x, left)| *x == g && (*left || !next_tab_in(&slots, si, &infos, Some(g))));
                     n_child += 1;
                     terms = terms.child(
                         div()
@@ -452,16 +514,31 @@ impl BoardView {
             }
             n_child += 1;
             // The end of the groups for a dragged chip: right of the last group's last tab.
-            let end_mark = chip_mark.is_some_and(|(g, left)| !left && infos[i].group == Some(g) && !next_tab_in(&slots, si, &infos, Some(g)));
+            let end_mark = chip_mark.is_some_and(|(g, left)| {
+                !left && infos[i].group == Some(g) && !next_tab_in(&slots, si, &infos, Some(g))
+            });
             // Slim: the close button only where it is wanted, so the title keeps its letters.
             let no_x = slim && !on && !hovered;
             terms = terms.child(
                 term_tab(&t, ("tab", i), on)
-                    .min_w(px(if editing { RENAME_W } else if tiny && on { 64. } else { tab_min } + if starred { 16. } else { 0. } + if slim && on && !editing { 25. } else { 0. }))
+                    .min_w(px(if editing {
+                        RENAME_W
+                    } else if tiny && on {
+                        64.
+                    } else {
+                        tab_min
+                    } + if starred { 16. } else { 0. }
+                        + if slim && on && !editing { 25. } else { 0. }))
                     .when(slim, |d| d.pl(px(10.)).pr(px(6.)).gap(px(6.)))
                     .when(tiny && !on && !editing, |d| d.justify_center().px(px(6.)))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
-                        let next = if *h { Some(i) } else if this.tab_hover == Some(i) { None } else { this.tab_hover };
+                        let next = if *h {
+                            Some(i)
+                        } else if this.tab_hover == Some(i) {
+                            None
+                        } else {
+                            this.tab_hover
+                        };
                         if next != this.tab_hover {
                             this.tab_hover = next;
                             cx.notify();
@@ -474,10 +551,13 @@ impl BoardView {
                             this.rename_tab(i, window, cx);
                         }
                     }))
-                    .on_mouse_down(MouseButton::Right, cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.open_tab_menu(i, ev.position, cx);
-                    }))
+                    .on_mouse_down(
+                        MouseButton::Right,
+                        cx.listener(move |this, ev: &gpui::MouseDownEvent, _, cx| {
+                            cx.stop_propagation();
+                            this.open_tab_menu(i, ev.position, cx);
+                        }),
+                    )
                     .on_drag(TabDrag(i), |d, _, _, cx| cx.new(|_| d.clone()))
                     // Over a tab, the drop goes before it (its left half) or after it (its right half); over a
                     // group's tabs it joins that group, over the tabs in no group it leaves its group.
@@ -488,13 +568,19 @@ impl BoardView {
                             this.tab_drag_over(from, i, p.x >= b.left() + b.size.width / 2., cx);
                         }
                     }))
-                    .on_drag_move::<crate::tabgroups::GroupDrag>(cx.listener(move |this, ev: &gpui::DragMoveEvent<crate::tabgroups::GroupDrag>, _, cx| {
-                        let (b, p) = (ev.bounds, ev.event.position);
-                        if p.x >= b.left() && p.x < b.right() && p.y >= b.top() - px(6.) && p.y <= b.bottom() + px(6.) {
-                            let id = ev.drag(cx).id.clone();
-                            this.group_drag_over(&id, crate::tabgroups::Slot::Tab(i), true, cx);
-                        }
-                    }))
+                    .on_drag_move::<crate::tabgroups::GroupDrag>(cx.listener(
+                        move |this, ev: &gpui::DragMoveEvent<crate::tabgroups::GroupDrag>, _, cx| {
+                            let (b, p) = (ev.bounds, ev.event.position);
+                            if p.x >= b.left()
+                                && p.x < b.right()
+                                && p.y >= b.top() - px(6.)
+                                && p.y <= b.bottom() + px(6.)
+                            {
+                                let id = ev.drag(cx).id.clone();
+                                this.group_drag_over(&id, crate::tabgroups::Slot::Tab(i), true, cx);
+                            }
+                        },
+                    ))
                     .when(dragging == Some(i), |d| d.opacity(0.45))
                     .when_some(mark.filter(|(j, _)| *j == i), |d, (_, left)| d.child(marker(left)))
                     .when(end_mark, |d| d.child(marker(false)))
@@ -524,10 +610,12 @@ impl BoardView {
                                 .flex_none()
                                 .ml(px(-2.))
                                 .when(can_star, |d| {
-                                    d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                        cx.stop_propagation();
-                                        this.star_tab(i, cx);
-                                    }))
+                                    d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()).on_click(
+                                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                            cx.stop_propagation();
+                                            this.star_tab(i, cx);
+                                        }),
+                                    )
                                 })
                                 .child(ui::icon("star-on", 11., t.cold)),
                         )
@@ -538,12 +626,26 @@ impl BoardView {
                     // A tiny tab (its dot only) shows no title unless it is the one that shows.
                     .when(editing || !tiny || on, |d| {
                         d.child(if editing {
-                            self.chat_name_field(c, "tab-rename", 22., 13.).font_weight(FontWeight::NORMAL).flex_grow(1.).flex_shrink(1.).min_w(px(150.)).into_any_element()
+                            self.chat_name_field(c, "tab-rename", 22., 13.)
+                                .font_weight(FontWeight::NORMAL)
+                                .flex_grow(1.)
+                                .flex_shrink(1.)
+                                .min_w(px(150.))
+                                .into_any_element()
                         } else {
                             ui::line(topic).flex_grow(1.).flex_shrink(1.).min_w(px(12.)).into_any_element()
                         })
                     })
-                    .when(!editing && show_label && !tb.label.is_empty(), |d| d.child(ui::line(tb.label.clone()).flex_shrink(0.05).min_w_0().max_w(px(72.)).text_color(t.faint).text_size(px(12.5))))
+                    .when(!editing && show_label && !tb.label.is_empty(), |d| {
+                        d.child(
+                            ui::line(tb.label.clone())
+                                .flex_shrink(0.05)
+                                .min_w_0()
+                                .max_w(px(72.))
+                                .text_color(t.faint)
+                                .text_size(px(12.5)),
+                        )
+                    })
                     .when(tb.bell && !on, |d| d.child(div().flex_none().size(px(6.)).rounded_full().bg(t.need)))
                     // Under the pointer: a star button just before the close button (both fixed, so neither covers
                     // the other; the title gives way).
@@ -566,23 +668,25 @@ impl BoardView {
                                 .child(ui::icon("star", 12., t.faint)),
                         )
                     })
-                    .when(!no_x, |d| d.child(
-                        div()
-                            .id(("tab-x", i))
-                            .flex_none()
-                            .size(px(18.))
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .rounded(px(ui::R_CHIP))
-                            .hover(move |s| s.bg(press))
-                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                cx.stop_propagation();
-                                this.close_tab(i, cx);
-                            }))
-                            .child(ui::icon("x", 11., if on { t.dim } else { t.faint })),
-                    )),
+                    .when(!no_x, |d| {
+                        d.child(
+                            div()
+                                .id(("tab-x", i))
+                                .flex_none()
+                                .size(px(18.))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded(px(ui::R_CHIP))
+                                .hover(move |s| s.bg(press))
+                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    this.close_tab(i, cx);
+                                }))
+                                .child(ui::icon("x", 11., if on { t.dim } else { t.faint })),
+                        )
+                    }),
             );
             prev_tab = true;
         }
@@ -602,7 +706,9 @@ impl BoardView {
                 let seen = self.tab_scroll.bounds_for_item(ix).is_some_and(|b| {
                     let view = self.tab_scroll.bounds();
                     let x = self.tab_scroll.offset().x;
-                    view.size.width > px(0.) && b.left() + x >= view.left() - px(1.) && b.right() + x <= view.right() + px(1.)
+                    view.size.width > px(0.)
+                        && b.left() + x >= view.left() - px(1.)
+                        && b.right() + x <= view.right() + px(1.)
                 });
                 if seen {
                     self.tab_scroll_pending.set(false);
@@ -655,7 +761,13 @@ impl BoardView {
         let week = if plan.week_label(c.now) == "--" { 0.0 } else { week };
         // Over the daily budget turns the chip amber; the hard limit stopping chats turns it red.
         let st = c.app.snap.budget.as_ref().map(|b| b.status()).unwrap_or_default();
-        let alarm = if st.blocking() { Some(t.bad) } else if st.over_budget() { Some(t.cold) } else { None };
+        let alarm = if st.blocking() {
+            Some(t.bad)
+        } else if st.over_budget() {
+            Some(t.cold)
+        } else {
+            None
+        };
         let tone = match (alarm, plan.week_tone()) {
             (Some(a), _) => a,
             (None, sb_core::Tone::Ok) => t.fill,
@@ -686,12 +798,24 @@ impl BoardView {
                 }
             }))
             .child(div().text_size(px(13.)).text_color(t.ink2).child("Week"))
-            .child(div().w(px(44.)).child(ui::meter(&t, (week / 100.0) as f32, tone, plan.week_projected.map(|p| (p / 100.0) as f32), 4.)))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(match alarm {
-                Some(a) => a,
-                None if old => t.dim,
-                None => t.ink,
-            }).child(plan.week_label(c.now)))
+            .child(div().w(px(44.)).child(ui::meter(
+                &t,
+                (week / 100.0) as f32,
+                tone,
+                plan.week_projected.map(|p| (p / 100.0) as f32),
+                4.,
+            )))
+            .child(
+                div()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::BOLD)
+                    .text_color(match alarm {
+                        Some(a) => a,
+                        None if old => t.dim,
+                        None => t.ink,
+                    })
+                    .child(plan.week_label(c.now)),
+            )
             .children(plan.as_of(c.now).map(|a| div().text_size(px(12.)).text_color(t.faint).child(a)))
             .into_any_element()
     }
@@ -722,7 +846,9 @@ impl BoardView {
                         .flex()
                         .flex_col()
                         .gap(px(1.))
-                        .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(title))
+                        .child(
+                            div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(title),
+                        )
                         .child(div().text_size(px(12.)).text_color(t.dim).child(sub)),
                 )
                 .child(ui::kbd(&t, &keys))
@@ -734,10 +860,13 @@ impl BoardView {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                    this.add_open = false;
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.add_open = false;
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .id("add-menu")
@@ -755,24 +884,45 @@ impl BoardView {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .flex()
                         .flex_col()
-                        .child(row("add-new", "plus", "New session", "Any machine and folder, with a terminal", ui::mod_cap("N")).on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
+                        .child(
+                            row(
+                                "add-new",
+                                "plus",
+                                "New session",
+                                "Any machine and folder, with a terminal",
+                                ui::mod_cap("N"),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.add_open = false;
                                 this.open_new(None, window, cx);
-                            },
-                        )))
-                        .child(row("add-attach", "term", "Open a chat in a terminal", "Attach to one that is running", ui::mod_cap("T")).on_click(cx.listener(
-                            |this, _: &ClickEvent, window, cx| {
+                            })),
+                        )
+                        .child(
+                            row(
+                                "add-attach",
+                                "term",
+                                "Open a chat in a terminal",
+                                "Attach to one that is running",
+                                ui::mod_cap("T"),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.add_open = false;
                                 this.open_chat_palette(window, cx);
-                            },
-                        )))
-                        .child(row("add-history", "history", "Find an older chat", "Every chat on every machine", ui::mod_cap("B")).on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| {
+                            })),
+                        )
+                        .child(
+                            row(
+                                "add-history",
+                                "history",
+                                "Find an older chat",
+                                "Every chat on every machine",
+                                ui::mod_cap("B"),
+                            )
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.add_open = false;
                                 this.view_history(cx);
-                            },
-                        ))),
+                            })),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -843,8 +993,15 @@ pub fn live_dot(t: &Theme, l: &sb_core::live::Live, id: impl Into<gpui::ElementI
     }
     let dot = div().flex_none().size(px(size)).rounded_full().bg(c);
     if l.working() {
-        gpui::AnimationExt::with_animation(dot, id, gpui::Animation::new(std::time::Duration::from_millis(1600)).repeat().with_easing(gpui::pulsating_between(0.35, 1.0)), |d, k| d.opacity(k))
-            .into_any_element()
+        gpui::AnimationExt::with_animation(
+            dot,
+            id,
+            gpui::Animation::new(std::time::Duration::from_millis(1600))
+                .repeat()
+                .with_easing(gpui::pulsating_between(0.35, 1.0)),
+            |d, k| d.opacity(k),
+        )
+        .into_any_element()
     } else {
         dot.into_any_element()
     }
@@ -908,7 +1065,10 @@ impl BoardView {
     /// Is terminal tab `i` (of `tabs`) starred?
     pub fn tab_starred(&self, i: usize, cx: &gpui::App) -> bool {
         let app = self.app.read(cx);
-        self.tabs.get(i).and_then(|t| t.read(cx).key.clone()).is_some_and(|k| app.snap.session(&k).is_some_and(|s| s.star))
+        self.tabs
+            .get(i)
+            .and_then(|t| t.read(cx).key.clone())
+            .is_some_and(|k| app.snap.session(&k).is_some_and(|s| s.star))
     }
 
     /// Star or unstar terminal tab `i`'s chat (its tab moves to or out of the starred group at once).
@@ -934,10 +1094,10 @@ impl BoardView {
         let shown = self.tab.checked_sub(1).and_then(|i| self.tabs.get(i)).cloned();
         let moved = self.tabs.remove(from);
         self.tabs.insert(to, moved);
-        if let Some(s) = shown {
-            if let Some(i) = self.tabs.iter().position(|x| *x == s) {
-                self.tab = i + 1;
-            }
+        if let Some(s) = shown
+            && let Some(i) = self.tabs.iter().position(|x| *x == s)
+        {
+            self.tab = i + 1;
         }
         self.tab_menu = None;
         self.remember_tabs(cx);
@@ -964,9 +1124,9 @@ fn tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<gp
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
         .hover(move |s| s.bg(hover))
         .when(on, |d| {
-            d.text_color(t.ink)
-                .font_weight(FontWeight::SEMIBOLD)
-                .child(div().absolute().left(px(10.)).right(px(10.)).bottom(px(-5.)).h(px(2.)).rounded(px(1.)).bg(accent))
+            d.text_color(t.ink).font_weight(FontWeight::SEMIBOLD).child(
+                div().absolute().left(px(10.)).right(px(10.)).bottom(px(-5.)).h(px(2.)).rounded(px(1.)).bg(accent),
+            )
         })
         .when(!on, |d| d.text_color(t.dim))
 }
@@ -992,7 +1152,9 @@ fn term_tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> gpui::Statef
         .text_size(px(13.))
         .cursor_pointer()
         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-        .when(on, |d| d.bg(t.panel).shadow(vec![Theme::ring(t.line)]).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
+        .when(on, |d| {
+            d.bg(t.panel).shadow(vec![Theme::ring(t.line)]).text_color(t.ink).font_weight(FontWeight::SEMIBOLD)
+        })
         .when(!on, |d| d.text_color(t.dim).hover(move |s| s.bg(hover)))
 }
 
@@ -1037,11 +1199,23 @@ impl BoardView {
 }
 
 /// The slot before `si` is a tab in group `g`.
-fn prev_tab_in(slots: &[crate::tabgroups::Slot], si: usize, infos: &[crate::tabgroups::TabInfo], g: Option<usize>) -> bool {
-    si.checked_sub(1).and_then(|k| slots.get(k)).is_some_and(|s| matches!(s, crate::tabgroups::Slot::Tab(j) if infos[*j].group == g))
+fn prev_tab_in(
+    slots: &[crate::tabgroups::Slot],
+    si: usize,
+    infos: &[crate::tabgroups::TabInfo],
+    g: Option<usize>,
+) -> bool {
+    si.checked_sub(1)
+        .and_then(|k| slots.get(k))
+        .is_some_and(|s| matches!(s, crate::tabgroups::Slot::Tab(j) if infos[*j].group == g))
 }
 
 /// The slot after `si` is a tab in group `g`.
-fn next_tab_in(slots: &[crate::tabgroups::Slot], si: usize, infos: &[crate::tabgroups::TabInfo], g: Option<usize>) -> bool {
+fn next_tab_in(
+    slots: &[crate::tabgroups::Slot],
+    si: usize,
+    infos: &[crate::tabgroups::TabInfo],
+    g: Option<usize>,
+) -> bool {
     slots.get(si + 1).is_some_and(|s| matches!(s, crate::tabgroups::Slot::Tab(j) if infos[*j].group == g))
 }

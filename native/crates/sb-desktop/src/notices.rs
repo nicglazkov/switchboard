@@ -2,7 +2,10 @@
 //! ran out) wait here, behind "Notices" at the right of the status bar, until they are acted on or ignored. Ignore and
 //! Clear all each ask once more ("Confirm") before anything is gone.
 
-use gpui::{AnyElement, ClickEvent, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, ClickEvent, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, prelude::*, px, relative,
+};
 use sb_core::fmt;
 
 use crate::state::{NoticeAct, Tone};
@@ -168,7 +171,14 @@ impl BoardView {
                 this.ignore_armed = None;
                 cx.notify();
             })));
-        let mut list = div().id("tray-list").max_h(px(460.)).overflow_y_scroll().py(px(6.)).flex().flex_col();
+        let mut list = div()
+            .id("tray-list")
+            .max_h(px(460.))
+            .overflow_y_scroll()
+            .track_scroll(&self.tray_scroll)
+            .py(px(6.))
+            .flex()
+            .flex_col();
         if rows.is_empty() {
             list = list.child(
                 div()
@@ -211,7 +221,7 @@ impl BoardView {
                         .overflow_hidden()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .child(head)
-                        .child(list),
+                        .child(div().relative().child(list).child(ui::scrollbar(&self.tray_scroll))),
                 )
                 .into_any_element(),
         )
@@ -248,8 +258,15 @@ impl BoardView {
                     .flex()
                     .flex_col()
                     .gap(px(3.))
-                    .child(ui::wrap(r.title.clone()).text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(if r.tone == Tone::Bad { t.bad } else { t.ink }))
-                    .when_some(r.sub.clone(), |d, s| d.child(ui::wrap(s).text_size(px(12.)).line_height(relative(1.4)).text_color(t.dim)))
+                    .child(
+                        ui::wrap(r.title.clone())
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::BOLD)
+                            .text_color(if r.tone == Tone::Bad { t.bad } else { t.ink }),
+                    )
+                    .when_some(r.sub.clone(), |d, s| {
+                        d.child(ui::wrap(s).text_size(px(12.)).line_height(relative(1.4)).text_color(t.dim))
+                    })
                     .when_some(meta, |d, m| d.child(div().text_size(px(11.5)).text_color(t.faint).child(m)))
                     .child(
                         div()
@@ -269,9 +286,13 @@ impl BoardView {
                                                 return;
                                             }
                                             match act.clone() {
-                                                RowAct::Fix { machine, id, fix } => this.app.update(cx, |s, cx| s.fix_setup(&machine, &id, &fix, cx)),
+                                                RowAct::Fix { machine, id, fix } => {
+                                                    this.app.update(cx, |s, cx| s.fix_setup(&machine, &id, &fix, cx))
+                                                }
                                                 RowAct::Notice(id) => {
-                                                    if let Some(NoticeAct::Terminal { key }) = this.app.update(cx, |s, cx| s.notice_act(id, cx)) {
+                                                    if let Some(NoticeAct::Terminal { key }) =
+                                                        this.app.update(cx, |s, cx| s.notice_act(id, cx))
+                                                    {
                                                         this.notices_open = false;
                                                         this.open_terminal(key, false, cx);
                                                     }
@@ -296,8 +317,12 @@ impl BoardView {
                                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                         this.ignore_armed = None;
                                         match ignore.clone() {
-                                            RowIgnore::Notice(id) => this.app.update(cx, |s, cx| s.ignore_notice(id, cx)),
-                                            RowIgnore::Setup { machine, id } => this.app.update(cx, |s, cx| s.close_setup(&machine, &id, cx)),
+                                            RowIgnore::Notice(id) => {
+                                                this.app.update(cx, |s, cx| s.ignore_notice(id, cx))
+                                            }
+                                            RowIgnore::Setup { machine, id } => {
+                                                this.app.update(cx, |s, cx| s.close_setup(&machine, &id, cx))
+                                            }
                                         }
                                     }))
                                     .into_any_element()

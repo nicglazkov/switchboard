@@ -8,7 +8,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use alacritty_terminal::term::TermMode;
-use gpui::{AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, SharedString, StatefulInteractiveElement, Styled, div, px, relative};
+use gpui::{
+    AnyElement, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, PathPromptOptions, SharedString,
+    StatefulInteractiveElement, Styled, div, px, relative,
+};
 use sb_core::term::keys;
 
 use super::{Phase, TermTab};
@@ -48,7 +51,9 @@ impl TermTab {
                 continue;
             }
             match std::fs::metadata(&p) {
-                Ok(m) if m.len() > MAX => self.up_fail(name, format!("That file is {}. Files up to 20 MB can be attached.", mb(m.len())), cx),
+                Ok(m) if m.len() > MAX => {
+                    self.up_fail(name, format!("That file is {}. Files up to 20 MB can be attached.", mb(m.len())), cx)
+                }
                 Ok(_) => match std::fs::read(&p) {
                     Ok(bytes) => self.send_bytes(name, bytes, cx),
                     Err(e) => self.up_fail(name, format!("Could not read it: {e}"), cx),
@@ -60,7 +65,13 @@ impl TermTab {
 
     fn up_fail(&mut self, name: String, why: String, cx: &mut Context<Self>) {
         self.up_seq += 1;
-        self.uploads.push(Upload { id: self.up_seq, name, total: 0, sent: Arc::new(AtomicU64::new(0)), state: UpState::Failed(why) });
+        self.uploads.push(Upload {
+            id: self.up_seq,
+            name,
+            total: 0,
+            sent: Arc::new(AtomicU64::new(0)),
+            state: UpState::Failed(why),
+        });
         cx.notify();
     }
 
@@ -72,7 +83,13 @@ impl TermTab {
         self.up_seq += 1;
         let id = self.up_seq;
         let sent = Arc::new(AtomicU64::new(0));
-        self.uploads.push(Upload { id, name: name.clone(), total: bytes.len() as u64, sent: sent.clone(), state: UpState::Sending });
+        self.uploads.push(Upload {
+            id,
+            name: name.clone(),
+            total: bytes.len() as u64,
+            sent: sent.clone(),
+            state: UpState::Sending,
+        });
         let core = self.app.read(cx).core.clone();
         let machine = self.machine.clone();
         // Redraw while it goes, so the bar moves.
@@ -166,7 +183,12 @@ impl TermTab {
 
     /// Attach: the system file picker, then the same path as a drop.
     pub fn attach(&mut self, cx: &mut Context<Self>) {
-        let rx = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: true, prompt: Some("Attach".into()) });
+        let rx = cx.prompt_for_paths(PathPromptOptions {
+            files: true,
+            directories: false,
+            multiple: true,
+            prompt: Some("Attach".into()),
+        });
         cx.spawn(async move |this, cx| match rx.await {
             Ok(Ok(Some(paths))) => {
                 let _ = this.update(cx, |t, cx| t.send_files(paths, cx));
@@ -198,10 +220,21 @@ impl TermTab {
             let id = u.id;
             let (title, sub, tone, frac) = match &u.state {
                 UpState::Sending => {
-                    let f = if u.total > 0 { (u.sent.load(Ordering::Relaxed) as f32 / u.total as f32).clamp(0.02, 0.98) } else { 0.5 };
-                    (format!("Sending {} to {label}", u.name), format!("{} of {}", mb(u.sent.load(Ordering::Relaxed).min(u.total)), mb(u.total)), t.run, Some(f))
+                    let f = if u.total > 0 {
+                        (u.sent.load(Ordering::Relaxed) as f32 / u.total as f32).clamp(0.02, 0.98)
+                    } else {
+                        0.5
+                    };
+                    (
+                        format!("Sending {} to {label}", u.name),
+                        format!("{} of {}", mb(u.sent.load(Ordering::Relaxed).min(u.total)), mb(u.total)),
+                        t.run,
+                        Some(f),
+                    )
                 }
-                UpState::Done(p) => (format!("{} is on {label}", u.name), format!("Pasted its path: {p}"), t.warm, None),
+                UpState::Done(p) => {
+                    (format!("{} is on {label}", u.name), format!("Pasted its path: {p}"), t.warm, None)
+                }
                 UpState::Failed(e) => (format!("{} was not sent", u.name), e.clone(), t.bad, None),
                 UpState::Note(title, sub) => (title.clone(), sub.clone(), t.bad, None),
             };
@@ -218,10 +251,22 @@ impl TermTab {
                     .gap(px(10.))
                     .rounded(px(ui::R_CARD))
                     .border_1()
-                    .border_color(if matches!(u.state, UpState::Failed(_) | UpState::Note(..)) { t.bad.alpha(0.5) } else { t.line2 })
+                    .border_color(if matches!(u.state, UpState::Failed(_) | UpState::Note(..)) {
+                        t.bad.alpha(0.5)
+                    } else {
+                        t.line2
+                    })
                     .bg(t.panel2)
                     .shadow(t.drop())
-                    .child(ui::icon(match u.state { UpState::Failed(_) | UpState::Note(..) => "warn", UpState::Done(_) => "check", UpState::Sending => "upload" }, 15., tone))
+                    .child(ui::icon(
+                        match u.state {
+                            UpState::Failed(_) | UpState::Note(..) => "warn",
+                            UpState::Done(_) => "check",
+                            UpState::Sending => "upload",
+                        },
+                        15.,
+                        tone,
+                    ))
                     .child(
                         div()
                             .flex_1()
@@ -229,13 +274,17 @@ impl TermTab {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(ui::wrap(title).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
+                            .child(
+                                ui::wrap(title).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink),
+                            )
                             .child(ui::wrap(sub).text_size(px(12.)).line_height(relative(1.35)).text_color(t.dim)),
                     )
-                    .child(ui::icon_btn(t, SharedString::from(format!("up-x-{id}")), "x", 24.).on_click(cx.listener(move |this, _: &gpui::ClickEvent, _, cx| {
-                        this.uploads.retain(|u| u.id != id);
-                        cx.notify();
-                    })))
+                    .child(ui::icon_btn(t, SharedString::from(format!("up-x-{id}")), "x", 24.).on_click(cx.listener(
+                        move |this, _: &gpui::ClickEvent, _, cx| {
+                            this.uploads.retain(|u| u.id != id);
+                            cx.notify();
+                        },
+                    )))
                     .children(frac.map(|f| div().absolute().left_0().bottom_0().h(px(2.)).w(relative(f)).bg(t.run))),
             );
         }
@@ -261,8 +310,19 @@ impl TermTab {
             .invisible()
             .group_drag_over::<gpui::ExternalPaths>("term-drop", |s| s.visible())
             .child(ui::icon("upload", 24., t.accent))
-            .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(format!("Drop to send to {label}")))
-            .child(div().text_size(px(12.5)).text_color(t.dim).child("Its path there is pasted into the chat. Files up to 20 MB."))
+            .child(
+                div()
+                    .text_size(px(15.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.ink)
+                    .child(format!("Drop to send to {label}")),
+            )
+            .child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(t.dim)
+                    .child("Its path there is pasted into the chat. Files up to 20 MB."),
+            )
             .into_any_element()
     }
 }

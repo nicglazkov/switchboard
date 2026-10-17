@@ -1,17 +1,20 @@
-//! The inspector: one chat in full, what you can do with it and its numbers. Docked at 320 px on wide windows,
-//! floating on narrow ones, and on the right of the Archive sheet.
+//! The inspector: one chat in full, what you can do with it and its numbers. Docked beside the board on wide windows
+//! (its width set by a drag handle and saved), floating on narrow ones, and on the right of the Archive sheet.
 
-use gpui::{AnyElement, ClickEvent, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, ClickEvent, FontWeight, Hsla, InteractiveElement, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, div, prelude::*, px, relative,
+};
 use sb_core::actions::{self as acts, Action, ActionId, Pick};
 use sb_core::api::ApiThreadChat;
+use sb_core::live::{Live, LiveKind};
 use sb_core::model::COMPACT;
 use sb_core::names::{self, TagKind};
-use sb_core::live::{Live, LiveKind};
 use sb_core::{Replaced, Session, TextRun, fmt};
 
-use crate::theme::{NUM, UI};
 use crate::place::Place;
 use crate::theme::Theme;
+use crate::theme::{NUM, UI};
 use crate::ui;
 use crate::view::{BoardView, Ctx};
 
@@ -43,20 +46,30 @@ fn state_sentence(s: &Session, l: &Live, now: f64, offline: bool) -> String {
         return format!("{} is offline, so this chat can't be opened right now.", s.machine_label);
     }
     let said = match l.kind {
-        LiveKind::Held => format!("Your message is on hold. The chat went cold at {}, so sending it now would re-read all of it.", s.ctx_label()),
+        LiveKind::Held => format!(
+            "Your message is on hold. The chat went cold at {}, so sending it now would re-read all of it.",
+            s.ctx_label()
+        ),
         LiveKind::Parked => format!(
             "Waiting for your answer since {}. After a day it is parked: it stays here but no longer counts toward the badge or notifications.",
             fmt::when(s.active, now)
         ),
         LiveKind::Wait => format!("Waiting for your answer since {}.", fmt::when(s.active, now)),
         LiveKind::Run => "Working right now.".into(),
-        LiveKind::Stall => format!("No word from it for {}, though it never finished its turn. It may be stuck on one step.", fmt::sago(s.active, now)),
+        LiveKind::Stall => format!(
+            "No word from it for {}, though it never finished its turn. It may be stuck on one step.",
+            fmt::sago(s.active, now)
+        ),
         LiveKind::Warm => format!("Warm for {} more. Replies stay cheap until then.", fmt::mins(l.left)),
-        LiveKind::Cold if s.cache_until > 0.0 => format!("Cold since {}. The next message re-reads {}.", fmt::when(s.cache_until, now), s.ctx_label()),
+        LiveKind::Cold if s.cache_until > 0.0 => {
+            format!("Cold since {}. The next message re-reads {}.", fmt::when(s.cache_until, now), s.ctx_label())
+        }
         LiveKind::Cold => format!("Cold. The next message re-reads {}.", s.ctx_label()),
         LiveKind::Idle => match &s.reaped {
             Some(r) if s.reaped_note() => r.text(),
-            _ if s.ctx > 0 => format!("Quiet since {}. Whether its cache is still warm is not known yet.", fmt::when(s.active, now)),
+            _ if s.ctx > 0 => {
+                format!("Quiet since {}. Whether its cache is still warm is not known yet.", fmt::when(s.active, now))
+            }
             _ => format!("Quiet since {}.", fmt::when(s.active, now)),
         },
     };
@@ -114,16 +127,28 @@ impl BoardView {
     pub fn inspector_panel(&self, c: &Ctx, key: Option<&str>, docked: bool) -> AnyElement {
         let t = c.t;
         let Some(key) = key else { return div().into_any_element() };
-        let inner = self.inspector(c, key, InsOpts { close: true, radius: if docked { 0. } else { ui::R_SHEET - 1. }, detached: false });
+        let inner = self.inspector(
+            c,
+            key,
+            InsOpts { close: true, radius: if docked { 0. } else { ui::R_SHEET - 1. }, detached: false },
+        );
         if docked {
-            div().flex_none().w(px(320.)).h_full().min_h_0().border_l_1().border_color(t.rule).child(inner).into_any_element()
+            // beside the board on a wide window: the dock (view.rs) sizes it and draws the handle on its left
+            div().size_full().min_h_0().bg(t.panel).child(inner).into_any_element()
         } else {
             inner
         }
     }
 
     /// `star`: the chat's key and whether it is starred (a replaced, older chat has no star button).
-    fn ins_head(&self, c: &Ctx, state: AnyElement, machine: &str, star: Option<(String, bool)>, o: &InsOpts) -> impl IntoElement {
+    fn ins_head(
+        &self,
+        c: &Ctx,
+        state: AnyElement,
+        machine: &str,
+        star: Option<(String, bool)>,
+        o: &InsOpts,
+    ) -> impl IntoElement {
         let t = c.t;
         let cx = c.cx;
         // Rename: a pencil before the star, for a current chat on a machine that can keep a name (rename.rs). Not in
@@ -131,16 +156,15 @@ impl BoardView {
         let rename_btn = star.as_ref().filter(|_| !o.detached && c.app.snap.can_rename(machine)).map(|(key, _)| {
             let key = key.clone();
             let on = self.renaming(&key, crate::rename::EditAt::Details);
-            ui::icon_btn(&t, "ins-rename", "pencil", 26.)
-                .flex_none()
-                .when(on, |d| d.bg(t.press))
-                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+            ui::icon_btn(&t, "ins-rename", "pencil", 26.).flex_none().when(on, |d| d.bg(t.press)).on_click(cx.listener(
+                move |this, _: &ClickEvent, window, cx| {
                     if this.renaming(&key, crate::rename::EditAt::Details) {
                         this.cancel_chat_name(cx);
                     } else {
                         this.rename_chat(key.clone(), window, cx);
                     }
-                }))
+                },
+            ))
         });
         let star_btn = star.map(|(key, on)| {
             let (hover, press) = (t.hover, t.press);
@@ -175,12 +199,26 @@ impl BoardView {
             .children(star_btn)
             // Pop out: the details move to their own window and keep following what is clicked; Dock brings them back.
             .when(o.close && !o.detached, |d| {
-                d.child(ui::icon_btn(&t, "ins-popout", "popout", 26.).flex_none().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pop_out(cx))))
+                d.child(
+                    ui::icon_btn(&t, "ins-popout", "popout", 26.)
+                        .flex_none()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pop_out(cx))),
+                )
             })
             .when(o.detached, |d| {
-                d.child(ui::icon_btn(&t, "ins-dock", "sidebar", 26.).flex_none().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dock(cx))))
+                d.child(
+                    ui::icon_btn(&t, "ins-dock", "sidebar", 26.)
+                        .flex_none()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.dock(cx))),
+                )
             })
-            .when(o.close && !o.detached, |d| d.child(ui::icon_btn(&t, "ins-close", "x", 26.).flex_none().on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.select(None, cx)))))
+            .when(o.close && !o.detached, |d| {
+                d.child(
+                    ui::icon_btn(&t, "ins-close", "x", 26.)
+                        .flex_none()
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.select(None, cx))),
+                )
+            })
     }
 
     fn ins_title(&self, c: &Ctx, topic: &str, tag: Option<&String>, kind: Option<TagKind>) -> impl IntoElement {
@@ -234,17 +272,38 @@ impl BoardView {
             .min_w_0()
             .gap(px(8.))
             .child(crate::chrome::live_dot(&t, &live, SharedString::from(format!("ins-live-{}", s.key)), 8.))
-            .child(div().min_w_0().truncate().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(lc).child(state_text(s, &live, now)))
+            .child(
+                div()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(13.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(lc)
+                    .child(state_text(s, &live, now)),
+            )
             .when_some(live.expensive.clone(), |d, e| d.child(crate::chrome::cost_badge(&t, &e, live.stale.is_some())))
             .into_any_element();
         let acts = acts::for_session(s, &c.app.snap, now);
         // The choice and the rows below cover these; the rest stay in a short list.
-        let covered = [ActionId::Terminal, ActionId::ResumeOpen, ActionId::Fresh, ActionId::Resume, ActionId::Continue, ActionId::Handoff, ActionId::Stop];
+        let covered = [
+            ActionId::Terminal,
+            ActionId::ResumeOpen,
+            ActionId::Fresh,
+            ActionId::Resume,
+            ActionId::Continue,
+            ActionId::Handoff,
+            ActionId::Stop,
+        ];
         // Rename is the pencil by the star (in the popped-out window, a row here).
-        let rest: Vec<Action> = acts.iter().filter(|a| !covered.contains(&a.id) && !(a.id == ActionId::Rename && !o.detached)).cloned().map(|mut a| {
-            a.primary = false;
-            a
-        }).collect();
+        let rest: Vec<Action> = acts
+            .iter()
+            .filter(|a| !covered.contains(&a.id) && !(a.id == ActionId::Rename && !o.detached))
+            .cloned()
+            .map(|mut a| {
+                a.primary = false;
+                a
+            })
+            .collect();
         let kept = s.keep && s.alive;
         let offline = c.app.snap.machine(&s.machine).is_some_and(|m| m.is_offline());
 
@@ -253,6 +312,7 @@ impl BoardView {
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.ins_scroll)
             .pt(px(4.))
             .px(px(20.))
             .pb(px(24.))
@@ -287,8 +347,14 @@ impl BoardView {
             )
             // A waiting chat's "Needs you" card, the only place with the full controls (askcard.rs).
             .children(self.ask_card(c, s, offline))
-            .child(ui::wrap(state_sentence(s, &live, now, offline)).mt(px(8.)).text_size(px(13.)).line_height(relative(1.5)).text_color(t.ink2))
-            .when(kept,|d| d.child(div().mt(px(8.)).flex().child(ui::note_tag(&t, "pin", "Kept running"))))
+            .child(
+                ui::wrap(state_sentence(s, &live, now, offline))
+                    .mt(px(8.))
+                    .text_size(px(13.))
+                    .line_height(relative(1.5))
+                    .text_color(t.ink2),
+            )
+            .when(kept, |d| d.child(div().mt(px(8.)).flex().child(ui::note_tag(&t, "pin", "Kept running"))))
             .child(self.ins_choice(c, s, offline))
             .child(self.ins_places(c, s, offline))
             .child(self.ins_facts(c, s))
@@ -304,7 +370,16 @@ impl BoardView {
             .flex()
             .flex_col()
             .child(self.ins_head(c, state, &s.machine, Some((s.key.clone(), s.star)), o))
-            .child(body)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(body)
+                    .child(ui::scrollbar(&self.ins_scroll)),
+            )
             .into_any_element()
     }
 
@@ -313,9 +388,21 @@ impl BoardView {
         let t = c.t;
         let cx = c.cx;
         let now = c.now;
-        let wrap = |d: gpui::Div| div().mt(px(16.)).p(px(14.)).rounded(px(ui::R_CARD)).bg(t.bg).border_1().border_color(t.line).child(d);
+        let wrap = |d: gpui::Div| {
+            div().mt(px(16.)).p(px(14.)).rounded(px(ui::R_CARD)).bg(t.bg).border_1().border_color(t.line).child(d)
+        };
         if offline {
-            return wrap(div().child(ui::wrap(format!("{} is offline. When it is back, you can resume or start fresh from here.", s.machine_label)).text_size(px(13.)).text_color(t.dim))).into_any_element();
+            return wrap(
+                div().child(
+                    ui::wrap(format!(
+                        "{} is offline. When it is back, you can resume or start fresh from here.",
+                        s.machine_label
+                    ))
+                    .text_size(px(13.))
+                    .text_color(t.dim),
+                ),
+            )
+            .into_any_element();
         }
         let g = acts::suggest(s, now);
         let key = s.key.clone();
@@ -333,7 +420,9 @@ impl BoardView {
                                 .px(px(14.))
                                 .child(ui::icon("term", 15., t.on_accent))
                                 .child("Open terminal")
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_terminal(k.clone(), false, cx))),
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    this.open_terminal(k.clone(), false, cx)
+                                })),
                         ),
                     ),
             )
@@ -353,13 +442,33 @@ impl BoardView {
         let f_w = (f_up / scale).clamp(0.03, 1.);
         let k = |n: f64| fmt::k(n.max(0.0).round() as u64);
         let resume_cost = match cost {
-            Some(c) if warm => format!("About {} up front, because the cache is warm. Then about {} each reply.", k(c.resume.warm), k(c.resume.each)),
-            Some(c) => format!("About {} up front, because the cache is cold and all {} is read again. Then about {} each reply.", k(c.resume.cold), s.ctx_label(), k(c.resume.each)),
+            Some(c) if warm => format!(
+                "About {} up front, because the cache is warm. Then about {} each reply.",
+                k(c.resume.warm),
+                k(c.resume.each)
+            ),
+            Some(c) => format!(
+                "About {} up front, because the cache is cold and all {} is read again. Then about {} each reply.",
+                k(c.resume.cold),
+                s.ctx_label(),
+                k(c.resume.each)
+            ),
             None => g.resume_cost.clone(),
         };
         let fresh_cost = match cost {
-            Some(c) if c.summary_ready => format!("About {} up front: the summary is already written, and the new chat reads {}. Then about {} each reply.", k(c.fresh.total), k(c.fresh.first), k(c.fresh.each)),
-            Some(c) => format!("About {} up front: writing the summary {} + the new chat {}. Then about {} each reply.", k(c.fresh.total), k(c.fresh.summary), k(c.fresh.first), k(c.fresh.each)),
+            Some(c) if c.summary_ready => format!(
+                "About {} up front: the summary is already written, and the new chat reads {}. Then about {} each reply.",
+                k(c.fresh.total),
+                k(c.fresh.first),
+                k(c.fresh.each)
+            ),
+            Some(c) => format!(
+                "About {} up front: writing the summary {} + the new chat {}. Then about {} each reply.",
+                k(c.fresh.total),
+                k(c.fresh.summary),
+                k(c.fresh.first),
+                k(c.fresh.each)
+            ),
             None => "Writing the summary reads the chat once, then the new chat starts small.".into(),
         };
         let fresh_what = if s.handoff_fresh {
@@ -369,11 +478,33 @@ impl BoardView {
         };
         let needs = s.lamp(now).needs_you();
         // A waiting chat is answered in its card above, so this only opens the terminal.
-        let resume_label = if s.held { "Send anyway" } else if needs || (s.alive && s.background()) { "Open terminal" } else { "Resume" };
-        let resume_id = if s.held { ActionId::Pass } else if s.alive && s.background() { ActionId::Terminal } else if s.alive { ActionId::Open } else { ActionId::ResumeOpen };
+        let resume_label = if s.held {
+            "Send anyway"
+        } else if needs || (s.alive && s.background()) {
+            "Open terminal"
+        } else {
+            "Resume"
+        };
+        let resume_id = if s.held {
+            ActionId::Pass
+        } else if s.alive && s.background() {
+            ActionId::Terminal
+        } else if s.alive {
+            ActionId::Open
+        } else {
+            ActionId::ResumeOpen
+        };
         // One card per choice, stacked: at the sheet's 400 to 452 px two cards side by side squeeze their words, so
         // they never sit side by side here. Each card owns its badge, meter and button, all inside its own padding.
-        let opt = |id: &'static str, k: Pick, ic: &'static str, h: &'static str, what: String, cost: String, w: f32, btn: &'static str, act: ActionId| {
+        let opt = |id: &'static str,
+                   k: Pick,
+                   ic: &'static str,
+                   h: &'static str,
+                   what: String,
+                   cost: String,
+                   w: f32,
+                   btn: &'static str,
+                   act: ActionId| {
             let sug = pick == k;
             let key = key.clone();
             let bar_c = if k == Pick::Fresh { t.accent } else { t.run };
@@ -395,7 +526,20 @@ impl BoardView {
                         .child(ui::icon(ic, 15., if sug { t.accent } else { t.dim }))
                         .child(ui::wrap(h).flex_1().text_size(px(13.5)).font_weight(FontWeight::BOLD).text_color(t.ink))
                         .when(sug, |d| {
-                            d.child(div().flex_none().px(px(7.)).h(px(18.)).flex().items_center().rounded_full().bg(t.accent).text_size(px(10.5)).font_weight(FontWeight::BOLD).text_color(t.on_accent).child("Suggested"))
+                            d.child(
+                                div()
+                                    .flex_none()
+                                    .px(px(7.))
+                                    .h(px(18.))
+                                    .flex()
+                                    .items_center()
+                                    .rounded_full()
+                                    .bg(t.accent)
+                                    .text_size(px(10.5))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(t.on_accent)
+                                    .child("Suggested"),
+                            )
                         }),
                 )
                 .child(ui::wrap(what).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.dim))
@@ -404,7 +548,14 @@ impl BoardView {
                         .flex()
                         .flex_col()
                         .gap(px(5.))
-                        .child(div().h(px(4.)).rounded_full().bg(t.track).overflow_hidden().child(div().h_full().w(relative(w)).rounded_full().bg(bar_c)))
+                        .child(
+                            div()
+                                .h(px(4.))
+                                .rounded_full()
+                                .bg(t.track)
+                                .overflow_hidden()
+                                .child(div().h_full().w(relative(w)).rounded_full().bg(bar_c)),
+                        )
                         .child(ui::wrap(cost).text_size(px(12.)).line_height(relative(1.45)).text_color(t.ink2)),
                 )
                 .child({
@@ -434,16 +585,34 @@ impl BoardView {
             .flex()
             .flex_col()
             .gap(px(10.))
-            .child(
-                div()
-                    .min_w_0()
-                    .text_size(px(13.))
-                    .line_height(relative(1.45))
-                    .text_color(t.ink2)
-                    .child(ui::runs_text(&[TextRun { text: head, bold: true }, TextRun { text: format!(" {}", g.why), bold: false }], t.ink)),
-            )
-            .child(opt("ch-resume", Pick::Resume, "resume", "Resume this chat", "Opens the same chat. Claude still has everything said so far.".into(), resume_cost, r_w, resume_label, resume_id))
-            .child(opt("ch-fresh", Pick::Fresh, "fresh", "Start fresh", fresh_what.into(), fresh_cost, f_w, "Start fresh", ActionId::Fresh))
+            .child(div().min_w_0().text_size(px(13.)).line_height(relative(1.45)).text_color(t.ink2).child(
+                ui::runs_text(
+                    &[TextRun { text: head, bold: true }, TextRun { text: format!(" {}", g.why), bold: false }],
+                    t.ink,
+                ),
+            ))
+            .child(opt(
+                "ch-resume",
+                Pick::Resume,
+                "resume",
+                "Resume this chat",
+                "Opens the same chat. Claude still has everything said so far.".into(),
+                resume_cost,
+                r_w,
+                resume_label,
+                resume_id,
+            ))
+            .child(opt(
+                "ch-fresh",
+                Pick::Fresh,
+                "fresh",
+                "Start fresh",
+                fresh_what.into(),
+                fresh_cost,
+                f_w,
+                "Start fresh",
+                ActionId::Fresh,
+            ))
             .children(how.map(|how| {
                 div()
                     .flex()
@@ -466,9 +635,15 @@ impl BoardView {
                                 cx.notify();
                             })),
                     )
-                    .when(how_open, |d| d.child(ui::wrap(how).text_size(px(12.)).line_height(relative(1.5)).text_color(t.dim)))
+                    .when(how_open, |d| {
+                        d.child(ui::wrap(how).text_size(px(12.)).line_height(relative(1.5)).text_color(t.dim))
+                    })
             }))
-            .child(ui::wrap("Once the new chat is ready, Switchboard offers to open its terminal.").text_size(px(12.)).text_color(t.faint))
+            .child(
+                ui::wrap("Once the new chat is ready, Switchboard offers to open its terminal.")
+                    .text_size(px(12.))
+                    .text_color(t.faint),
+            )
             .into_any_element()
     }
 
@@ -483,7 +658,9 @@ impl BoardView {
             .flex()
             .flex_col()
             .gap(px(6.))
-            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Open its terminal"))
+            .child(
+                div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Open its terminal"),
+            )
             .child(div().flex().gap(px(6.)).children([Place::Tab, Place::Window, Place::Float].into_iter().map(|p| {
                 let k = s.key.clone();
                 let label = match p {
@@ -508,18 +685,46 @@ impl BoardView {
     fn ins_facts(&self, c: &Ctx, s: &Session) -> AnyElement {
         let t = c.t;
         let now = c.now;
-        let mb = c.app.snap.cleanup.as_ref().and_then(|cl| cl.items.iter().find(|d| d.machine == s.machine && d.sid.as_deref() == Some(s.sid.as_str()))).and_then(|d| d.mb);
+        let mb = c
+            .app
+            .snap
+            .cleanup
+            .as_ref()
+            .and_then(|cl| cl.items.iter().find(|d| d.machine == s.machine && d.sid.as_deref() == Some(s.sid.as_str())))
+            .and_then(|d| d.mb);
         let cell = |k: &str, v: AnyElement| {
-            div().flex_1().min_w_0().p(px(10.)).rounded(px(ui::R_CTRL)).bg(t.bg).flex().flex_col().gap(px(3.)).child(div().text_size(px(11.5)).text_color(t.faint).child(k.to_string())).child(v)
+            div()
+                .flex_1()
+                .min_w_0()
+                .p(px(10.))
+                .rounded(px(ui::R_CTRL))
+                .bg(t.bg)
+                .flex()
+                .flex_col()
+                .gap(px(3.))
+                .child(div().text_size(px(11.5)).text_color(t.faint).child(k.to_string()))
+                .child(v)
         };
-        let txt = |v: String| div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(v).into_any_element();
+        let txt = |v: String| {
+            div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(v).into_any_element()
+        };
         let frac = (s.ctx as f32 / COMPACT as f32).clamp(0., 1.);
-        let tone = if s.over() { t.bad } else if s.heavy() { t.cold } else { t.fill };
+        let tone = if s.over() {
+            t.bad
+        } else if s.heavy() {
+            t.cold
+        } else {
+            t.fill
+        };
         let ctx = div()
             .flex()
             .flex_col()
             .gap(px(5.))
-            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(if s.ctx > 0 { format!("{} of 300k", s.ctx_label()) } else { "None yet".into() }))
+            .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(if s.ctx > 0 {
+                format!("{} of 300k", s.ctx_label())
+            } else {
+                "None yet".into()
+            }))
             .child(
                 div()
                     .relative()
@@ -530,8 +735,13 @@ impl BoardView {
                     .child(div().absolute().top(px(-2.)).h(px(8.)).w(px(2.)).left(relative(0.5)).bg(t.faint)),
             )
             .into_any_element();
-        let cache = if s.cache_left(now) > 0 { format!("Warm, {} left", fmt::clock(s.cache_left(now))) } else { "Cold".into() };
-        let machine = if c.app.snap.machine(&s.machine).is_some_and(|m| m.is_offline()) { format!("{} (offline)", s.machine_label) } else { s.machine_label.clone() };
+        let cache =
+            if s.cache_left(now) > 0 { format!("Warm, {} left", fmt::clock(s.cache_left(now))) } else { "Cold".into() };
+        let machine = if c.app.snap.machine(&s.machine).is_some_and(|m| m.is_offline()) {
+            format!("{} (offline)", s.machine_label)
+        } else {
+            s.machine_label.clone()
+        };
         let mem = if !s.alive { "Not running".into() } else { mb.map(fmt::mem).unwrap_or_else(|| "Running".into()) };
         let row = |a: AnyElement, b: AnyElement| div().flex().gap(px(8.)).child(a).child(b);
         div()
@@ -540,7 +750,11 @@ impl BoardView {
             .flex_col()
             .gap(px(8.))
             .child(row(cell("Context", ctx).into_any_element(), cell("Cache", txt(cache)).into_any_element()))
-            .child(row(cell("Model", txt(if s.model.is_empty() { "Default".into() } else { s.model.clone() })).into_any_element(), cell("Last active", txt(fmt::when(s.active, now))).into_any_element()))
+            .child(row(
+                cell("Model", txt(if s.model.is_empty() { "Default".into() } else { s.model.clone() }))
+                    .into_any_element(),
+                cell("Last active", txt(fmt::when(s.active, now))).into_any_element(),
+            ))
             .child(row(cell("Machine", txt(machine)).into_any_element(), cell("Memory", txt(mem)).into_any_element()))
             .into_any_element()
     }
@@ -559,8 +773,21 @@ impl BoardView {
                 div()
                     .flex()
                     .items_center()
-                    .child(div().flex_1().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Flags"))
-                    .child(ui::ghost(&t, "ins-flags", Some("Change"), Some("flag")).h(px(26.)).px(px(8.)).text_size(px(12.5)).on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| this.open_flags(k.clone(), cx)))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(12.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.dim)
+                            .child("Flags"),
+                    )
+                    .child(
+                        ui::ghost(&t, "ins-flags", Some("Change"), Some("flag"))
+                            .h(px(26.))
+                            .px(px(8.))
+                            .text_size(px(12.5))
+                            .on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| this.open_flags(k.clone(), cx))),
+                    ),
             )
             .child(
                 div()
@@ -578,7 +805,8 @@ impl BoardView {
         if self.flags.as_ref().is_some_and(|d| d.key == key) {
             return;
         }
-        self.tools_pick = Some(ToolsPick { key: key.to_string(), sel: Vec::new(), confirm: false, cmd: Some((cmd, err)) });
+        self.tools_pick =
+            Some(ToolsPick { key: key.to_string(), sel: Vec::new(), confirm: false, cmd: Some((cmd, err)) });
         cx.notify();
     }
 
@@ -600,18 +828,37 @@ impl BoardView {
             Some(w) => format!("Tools: {w}"),
             None => "Tools".to_string(),
         };
-        let mut head = div().flex().items_center().child(div().flex_1().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child(title));
+        let mut head = div()
+            .flex()
+            .items_center()
+            .child(div().flex_1().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child(title));
         if lib.is_some() && pick.is_none() {
             let (k, cur) = (key.clone(), cur.clone());
-            head = head.child(ui::ghost(&t, "ins-tools", Some(if busy { "Attaching" } else { "Attach tool..." }), Some("cube")).h(px(26.)).px(px(8.)).text_size(px(12.5)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.tools_pick = Some(ToolsPick { key: k.clone(), sel: cur.clone(), confirm: false, cmd: None });
-                cx.notify();
-            })));
+            head = head.child(
+                ui::ghost(&t, "ins-tools", Some(if busy { "Attaching" } else { "Attach tool..." }), Some("cube"))
+                    .h(px(26.))
+                    .px(px(8.))
+                    .text_size(px(12.5))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.tools_pick =
+                            Some(ToolsPick { key: k.clone(), sel: cur.clone(), confirm: false, cmd: None });
+                        cx.notify();
+                    })),
+            );
         }
         let chips = if s.tools.is_empty() {
-            div().text_size(px(12.5)).text_color(t.faint).child("None. Tools on for every new chat join when one starts.").into_any_element()
+            div()
+                .text_size(px(12.5))
+                .text_color(t.faint)
+                .child("None. Tools on for every new chat join when one starts.")
+                .into_any_element()
         } else {
-            div().flex().flex_wrap().gap(px(5.)).children(s.tools.iter().map(|n| ui::tool_chip(&t, n))).into_any_element()
+            div()
+                .flex()
+                .flex_wrap()
+                .gap(px(5.))
+                .children(s.tools.iter().map(|n| ui::tool_chip(&t, n)))
+                .into_any_element()
         };
         let mut out = div().mt(px(16.)).flex().flex_col().gap(px(8.)).child(head).child(chips);
         if let Some(p) = pick {
@@ -624,29 +871,45 @@ impl BoardView {
         let t = c.t;
         let cx = c.cx;
         let close = |id: &'static str, label: &'static str| {
-            ui::ghost(&t, id, Some(label), None).h(px(30.)).px(px(10.)).text_size(px(12.5)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.tools_pick = None;
-                cx.notify();
-            }))
+            ui::ghost(&t, id, Some(label), None).h(px(30.)).px(px(10.)).text_size(px(12.5)).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.tools_pick = None;
+                    cx.notify();
+                },
+            ))
         };
-        let card = div().p(px(12.)).rounded(px(ui::R_CARD)).bg(t.bg).border_1().border_color(t.line).flex().flex_col().gap(px(10.));
+        let card = div()
+            .p(px(12.))
+            .rounded(px(ui::R_CARD))
+            .bg(t.bg)
+            .border_1()
+            .border_color(t.line)
+            .flex()
+            .flex_col()
+            .gap(px(10.));
         // The chat lives in a terminal: Switchboard cannot restart it, so here is what to run there.
         if let Some((cmd, err)) = &p.cmd {
             let c2 = cmd.clone();
             return card
                 .child(ui::wrap(err.clone()).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.ink2))
-                .child(div().px(px(10.)).py(px(7.)).rounded(px(ui::R_ITEM)).bg(t.panel).border_1().border_color(t.line2).child(ui::wrap(cmd.clone()).font_family(NUM).text_size(px(12.)).text_color(t.ink)))
                 .child(
                     div()
-                        .flex()
-                        .justify_end()
-                        .gap(px(6.))
-                        .child(close("ins-tools-done", "Done"))
-                        .child(ui::line_btn(&t, "ins-tools-copy", 30.).child(ui::icon("copy", 13., t.dim)).child("Copy").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        .px(px(10.))
+                        .py(px(7.))
+                        .rounded(px(ui::R_ITEM))
+                        .bg(t.panel)
+                        .border_1()
+                        .border_color(t.line2)
+                        .child(ui::wrap(cmd.clone()).font_family(NUM).text_size(px(12.)).text_color(t.ink)),
+                )
+                .child(div().flex().justify_end().gap(px(6.)).child(close("ins-tools-done", "Done")).child(
+                    ui::line_btn(&t, "ins-tools-copy", 30.).child(ui::icon("copy", 13., t.dim)).child("Copy").on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
                             crate::state::copy_text(cx, c2.clone());
                             this.app.update(cx, |s, cx| s.toast("Copied the command", None, false, cx));
-                        }))),
-                )
+                        }),
+                    ),
+                ))
                 .into_any_element();
         }
         let Some(lib) = c.app.lib() else { return div().into_any_element() };
@@ -655,20 +918,28 @@ impl BoardView {
             let on = p.sel.contains(&tool.name);
             let name = tool.name.clone();
             let ic = if tool.kinds.iter().any(|k| k == "mcp") { "cube" } else { "spark" };
-            chips = chips.child(ui::check_chip(&t, SharedString::from(format!("ins-tool-{}", tool.name)), on, false, ic, &tool.name).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if let Some(p) = this.tools_pick.as_mut() {
-                    if p.sel.contains(&name) {
-                        p.sel.retain(|x| x != &name);
-                    } else {
-                        p.sel.push(name.clone());
-                    }
-                    p.confirm = false;
-                }
-                cx.notify();
-            })));
+            chips = chips.child(
+                ui::check_chip(&t, SharedString::from(format!("ins-tool-{}", tool.name)), on, false, ic, &tool.name)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if let Some(p) = this.tools_pick.as_mut() {
+                            if p.sel.contains(&name) {
+                                p.sel.retain(|x| x != &name);
+                            } else {
+                                p.sel.push(name.clone());
+                            }
+                            p.confirm = false;
+                        }
+                        cx.notify();
+                    })),
+            );
         }
         if lib.tools.is_empty() {
-            chips = chips.child(div().text_size(px(12.5)).text_color(t.faint).child("No tools in the library yet. Add some in Settings, Library."));
+            chips = chips.child(
+                div()
+                    .text_size(px(12.5))
+                    .text_color(t.faint)
+                    .child("No tools in the library yet. Add some in Settings, Library."),
+            );
         }
         let changed = {
             let mut a = p.sel.clone();
@@ -691,40 +962,62 @@ impl BoardView {
                         .rounded(px(ui::R_CTRL))
                         .bg(t.need.alpha(if t.dark { 0.14 } else { 0.1 }))
                         .child(div().mt(px(1.)).child(ui::icon("warn", 14., t.need)))
-                        .child(ui::wrap("Attaching restarts this chat, and it re-reads its whole context.").flex_1().text_size(px(12.5)).line_height(relative(1.4)).text_color(t.ink)),
+                        .child(
+                            ui::wrap("Attaching restarts this chat, and it re-reads its whole context.")
+                                .flex_1()
+                                .text_size(px(12.5))
+                                .line_height(relative(1.4))
+                                .text_color(t.ink),
+                        ),
                 )
                 .child(
                     div().flex().justify_end().gap(px(6.)).child(close("ins-tools-x", "Cancel")).child(
-                        ui::primary_btn(&t, "ins-tools-restart", 30.).px(px(12.)).text_size(px(12.5)).child(ui::icon("relaunch", 13., t.on_accent)).child("Restart and attach").on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
+                        ui::primary_btn(&t, "ins-tools-restart", 30.)
+                            .px(px(12.))
+                            .text_size(px(12.5))
+                            .child(ui::icon("relaunch", 13., t.on_accent))
+                            .child("Restart and attach")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                                 this.tools_pick = None;
                                 let (k, sel) = (k1.clone(), sel1.clone());
                                 this.app.update(cx, |s, cx| s.attach_tools(&k, sel, true, cx));
                                 cx.notify();
-                            },
-                        )),
+                            })),
                     ),
                 );
         } else {
             card = card
-                .child(ui::wrap(if running { "It is running, so it restarts to load them." } else { "It loads them the next time it starts." }).text_size(px(12.)).text_color(t.faint))
+                .child(
+                    ui::wrap(if running {
+                        "It is running, so it restarts to load them."
+                    } else {
+                        "It loads them the next time it starts."
+                    })
+                    .text_size(px(12.))
+                    .text_color(t.faint),
+                )
                 .child(
                     div().flex().justify_end().gap(px(6.)).child(close("ins-tools-x", "Cancel")).child(
-                        ui::primary_btn(&t, "ins-tools-go", 30.).px(px(12.)).text_size(px(12.5)).when(!changed, |d| d.opacity(0.5)).child("Attach").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            if !changed {
-                                return;
-                            }
-                            if running {
-                                if let Some(p) = this.tools_pick.as_mut() {
-                                    p.confirm = true;
+                        ui::primary_btn(&t, "ins-tools-go", 30.)
+                            .px(px(12.))
+                            .text_size(px(12.5))
+                            .when(!changed, |d| d.opacity(0.5))
+                            .child("Attach")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if !changed {
+                                    return;
                                 }
-                            } else {
-                                this.tools_pick = None;
-                                let (k, sel) = (k2.clone(), sel2.clone());
-                                this.app.update(cx, |s, cx| s.attach_tools(&k, sel, false, cx));
-                            }
-                            cx.notify();
-                        })),
+                                if running {
+                                    if let Some(p) = this.tools_pick.as_mut() {
+                                        p.confirm = true;
+                                    }
+                                } else {
+                                    this.tools_pick = None;
+                                    let (k, sel) = (k2.clone(), sel2.clone());
+                                    this.app.update(cx, |s, cx| s.attach_tools(&k, sel, false, cx));
+                                }
+                                cx.notify();
+                            })),
                     ),
                 );
         }
@@ -804,26 +1097,68 @@ impl BoardView {
                 .cursor_pointer()
                 .hover(move |st| st.bg(hover))
                 .child(ui::icon(ic, 16., t.dim))
-                .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(title)).child(ui::wrap(sub).text_size(px(12.)).text_color(t.faint)))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .gap(px(1.))
+                        .child(
+                            div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(title),
+                        )
+                        .child(ui::wrap(sub).text_size(px(12.)).text_color(t.faint)),
+                )
         };
         let (k1, k2) = (s.key.clone(), s.key.clone());
         let others = c.app.snap.other_machines(&s.machine).len();
         let mut more = div().mt(px(14.)).pt(px(8.)).border_t_1().border_color(t.line).flex().flex_col();
         if !offline && others > 0 {
-            more = more.child(mrow(format!("m-cont-{}", s.key), "cont", "Continue on another machine", "Moves it with a handoff".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.run_action(ActionId::Continue, k1.clone(), cx))));
+            more = more.child(
+                mrow(
+                    format!("m-cont-{}", s.key),
+                    "cont",
+                    "Continue on another machine",
+                    "Moves it with a handoff".into(),
+                )
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.run_action(ActionId::Continue, k1.clone(), cx)),
+                ),
+            );
             if self.cont_open.as_deref() == Some(s.key.as_str()) {
                 more = more.child(self.continue_menu(c, &s.key));
             }
         }
         if !offline {
             more = more.child(
-                mrow(format!("m-hand-{}", s.key), "handoff", "Write a handoff", if s.handoff { "A handoff exists; this writes a newer one".into() } else { "Saves notes without starting anything".into() })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.run_action(ActionId::Handoff, k2.clone(), cx))),
+                mrow(
+                    format!("m-hand-{}", s.key),
+                    "handoff",
+                    "Write a handoff",
+                    if s.handoff {
+                        "A handoff exists; this writes a newer one".into()
+                    } else {
+                        "Saves notes without starting anything".into()
+                    },
+                )
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.run_action(ActionId::Handoff, k2.clone(), cx)),
+                ),
             );
         }
         if s.alive && s.background() && !offline {
-            let mb = c.app.snap.cleanup.as_ref().and_then(|cl| cl.items.iter().find(|d| d.machine == s.machine && d.sid.as_deref() == Some(s.sid.as_str()))).and_then(|d| d.mb);
-            let frees = mb.map(|m| format!("Frees {}. You can resume it later.", fmt::mem(m))).unwrap_or_else(|| "Frees its memory. You can resume it later.".into());
+            let mb = c
+                .app
+                .snap
+                .cleanup
+                .as_ref()
+                .and_then(|cl| {
+                    cl.items.iter().find(|d| d.machine == s.machine && d.sid.as_deref() == Some(s.sid.as_str()))
+                })
+                .and_then(|d| d.mb);
+            let frees = mb
+                .map(|m| format!("Frees {}. You can resume it later.", fmt::mem(m)))
+                .unwrap_or_else(|| "Frees its memory. You can resume it later.".into());
             let k3 = s.key.clone();
             more = more.child(
                 div()
@@ -834,7 +1169,22 @@ impl BoardView {
                     .items_center()
                     .gap(px(12.))
                     .child(ui::icon("mem", 16., t.dim))
-                    .child(div().flex_1().min_w_0().flex().flex_col().gap(px(1.)).child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child("Stop it")).child(ui::wrap(frees).text_size(px(12.)).text_color(t.faint)))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(
+                                div()
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(t.ink)
+                                    .child("Stop it"),
+                            )
+                            .child(ui::wrap(frees).text_size(px(12.)).text_color(t.faint)),
+                    )
                     .child(self.stop_btn(c, format!("ins-{}", s.key), "Stop", s.topic.clone(), mb, move |this, cx| {
                         let k = k3.clone();
                         this.app.update(cx, |s, cx| s.act(ActionId::Stop, &k, cx));
@@ -846,7 +1196,13 @@ impl BoardView {
 
     fn ins_replaced(&self, c: &Ctx, r: &Replaced, o: &InsOpts) -> AnyElement {
         let t = c.t;
-        let state = div().flex().items_center().gap(px(8.)).child(ui::ring_lamp(&t, 8.)).child(ui::lbl("Replaced", t.dim)).into_any_element();
+        let state = div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .child(ui::ring_lamp(&t, 8.))
+            .child(ui::lbl("Replaced", t.dim))
+            .into_any_element();
         let acts = acts::for_replaced(r, &c.app.snap);
         let how = r.how_text(|m| c.app.snap.label_of(m));
         let newer = r.newer_key().and_then(|k| c.app.snap.session(&k).map(|s| s.topic.clone()));
@@ -855,20 +1211,33 @@ impl BoardView {
             runs.push(TextRun { text: ", now ".into(), bold: false });
             runs.push(TextRun { text: n, bold: true });
         }
-        runs.push(TextRun { text: ". It stays out of the main view so the newer chat is the one you see. Nothing was deleted.".into(), bold: false });
+        runs.push(TextRun {
+            text: ". It stays out of the main view so the newer chat is the one you see. Nothing was deleted.".into(),
+            bold: false,
+        });
         let body = div()
             .id(SharedString::from(format!("ins-body-{}", r.key)))
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.ins_scroll)
             .pt(px(16.))
             .px(px(16.))
             .pb(px(22.))
             .child(self.ins_title(c, &r.topic, r.tag.as_ref(), r.tag_kind))
             .child(self.ins_sub(c, &r.machine, &r.machine_label, &r.folder, r.active))
-            .child(div().mt(px(12.)).text_size(px(13.)).line_height(relative(1.55)).text_color(t.ink2).child(ui::runs_text(&runs, t.ink)))
+            .child(
+                div()
+                    .mt(px(12.))
+                    .text_size(px(13.))
+                    .line_height(relative(1.55))
+                    .text_color(t.ink2)
+                    .child(ui::runs_text(&runs, t.ink)),
+            )
             .when_some(r.reaped.as_ref().filter(|_| r.reaped_note()), |d, rp| {
-                d.child(div().mt(px(8.)).text_size(px(13.)).line_height(relative(1.55)).text_color(t.ink2).child(rp.text()))
+                d.child(
+                    div().mt(px(8.)).text_size(px(13.)).line_height(relative(1.55)).text_color(t.ink2).child(rp.text()),
+                )
             })
             .child(self.ins_actions(c, &r.key, &acts))
             .child(
@@ -884,7 +1253,16 @@ impl BoardView {
             .flex()
             .flex_col()
             .child(self.ins_head(c, state, &r.machine, None, o))
-            .child(body)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .relative()
+                    .flex()
+                    .flex_col()
+                    .child(body)
+                    .child(ui::scrollbar(&self.ins_scroll)),
+            )
             .into_any_element()
     }
 
@@ -894,7 +1272,8 @@ impl BoardView {
         let rest = if lead.is_some() { &acts[1..] } else { acts };
         // A hover note only counts while its row is still here (a split or keep can remove the row under the mouse).
         let hovered = self.hint.clone().filter(|h| acts.iter().any(|a| a.note.as_str() == h.as_ref()));
-        let hint: SharedString = hovered.unwrap_or_else(|| lead.map(|a| SharedString::from(a.note.clone())).unwrap_or_default());
+        let hint: SharedString =
+            hovered.unwrap_or_else(|| lead.map(|a| SharedString::from(a.note.clone())).unwrap_or_default());
         let mut list = div().mt(px(16.)).flex().flex_col().gap(px(1.));
         if let Some(a) = lead {
             list = list.child(self.action_row(c, key, a, true));
@@ -905,7 +1284,16 @@ impl BoardView {
                 list = list.child(self.continue_menu(c, key));
             }
         }
-        list.child(div().min_h(px(34.)).mt(px(6.)).px(px(9.)).text_size(px(12.)).line_height(relative(1.4)).text_color(t.faint).child(hint))
+        list.child(
+            div()
+                .min_h(px(34.))
+                .mt(px(6.))
+                .px(px(9.))
+                .text_size(px(12.))
+                .line_height(relative(1.4))
+                .text_color(t.faint)
+                .child(hint),
+        )
     }
 
     fn action_row(&self, c: &Ctx, key: &str, a: &Action, lead: bool) -> AnyElement {
@@ -928,8 +1316,22 @@ impl BoardView {
                 .child(ui::line(a.title.clone()).flex_1())
                 .when_some(cap, |d, k| d.child(ui::kbd_in(k, t.on_accent.alpha(0.75), t.on_accent.alpha(0.35))))
         } else {
-            let ink: Hsla = if a.disabled { t.faint } else if a.danger { t.bad } else if open_cont { t.ink } else { t.ink2 };
-            let ic = if a.danger { t.bad } else if open_cont { t.ink2 } else { t.faint };
+            let ink: Hsla = if a.disabled {
+                t.faint
+            } else if a.danger {
+                t.bad
+            } else if open_cont {
+                t.ink
+            } else {
+                t.ink2
+            };
+            let ic = if a.danger {
+                t.bad
+            } else if open_cont {
+                t.ink2
+            } else {
+                t.faint
+            };
             let hover = t.hover;
             div()
                 .id(el_id)
@@ -985,7 +1387,9 @@ impl BoardView {
             .flex_col()
             .child(ui::lbl("Continue on", t.label).px(px(8.)).pt(px(2.)).pb(px(6.)));
         if others.is_empty() {
-            menu = menu.child(div().px(px(8.)).pb(px(2.)).text_size(px(12.)).text_color(t.dim).child("No other machine is online."));
+            menu = menu.child(
+                div().px(px(8.)).pb(px(2.)).text_size(px(12.)).text_color(t.dim).child("No other machine is online."),
+            );
         }
         for m in others {
             let (k, to) = (key.to_string(), m.name.clone());
@@ -1046,11 +1450,14 @@ impl BoardView {
         };
         let mut list = div().mt(px(8.)).flex().flex_col();
         if earlier.is_empty() {
-            let note = match tv {
-                Some(v) if !v.loading && v.failed.is_some() => format!("Could not load it: {}", v.failed.clone().unwrap_or_default()),
-                _ => "Loading...".to_string(),
-            };
-            list = list.child(div().py(px(6.)).text_size(px(12.)).text_color(t.faint).child(note));
+            list = list.child(match tv {
+                Some(v) if !v.loading && v.failed.is_some() => div()
+                    .py(px(6.))
+                    .text_size(px(12.))
+                    .text_color(t.faint)
+                    .child(format!("Could not load it: {}", v.failed.clone().unwrap_or_default())),
+                _ => ui::loading(&t, "ins-hist-load", "Loading the thread").py(px(6.)).text_size(px(12.)),
+            });
         }
         for i in earlier {
             list = list.child(self.history_row(c, chats, i));
@@ -1061,7 +1468,14 @@ impl BoardView {
                 .pt(px(14.))
                 .border_t_1()
                 .border_color(t.rule)
-                .child(div().flex().items_center().gap(px(7.)).child(ui::icon("history", 13., t.label)).child(ui::lbl("History", t.label)))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(7.))
+                        .child(ui::icon("history", 13., t.label))
+                        .child(ui::lbl("History", t.label)),
+                )
                 .child(div().mt(px(8.)).text_size(px(13.)).text_color(t.ink2).child(sum))
                 .child(list)
                 .into_any_element(),
@@ -1079,7 +1493,10 @@ impl BoardView {
             Some("handoff") => "Handed off".to_string(),
             Some("compacted") => "Compacted with its thread into a fresh chat".to_string(),
             Some("continued") => match next {
-                Some(n) => format!("Continued on {}", n.label.clone().or_else(|| c.app.snap.label_of(&n.machine)).unwrap_or_else(|| n.machine.clone())),
+                Some(n) => format!(
+                    "Continued on {}",
+                    n.label.clone().or_else(|| c.app.snap.label_of(&n.machine)).unwrap_or_else(|| n.machine.clone())
+                ),
                 None => "Continued on another machine".to_string(),
             },
             Some("linked") => "Linked by you".to_string(),
@@ -1094,7 +1511,13 @@ impl BoardView {
         let key = format!("{}:{}", x.machine, x.sid);
         let on_list = c.app.snap.session(&key).is_some() || c.app.snap.replaced_row(&key).is_some();
         let url = x.url.clone().filter(|u| !u.is_empty());
-        let (go, go_icon) = if url.is_some() { ("Open", "out") } else if on_list { ("View", "chev") } else { ("", "") };
+        let (go, go_icon) = if url.is_some() {
+            ("Open", "out")
+        } else if on_list {
+            ("View", "chev")
+        } else {
+            ("", "")
+        };
         let hover = t.hover;
         let clickable = url.is_some() || on_list;
         div()
@@ -1109,7 +1532,16 @@ impl BoardView {
             .border_t_1()
             .border_color(t.rule)
             .when(clickable, |d| d.cursor_pointer().hover(move |st| st.bg(hover)))
-            .child(div().flex_none().w(px(40.)).pt(px(1.)).font_family(NUM).text_size(px(11.5)).text_color(t.dim).child(when))
+            .child(
+                div()
+                    .flex_none()
+                    .w(px(40.))
+                    .pt(px(1.))
+                    .font_family(NUM)
+                    .text_size(px(11.5))
+                    .text_color(t.dim)
+                    .child(when),
+            )
             .child(
                 div()
                     .flex_1()
@@ -1123,7 +1555,13 @@ impl BoardView {
                             .items_center()
                             .gap(px(6.))
                             .min_w_0()
-                            .child(ui::wrap(topic).flex_shrink(1.).text_size(px(12.5)).font_weight(FontWeight::BOLD).text_color(t.ink))
+                            .child(
+                                ui::wrap(topic)
+                                    .flex_shrink(1.)
+                                    .text_size(px(12.5))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(t.ink),
+                            )
                             .when_some(tag, |d, tg| d.child(ui::name_tag(&t, &tg, kind))),
                     )
                     .child(div().text_size(px(11.5)).line_height(relative(1.4)).text_color(t.dim).child(sub)),
@@ -1150,7 +1588,6 @@ impl BoardView {
             }))
             .into_any_element()
     }
-
 }
 
 /// One fact row: a label on the left, the value on the right, a hairline above.

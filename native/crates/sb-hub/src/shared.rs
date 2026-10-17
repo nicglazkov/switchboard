@@ -136,7 +136,15 @@ pub struct Seat {
 }
 
 impl Shared {
-    pub fn new(machine: &str, bg: &str, label: String, via: &'static str, backend: Backend, cols: u16, rows: u16) -> Arc<Shared> {
+    pub fn new(
+        machine: &str,
+        bg: &str,
+        label: String,
+        via: &'static str,
+        backend: Backend,
+        cols: u16,
+        rows: u16,
+    ) -> Arc<Shared> {
         Arc::new(Shared {
             machine: machine.into(),
             bg: bg.into(),
@@ -454,7 +462,8 @@ mod tests {
         assert!(sh.leave(b.id), "the last one");
         sh.close();
         assert!(!sh.alive());
-        let closed = std::iter::from_fn(|| rx.try_recv().ok()).any(|m| matches!(m, Message::Text(t) if t.contains("term.close")));
+        let closed = std::iter::from_fn(|| rx.try_recv().ok())
+            .any(|m| matches!(m, Message::Text(t) if t.contains("term.close")));
         assert!(closed, "the node was told to hang up");
     }
 

@@ -123,6 +123,7 @@ class AutoServer(unittest.TestCase):
         app = server.App(fleet.Fleet(MACH, self.f), state_dir=self.state, web_dir=self.state, sleep=lambda s: None, poll_every=0,
                          retry_waits=(0, 0), cfg_dir=self.cfg, pusher=lambda *a: self.pushes.append(a))
         app._refresh_soon = lambda *a, **k: None
+        app.post('/api/prefs', {'ai_auto_machine': True})  # Claude picks are opt-in; these tests cover them
         app.fleet.poll()
         app.feat.auto.refresh(app.fleet.snapshot()['machines'], wait=5)
         self.app = app

@@ -70,7 +70,10 @@ mod tests {
     #[test]
     fn messages_match_the_spec() {
         let m = ToNode::TermOpen { ch: 3, bg: "c03ef0d9".into(), cols: 80, rows: 24 };
-        assert_eq!(serde_json::to_value(&m).unwrap(), json!({"type": "term.open", "ch": 3, "bg": "c03ef0d9", "cols": 80, "rows": 24}));
+        assert_eq!(
+            serde_json::to_value(&m).unwrap(),
+            json!({"type": "term.open", "ch": 3, "bg": "c03ef0d9", "cols": 80, "rows": 24})
+        );
         let r: FromNode = serde_json::from_str(r#"{"type":"rpc.result","id":7,"res":{"ok":true}}"#).unwrap();
         assert_eq!(r, FromNode::RpcResult { id: 7, res: json!({"ok": true}) });
         let h: FromNode = serde_json::from_str(r#"{"type":"hello","version":"0.1.0","os":"linux"}"#).unwrap();

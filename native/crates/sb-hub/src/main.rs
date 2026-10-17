@@ -4,7 +4,9 @@ use sb_hub::config::Config;
 use sb_hub::server::{self, Hub, log};
 
 fn usage() -> ! {
-    eprintln!("usage: switchboard-hub [--listen ADDR] [--version]   (other settings: SWITCHBOARD_* variables, see config.rs)");
+    eprintln!(
+        "usage: switchboard-hub [--listen ADDR] [--version]   (other settings: SWITCHBOARD_* variables, see config.rs)"
+    );
     std::process::exit(2);
 }
 
@@ -44,13 +46,19 @@ async fn main() {
         }
     };
     log(format!("switchboard-hub {} on {listen}, up to {} terminals", env!("CARGO_PKG_VERSION"), hub.cfg.max_terms));
+    // SIGTERM is how a service manager stops it; Windows has no such signal, only Ctrl+C.
+    #[cfg(unix)]
     let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
+    #[cfg(unix)]
+    let terminate = term.recv();
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<Option<()>>();
     tokio::select! {
         r = server::serve(hub, listener) => if let Err(e) = r {
             eprintln!("switchboard-hub: {e}");
             std::process::exit(1);
         },
-        _ = term.recv() => log("switchboard-hub stopping; open terminals detach"),
+        _ = terminate => log("switchboard-hub stopping; open terminals detach"),
         _ = tokio::signal::ctrl_c() => log("switchboard-hub stopping; open terminals detach"),
     }
 }

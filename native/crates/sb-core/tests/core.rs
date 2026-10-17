@@ -91,7 +91,10 @@ fn hand_fixture_normalizes() {
     assert_eq!(s.plan.five_tone(), Tone::Warn);
     // The status note is the server's (notes.py); the app writes no advice of its own.
     assert_eq!(s.plan.note_text(), Some("Garden planner is waiting for you on Studio."));
-    assert_eq!(s.plan.note.as_ref().and_then(|n| n.key()).as_deref(), Some("studio:11111111-1111-4111-8111-111111111111"));
+    assert_eq!(
+        s.plan.note.as_ref().and_then(|n| n.key()).as_deref(),
+        Some("studio:11111111-1111-4111-8111-111111111111")
+    );
 }
 
 #[test]
@@ -154,7 +157,10 @@ fn actions_match_the_web_app() {
     assert_eq!(term.note, "It is open in a terminal on Studio. Only background chats open here.");
     assert_eq!(a.iter().find(|x| x.id == ActionId::Open).unwrap().key.as_deref(), Some("Enter"));
     assert!(a.iter().find(|x| x.id == ActionId::Resume).unwrap().disabled, "already open in a terminal");
-    assert_eq!(a.iter().find(|x| x.id == ActionId::Pass).unwrap().note, "Re-reads 210k once, then the guard leaves it alone");
+    assert_eq!(
+        a.iter().find(|x| x.id == ActionId::Pass).unwrap().note,
+        "Re-reads 210k once, then the guard leaves it alone"
+    );
     assert_eq!(a.iter().find(|x| x.id == ActionId::Dismiss).unwrap().note, "Hides it here. The terminal stays open.");
 
     let c = actions::fresh_confirm(held);
@@ -197,13 +203,20 @@ fn actions_match_the_web_app() {
     let r = &s.machine("studio").unwrap().replaced[0];
     assert_eq!(r.how_text(|m| s.label_of(m)), "Started fresh");
     let ra = actions::for_replaced(r, &s);
-    assert_eq!(ra.iter().map(|x| x.id).collect::<Vec<_>>(), vec![ActionId::Newer, ActionId::ArchiveInClaude, ActionId::Resume, ActionId::Dismiss]);
+    assert_eq!(
+        ra.iter().map(|x| x.id).collect::<Vec<_>>(),
+        vec![ActionId::Newer, ActionId::ArchiveInClaude, ActionId::Resume, ActionId::Dismiss]
+    );
     assert_eq!(ra[0].note, "Garden planner (fresh)");
 
     assert!(actions::valid_folder_name("new thing_2.0"));
     assert!(!actions::valid_folder_name("a/b"));
     assert!(!actions::valid_folder_name(""));
-    assert!(actions::ultra_warn(&s.plan, NOW).unwrap().starts_with("The 5-hour window is at 62%. Workflows stop if it fills mid-run. It resets at "));
+    assert!(
+        actions::ultra_warn(&s.plan, NOW)
+            .unwrap()
+            .starts_with("The 5-hour window is at 62%. Workflows stop if it fills mid-run. It resets at ")
+    );
 }
 
 #[test]
@@ -232,7 +245,11 @@ fn snapshot_cache_round_trip() {
     assert_eq!(base.as_deref(), Some("http://127.0.0.1:1"));
     assert_eq!(data.machines.len(), 3);
     assert!(cache::load_sessions(&dir, NOW + cache::MAX_AGE + 1.0).is_none(), "a day-old snapshot is not shown");
-    assert_eq!(cache::last_server(&dir).as_deref(), Some("http://127.0.0.1:1"), "but where it came from is still worth a try");
+    assert_eq!(
+        cache::last_server(&dir).as_deref(),
+        Some("http://127.0.0.1:1"),
+        "but where it came from is still worth a try"
+    );
     // a torn write never replaces a good file
     std::fs::write(dir.join("sessions.json.tmp-1"), b"{\"half").unwrap();
     assert!(cache::load_sessions(&dir, NOW).is_some());
@@ -258,9 +275,12 @@ fn snapshot_cache_round_trip() {
 
 // ---------- fake servers over real sockets ----------
 
+/// One request the fake server saw: (method, path, headers, body).
+type Request = (String, String, Vec<(String, String)>, String);
+
 #[derive(Default)]
 struct Seen {
-    requests: Vec<(String, String, Vec<(String, String)>, String)>,
+    requests: Vec<Request>,
 }
 
 /// A tiny HTTP server: `reply(method, path, body)` returns (status, json).
@@ -312,7 +332,11 @@ fn handle(stream: TcpStream, reply: &dyn Fn(&str, &str, &str) -> (u16, String), 
         let (status, out) = reply(&method, &path, &body);
         seen.lock().unwrap().requests.push((method, path, headers, body));
         let mut w = stream.try_clone().unwrap();
-        let _ = write!(w, "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{out}", out.len());
+        let _ = write!(
+            w,
+            "HTTP/1.1 {status} X\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{out}",
+            out.len()
+        );
         let _ = w.flush();
     }
 }
@@ -337,7 +361,9 @@ fn switchboard() -> (String, Arc<Mutex<Seen>>) {
     serve(move |method, path, _body| match (method, path) {
         ("GET", "/api/summary") => (200, SUMMARY.into()),
         ("GET", "/api/sessions") => (200, sessions.clone()),
-        ("GET", p) if p.starts_with("/api/folders/studio?parent=") => (200, r#"{"ok":true,"root":"/r","parent":"","folders":[{"folder":"x","name":"x","kids":false}]}"#.into()),
+        ("GET", p) if p.starts_with("/api/folders/studio?parent=") => {
+            (200, r#"{"ok":true,"root":"/r","parent":"","folders":[{"folder":"x","name":"x","kids":false}]}"#.into())
+        }
         ("GET", "/api/job/server/s-abc") => (200, r#"{"ok":true,"state":"running","step":"handoff"}"#.into()),
         ("GET", p) if p.starts_with("/api/job/") => (404, r#"{"ok":false,"error":"no such job"}"#.into()),
         ("POST", "/api/action") => (200, r#"{"ok":true,"job":"s-abc","machine":"server"}"#.into()),
@@ -351,7 +377,11 @@ fn falls_back_to_tailscale_when_the_lan_hangs() {
     let lan = black_hole();
     let (ts, _) = switchboard();
     let dir = temp_dir("fallback");
-    let core = Core::new(CoreConfig { servers: vec![lan, ts.clone()], cache_dir: Some(dir.display().to_string()), user_agent: None });
+    let core = Core::new(CoreConfig {
+        servers: vec![lan, ts.clone()],
+        cache_dir: Some(dir.display().to_string()),
+        user_agent: None,
+    });
     let t = Instant::now();
     let snap = core.refresh().unwrap();
     assert!(t.elapsed() < Duration::from_millis(2000), "should not wait out the LAN probe: {:?}", t.elapsed());
@@ -368,20 +398,32 @@ fn prefers_the_lan_and_skips_strangers() {
     let (lan, _) = switchboard();
     let (ts, _) = switchboard();
     let (stranger, _) = serve(|_, _, _| (200, r#"{"hello":"world"}"#.into()));
-    let core = Core::new(CoreConfig { servers: vec![stranger, lan.clone(), ts], cache_dir: Some(temp_dir("prefer").display().to_string()), user_agent: None });
+    let core = Core::new(CoreConfig {
+        servers: vec![stranger, lan.clone(), ts],
+        cache_dir: Some(temp_dir("prefer").display().to_string()),
+        user_agent: None,
+    });
     core.refresh().unwrap();
     assert_eq!(core.server().as_deref(), Some(lan.as_str()));
 }
 
 #[test]
 fn unreachable_when_nothing_answers() {
-    let core = Core::new(CoreConfig { servers: vec!["http://127.0.0.1:9".into()], cache_dir: Some(temp_dir("none").display().to_string()), user_agent: None });
+    let core = Core::new(CoreConfig {
+        servers: vec!["http://127.0.0.1:9".into()],
+        cache_dir: Some(temp_dir("none").display().to_string()),
+        user_agent: None,
+    });
     assert_eq!(core.refresh().unwrap_err(), CoreError::Unreachable);
 }
 
 #[test]
 fn a_typed_address_is_used_at_once() {
-    let core = Core::new(CoreConfig { servers: vec!["http://127.0.0.1:9".into()], cache_dir: Some(temp_dir("typed").display().to_string()), user_agent: None });
+    let core = Core::new(CoreConfig {
+        servers: vec!["http://127.0.0.1:9".into()],
+        cache_dir: Some(temp_dir("typed").display().to_string()),
+        user_agent: None,
+    });
     assert_eq!(core.refresh().unwrap_err(), CoreError::Unreachable);
     assert!(!core.needs_server(), "an address is saved, it just does not answer");
     let (base, _) = switchboard();
@@ -394,14 +436,26 @@ fn a_typed_address_is_used_at_once() {
 #[test]
 fn posts_carry_the_switchboard_headers() {
     let (base, seen) = switchboard();
-    let core = Core::new(CoreConfig { servers: vec![base], cache_dir: Some(temp_dir("posts").display().to_string()), user_agent: Some("SwitchboardDesktop/test".into()) });
+    let core = Core::new(CoreConfig {
+        servers: vec![base],
+        cache_dir: Some(temp_dir("posts").display().to_string()),
+        user_agent: Some("SwitchboardDesktop/test".into()),
+    });
     let job = core.act("studio", "fresh", "11111111-1111-4111-8111-111111111111", None).unwrap();
     assert_eq!(job.as_deref(), Some("s-abc"));
     let j = core.poll_job("s-abc").unwrap();
     assert_eq!(j.state.as_deref(), Some("running"));
     assert!(matches!(core.poll_job("s-gone"), Err(CoreError::Server { status: 404, .. })));
     let job = core
-        .start_new(NewRequest { machine: "studio".into(), folder: "x".into(), create: false, prompt: "hi".into(), model: None, mode: "normal".into(), ..Default::default() })
+        .start_new(NewRequest {
+            machine: "studio".into(),
+            folder: "x".into(),
+            create: false,
+            prompt: "hi".into(),
+            model: None,
+            mode: "normal".into(),
+            ..Default::default()
+        })
         .unwrap();
     assert_eq!(job.as_deref(), Some("s-new"));
     let lvl = core.folder_level("studio", "").unwrap();
@@ -415,7 +469,10 @@ fn posts_carry_the_switchboard_headers() {
     assert_eq!(h("content-type").as_deref(), Some("application/json"));
     assert_eq!(h("user-agent").as_deref(), Some("SwitchboardDesktop/test"));
     let body: serde_json::Value = serde_json::from_str(&post.3).unwrap();
-    assert_eq!(body, serde_json::json!({"machine": "studio", "verb": "fresh", "sid": "11111111-1111-4111-8111-111111111111"}));
+    assert_eq!(
+        body,
+        serde_json::json!({"machine": "studio", "verb": "fresh", "sid": "11111111-1111-4111-8111-111111111111"})
+    );
     let new = seen.requests.iter().find(|r| r.1 == "/api/new").unwrap();
     let body: serde_json::Value = serde_json::from_str(&new.3).unwrap();
     assert_eq!(body["model"], serde_json::Value::Null);
@@ -442,8 +499,14 @@ fn same_board_ignores_fetch_times_only() {
 #[test]
 fn claude_app_links() {
     use sb_core::links::claude_app_link;
-    assert_eq!(claude_app_link("https://claude.ai/code/session_01TpXMroLvVvsYTKwF6n1BUm").as_deref(), Some("claude://code/session_01TpXMroLvVvsYTKwF6n1BUm"));
-    assert_eq!(claude_app_link("https://claude.ai/code/session_01Abc?x=1#y").as_deref(), Some("claude://code/session_01Abc"));
+    assert_eq!(
+        claude_app_link("https://claude.ai/code/session_01TpXMroLvVvsYTKwF6n1BUm").as_deref(),
+        Some("claude://code/session_01TpXMroLvVvsYTKwF6n1BUm")
+    );
+    assert_eq!(
+        claude_app_link("https://claude.ai/code/session_01Abc?x=1#y").as_deref(),
+        Some("claude://code/session_01Abc")
+    );
     assert_eq!(claude_app_link("https://claude.ai/code/cse_9z-Q").as_deref(), Some("claude://code/cse_9z-Q"));
     assert_eq!(claude_app_link("https://claude.ai/code/onboarding"), None);
     assert_eq!(claude_app_link("https://claude.ai/code/session_"), None);
@@ -460,7 +523,10 @@ fn v2_fields() {
     let raw: ApiSessions = serde_json::from_slice(&fixture("api_sessions_v2.json")).unwrap();
     let s = model::normalize(&raw, NOW);
     let studio = s.machine("studio").unwrap();
-    assert_eq!(studio.mem_line().as_deref(), Some("Claude is using 3.1 GB on Studio, 410 MB of it in a process nothing is using"));
+    assert_eq!(
+        studio.mem_line().as_deref(),
+        Some("Claude is using 3.1 GB on Studio, 410 MB of it in a process nothing is using")
+    );
     assert_eq!(studio.mem_short().as_deref(), Some("3.1 GB"));
     assert_eq!(studio.can.as_deref(), Some("iOS + iPhone, Docker"));
     assert!(studio.has_caps);
@@ -575,8 +641,10 @@ fn one(ctx: f64, cache_left: f64, cost: Option<serde_json::Value>) -> model::Ses
     if let Some(c) = cost {
         s["cost"] = c;
     }
-    let raw: ApiSessions = serde_json::from_value(serde_json::json!({"machines": [{"name": "studio", "label": "Studio",
-        "online": true, "updated": NOW, "sessions": [s]}], "summary": {}})).unwrap();
+    let raw: ApiSessions =
+        serde_json::from_value(serde_json::json!({"machines": [{"name": "studio", "label": "Studio",
+        "online": true, "updated": NOW, "sessions": [s]}], "summary": {}}))
+        .unwrap();
     model::normalize(&raw, NOW).machines[0].sessions[0].clone()
 }
 
@@ -584,7 +652,10 @@ fn one(ctx: f64, cache_left: f64, cost: Option<serde_json::Value>) -> model::Ses
 fn three_size_bands_with_the_actual_size() {
     use sb_core::model::Band;
     assert_eq!(Band::words(40_000, false), "40k, small, so going back is cheap");
-    assert_eq!(Band::words(145_000, false), "145k, resuming re-reads 145k; Start fresh is cheaper if you do not need the history");
+    assert_eq!(
+        Band::words(145_000, false),
+        "145k, resuming re-reads 145k; Start fresh is cheaper if you do not need the history"
+    );
     assert_eq!(Band::words(200_000, false), "200k, big: resuming re-reads all 200k at full price");
     for k in [40_000, 145_000, 200_000] {
         assert!(Band::words(k, true).ends_with("reply while warm"), "a warm chat is cheap at any size");
@@ -640,8 +711,12 @@ fn the_agents_cost_is_shown_for_the_cache_as_it_is_now() {
 #[test]
 fn plan_numbers_say_how_old_they_are() {
     let plan = |updated: f64, week_reset: f64, five_reset: f64| model::Plan {
-        week: Some(81.0), five_hour: Some(12.0), week_reset: Some(week_reset), five_hour_reset: Some(five_reset),
-        updated: Some(updated), ..Default::default()
+        week: Some(81.0),
+        five_hour: Some(12.0),
+        week_reset: Some(week_reset),
+        five_hour_reset: Some(five_reset),
+        updated: Some(updated),
+        ..Default::default()
     };
     let fresh = plan(NOW - 300.0, NOW + 86400.0, NOW + 3600.0);
     assert!(!fresh.limits_old(NOW));
@@ -656,7 +731,10 @@ fn plan_numbers_say_how_old_they_are() {
     assert_eq!(old.five_label(NOW), "--", "its window reset since");
     let reset = plan(NOW - 6.0 * 3600.0, NOW - 60.0, NOW - 60.0);
     assert_eq!(reset.week_label(NOW), "--", "the week reset since");
-    let raw: ApiSessions = serde_json::from_value(serde_json::json!({"machines": [], "summary": {"seven_day": 40, "limits_updated": NOW - 60.0}})).unwrap();
+    let raw: ApiSessions = serde_json::from_value(
+        serde_json::json!({"machines": [], "summary": {"seven_day": 40, "limits_updated": NOW - 60.0}}),
+    )
+    .unwrap();
     assert_eq!(model::normalize(&raw, NOW).plan.updated, Some(NOW - 60.0));
 }
 
@@ -680,10 +758,15 @@ fn settings_reads_a_machines_folder_versions_capabilities_and_mcp_servers() {
     let s = &mcp.servers;
     assert_eq!(s[0].line(), "npx -y server-github --token •••");
     assert_eq!(s[1].line(), "https://mcp.linear.app/sse");
-    assert_eq!(s.iter().map(|x| x.scope_label()).collect::<Vec<_>>(), ["User", "Project", "Local, in proj", "Plugin tools"]);
+    assert_eq!(
+        s.iter().map(|x| x.scope_label()).collect::<Vec<_>>(),
+        ["User", "Project", "Local, in proj", "Plugin tools"]
+    );
     assert_eq!(s[0].kind.as_deref(), Some("stdio"));
-    let caps: ApiCapsView = serde_json::from_value(serde_json::json!({"on": true, "extra": ["Can print labels"], "off": ["cuda"],
-        "tools": [{"key": "cuda", "name": "CUDA", "detail": "13.2 on the RTX GPU", "on": false}], "can": "Docker"})).unwrap();
+    let caps: ApiCapsView =
+        serde_json::from_value(serde_json::json!({"on": true, "extra": ["Can print labels"], "off": ["cuda"],
+        "tools": [{"key": "cuda", "name": "CUDA", "detail": "13.2 on the RTX GPU", "on": false}], "can": "Docker"}))
+        .unwrap();
     assert!(caps.on && !caps.tools.unwrap()[0].on);
 }
 
@@ -693,16 +776,22 @@ fn a_rename_shows_at_once_and_says_where_it_cannot() {
     let k = "studio:11111111-1111-4111-8111-111111111111";
     assert!(s.retitle(k, "Widget fix (part 2)"));
     let c = s.session(k).unwrap();
-    assert_eq!((c.topic.as_str(), c.tag.as_deref(), c.raw_title.as_str()), ("Widget fix", Some("part 2"), "Widget fix (part 2)"));
+    assert_eq!(
+        (c.topic.as_str(), c.tag.as_deref(), c.raw_title.as_str()),
+        ("Widget fix", Some("part 2"), "Widget fix (part 2)")
+    );
     assert!(!s.retitle("studio:nope", "x"));
-    let r = actions::for_session(s.session(k).unwrap(), &s, NOW).into_iter().find(|a| a.id == ActionId::Rename).unwrap();
+    let r =
+        actions::for_session(s.session(k).unwrap(), &s, NOW).into_iter().find(|a| a.id == ActionId::Rename).unwrap();
     assert_eq!((r.title.as_str(), r.icon.as_str()), ("Rename chat", "pencil"));
     if let Some(m) = s.machines.iter_mut().find(|m| m.name == "studio") {
         m.online = Some(true);
         m.features = vec!["browse".into()];
     }
     assert!(!s.can_rename("studio"), "an older agent cannot keep a name");
-    assert!(actions::for_session(s.session(k).unwrap(), &s, NOW).iter().any(|a| a.id == ActionId::Rename && a.disabled));
+    assert!(
+        actions::for_session(s.session(k).unwrap(), &s, NOW).iter().any(|a| a.id == ActionId::Rename && a.disabled)
+    );
 }
 
 #[test]
@@ -713,7 +802,10 @@ fn a_cleanup_stop_says_what_is_still_running() {
     assert_eq!(s.queued, vec![("studio/d".to_string(), "j1".to_string())]);
     assert_eq!(
         s.not_stopped,
-        vec![("studio/b".to_string(), String::new()), ("mbp/c".to_string(), "Claude Code could not confirm it stopped.".to_string())]
+        vec![
+            ("studio/b".to_string(), String::new()),
+            ("mbp/c".to_string(), "Claude Code could not confirm it stopped.".to_string())
+        ]
     );
     assert_eq!(sb_core::CleanStopped::read(&serde_json::json!({"ok": true})), sb_core::CleanStopped::default());
 }

@@ -67,7 +67,14 @@ fn sgr(l: &(Color, Color, Flags, Option<Color>)) -> String {
     use std::fmt::Write;
     let (fg, bg, f, ul) = l;
     let mut s = String::from("\x1b[0");
-    for (flag, code) in [(Flags::BOLD, "1"), (Flags::DIM, "2"), (Flags::ITALIC, "3"), (Flags::INVERSE, "7"), (Flags::HIDDEN, "8"), (Flags::STRIKEOUT, "9")] {
+    for (flag, code) in [
+        (Flags::BOLD, "1"),
+        (Flags::DIM, "2"),
+        (Flags::ITALIC, "3"),
+        (Flags::INVERSE, "7"),
+        (Flags::HIDDEN, "8"),
+        (Flags::STRIKEOUT, "9"),
+    ] {
         if f.contains(flag) {
             s.push(';');
             s.push_str(code);
@@ -157,10 +164,12 @@ fn extent(grid: &Grid<Cell>, line: Line, cols: usize) -> (usize, bool) {
 /// cursor ends on the last row written.
 fn rows(out: &mut Vec<u8>, grid: &Grid<Cell>, from: i32, to: i32, pen: &mut Pen) {
     let cols = grid.columns();
-    let lines: Vec<(Line, usize, bool)> = (from..to).map(|l| {
-        let (end, wrapped) = extent(grid, Line(l), cols);
-        (Line(l), end, wrapped)
-    }).collect();
+    let lines: Vec<(Line, usize, bool)> = (from..to)
+        .map(|l| {
+            let (end, wrapped) = extent(grid, Line(l), cols);
+            (Line(l), end, wrapped)
+        })
+        .collect();
     for (i, &(line, end, wrapped)) in lines.iter().enumerate() {
         let next_empty = lines.get(i + 1).is_none_or(|n| n.1 == 0);
         // a soft wrap is kept by writing the whole row and letting the next character wrap it
@@ -447,7 +456,14 @@ pub fn dump<T>(term: &Term<T>, history: usize) -> Vec<String> {
 /// The cursor and the modes, as text, to compare beside `dump`.
 pub fn state<T>(term: &Term<T>) -> String {
     let c = &term.grid().cursor;
-    format!("cursor {}:{} wrap={} mode={:?} style={:?}", c.point.line.0, c.point.column.0, c.input_needs_wrap, term.mode(), term.cursor_style())
+    format!(
+        "cursor {}:{} wrap={} mode={:?} style={:?}",
+        c.point.line.0,
+        c.point.column.0,
+        c.input_needs_wrap,
+        term.mode(),
+        term.cursor_style()
+    )
 }
 
 #[cfg(test)]
@@ -551,7 +567,11 @@ mod tests {
 
     #[test]
     fn modes_and_cursor_style() {
-        let mut s = screen(20, 4, b"\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?25l\x1b[5 q\x1b=\x1b]4;1;rgb:12/34/56\x1b\\hi");
+        let mut s = screen(
+            20,
+            4,
+            b"\x1b[?1h\x1b[?2004h\x1b[?1002h\x1b[?1006h\x1b[?1004h\x1b[?25l\x1b[5 q\x1b=\x1b]4;1;rgb:12/34/56\x1b\\hi",
+        );
         round_trip(&mut s, 0);
         assert!(s.term.mode().contains(TermMode::BRACKETED_PASTE));
     }
@@ -598,7 +618,10 @@ mod tests {
         let got = dump(&fresh.term, 1000);
         let hist = fresh.term.grid().history_size();
         assert_eq!(&got[..hist], want_hist, "the scrollback is the same lines");
-        assert!(got[hist..].iter().all(|l| l.trim_start_matches(|c| c != '}').trim_start_matches('}').is_empty()), "the screen is blank: {got:?}");
+        assert!(
+            got[hist..].iter().all(|l| l.trim_start_matches(|c| c != '}').trim_start_matches('}').is_empty()),
+            "the screen is blank: {got:?}"
+        );
         assert_eq!(fresh.term.grid().cursor.point.line.0, 0);
     }
 }

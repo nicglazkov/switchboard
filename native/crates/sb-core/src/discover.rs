@@ -90,7 +90,8 @@ impl Found {
                     }
                 }
                 A if r.data.len() == 4 => {
-                    self.a.insert(r.name.to_ascii_lowercase(), Ipv4Addr::new(r.data[0], r.data[1], r.data[2], r.data[3]));
+                    self.a
+                        .insert(r.name.to_ascii_lowercase(), Ipv4Addr::new(r.data[0], r.data[1], r.data[2], r.data[3]));
                 }
                 _ => {}
             }

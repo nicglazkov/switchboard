@@ -152,7 +152,9 @@ impl Band {
         }
         match Band::of(ctx) {
             Band::Small => format!("{k}, small, so going back is cheap"),
-            Band::Medium => format!("{k}, resuming re-reads {k}; Start fresh is cheaper if you do not need the history"),
+            Band::Medium => {
+                format!("{k}, resuming re-reads {k}; Start fresh is cheaper if you do not need the history")
+            }
             Band::Big => format!("{k}, big: resuming re-reads all {k} at full price"),
         }
     }
@@ -184,7 +186,10 @@ pub struct Flags {
 impl Flags {
     /// How many launch flags it runs with, counting the model (always set), as the board's flag button shows it.
     pub fn count(&self) -> usize {
-        1 + [self.effort.is_some(), self.chrome, self.fast, self.perm.is_some(), self.agent.is_some(), self.remote].iter().filter(|b| **b).count()
+        1 + [self.effort.is_some(), self.chrome, self.fast, self.perm.is_some(), self.agent.is_some(), self.remote]
+            .iter()
+            .filter(|b| **b)
+            .count()
     }
 
     pub fn from_api(f: Option<&ApiFlags>) -> Flags {
@@ -324,12 +329,20 @@ pub struct Reaped {
 impl Reaped {
     fn from_api(r: Option<&ApiReaped>) -> Option<Reaped> {
         let r = r?;
-        Some(Reaped { at: r.at.unwrap_or(0.0), reason: r.reason.clone().unwrap_or_else(|| "idle".into()), idle_h: r.idle_h.unwrap_or(0.0) })
+        Some(Reaped {
+            at: r.at.unwrap_or(0.0),
+            reason: r.reason.clone().unwrap_or_else(|| "idle".into()),
+            idle_h: r.idle_h.unwrap_or(0.0),
+        })
     }
     /// "Stopped after 26 h idle to free memory. Resume continues it."
     pub fn text(&self) -> String {
         let h = self.idle_h;
-        let span = if h >= 48.0 { format!("{} days", (h / 24.0).round() as u64) } else { format!("{} h", h.round().max(1.0) as u64) };
+        let span = if h >= 48.0 {
+            format!("{} days", (h / 24.0).round() as u64)
+        } else {
+            format!("{} h", h.round().max(1.0) as u64)
+        };
         match self.reason.as_str() {
             "stalled" => format!("Stopped after {span} stuck on one step, to free memory. Resume continues it."),
             "replaced" => "Stopped to free memory once a newer chat took over. Resume continues it.".into(),
@@ -402,7 +415,13 @@ impl Session {
     /// The cache this second: warm turns cold the moment `cache_until` passes, on every view at once.
     pub fn cache_now(&self, now: f64) -> Cache {
         match self.cache {
-            Cache::Warm | Cache::Cold if self.cache_until > 0.0 => if self.cache_until > now { Cache::Warm } else { Cache::Cold },
+            Cache::Warm | Cache::Cold if self.cache_until > 0.0 => {
+                if self.cache_until > now {
+                    Cache::Warm
+                } else {
+                    Cache::Cold
+                }
+            }
             c => c,
         }
     }
@@ -431,11 +450,7 @@ impl Session {
         !link || (self.as_of > 0.0 && now - self.as_of > LIVE_STALE)
     }
     pub fn word(&self, now: f64) -> &'static str {
-        if self.reaped_note() && self.lamp(now) == Lamp::Idle {
-            "Stopped"
-        } else {
-            self.lamp(now).word()
-        }
+        if self.reaped_note() && self.lamp(now) == Lamp::Idle { "Stopped" } else { self.lamp(now).word() }
     }
     /// The reaper stopped it and nothing has used it since: say so instead of the usual words.
     pub fn reaped_note(&self) -> bool {
@@ -504,10 +519,22 @@ impl Session {
         let l = self.lamp(now);
         match l {
             Lamp::Warm => format!("Warm, {} left", fmt::mins(self.cache_left(now))),
-            Lamp::Cold => if self.handoff { "Cold, handoff ready".into() } else { "Cold, start fresh".into() },
+            Lamp::Cold => {
+                if self.handoff {
+                    "Cold, handoff ready".into()
+                } else {
+                    "Cold, start fresh".into()
+                }
+            }
             Lamp::Stall => format!("Stalled {}", fmt::sago(self.active, now)),
             Lamp::Idle if self.reaped_note() => "Stopped to free memory".into(),
-            Lamp::Idle => if self.alive && !self.background() { "Open, idle".into() } else { "Idle".into() },
+            Lamp::Idle => {
+                if self.alive && !self.background() {
+                    "Open, idle".into()
+                } else {
+                    "Idle".into()
+                }
+            }
             Lamp::Held => "Message held".into(),
             Lamp::Wait => self.wait_line(now, Some(NEEDS_CARD)).unwrap_or_else(|| "Waiting for you".into()),
             Lamp::Run => "Working".into(),
@@ -522,9 +549,17 @@ impl Session {
         if let (true, Some(rp)) = (self.reaped_note(), &self.reaped) {
             r.t(&rp.text());
         } else if self.ctx == 0 && matches!(l, Lamp::Run | Lamp::Warm | Lamp::Idle) {
-            r.t(if l == Lamp::Run { "Starting. Claude is working on the first reply." } else { "No replies yet, so there is nothing to re-read." });
+            r.t(if l == Lamp::Run {
+                "Starting. Claude is working on the first reply."
+            } else {
+                "No replies yet, so there is nothing to re-read."
+            });
         } else if self.held {
-            r.t("Your last message is held because going back would re-read ").b(&kk).t(" tokens. ").b("Start fresh").t(" carries your notes and that message into a new chat.");
+            r.t("Your last message is held because going back would re-read ")
+                .b(&kk)
+                .t(" tokens. ")
+                .b("Start fresh")
+                .t(" carries your notes and that message into a new chat.");
         } else if l == Lamp::Wait {
             r.t("Claude asked something and is waiting for your answer");
             if self.url.is_some() {
@@ -542,24 +577,43 @@ impl Session {
                 if self.background() && self.alive { ", or stop it" } else { "" }
             ));
         } else if l == Lamp::Cold {
-            r.t("The cache expired, so replying here re-reads all ").b(&kk).t(" tokens. ").b("Start fresh").t(" writes a summary and opens a new chat with just your notes.");
+            r.t("The cache expired, so replying here re-reads all ")
+                .b(&kk)
+                .t(" tokens. ")
+                .b("Start fresh")
+                .t(" writes a summary and opens a new chat with just your notes.");
         } else if l == Lamp::Run {
             r.t("Working now. The cache stays warm while it runs.");
         } else if l == Lamp::Warm && self.heavy() {
-            r.t("Replies stay cheap for ").b(&fmt::mins(self.cache_left(now))).t(". After that, start fresh instead of going back.");
+            r.t("Replies stay cheap for ")
+                .b(&fmt::mins(self.cache_left(now)))
+                .t(". After that, start fresh instead of going back.");
         } else if l == Lamp::Warm && self.band() == Band::Medium {
-            r.t("Replies stay cheap for ").b(&fmt::mins(self.cache_left(now))).t(". After that, resuming re-reads all ").b(&kk)
+            r.t("Replies stay cheap for ")
+                .b(&fmt::mins(self.cache_left(now)))
+                .t(". After that, resuming re-reads all ")
+                .b(&kk)
                 .t("; Start fresh is cheaper if you do not need the history.");
         } else if l == Lamp::Warm {
-            r.t("Replies stay cheap for ").b(&fmt::mins(self.cache_left(now))).t(&format!(", and at {kk} it stays cheap to come back to later."));
+            r.t("Replies stay cheap for ")
+                .b(&fmt::mins(self.cache_left(now)))
+                .t(&format!(", and at {kk} it stays cheap to come back to later."));
         } else if self.cache_now(now) == Cache::Unknown && self.band() == Band::Medium {
-            r.t("How long its cache stays warm is not known yet. Once it is cold, resuming re-reads all ").b(&kk).t(".");
+            r.t("How long its cache stays warm is not known yet. Once it is cold, resuming re-reads all ")
+                .b(&kk)
+                .t(".");
         } else if self.cache_now(now) == Cache::Unknown && self.band() == Band::Big {
-            r.t("How long its cache stays warm is not known yet. Once it is cold, going back re-reads all ").b(&kk).t(" at full price.");
+            r.t("How long its cache stays warm is not known yet. Once it is cold, going back re-reads all ")
+                .b(&kk)
+                .t(" at full price.");
         } else if self.cache_now(now) == Cache::Unknown {
             r.t(&format!("How long its cache stays warm is not known yet, but at {kk} going back is cheap."));
         } else if self.band() == Band::Medium {
-            r.t("The cache expired, so resuming re-reads all ").b(&kk).t(". ").b("Start fresh").t(" is cheaper if you do not need the history.");
+            r.t("The cache expired, so resuming re-reads all ")
+                .b(&kk)
+                .t(". ")
+                .b("Start fresh")
+                .t(" is cheaper if you do not need the history.");
         } else {
             r.t(&format!("The cache expired, but at {kk} going back is cheap."));
         }
@@ -570,7 +624,11 @@ impl Session {
         if self.lamp(now) == Lamp::Run {
             "Warm while it works".into()
         } else if self.cache_left(now) > 0 {
-            format!("Warm for {}, until {}", fmt::mins(self.cache_left(now)), fmt::when(now + self.cache_left(now) as f64, now))
+            format!(
+                "Warm for {}, until {}",
+                fmt::mins(self.cache_left(now)),
+                fmt::when(now + self.cache_left(now) as f64, now)
+            )
         } else if self.cache_now(now) == Cache::Unknown {
             "Not known yet".into()
         } else if self.cache_until > 0.0 {
@@ -594,9 +652,15 @@ impl Session {
     pub fn chips(&self, full: bool) -> Vec<Chip> {
         let mut out = Vec::new();
         let f = &self.flags;
-        let chip = |id: &str, short: &str, long: &str, icon: &str| Chip { id: id.into(), short: short.into(), long: long.into(), icon: icon.into() };
+        let chip = |id: &str, short: &str, long: &str, icon: &str| Chip {
+            id: id.into(),
+            short: short.into(),
+            long: long.into(),
+            icon: icon.into(),
+        };
         if let Some(e) = &f.effort {
-            let said = (self.tag_kind == Some(TagKind::Ultra) && e == "ultracode") || (self.tag_kind == Some(TagKind::Max) && e == "max");
+            let said = (self.tag_kind == Some(TagKind::Ultra) && e == "ultracode")
+                || (self.tag_kind == Some(TagKind::Max) && e == "max");
             if !said {
                 out.push(match e.as_str() {
                     "ultracode" => chip("ultracode", "UltraCode", "UltraCode", "spark"),
@@ -853,13 +917,35 @@ impl Plan {
     pub fn week_tone(&self) -> Tone {
         let used = self.week.unwrap_or(0.0);
         match self.week_projected {
-            None => if used >= 80.0 { Tone::Bad } else if used >= 50.0 { Tone::Warn } else { Tone::Ok },
-            Some(p) => if p > 100.0 { Tone::Bad } else if p > 85.0 { Tone::Warn } else { Tone::Ok },
+            None => {
+                if used >= 80.0 {
+                    Tone::Bad
+                } else if used >= 50.0 {
+                    Tone::Warn
+                } else {
+                    Tone::Ok
+                }
+            }
+            Some(p) => {
+                if p > 100.0 {
+                    Tone::Bad
+                } else if p > 85.0 {
+                    Tone::Warn
+                } else {
+                    Tone::Ok
+                }
+            }
         }
     }
     pub fn five_tone(&self) -> Tone {
         let f = self.five_hour.unwrap_or(0.0);
-        if f >= 80.0 { Tone::Bad } else if f >= 60.0 { Tone::Warn } else { Tone::Ok }
+        if f >= 80.0 {
+            Tone::Bad
+        } else if f >= 60.0 {
+            Tone::Warn
+        } else {
+            Tone::Ok
+        }
     }
     pub fn five_live(&self, now: f64) -> bool {
         self.five_hour_reset.map(|r| r > now).unwrap_or(false)
@@ -876,7 +962,11 @@ impl Plan {
     pub fn as_of(&self, now: f64) -> Option<String> {
         let age = self.limits_age(now).filter(|a| *a >= LIMITS_FRESH)?;
         let u = self.updated?;
-        Some(if age < 3600.0 { format!("as of {} ago", fmt::sago(u, now)) } else { format!("as of {}", fmt::when(u, now)) })
+        Some(if age < 3600.0 {
+            format!("as of {} ago", fmt::sago(u, now))
+        } else {
+            format!("as of {}", fmt::when(u, now))
+        })
     }
     fn week_reset_passed(&self, now: f64) -> bool {
         self.week_reset.is_some_and(|r| r <= now)
@@ -887,7 +977,9 @@ impl Plan {
         match self.week {
             None => "--".into(),
             Some(_) if self.week_reset_passed(now) => "--".into(),
-            Some(w) if self.limits_age(now).is_some_and(|a| a > FIVE_WINDOW) => format!("at least {}%", w.round() as i64),
+            Some(w) if self.limits_age(now).is_some_and(|a| a > FIVE_WINDOW) => {
+                format!("at least {}%", w.round() as i64)
+            }
             Some(w) => format!("{}%", w.round() as i64),
         }
     }
@@ -1002,7 +1094,17 @@ pub fn project_of(folder: &str) -> String {
     if let Some(i) = f.find("/.claude/worktrees/") {
         f.truncate(i);
     }
-    for p in ["Developer/", "Documents/Code/", "Documents/code/", "Documents/", "Downloads/", "Desktop/Claude/", "Desktop/", "code/", "Code/"] {
+    for p in [
+        "Developer/",
+        "Documents/Code/",
+        "Documents/code/",
+        "Documents/",
+        "Downloads/",
+        "Desktop/Claude/",
+        "Desktop/",
+        "code/",
+        "Code/",
+    ] {
         if let Some(rest) = f.strip_prefix(p) {
             f = rest.to_string();
             break;
@@ -1030,7 +1132,14 @@ pub fn session(s: &ApiSession, m: &ApiMachine, label: &str, root_lbl: &str, fetc
     session_at(s, m, label, root_lbl, fetched_at, 0.0)
 }
 
-pub fn session_at(s: &ApiSession, m: &ApiMachine, label: &str, root_lbl: &str, fetched_at: f64, offset: f64) -> Session {
+pub fn session_at(
+    s: &ApiSession,
+    m: &ApiMachine,
+    label: &str,
+    root_lbl: &str,
+    fetched_at: f64,
+    offset: f64,
+) -> Session {
     let local = |t: Option<f64>| t.filter(|t| *t > 0.0).map(|t| t + offset);
     let ctx = s.ctx.unwrap_or(0.0).max(0.0) as u64;
     let mtime = local(s.mtime).unwrap_or(0.0);
@@ -1044,7 +1153,9 @@ pub fn session_at(s: &ApiSession, m: &ApiMachine, label: &str, root_lbl: &str, f
         None => {
             let stalled = s.stalled.unwrap_or(status == Some("busy") && quiet > STALLED);
             let waiting = !stalled
-                && (status == Some("waiting") || (s.state.as_deref() == Some("blocked") && status.is_some_and(|x| x != "busy" && x != "stopped")));
+                && (status == Some("waiting")
+                    || (s.state.as_deref() == Some("blocked")
+                        && status.is_some_and(|x| x != "busy" && x != "stopped")));
             let a = active_raw.max(if active_raw > 0.0 { 0.0 } else { mtime });
             if held {
                 Activity::Held
@@ -1076,7 +1187,13 @@ pub fn session_at(s: &ApiSession, m: &ApiMachine, label: &str, root_lbl: &str, f
     };
     let stalled = activity == Activity::Stalled;
     let open = s.kind.is_some() && status.is_some() && status != Some("stopped") && status != Some("done") && !stalled;
-    let active = if active_raw > 0.0 { active_raw } else if mtime > 0.0 { mtime } else { fetched_at };
+    let active = if active_raw > 0.0 {
+        active_raw
+    } else if mtime > 0.0 {
+        mtime
+    } else {
+        fetched_at
+    };
     let idle = fetched_at - active;
     let raw_title = s.title.clone().unwrap_or_default();
     let (topic, tag) = names::split(&raw_title);
@@ -1180,7 +1297,8 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
             let label = m.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| m.name.clone());
             let root = m.root.clone().unwrap_or_default();
             let rl = root_label(&root);
-            let mut sessions: Vec<Session> = m.sessions.iter().map(|s| session_at(s, m, &label, &rl, fetched_at, offset)).collect();
+            let mut sessions: Vec<Session> =
+                m.sessions.iter().map(|s| session_at(s, m, &label, &rl, fetched_at, offset)).collect();
             sessions.sort_by(|a, b| b.active.total_cmp(&a.active));
             let mut rep: Vec<Replaced> = m.replaced.iter().map(|r| replaced(r, m, &label, &rl)).collect();
             rep.sort_by(|a, b| b.active.total_cmp(&a.active));
@@ -1229,7 +1347,17 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
 
 impl Snapshot {
     pub fn empty() -> Snapshot {
-        Snapshot { machines: Vec::new(), plan: Plan::default(), fetched_at: 0.0, server_now: None, web: None, v: None, cleanup: None, groups: Vec::new(), budget: None }
+        Snapshot {
+            machines: Vec::new(),
+            plan: Plan::default(),
+            fetched_at: 0.0,
+            server_now: None,
+            web: None,
+            v: None,
+            cleanup: None,
+            groups: Vec::new(),
+            budget: None,
+        }
     }
     /// The group a chat is in, by its thread (its own sid when it has none), from `groups`.
     pub fn group_of(&self, s: &Session) -> Option<&crate::groups::Group> {
@@ -1299,12 +1427,16 @@ impl Snapshot {
     /// Whether a machine's chats can be renamed: its agent says so. One not heard from yet (no feature list, not
     /// online) is given the benefit: the server keeps the name and tells the machine when it is back.
     pub fn can_rename(&self, machine: &str) -> bool {
-        self.machine(machine).is_none_or(|m| m.features.iter().any(|f| f == "rename") || (m.features.is_empty() && m.online != Some(true)))
+        self.machine(machine).is_none_or(|m| {
+            m.features.iter().any(|f| f == "rename") || (m.features.is_empty() && m.online != Some(true))
+        })
     }
     /// A chat renamed here shows its new name at once, before the server's next snapshot says it.
     pub fn retitle(&mut self, key: &str, raw: &str) -> bool {
         let Some((m, sid)) = key.split_once(':') else { return false };
-        let Some(s) = self.machines.iter_mut().find(|x| x.name == m).and_then(|x| x.sessions.iter_mut().find(|s| s.sid == sid)) else {
+        let Some(s) =
+            self.machines.iter_mut().find(|x| x.name == m).and_then(|x| x.sessions.iter_mut().find(|s| s.sid == sid))
+        else {
             return false;
         };
         let (topic, tag) = names::split(raw);
@@ -1530,7 +1662,10 @@ mod tests {
         .unwrap();
         let mut snap = normalize(&raw, NOW);
         assert_eq!(snap.groups.len(), 2, "a group without an id is dropped");
-        assert_eq!((snap.groups[1].name.as_str(), snap.groups[1].color, snap.groups[1].members.clone()), ("", crate::groups::GroupColor::Grey, vec!["s9".to_string()]));
+        assert_eq!(
+            (snap.groups[1].name.as_str(), snap.groups[1].color, snap.groups[1].members.clone()),
+            ("", crate::groups::GroupColor::Grey, vec!["s9".to_string()])
+        );
         let s1 = snap.session("studio:s1").unwrap().clone();
         assert_eq!(s1.group.as_deref(), Some("g1"));
         assert_eq!(snap.group_of(&s1).map(|g| g.name.as_str()), Some("Server"));

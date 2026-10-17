@@ -5,8 +5,9 @@
 //! machine. All of it lives on the server, so every device agrees.
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::*, px, relative,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
+    IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    Window, div, prelude::*, px, relative,
 };
 use gpui_base::input::{InputEvent, InputState, TextareaState};
 use sb_core::api::{ApiCapsView, ApiMachineRow, ApiMachines, ApiMcp, ApiRootDirs};
@@ -30,10 +31,12 @@ pub enum Section {
     Notifications,
     Chrome,
     Budget,
+    Updates,
+    Privacy,
 }
 
 /// About is not here: it is its own window (about.rs), from Switchboard > About Switchboard.
-const SECTIONS: [(Section, &str, &str); 8] = [
+const SECTIONS: [(Section, &str, &str); 10] = [
     (Section::Appearance, "Appearance", "sun"),
     (Section::Terminal, "Terminal", "term"),
     (Section::NewSessions, "New sessions", "plus"),
@@ -42,6 +45,8 @@ const SECTIONS: [(Section, &str, &str); 8] = [
     (Section::Notifications, "Notifications", "bolt"),
     (Section::Chrome, "Chrome machine", "globe"),
     (Section::Budget, "Budget", "gauge"),
+    (Section::Updates, "Updates", "update"),
+    (Section::Privacy, "AI and your Claude setup", "spark"),
 ];
 
 /// Opens Settings, or brings it forward.
@@ -144,6 +149,7 @@ pub struct SettingsView {
     add_target: Entity<InputState>,
     error: Option<String>,
     scroll: ScrollHandle,
+    nav_scroll: ScrollHandle,
     /// Library: Import and New tool (one open at a time), their fields, open version lists, the Set key command
     /// showing (tool, machine, key), and Delete's first click.
     lib_import: Option<library_ui::Import>,
@@ -169,7 +175,9 @@ impl SettingsView {
         let extra = cx.new(|cx| InputState::new(window, cx).placeholder("Something else it can do"));
         let lib_name = cx.new(|cx| InputState::new(window, cx).placeholder("my-tool"));
         let lib_brief = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("What it does, what it needs, and how you would check it works.").auto_grow(3, 8)
+            TextareaState::new(window, cx)
+                .placeholder("What it does, what it needs, and how you would check it works.")
+                .auto_grow(3, 8)
         });
         let lib_secret = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste the value"));
         let subs = vec![
@@ -218,6 +226,7 @@ impl SettingsView {
             add_target,
             error: None,
             scroll: ScrollHandle::new(),
+            nav_scroll: ScrollHandle::new(),
             lib_import: None,
             lib_new: None,
             lib_name,
@@ -454,32 +463,24 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// A row on a section's page, ruled under: the shared settings row (ui::setting_row).
     fn row(t: &Theme, label: &str, note: Option<&str>, ctl: AnyElement) -> AnyElement {
         div()
             .py(px(12.))
-            .flex()
-            .items_center()
-            .gap(px(16.))
             .border_b_1()
             .border_color(t.line)
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(label.to_string()))
-                    .children(note.map(|n| ui::wrap(n.to_string()).text_size(px(12.5)).line_height(relative(1.4)).text_color(t.faint))),
-            )
-            .child(ctl)
+            .child(ui::setting_row(t, label.to_string(), note.map(|n| SharedString::from(n.to_string())), Some(ctl)))
             .into_any_element()
     }
 
     fn appearance(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
         let mode = Mode::parse(self.app.read(cx).settings.theme.as_deref());
         let mut seg = ui::seg_box(t);
-        for (i, (m, label, ic)) in [(Mode::Light, "Light", "sun"), (Mode::System, "System", "contrast"), (Mode::Dark, "Dark", "moon")].into_iter().enumerate() {
+        for (i, (m, label, ic)) in
+            [(Mode::Light, "Light", "sun"), (Mode::System, "System", "contrast"), (Mode::Dark, "Dark", "moon")]
+                .into_iter()
+                .enumerate()
+        {
             seg = seg.child(
                 ui::seg_btn(t, ("st-mode", i), mode == m, false)
                     .child(ui::icon(ic, 13., if mode == m { t.ink } else { t.dim }))
@@ -491,9 +492,22 @@ impl SettingsView {
             .child(Self::head(
                 t,
                 "Appearance",
-                if ui::MAC { "How Switchboard looks. Synced, so your other Macs and the iPhone app match." } else { "How Switchboard looks. Synced, so your other computers and the iPhone app match." },
+                if ui::MAC {
+                    "How Switchboard looks. Synced, so your other Macs and the iPhone app match."
+                } else {
+                    "How Switchboard looks. Synced, so your other computers and the iPhone app match."
+                },
             ))
-            .child(Self::row(t, "Theme", Some(if ui::MAC { "Also in the header, and ⌘⇧L switches light and dark." } else { "Also in the header, and Ctrl+Shift+L switches light and dark." }), seg.into_any_element()))
+            .child(Self::row(
+                t,
+                "Theme",
+                Some(if ui::MAC {
+                    "Also in the header, and ⌘⇧L switches light and dark."
+                } else {
+                    "Also in the header, and Ctrl+Shift+L switches light and dark."
+                }),
+                seg.into_any_element(),
+            ))
             .into_any_element()
     }
 
@@ -501,7 +515,8 @@ impl SettingsView {
         let look = colors::look(cx);
         let hover = t.hover;
         let mut grid = div().flex().flex_wrap().gap(px(10.));
-        let mut all: Vec<(String, String, colors::Palette)> = colors::scheme::all().iter().map(|s| (s.id.clone(), s.name.clone(), colors::palette_of(s))).collect();
+        let mut all: Vec<(String, String, colors::Palette)> =
+            colors::scheme::all().iter().map(|s| (s.id.clone(), s.name.clone(), colors::palette_of(s))).collect();
         all.push((colors::MATCH.to_string(), "Match the app".into(), colors::palette(t)));
         for (id, name, pal) in all {
             let on = look.scheme == id;
@@ -519,7 +534,20 @@ impl SettingsView {
                     .when(on, |d| d.bg(t.sel).shadow(vec![Theme::ring(t.accent)]))
                     .when(!on, |d| d.hover(move |s| s.bg(hover)))
                     .child(crate::term::swatch(t, &pal, 160., 44.))
-                    .child(div().flex().items_center().gap(px(6.)).child(div().flex_1().text_size(px(13.)).text_color(if on { t.ink } else { t.ink2 }).child(name)).when(on, |d| d.child(ui::icon("check", 13., t.accent))))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .text_size(px(13.))
+                                    .text_color(if on { t.ink } else { t.ink2 })
+                                    .child(name),
+                            )
+                            .when(on, |d| d.child(ui::icon("check", 13., t.accent))),
+                    )
                     .on_hover(cx.listener(move |_, h: &bool, _, cx| colors::set_preview(h.then(|| peek.clone()), cx)))
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
                         colors::set_preview(None, cx);
@@ -529,16 +557,21 @@ impl SettingsView {
         }
         let size = look.size.unwrap_or(sb_core::term::scheme::SIZE_DEFAULT);
         let step = |id: &'static str, ic: &'static str, up: bool| {
-            ui::icon_btn(t, id, ic, 28.).shadow(vec![Theme::ring(t.line2)]).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                let next = sb_core::term::scheme::step_size(colors::look(cx).size, up);
-                crate::theme::save_look(cx, |s| s.term_size = Some(next));
-            }))
+            ui::icon_btn(t, id, ic, 28.).shadow(vec![Theme::ring(t.line2)]).on_click(cx.listener(
+                move |_, _: &ClickEvent, _, cx| {
+                    let next = sb_core::term::scheme::step_size(colors::look(cx).size, up);
+                    crate::theme::save_look(cx, |s| s.term_size = Some(next));
+                },
+            ))
         };
         let mut cursors = ui::seg_box(t);
-        for (i, (v, label)) in [("block", "Block"), ("bar", "Bar"), ("underline", "Underline")].into_iter().enumerate() {
-            cursors = cursors.child(ui::seg_btn(t, ("st-cur", i), look.cursor == v, false).child(label).on_click(cx.listener(move |_, _: &ClickEvent, _, cx| {
-                crate::theme::save_look(cx, |s| s.term_cursor = Some(v.to_string()))
-            })));
+        for (i, (v, label)) in [("block", "Block"), ("bar", "Bar"), ("underline", "Underline")].into_iter().enumerate()
+        {
+            cursors = cursors.child(ui::seg_btn(t, ("st-cur", i), look.cursor == v, false).child(label).on_click(
+                cx.listener(move |_, _: &ClickEvent, _, cx| {
+                    crate::theme::save_look(cx, |s| s.term_cursor = Some(v.to_string()))
+                }),
+            ));
         }
         let blink = look.blink;
         div()
@@ -556,9 +589,8 @@ impl SettingsView {
                 t,
                 "Blink",
                 None,
-                ui::seg_box(t)
-                    .child(ui::seg_btn(t, "st-blink-on", blink, false).child("On").on_click(cx.listener(|_, _: &ClickEvent, _, cx| crate::theme::save_look(cx, |s| s.term_blink = Some(true)))))
-                    .child(ui::seg_btn(t, "st-blink-off", !blink, false).child("Off").on_click(cx.listener(|_, _: &ClickEvent, _, cx| crate::theme::save_look(cx, |s| s.term_blink = Some(false)))))
+                ui::switch(t, "st-blink", blink, false)
+                    .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| crate::theme::save_look(cx, |s| s.term_blink = Some(!blink))))
                     .into_any_element(),
             ))
             .into_any_element()
@@ -568,7 +600,8 @@ impl SettingsView {
     fn group(t: &Theme, title: &str, sub: Option<&str>, rows: Vec<AnyElement>) -> AnyElement {
         let mut card = div().rounded(px(ui::R_CARD)).border_1().border_color(t.line).bg(t.bg).flex().flex_col();
         for (i, r) in rows.into_iter().enumerate() {
-            card = card.child(div().px(px(14.)).py(px(11.)).when(i > 0, |d| d.border_t_1().border_color(t.line)).child(r));
+            card =
+                card.child(div().px(px(14.)).py(px(11.)).when(i > 0, |d| d.border_t_1().border_color(t.line)).child(r));
         }
         div()
             .mt(px(22.))
@@ -581,31 +614,24 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(3.))
-                    .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2).child(title.to_string()))
-                    .children(sub.map(|s| ui::wrap(s.to_string()).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.faint))),
+                    .child(
+                        div()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.ink2)
+                            .child(title.to_string()),
+                    )
+                    .children(sub.map(|s| {
+                        ui::wrap(s.to_string()).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.faint)
+                    })),
             )
             .child(card)
             .into_any_element()
     }
 
-    /// One row on a group's card: a label (and a note under it) and its control on the right.
+    /// One row on a group's card: the shared settings row (ui::setting_row).
     fn crow(t: &Theme, label: impl Into<SharedString>, note: Option<String>, ctl: Option<AnyElement>) -> AnyElement {
-        div()
-            .flex()
-            .items_center()
-            .gap(px(16.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .gap(px(2.))
-                    .child(ui::wrap(label.into()).text_size(px(13.5)).text_color(t.ink))
-                    .children(note.map(|n| ui::wrap(n).text_size(px(12.5)).line_height(relative(1.4)).text_color(t.faint))),
-            )
-            .children(ctl.map(|c| div().flex_none().child(c)))
-            .into_any_element()
+        ui::setting_row(t, label, note.map(SharedString::from), ctl).into_any_element()
     }
 
     fn os_name(os: Option<&str>) -> &'static str {
@@ -656,17 +682,31 @@ impl SettingsView {
             .child(gpui_base::Input::new(&self.field))
     }
 
-    fn edit_row(&self, t: &Theme, ids: (&'static str, &'static str, &'static str), focused: bool, cx: &Context<Self>) -> AnyElement {
+    fn edit_row(
+        &self,
+        t: &Theme,
+        ids: (&'static str, &'static str, &'static str),
+        focused: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         div()
             .flex()
             .flex_wrap()
             .gap(px(8.))
             .child(self.text_field(t, ids.0, focused))
-            .child(ui::primary_btn(t, ids.1, 32.).px(px(12.)).text_size(px(13.)).child("Save").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_edit(cx))))
-            .child(ui::ghost(t, ids.2, Some("Cancel"), None).h(px(32.)).px(px(10.)).text_size(px(13.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.edit = None;
-                cx.notify();
-            })))
+            .child(
+                ui::primary_btn(t, ids.1, 32.)
+                    .px(px(12.))
+                    .text_size(px(13.))
+                    .child("Save")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_edit(cx))),
+            )
+            .child(ui::ghost(t, ids.2, Some("Cancel"), None).h(px(32.)).px(px(10.)).text_size(px(13.)).on_click(
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.edit = None;
+                    cx.notify();
+                }),
+            ))
             .into_any_element()
     }
 
@@ -676,8 +716,14 @@ impl SettingsView {
         }
         let mut body = div().child(Self::head(t, "Machines", "Every machine Switchboard watches, in the order the board shows them. Open one to set its Claude folder, see what it can do, and its MCP servers."));
         let list = match &self.machines {
-            None => return body.child(div().text_size(px(13.)).text_color(t.faint).child("Loading the machines")).into_any_element(),
-            Some(Err(e)) => return body.child(ui::wrap(format!("Could not load the machines. {e}")).text_size(px(13.)).text_color(t.bad)).into_any_element(),
+            None => {
+                return body.child(ui::loading(t, "st-m-load", "Loading the machines")).into_any_element();
+            }
+            Some(Err(e)) => {
+                return body
+                    .child(ui::wrap(format!("Could not load the machines. {e}")).text_size(px(13.)).text_color(t.bad))
+                    .into_any_element();
+            }
             Some(Ok(m)) => m.machines.clone(),
         };
         let n = list.len();
@@ -700,13 +746,23 @@ impl SettingsView {
                     .when(i == 0, |d| d.rounded_t(px(ui::R_CARD - 1.)))
                     .when(i + 1 == n, |d| d.rounded_b(px(ui::R_CARD - 1.)))
                     .when(i > 0, |d| d.border_t_1().border_color(t.line))
-                    .child(div().flex_none().relative().child(ui::machine_icon(&m.name, 22., t.dim)).child(
-                        div().absolute().right(px(-2.)).bottom(px(-1.)).size(px(9.)).rounded_full().border_2().border_color(t.bg).bg(match m.online {
-                            Some(true) => t.warm,
-                            Some(false) => t.bad,
-                            None => t.cold,
-                        }),
-                    ))
+                    .child(
+                        div().flex_none().relative().child(ui::machine_icon(&m.name, 22., t.dim)).child(
+                            div()
+                                .absolute()
+                                .right(px(-2.))
+                                .bottom(px(-1.))
+                                .size(px(9.))
+                                .rounded_full()
+                                .border_2()
+                                .border_color(t.bg)
+                                .bg(match m.online {
+                                    Some(true) => t.warm,
+                                    Some(false) => t.bad,
+                                    None => t.cold,
+                                }),
+                        ),
+                    )
                     .child(
                         div()
                             .flex_1()
@@ -720,9 +776,20 @@ impl SettingsView {
                                     .flex_wrap()
                                     .items_center()
                                     .gap(px(8.))
-                                    .child(ui::wrap(m.label.clone()).text_size(px(14.5)).font_weight(FontWeight::BOLD).text_color(t.ink))
-                                    .child(div().text_size(px(12.5)).text_color(t.faint).child(if os.is_empty() { m.name.clone() } else { format!("{os}, {}", m.name) }))
-                                    .when(m.needs_root, |d| d.child(ui::note_tag(t, "folder", "Pick its Claude folder"))),
+                                    .child(
+                                        ui::wrap(m.label.clone())
+                                            .text_size(px(14.5))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(t.ink),
+                                    )
+                                    .child(div().text_size(px(12.5)).text_color(t.faint).child(if os.is_empty() {
+                                        m.name.clone()
+                                    } else {
+                                        format!("{os}, {}", m.name)
+                                    }))
+                                    .when(m.needs_root, |d| {
+                                        d.child(ui::note_tag(t, "folder", "Pick its Claude folder"))
+                                    }),
                             )
                             .child(
                                 div()
@@ -734,10 +801,14 @@ impl SettingsView {
                                     .child(ui::icon("folder", 13., t.faint))
                                     .child(ui::wrap(folder).font_family(NUM)),
                             )
-                            .child(ui::wrap(match Self::versions_line(&m) {
-                                Some(v) => format!("{}. {v}", Self::status_line(&m)),
-                                None => Self::status_line(&m),
-                            }).text_size(px(12.)).text_color(t.faint)),
+                            .child(
+                                ui::wrap(match Self::versions_line(&m) {
+                                    Some(v) => format!("{}. {v}", Self::status_line(&m)),
+                                    None => Self::status_line(&m),
+                                })
+                                .text_size(px(12.))
+                                .text_color(t.faint),
+                            ),
                     )
                     .child(
                         div()
@@ -771,16 +842,37 @@ impl SettingsView {
             body = body.child(ui::wrap(e.clone()).mt(px(10.)).text_size(px(13.)).text_color(t.bad));
         }
         let field = |inp: &Entity<InputState>, w: f32| {
-            div().w(px(w)).h(px(32.)).px(px(10.)).flex().items_center().rounded(px(ui::R_CTRL)).border_1().border_color(t.line2).bg(t.bg).text_size(px(13.)).text_color(t.ink).child(gpui_base::Input::new(inp))
+            div()
+                .w(px(w))
+                .h(px(32.))
+                .px(px(10.))
+                .flex()
+                .items_center()
+                .rounded(px(ui::R_CTRL))
+                .border_1()
+                .border_color(t.line2)
+                .bg(t.bg)
+                .text_size(px(13.))
+                .text_color(t.ink)
+                .child(gpui_base::Input::new(inp))
         };
-        let labeled = |l: &str, el: AnyElement| div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.dim).child(l.to_string())).child(el);
+        let labeled = |l: &str, el: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.))
+                .child(div().text_size(px(12.)).text_color(t.dim).child(l.to_string()))
+                .child(el)
+        };
         if self.adding {
             let mut oss = ui::seg_box(t);
             for (i, (v, l)) in [("mac", "macOS"), ("linux", "Linux"), ("windows", "Windows")].into_iter().enumerate() {
-                oss = oss.child(ui::seg_btn(t, ("st-os", i), self.add_os == v, false).child(l).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.add_os = v;
-                    cx.notify();
-                })));
+                oss = oss.child(ui::seg_btn(t, ("st-os", i), self.add_os == v, false).child(l).on_click(cx.listener(
+                    move |this, _: &ClickEvent, _, cx| {
+                        this.add_os = v;
+                        cx.notify();
+                    },
+                )));
             }
             body = body.child(
                 div()
@@ -824,11 +916,24 @@ impl SettingsView {
                     .flex()
                     .flex_wrap()
                     .gap(px(8.))
-                    .child(ui::primary_btn(t, "st-pair", 34.).px(px(14.)).text_size(px(13.)).child(ui::icon("plus", 14., t.on_accent)).child("Add a machine").on_click(cx.listener(|_, _: &ClickEvent, _, cx| crate::files::open_pair(cx))))
-                    .child(ui::line_btn(t, "st-ssh", 34.).px(px(14.)).text_size(px(13.)).child("Add one over SSH").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.adding = true;
-                        cx.notify();
-                    }))),
+                    .child(
+                        ui::primary_btn(t, "st-pair", 34.)
+                            .px(px(14.))
+                            .text_size(px(13.))
+                            .child(ui::icon("plus", 14., t.on_accent))
+                            .child("Add a machine")
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| crate::files::open_pair(cx))),
+                    )
+                    .child(
+                        ui::line_btn(t, "st-ssh", 34.)
+                            .px(px(14.))
+                            .text_size(px(13.))
+                            .child("Add one over SSH")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.adding = true;
+                                cx.notify();
+                            })),
+                    ),
             );
         }
         body.into_any_element()
@@ -839,7 +944,11 @@ impl SettingsView {
         let name = m.name.clone();
         let focused = self.field.focus_handle(cx).is_focused(window);
         let os = Self::os_name(m.os.as_deref());
-        let back = ui::ghost(t, "st-back", Some("All machines"), Some("back")).h(px(28.)).px(px(8.)).text_size(px(13.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.go(Section::Machines, cx)));
+        let back = ui::ghost(t, "st-back", Some("All machines"), Some("back"))
+            .h(px(28.))
+            .px(px(8.))
+            .text_size(px(13.))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.go(Section::Machines, cx)));
         let n1 = name.clone();
         let label = m.label.clone();
         let title = if self.edit == Some(Edit::Name(name.clone())) {
@@ -857,16 +966,23 @@ impl SettingsView {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
-                        .child(ui::wrap(m.label.clone()).text_size(px(20.)).font_weight(FontWeight::BOLD).text_color(t.ink))
+                        .child(
+                            ui::wrap(m.label.clone())
+                                .text_size(px(20.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(t.ink),
+                        )
                         .child(ui::wrap(Self::status_line(&m)).text_size(px(13.)).text_color(match m.online {
                             Some(true) => t.dim,
                             Some(false) => t.bad,
                             None => t.faint,
                         })),
                 )
-                .child(ui::line_btn(t, "st-rename", 30.).px(px(12.)).text_size(px(13.)).child("Rename").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                    this.start_edit(Edit::Name(n1.clone()), label.clone(), window, cx)
-                })))
+                .child(ui::line_btn(t, "st-rename", 30.).px(px(12.)).text_size(px(13.)).child("Rename").on_click(
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.start_edit(Edit::Name(n1.clone()), label.clone(), window, cx)
+                    }),
+                ))
                 .into_any_element()
         };
         let mut body = div().flex().flex_col().child(div().mb(px(10.)).ml(px(-8.)).child(back)).child(title);
@@ -875,16 +991,70 @@ impl SettingsView {
         }
 
         // About
-        let how = if m.via.as_deref() == Some("link") { "Linked with switchboard-node".to_string() } else { format!("Over SSH, {}", m.target.clone().unwrap_or_default()) };
+        let how = if m.via.as_deref() == Some("link") {
+            "Linked with switchboard-node".to_string()
+        } else {
+            format!("Over SSH, {}", m.target.clone().unwrap_or_default())
+        };
         let v = m.versions.clone().unwrap_or_default();
-        let unknown = if m.online == Some(true) { "Its agent does not say yet. Update Switchboard there." } else { "Shown once it is online." };
-        body = body.child(Self::group(t, "About this machine", None, vec![
-            Self::crow(t, "System", None, Some(div().text_size(px(13.)).text_color(t.dim).child(if os.is_empty() { "Not known yet".to_string() } else { os.to_string() }).into_any_element())),
-            Self::crow(t, "Id", Some("Switchboard's own name for it. It never changes.".into()), Some(div().font_family(NUM).text_size(px(13.)).text_color(t.dim).child(name.clone()).into_any_element())),
-            Self::crow(t, "Connection", Some(how), None),
-            Self::crow(t, "Claude Code", if v.claude.is_none() { Some(unknown.into()) } else { None }, v.claude.clone().map(|c| div().font_family(NUM).text_size(px(13.)).text_color(t.dim).child(c).into_any_element())),
-            Self::crow(t, "Switchboard agent", if v.agent.is_none() { Some(unknown.into()) } else { Some("The build running there, to compare machines.".into()) }, v.agent.clone().map(|c| div().font_family(NUM).text_size(px(13.)).text_color(t.dim).child(c).into_any_element())),
-        ]));
+        let unknown = if m.online == Some(true) {
+            "Its agent does not say yet. Update Switchboard there."
+        } else {
+            "Shown once it is online."
+        };
+        body = body.child(Self::group(
+            t,
+            "About this machine",
+            None,
+            vec![
+                Self::crow(
+                    t,
+                    "System",
+                    None,
+                    Some(
+                        div()
+                            .text_size(px(13.))
+                            .text_color(t.dim)
+                            .child(if os.is_empty() { "Not known yet".to_string() } else { os.to_string() })
+                            .into_any_element(),
+                    ),
+                ),
+                Self::crow(
+                    t,
+                    "Id",
+                    Some("Switchboard's own name for it. It never changes.".into()),
+                    Some(
+                        div()
+                            .font_family(NUM)
+                            .text_size(px(13.))
+                            .text_color(t.dim)
+                            .child(name.clone())
+                            .into_any_element(),
+                    ),
+                ),
+                Self::crow(t, "Connection", Some(how), None),
+                Self::crow(
+                    t,
+                    "Claude Code",
+                    if v.claude.is_none() { Some(unknown.into()) } else { None },
+                    v.claude.clone().map(|c| {
+                        div().font_family(NUM).text_size(px(13.)).text_color(t.dim).child(c).into_any_element()
+                    }),
+                ),
+                Self::crow(
+                    t,
+                    "Switchboard agent",
+                    if v.agent.is_none() {
+                        Some(unknown.into())
+                    } else {
+                        Some("The build running there, to compare machines.".into())
+                    },
+                    v.agent.clone().map(|c| {
+                        div().font_family(NUM).text_size(px(13.)).text_color(t.dim).child(c).into_any_element()
+                    }),
+                ),
+            ],
+        ));
 
         // Claude folder
         body = body.child(self.folder_group(t, &m, focused, cx));
@@ -897,31 +1067,36 @@ impl SettingsView {
         let now = AppState::now();
         let arming = self.removing.as_ref().is_some_and(|(n, at)| *n == name && now - at < 4.);
         let (n3, n4) = (name.clone(), name.clone());
-        body = body.child(Self::group(t, "Remove", None, vec![Self::crow(
+        body = body.child(Self::group(
             t,
-            "Remove this machine",
-            Some("Switchboard stops watching it. Its chats and files stay on it, and you can add it again.".into()),
-            Some(
-                ui::line_btn(t, "st-rm", 30.)
-                    .px(px(12.))
-                    .text_size(px(13.))
-                    .text_color(t.bad)
-                    .when(arming, |d| d.bg(t.bad.alpha(0.12)))
-                    .child(if arming { "Click again to remove" } else { "Remove" })
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let now = AppState::now();
-                        if this.removing.as_ref().is_some_and(|(n, at)| *n == n3 && now - at < 4.) {
-                            this.removing = None;
-                            this.machine = None;
-                            this.send(serde_json::json!({"op": "remove", "machine": n4}), cx);
-                        } else {
-                            this.removing = Some((n3.clone(), now));
-                            cx.notify();
-                        }
-                    }))
-                    .into_any_element(),
-            ),
-        )]));
+            "Remove",
+            None,
+            vec![Self::crow(
+                t,
+                "Remove this machine",
+                Some("Switchboard stops watching it. Its chats and files stay on it, and you can add it again.".into()),
+                Some(
+                    ui::line_btn(t, "st-rm", 30.)
+                        .px(px(12.))
+                        .text_size(px(13.))
+                        .text_color(t.bad)
+                        .when(arming, |d| d.bg(t.bad.alpha(0.12)))
+                        .child(if arming { "Click again to remove" } else { "Remove" })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let now = AppState::now();
+                            if this.removing.as_ref().is_some_and(|(n, at)| *n == n3 && now - at < 4.) {
+                                this.removing = None;
+                                this.machine = None;
+                                this.send(serde_json::json!({"op": "remove", "machine": n4}), cx);
+                            } else {
+                                this.removing = Some((n3.clone(), now));
+                                cx.notify();
+                            }
+                        }))
+                        .into_any_element(),
+                ),
+            )],
+        ));
         body.child(div().h(px(20.))).into_any_element()
     }
 
@@ -970,7 +1145,15 @@ impl SettingsView {
                     .flex()
                     .flex_col()
                     .gap(px(8.))
-                    .child(ui::wrap(if m.os.as_deref() == Some("windows") { "A full path, like ~/Claude or C:\\Users\\you\\Claude." } else { "A full path, like ~/Claude or /Users/you/Claude." }).text_size(px(12.5)).text_color(t.faint))
+                    .child(
+                        ui::wrap(if m.os.as_deref() == Some("windows") {
+                            "A full path, like ~/Claude or C:\\Users\\you\\Claude."
+                        } else {
+                            "A full path, like ~/Claude or /Users/you/Claude."
+                        })
+                        .text_size(px(12.5))
+                        .text_color(t.faint),
+                    )
                     .child(self.edit_row(t, ("st-root", "st-root-save", "st-root-x"), focused, cx))
                     .into_any_element(),
             );
@@ -988,19 +1171,38 @@ impl SettingsView {
                         .flex()
                         .gap(px(6.))
                         .when(can_browse, |d| {
-                            d.child(ui::line_btn(t, "st-root-pick", 30.).px(px(12.)).text_size(px(13.)).child("Choose").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.browse(n2.clone(), String::new(), cx)
-                            })))
+                            d.child(
+                                ui::line_btn(t, "st-root-pick", 30.)
+                                    .px(px(12.))
+                                    .text_size(px(13.))
+                                    .child("Choose")
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        this.browse(n2.clone(), String::new(), cx)
+                                    })),
+                            )
                         })
-                        .child(ui::ghost(t, "st-root-type", Some("Type a path"), None).h(px(30.)).px(px(8.)).text_size(px(13.)).on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                            this.picker = None;
-                            this.start_edit(Edit::Root(n3.clone()), root.clone(), window, cx)
-                        })))
+                        .child(
+                            ui::ghost(t, "st-root-type", Some("Type a path"), None)
+                                .h(px(30.))
+                                .px(px(8.))
+                                .text_size(px(13.))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    this.picker = None;
+                                    this.start_edit(Edit::Root(n3.clone()), root.clone(), window, cx)
+                                })),
+                        )
                         .into_any_element(),
                 ),
             ));
         }
-        Self::group(t, "Claude folder", Some("Every session on this machine starts in this folder or one under it. Nothing a session is given can step outside it."), rows)
+        Self::group(
+            t,
+            "Claude folder",
+            Some(
+                "Every session on this machine starts in this folder or one under it. Nothing a session is given can step outside it.",
+            ),
+            rows,
+        )
     }
 
     fn picker_view(&self, t: &Theme, p: &Picker, cx: &Context<Self>) -> AnyElement {
@@ -1028,14 +1230,27 @@ impl SettingsView {
                     .text_color(if last { t.ink } else { t.dim })
                     .when(last, |d| d.font_weight(FontWeight::SEMIBOLD))
                     .child(label)
-                    .when(!last, |d| d.cursor_pointer().hover(move |s| s.bg(hover)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(m2.clone(), to.clone(), cx)))),
+                    .when(!last, |d| {
+                        d.cursor_pointer().hover(move |s| s.bg(hover)).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(m2.clone(), to.clone(), cx)),
+                        )
+                    }),
             );
         }
         let mut list = div().flex().flex_col().max_h(px(260.)).overflow_hidden();
         match &p.dirs {
-            None => list = list.child(div().py(px(10.)).text_size(px(13.)).text_color(t.faint).child("Looking at its folders")),
-            Some(Err(e)) => list = list.child(ui::wrap(format!("Could not list its folders. {e}")).py(px(10.)).text_size(px(13.)).text_color(t.bad)),
-            Some(Ok(d)) if d.folders.is_empty() => list = list.child(div().py(px(10.)).text_size(px(13.)).text_color(t.faint).child("No folders in here.")),
+            None => list = list.child(ui::loading(t, "st-dirs-load", "Looking at its folders").py(px(10.))),
+            Some(Err(e)) => {
+                list = list.child(
+                    ui::wrap(format!("Could not list its folders. {e}"))
+                        .py(px(10.))
+                        .text_size(px(13.))
+                        .text_color(t.bad),
+                )
+            }
+            Some(Ok(d)) if d.folders.is_empty() => {
+                list = list.child(div().py(px(10.)).text_size(px(13.)).text_color(t.faint).child("No folders in here."))
+            }
             Some(Ok(d)) => {
                 for (i, f) in d.folders.iter().enumerate() {
                     let (m2, to) = (machine.clone(), f.path.clone());
@@ -1053,7 +1268,9 @@ impl SettingsView {
                             .child(ui::icon("folder", 14., t.dim))
                             .child(ui::wrap(f.name.clone()).flex_1().min_w_0().text_size(px(13.)).text_color(t.ink))
                             .when(f.kids, |d| d.child(ui::icon("chev", 12., t.faint)))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(m2.clone(), to.clone(), cx))),
+                            .on_click(
+                                cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(m2.clone(), to.clone(), cx)),
+                            ),
                     );
                 }
             }
@@ -1072,12 +1289,32 @@ impl SettingsView {
                     .flex_wrap()
                     .items_center()
                     .gap(px(8.))
-                    .child(ui::wrap("Open a folder to look inside, then use the one you are in.").flex_1().min_w(px(180.)).text_size(px(12.5)).text_color(t.faint))
-                    .child(ui::ghost(t, "st-pick-x", Some("Cancel"), None).h(px(30.)).px(px(10.)).text_size(px(13.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.picker = None;
-                        cx.notify();
-                    })))
-                    .child(ui::primary_btn(t, "st-pick-use", 30.).px(px(12.)).text_size(px(13.)).child(format!("Use {pick}")).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.use_folder(m3.clone(), pick2.clone(), cx)))),
+                    .child(
+                        ui::wrap("Open a folder to look inside, then use the one you are in.")
+                            .flex_1()
+                            .min_w(px(180.))
+                            .text_size(px(12.5))
+                            .text_color(t.faint),
+                    )
+                    .child(
+                        ui::ghost(t, "st-pick-x", Some("Cancel"), None)
+                            .h(px(30.))
+                            .px(px(10.))
+                            .text_size(px(13.))
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.picker = None;
+                                cx.notify();
+                            })),
+                    )
+                    .child(
+                        ui::primary_btn(t, "st-pick-use", 30.)
+                            .px(px(12.))
+                            .text_size(px(13.))
+                            .child(format!("Use {pick}"))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.use_folder(m3.clone(), pick2.clone(), cx)
+                            })),
+                    ),
             )
             .into_any_element()
     }
@@ -1086,8 +1323,27 @@ impl SettingsView {
         let name = m.name.clone();
         let sub = "What Switchboard found on this machine. The Auto machine pick only counts what is switched on here, plus anything you add.";
         let c = match self.caps.get(&name) {
-            None => return Self::group(t, "Capabilities", Some(sub), vec![div().text_size(px(13.)).text_color(t.faint).child("Asking the machine").into_any_element()]),
-            Some(Err(e)) => return Self::group(t, "Capabilities", Some(sub), vec![ui::wrap(format!("Could not ask it. {e}")).text_size(px(13.)).text_color(t.bad).into_any_element()]),
+            None => {
+                return Self::group(
+                    t,
+                    "Capabilities",
+                    Some(sub),
+                    vec![ui::loading(t, "st-caps-load", "Asking the machine").into_any_element()],
+                );
+            }
+            Some(Err(e)) => {
+                return Self::group(
+                    t,
+                    "Capabilities",
+                    Some(sub),
+                    vec![
+                        ui::wrap(format!("Could not ask it. {e}"))
+                            .text_size(px(13.))
+                            .text_color(t.bad)
+                            .into_any_element(),
+                    ],
+                );
+            }
             Some(Ok(c)) => c.clone(),
         };
         let mut rows = vec![];
@@ -1096,12 +1352,37 @@ impl SettingsView {
         rows.push(Self::crow(
             t,
             "Let Auto send work here",
-            Some(if on { c.can.clone().map(|x| format!("Auto sees: {x}")).unwrap_or_else(|| "Auto counts it in.".into()) } else { "Auto leaves this machine out.".into() }),
-            Some(ui::switch(t, "st-auto", on, false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_caps(n1.clone(), serde_json::json!({"on": !on}), cx))).into_any_element()),
+            Some(if on {
+                c.can.clone().map(|x| format!("Auto sees: {x}")).unwrap_or_else(|| "Auto counts it in.".into())
+            } else {
+                "Auto leaves this machine out.".into()
+            }),
+            Some(
+                ui::switch(t, "st-auto", on, false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.set_caps(n1.clone(), serde_json::json!({"on": !on}), cx)
+                    }))
+                    .into_any_element(),
+            ),
         ));
         match &c.tools {
-            None => rows.push(Self::crow(t, "Nothing found yet", Some(c.error.clone().map(|e| format!("The machine did not answer: {e}")).unwrap_or_else(|| "Shown once the machine answers.".into())), None)),
-            Some(tools) if tools.is_empty() => rows.push(Self::crow(t, "No developer tools found", Some("Auto still counts its free memory and its repos.".into()), None)),
+            None => rows.push(Self::crow(
+                t,
+                "Nothing found yet",
+                Some(
+                    c.error
+                        .clone()
+                        .map(|e| format!("The machine did not answer: {e}"))
+                        .unwrap_or_else(|| "Shown once the machine answers.".into()),
+                ),
+                None,
+            )),
+            Some(tools) if tools.is_empty() => rows.push(Self::crow(
+                t,
+                "No developer tools found",
+                Some("Auto still counts its free memory and its repos.".into()),
+                None,
+            )),
             Some(tools) => {
                 for tool in tools {
                     let (n2, key, off) = (name.clone(), tool.key.clone(), c.off.clone());
@@ -1134,10 +1415,17 @@ impl SettingsView {
                 .flex_col()
                 .gap(px(2.))
                 .child(div().text_size(px(13.5)).text_color(t.ink).child("This machine can also do"))
-                .child(ui::wrap("Anything detection missed, in your own words. Auto reads these too.").text_size(px(12.5)).text_color(t.faint)),
+                .child(
+                    ui::wrap("Anything detection missed, in your own words. Auto reads these too.")
+                        .text_size(px(12.5))
+                        .text_color(t.faint),
+                ),
         );
         for (i, line) in c.extra.iter().enumerate() {
-            let (n3, rest) = (name.clone(), c.extra.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, x)| x.clone()).collect::<Vec<_>>());
+            let (n3, rest) = (
+                name.clone(),
+                c.extra.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, x)| x.clone()).collect::<Vec<_>>(),
+            );
             own = own.child(
                 div()
                     .flex()
@@ -1150,9 +1438,11 @@ impl SettingsView {
                     .bg(t.panel)
                     .child(ui::icon("check", 13., t.accent))
                     .child(ui::wrap(line.clone()).flex_1().min_w_0().text_size(px(13.)).text_color(t.ink))
-                    .child(ui::icon_btn(t, SharedString::from(format!("st-extra-x-{i}")), "x", 24.).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.set_caps(n3.clone(), serde_json::json!({"extra": rest.clone()}), cx)
-                    }))),
+                    .child(ui::icon_btn(t, SharedString::from(format!("st-extra-x-{i}")), "x", 24.).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.set_caps(n3.clone(), serde_json::json!({"extra": rest.clone()}), cx)
+                        }),
+                    )),
             );
         }
         let focused = self.extra.focus_handle(cx).is_focused(window);
@@ -1176,7 +1466,13 @@ impl SettingsView {
                         .text_color(t.ink)
                         .child(gpui_base::Input::new(&self.extra)),
                 )
-                .child(ui::line_btn(t, "st-extra-add", 32.).px(px(12.)).text_size(px(13.)).child("Add").on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_extra(window, cx)))),
+                .child(
+                    ui::line_btn(t, "st-extra-add", 32.)
+                        .px(px(12.))
+                        .text_size(px(13.))
+                        .child("Add")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_extra(window, cx))),
+                ),
         );
         rows.push(own.into_any_element());
         Self::group(t, "Capabilities", Some(sub), rows)
@@ -1187,59 +1483,92 @@ impl SettingsView {
         let app = self.app.read(cx);
         let lib = app.lib();
         let rows: Vec<AnyElement> = match self.mcp.get(&m.name) {
-            None => vec![div().text_size(px(13.)).text_color(t.faint).child("Asking the machine").into_any_element()],
-            Some(Err(e)) => vec![ui::wrap(e.clone()).text_size(px(13.)).text_color(if m.online == Some(true) { t.bad } else { t.faint }).into_any_element()],
-            Some(Ok(x)) if x.servers.is_empty() => vec![ui::wrap("No MCP servers are set up in Claude Code here.").text_size(px(13.)).text_color(t.faint).into_any_element()],
-            Some(Ok(x)) => x
-                .servers
-                .iter()
-                .map(|s| {
-                    let mut uses = vec![];
-                    if !s.env.is_empty() {
-                        uses.push(format!("Uses {}", s.env.join(", ")));
-                    }
-                    if !s.headers.is_empty() {
-                        uses.push(format!("Sends {}", s.headers.join(", ")));
-                    }
-                    let info = div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(4.))
-                        .child(
+            None => vec![ui::loading(t, "st-mcp-load", "Asking the machine").into_any_element()],
+            Some(Err(e)) => vec![
+                ui::wrap(e.clone())
+                    .text_size(px(13.))
+                    .text_color(if m.online == Some(true) { t.bad } else { t.faint })
+                    .into_any_element(),
+            ],
+            Some(Ok(x)) if x.servers.is_empty() => vec![
+                ui::wrap("No MCP servers are set up in Claude Code here.")
+                    .text_size(px(13.))
+                    .text_color(t.faint)
+                    .into_any_element(),
+            ],
+            Some(Ok(x)) => {
+                x.servers
+                    .iter()
+                    .map(|s| {
+                        let mut uses = vec![];
+                        if !s.env.is_empty() {
+                            uses.push(format!("Uses {}", s.env.join(", ")));
+                        }
+                        if !s.headers.is_empty() {
+                            uses.push(format!("Sends {}", s.headers.join(", ")));
+                        }
+                        let info =
                             div()
+                                .flex_1()
+                                .min_w_0()
                                 .flex()
-                                .flex_wrap()
-                                .items_center()
-                                .gap(px(8.))
-                                .child(ui::wrap(s.name.clone()).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
-                                .child(ui::tag(t, &s.scope_label()))
-                                .children(s.kind.as_deref().map(|k| ui::tag(t, &k.to_uppercase())))
-                                .children(s.status.as_deref().map(|st| div().text_size(px(12.)).text_color(t.dim).child(st.to_string()))),
-                        )
-                        .child(ui::wrap(s.line()).font_family(NUM).text_size(px(12.)).line_height(relative(1.4)).text_color(t.dim))
-                        .when(!uses.is_empty(), |d| d.child(ui::wrap(uses.join(". ")).text_size(px(12.)).text_color(t.faint)));
-                    // Add to library: plugins' servers already come from a plugin, so only the user's own ones.
-                    let add = (lib.is_some() && s.scope != "plugin").then(|| {
-                        let busy = app.lib_busy.contains(&format!("import:{}/mcp/{}", m.name, s.name));
-                        let have = lib.and_then(|l| l.tool(&s.name.to_lowercase())).is_some();
-                        let (machine, source) = (m.name.clone(), s.name.clone());
-                        ui::line_btn(t, SharedString::from(format!("st-mcp-lib-{}", s.name)), 28.)
-                            .px(px(10.))
-                            .text_size(px(12.5))
-                            .when(busy, |d| d.opacity(0.55))
-                            .child(ui::icon("cube", 13., t.dim))
-                            .child(if busy { "Adding" } else if have { "Update in library" } else { "Add to library" })
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                if !busy {
-                                    this.import_one(machine.clone(), "mcp", source.clone(), cx)
-                                }
-                            }))
-                    });
-                    div().flex().items_start().gap(px(12.)).child(info).children(add).into_any_element()
-                })
-                .collect(),
+                                .flex_col()
+                                .gap(px(4.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .flex_wrap()
+                                        .items_center()
+                                        .gap(px(8.))
+                                        .child(
+                                            ui::wrap(s.name.clone())
+                                                .text_size(px(13.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(t.ink),
+                                        )
+                                        .child(ui::tag(t, &s.scope_label()))
+                                        .children(s.kind.as_deref().map(|k| ui::tag(t, &k.to_uppercase())))
+                                        .children(s.status.as_deref().map(|st| {
+                                            div().text_size(px(12.)).text_color(t.dim).child(st.to_string())
+                                        })),
+                                )
+                                .child(
+                                    ui::wrap(s.line())
+                                        .font_family(NUM)
+                                        .text_size(px(12.))
+                                        .line_height(relative(1.4))
+                                        .text_color(t.dim),
+                                )
+                                .when(!uses.is_empty(), |d| {
+                                    d.child(ui::wrap(uses.join(". ")).text_size(px(12.)).text_color(t.faint))
+                                });
+                        // Add to library: plugins' servers already come from a plugin, so only the user's own ones.
+                        let add = (lib.is_some() && s.scope != "plugin").then(|| {
+                            let busy = app.lib_busy.contains(&format!("import:{}/mcp/{}", m.name, s.name));
+                            let have = lib.and_then(|l| l.tool(&s.name.to_lowercase())).is_some();
+                            let (machine, source) = (m.name.clone(), s.name.clone());
+                            ui::line_btn(t, SharedString::from(format!("st-mcp-lib-{}", s.name)), 28.)
+                                .px(px(10.))
+                                .text_size(px(12.5))
+                                .when(busy, |d| d.opacity(0.55))
+                                .child(ui::icon("cube", 13., t.dim))
+                                .child(if busy {
+                                    "Adding"
+                                } else if have {
+                                    "Update in library"
+                                } else {
+                                    "Add to library"
+                                })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    if !busy {
+                                        this.import_one(machine.clone(), "mcp", source.clone(), cx)
+                                    }
+                                }))
+                        });
+                        div().flex().items_start().gap(px(12.)).child(info).children(add).into_any_element()
+                    })
+                    .collect()
+            }
         };
         Self::group(t, "MCP servers", Some(sub), rows)
     }
@@ -1250,18 +1579,25 @@ impl SettingsView {
         let presets = app.prefs.as_ref().map(|p| p.presets.clone()).unwrap_or_default();
         let mut seg = ui::seg_box(t);
         for (i, (v, l)) in [("opus", "Opus"), ("sonnet", "Sonnet")].into_iter().enumerate() {
-            seg = seg.child(ui::seg_btn(t, ("st-sum", i), model == v, false).child(l).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.app.update(cx, |s, cx| {
-                    if let Some(p) = s.prefs.as_mut() {
-                        p.summary_model = Some(v.to_string());
-                    }
-                    s.save_prefs(serde_json::json!({"summary_model": v}), Some("Saved".into()), cx)
-                })
-            })));
+            seg = seg.child(ui::seg_btn(t, ("st-sum", i), model == v, false).child(l).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.app.update(cx, |s, cx| {
+                        if let Some(p) = s.prefs.as_mut() {
+                            p.summary_model = Some(v.to_string());
+                        }
+                        s.save_prefs(serde_json::json!({"summary_model": v}), Some("Saved".into()), cx)
+                    })
+                },
+            )));
         }
         let mut setups = vec![];
         if presets.is_empty() {
-            setups.push(Self::crow(t, "No saved setups yet", Some("Save one from the New sheet: a model, effort, mode and flags you use often.".into()), None));
+            setups.push(Self::crow(
+                t,
+                "No saved setups yet",
+                Some("Save one from the New sheet: a model, effort, mode and flags you use often.".into()),
+                None,
+            ));
         }
         for (i, p) in presets.iter().enumerate() {
             let mut bits = vec![];
@@ -1313,67 +1649,218 @@ impl SettingsView {
     fn notifications(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
         let on = self.app.read(cx).notify_on();
         div()
-            .child(Self::head(t, "Notifications", "A plain notification when a chat starts waiting for you. Nothing else."))
+            .child(Self::head(
+                t,
+                "Notifications",
+                "A plain notification when a chat starts waiting for you. Nothing else.",
+            ))
             .child(Self::row(
                 t,
                 "When a chat needs you",
                 Some("Shows the chat's name and the machine. Click it to open the board."),
-                ui::seg_box(t)
-                    .child(ui::seg_btn(t, "st-n-on", on, false).child("On").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                ui::switch(t, "st-notify", on, false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.app.update(cx, |s, cx| {
-                            s.settings.notify = Some(true);
+                            s.settings.notify = Some(!on);
                             s.save_settings();
                             cx.notify();
                         })
-                    })))
-                    .child(ui::seg_btn(t, "st-n-off", !on, false).child("Off").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.app.update(cx, |s, cx| {
-                            s.settings.notify = Some(false);
-                            s.save_settings();
-                            cx.notify();
-                        })
-                    })))
+                    }))
                     .into_any_element(),
             ))
+            .child(div().h(px(18.)))
+            .child(self.push_block(t, "st-n-push", true, cx))
+            .into_any_element()
+    }
+
+    /// iPhone notifications: what they are, and while the server has no push key, where it goes (from /api/prefs).
+    /// `card`: the shared not-set-up card (the Notifications page); otherwise a row on a group's card.
+    fn push_block(&self, t: &Theme, id: &'static str, card: bool, cx: &Context<Self>) -> AnyElement {
+        let push = self.app.read(cx).prefs.as_ref().and_then(|p| p.push.clone());
+        let Some(push) = push else {
+            return ui::loading(t, id, "Asking the server about iPhone notifications").into_any_element();
+        };
+        if push.ready {
+            return ui::setting_row(t, "iPhone notifications", Some(push.explain.into()), None).into_any_element();
+        }
+        let setup = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(6.))
+            .text_size(px(12.5))
+            .text_color(t.ink2)
+            .child("Set up on the server:")
+            .child(
+                div()
+                    .px(px(6.))
+                    .py(px(2.))
+                    .rounded(px(ui::R_MIN))
+                    .bg(t.panel3)
+                    .font_family(NUM)
+                    .text_size(px(12.))
+                    .child(push.setup.clone().unwrap_or_default()),
+            );
+        let guide = SharedString::from(format!("{id}-guide"));
+        let open_guide =
+            |_: &ClickEvent, _: &mut Window, cx: &mut App| crate::state::open_link(cx, &ui::install_guide());
+        let action = div().flex().flex_col().gap(px(10.)).child(setup).child(div().flex().child(if card {
+            ui::setup_btn(t, guide, "Open the install guide").on_click(open_guide)
+        } else {
+            ui::link(t, guide, "Install guide").text_size(px(12.5)).on_click(open_guide)
+        }));
+        if card {
+            return ui::setup_card(
+                t,
+                "bolt",
+                "iPhone notifications are not set up",
+                push.explain,
+                Some(action.into_any_element()),
+            )
+            .into_any_element();
+        }
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(8.))
+            .child(ui::setting_row(t, "iPhone notifications", Some(push.explain.into()), None))
+            .child(action)
+            .into_any_element()
+    }
+
+    /// AI and your Claude setup: the opt-in switches, in two groups, as /api/prefs words them (server/options.py).
+    fn privacy(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
+        let head = Self::head(
+            t,
+            "AI and your Claude setup",
+            "Everything here is off until you turn it on. Each switch says what it sends or changes.",
+        );
+        let prefs = self.app.read(cx).prefs.clone();
+        let Some(prefs) = prefs.filter(|p| !p.options.is_empty()) else {
+            let body = if self.app.read(cx).prefs.is_some() {
+                ui::setup_card(
+                    t,
+                    "info",
+                    "This server has no switches yet",
+                    "Update the server to choose what Switchboard sends to Claude and what it changes on each machine.",
+                    None,
+                )
+                .into_any_element()
+            } else {
+                ui::loading(t, "st-pv-load", "Reading your choices from the server").into_any_element()
+            };
+            return div().child(head).child(body).into_any_element();
+        };
+        let group = |kind: &str, title: &str| {
+            let rows: Vec<AnyElement> = prefs
+                .options_of(kind)
+                .map(|o| {
+                    let (key, on) = (o.key.clone(), o.on);
+                    let sw = ui::switch(t, SharedString::from(format!("st-opt-{key}")), on, false).on_click(
+                        cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let key = key.clone();
+                            this.app.update(cx, |s, cx| {
+                                if let Some(p) = s.prefs.as_mut() {
+                                    p.set_option(&key, !on);
+                                }
+                                s.save_prefs(sb_core::api::option_body(&key, !on), Some("Saved".into()), cx)
+                            })
+                        }),
+                    );
+                    ui::option_row(t, o.label.clone(), o.explain.clone(), o.off.clone(), sw.into_any_element())
+                        .into_any_element()
+                })
+                .collect();
+            (!rows.is_empty()).then(|| Self::group(t, title, None, rows))
+        };
+        div()
+            .child(head)
+            .children(group("ai", "Sends chat text to Claude"))
+            .children(group("setup", "Changes to each machine's Claude setup"))
+            .child(Self::group(t, "Notifications", None, vec![self.push_block(t, "st-pv-push", false, cx)]))
             .into_any_element()
     }
 
     /// A percent setting: a switch (off is null) and, when on, a stepper with the number between.
     #[allow(clippy::too_many_arguments)]
-    fn pct_ctl(&self, t: &Theme, id: &'static str, v: Option<f64>, def: f64, step: f64, mk: fn(Option<f64>) -> serde_json::Value, busy: bool, cx: &Context<Self>) -> AnyElement {
-        let send = move |this: &mut Self, nv: Option<f64>, cx: &mut Context<Self>| this.app.update(cx, |s, cx| s.budget_op(mk(nv), cx));
+    fn pct_ctl(
+        &self,
+        t: &Theme,
+        id: &'static str,
+        v: Option<f64>,
+        def: f64,
+        step: f64,
+        mk: fn(Option<f64>) -> serde_json::Value,
+        busy: bool,
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let send = move |this: &mut Self, nv: Option<f64>, cx: &mut Context<Self>| {
+            this.app.update(cx, |s, cx| s.budget_op(mk(nv), cx))
+        };
         let mut row = div().flex().items_center().gap(px(10.));
         if let Some(x) = v {
             let dn = ((x - step).max(0.1) * 10.).round() / 10.;
             let up = ((x + step).min(100.) * 10.).round() / 10.;
             let btn = |sfx: &str, label: &'static str, off: bool| {
-                ui::seg_btn(t, SharedString::from(format!("{id}-{sfx}")), false, off || busy).w(px(28.)).justify_center().text_size(px(15.)).child(label)
+                ui::seg_btn(t, SharedString::from(format!("{id}-{sfx}")), false, off || busy)
+                    .w(px(28.))
+                    .justify_center()
+                    .text_size(px(15.))
+                    .child(label)
             };
             row = row.child(
                 ui::seg_box(t)
-                    .child(btn("dn", "\u{2212}", x <= 0.1).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, Some(dn), cx))))
-                    .child(div().w(px(58.)).text_center().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).font_features(ui::tnum()).text_color(t.ink).child(pct(x)))
-                    .child(btn("up", "+", x >= 100.).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, Some(up), cx)))),
+                    .child(
+                        btn("dn", "\u{2212}", x <= 0.1)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, Some(dn), cx))),
+                    )
+                    .child(
+                        div()
+                            .w(px(58.))
+                            .text_center()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .font_features(ui::tnum())
+                            .text_color(t.ink)
+                            .child(pct(x)),
+                    )
+                    .child(
+                        btn("up", "+", x >= 100.)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, Some(up), cx))),
+                    ),
             );
         } else {
             row = row.child(div().text_size(px(13.)).text_color(t.faint).child("Off"));
         }
         let on = v.is_some();
-        row.child(
-            ui::switch(t, SharedString::from(format!("{id}-sw")), on, busy)
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, if on { None } else { Some(def) }, cx))),
-        )
+        row.child(ui::switch(t, SharedString::from(format!("{id}-sw")), on, busy).on_click(
+            cx.listener(move |this, _: &ClickEvent, _, cx| send(this, if on { None } else { Some(def) }, cx)),
+        ))
         .into_any_element()
     }
 
     /// Budget: a daily share of the week, an optional 5-hour cap, and the hard limit that stops chats.
     fn budget(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
         let app = self.app.read(cx);
-        let head = Self::head(t, "Budget", "A daily share of your weekly limit. Switchboard tells you when a day goes over it, and can stop chats.");
+        let head = Self::head(
+            t,
+            "Budget",
+            "A daily share of your weekly limit. Switchboard tells you when a day goes over it, and can stop chats.",
+        );
         let Some(b) = app.snap.budget.clone() else {
             return div()
                 .child(head)
-                .child(Self::group(t, "Not on this server yet", None, vec![Self::crow(t, "The server has no budget", Some("Update Switchboard on the server to set one.".into()), None)]))
+                .child(Self::group(
+                    t,
+                    "Not on this server yet",
+                    None,
+                    vec![Self::crow(
+                        t,
+                        "The server has no budget",
+                        Some("Update Switchboard on the server to set one.".into()),
+                        None,
+                    )],
+                ))
                 .into_any_element();
         };
         let busy = app.budget_busy;
@@ -1403,15 +1890,31 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child("Lifted until midnight"))
-                            .child(ui::wrap("The hard limit stops nothing more today.").text_size(px(12.5)).text_color(t.faint)),
+                            .child(
+                                div()
+                                    .text_size(px(13.5))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(t.ink)
+                                    .child("Lifted until midnight"),
+                            )
+                            .child(
+                                ui::wrap("The hard limit stops nothing more today.")
+                                    .text_size(px(12.5))
+                                    .text_color(t.faint),
+                            ),
                     )
-                    .child(ui::line_btn(t, "bud-unlift", 30.).px(px(12.)).text_size(px(13.)).child("Undo").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.app.update(cx, |s, cx| s.budget_op(serde_json::json!({"op": "unlift"}), cx))
-                    }))),
+                    .child(ui::line_btn(t, "bud-unlift", 30.).px(px(12.)).text_size(px(13.)).child("Undo").on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.app.update(cx, |s, cx| s.budget_op(serde_json::json!({"op": "unlift"}), cx))
+                        }),
+                    )),
             );
         } else if st.over_hard() {
-            let why = if st.hard_reason.as_deref() == Some("five_hour") { "The 5-hour window is past its hard limit." } else { "Today is past its hard limit." };
+            let why = if st.hard_reason.as_deref() == Some("five_hour") {
+                "The 5-hour window is past its hard limit."
+            } else {
+                "Today is past its hard limit."
+            };
             body = body.child(
                 div()
                     .mt(px(18.))
@@ -1431,16 +1934,42 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(2.))
-                            .child(div().text_size(px(14.)).font_weight(FontWeight::BOLD).text_color(t.ink).child("Hard limit reached"))
-                            .child(ui::wrap(format!("{why} New messages are blocked and working background chats were stopped.")).text_size(px(12.5)).line_height(relative(1.4)).text_color(t.dim)),
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(t.ink)
+                                    .child("Hard limit reached"),
+                            )
+                            .child(
+                                ui::wrap(format!(
+                                    "{why} New messages are blocked and working background chats were stopped."
+                                ))
+                                .text_size(px(12.5))
+                                .line_height(relative(1.4))
+                                .text_color(t.dim),
+                            ),
                     )
-                    .child(ui::primary_btn(t, "bud-lift", 32.).px(px(14.)).text_size(px(13.)).child("Lift for today").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.app.update(cx, |s, cx| s.budget_op(serde_json::json!({"op": "lift"}), cx))
-                    }))),
+                    .child(
+                        ui::primary_btn(t, "bud-lift", 32.)
+                            .px(px(14.))
+                            .text_size(px(13.))
+                            .child("Lift for today")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.app.update(cx, |s, cx| s.budget_op(serde_json::json!({"op": "lift"}), cx))
+                            })),
+                    ),
             );
         }
         if let Some(sum) = st.summary.clone().filter(|x| !x.is_empty()) {
-            body = body.child(ui::wrap(sum).mt(px(14.)).px(px(2.)).text_size(px(12.5)).line_height(relative(1.45)).text_color(if st.over_budget() { t.cold } else { t.dim }));
+            body = body.child(
+                ui::wrap(sum)
+                    .mt(px(14.))
+                    .px(px(2.))
+                    .text_size(px(12.5))
+                    .line_height(relative(1.45))
+                    .text_color(if st.over_budget() { t.cold } else { t.dim }),
+            );
         }
 
         body = body.child(Self::group(
@@ -1452,13 +1981,31 @@ impl SettingsView {
                     t,
                     "Daily budget",
                     Some("Percent of the week per day. 14.3% spreads the week evenly over 7 days.".into()),
-                    Some(self.pct_ctl(t, "bud-daily", s.daily, 14.3, 1.0, |v| serde_json::json!({"op": "set", "daily": v}), busy, cx)),
+                    Some(self.pct_ctl(
+                        t,
+                        "bud-daily",
+                        s.daily,
+                        14.3,
+                        1.0,
+                        |v| serde_json::json!({"op": "set", "daily": v}),
+                        busy,
+                        cx,
+                    )),
                 ),
                 Self::crow(
                     t,
                     "5-hour cap",
                     Some("Percent of the 5-hour window. Off unless you set one.".into()),
-                    Some(self.pct_ctl(t, "bud-five", s.five_hour, 50.0, 5.0, |v| serde_json::json!({"op": "set", "five_hour": v}), busy, cx)),
+                    Some(self.pct_ctl(
+                        t,
+                        "bud-five",
+                        s.five_hour,
+                        50.0,
+                        5.0,
+                        |v| serde_json::json!({"op": "set", "five_hour": v}),
+                        busy,
+                        cx,
+                    )),
                 ),
             ],
         ));
@@ -1469,7 +2016,9 @@ impl SettingsView {
             Some(
                 ui::switch(t, "bud-hard-sw", hard_on, busy)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.app.update(cx, |s, cx| s.budget_op(serde_json::json!({"op": "set", "hard": {"on": !hard_on}}), cx))
+                        this.app.update(cx, |s, cx| {
+                            s.budget_op(serde_json::json!({"op": "set", "hard": {"on": !hard_on}}), cx)
+                        })
                     }))
                     .into_any_element(),
             ),
@@ -1479,13 +2028,31 @@ impl SettingsView {
                 t,
                 "Daily limit",
                 Some("Percent of the week per day.".into()),
-                Some(self.pct_ctl(t, "bud-hdaily", hard.daily, 20.0, 1.0, |v| serde_json::json!({"op": "set", "hard": {"daily": v}}), busy, cx)),
+                Some(self.pct_ctl(
+                    t,
+                    "bud-hdaily",
+                    hard.daily,
+                    20.0,
+                    1.0,
+                    |v| serde_json::json!({"op": "set", "hard": {"daily": v}}),
+                    busy,
+                    cx,
+                )),
             ));
             hard_rows.push(Self::crow(
                 t,
                 "5-hour limit",
                 Some("Percent of the 5-hour window. Off unless you set one.".into()),
-                Some(self.pct_ctl(t, "bud-hfive", hard.five_hour, 80.0, 5.0, |v| serde_json::json!({"op": "set", "hard": {"five_hour": v}}), busy, cx)),
+                Some(self.pct_ctl(
+                    t,
+                    "bud-hfive",
+                    hard.five_hour,
+                    80.0,
+                    5.0,
+                    |v| serde_json::json!({"op": "set", "hard": {"five_hour": v}}),
+                    busy,
+                    cx,
+                )),
             ));
         }
         body.child(Self::group(t, "Hard limit", Some("Off unless you turn it on."), hard_rows)).into_any_element()
@@ -1511,12 +2078,76 @@ impl SettingsView {
                     .items_center()
                     .gap(px(12.))
                     .child(ui::icon("globe", 16., if ok { t.accent } else { t.faint }))
-                    .child(div().flex_1().flex().flex_col().gap(px(1.)).child(div().text_size(px(14.)).text_color(t.ink).child(m.label.clone())).child(div().text_size(px(12.5)).text_color(t.faint).child(state))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .flex()
+                            .flex_col()
+                            .gap(px(1.))
+                            .child(div().text_size(px(14.)).text_color(t.ink).child(m.label.clone()))
+                            .child(div().text_size(px(12.5)).text_color(t.faint).child(state)),
+                    ),
             );
         }
+        let none = !app.snap.machines.iter().any(|m| m.chrome.as_ref().is_some_and(|c| c.connector));
+        let card = none.then(|| {
+            div().mb(px(14.)).child(ui::setup_card(
+                t,
+                "globe",
+                "Claude in Chrome is not set up",
+                "None of your machines has the Claude in Chrome extension. Install it in Chrome on a machine, and that machine shows up here.",
+                Some(
+                    ui::setup_btn(t, "st-chrome-guide", "Open the install guide")
+                        .on_click(|_, _, cx| crate::state::open_link(cx, &ui::install_guide()))
+                        .into_any_element(),
+                ),
+            ))
+        });
         div()
             .child(Self::head(t, "Chrome", "Each chat picks its own Chrome machine: in the New sheet's Chrome line, or in the chat's details. Start fresh and Continue keep it."))
+            .children(card)
             .child(list)
+            .into_any_element()
+    }
+}
+
+impl SettingsView {
+    /// Updates: whether this build gets them, when it last looked, and Check now. A build without an update key
+    /// says updates are off and links to how a build gets them.
+    fn updates(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
+        let app = self.app.read(cx);
+        let off = sb_core::update::off_reason().is_some();
+        let ctl = if off {
+            ui::ghost(t, "st-upd-how", Some("How builds get updates"), None)
+                .h(px(32.))
+                .px(px(10.))
+                .text_size(px(13.))
+                .on_click(|_, _, cx| {
+                    let url = format!(
+                        "{}/blob/main/docs/building.md#updates",
+                        sb_core::brand::HOMEPAGE.trim_end_matches('/')
+                    );
+                    crate::state::open_link(cx, &url)
+                })
+                .into_any_element()
+        } else {
+            ui::ghost(t, "st-upd-check", Some(if app.update_busy { "Checking" } else { "Check now" }), None)
+                .h(px(32.))
+                .px(px(10.))
+                .text_size(px(13.))
+                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.look_for_update(cx))))
+                .into_any_element()
+        };
+        div()
+            .child(Self::head(
+                t,
+                "Updates",
+                &format!(
+                    "Switchboard {}. Updates never change your settings or what you chose when you set it up.",
+                    sb_core::version()
+                ),
+            ))
+            .child(Self::row(t, "New versions", Some(&crate::update::status_line(app)), ctl))
             .into_any_element()
     }
 }
@@ -1545,7 +2176,21 @@ impl SettingsView {
                 self.scroll.set_offset(gpui::point(px(0.), px(-y)));
             }
         }
-        let mut nav = div().id("st-nav").flex_none().w(px(220.)).h_full().overflow_y_scroll().pt(px(18.)).px(px(10.)).flex().flex_col().gap(px(2.)).bg(t.bg).border_r_1().border_color(t.line);
+        let mut nav = div()
+            .id("st-nav")
+            .flex_none()
+            .w(px(220.))
+            .h_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.nav_scroll)
+            .pt(px(18.))
+            .px(px(10.))
+            .flex()
+            .flex_col()
+            .gap(px(2.))
+            .bg(t.bg)
+            .border_r_1()
+            .border_color(t.line);
         for (s, label, ic) in SECTIONS {
             let on = self.section == s && (s != Section::Machines || self.machine.is_none());
             nav = nav.child(
@@ -1561,41 +2206,47 @@ impl SettingsView {
                     .text_size(px(13.5))
                     .when(on, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
                     .when(!on, |d| d.text_color(t.ink2).hover(move |st| st.bg(hover)))
-                    .child(if s == Section::Machines { ui::machine_icon("", 15., if on { t.ink } else { t.dim }) } else { ui::icon(ic, 15., if on { t.ink } else { t.dim }) })
+                    .child(if s == Section::Machines {
+                        ui::machine_icon("", 15., if on { t.ink } else { t.dim })
+                    } else {
+                        ui::icon(ic, 15., if on { t.ink } else { t.dim })
+                    })
                     .child(label)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(s, cx))),
             );
             // Under Machines, each machine: its own page.
-            if s == Section::Machines {
-                if let Some(Ok(ms)) = &self.machines {
-                    for m in &ms.machines {
-                        let mon = self.section == Section::Machines && self.machine.as_deref() == Some(m.name.as_str());
-                        let name = m.name.clone();
-                        nav = nav.child(
-                            div()
-                                .id(SharedString::from(format!("st-nav-m-{}", m.name)))
-                                .min_h(px(30.))
-                                .py(px(5.))
-                                .pl(px(30.))
-                                .pr(px(10.))
-                                .flex()
-                                .items_center()
-                                .gap(px(8.))
-                                .rounded(px(ui::R_CTRL))
-                                .cursor_pointer()
-                                .text_size(px(13.))
-                                .when(mon, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
-                                .when(!mon, |d| d.text_color(t.dim).hover(move |st| st.bg(hover)))
-                                .child(div().flex_none().size(px(7.)).rounded_full().bg(match m.online {
-                                    Some(true) => t.warm,
-                                    Some(false) => t.bad,
-                                    None => t.cold,
-                                }))
-                                .child(ui::wrap(m.label.clone()).flex_1().min_w_0())
-                                .when(m.needs_root, |d| d.child(ui::icon("info", 13., t.accent)))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_machine(name.clone(), cx))),
-                        );
-                    }
+            if s == Section::Machines
+                && let Some(Ok(ms)) = &self.machines
+            {
+                for m in &ms.machines {
+                    let mon = self.section == Section::Machines && self.machine.as_deref() == Some(m.name.as_str());
+                    let name = m.name.clone();
+                    nav = nav.child(
+                        div()
+                            .id(SharedString::from(format!("st-nav-m-{}", m.name)))
+                            .min_h(px(30.))
+                            .py(px(5.))
+                            .pl(px(30.))
+                            .pr(px(10.))
+                            .flex()
+                            .items_center()
+                            .gap(px(8.))
+                            .rounded(px(ui::R_CTRL))
+                            .cursor_pointer()
+                            .text_size(px(13.))
+                            .when(mon, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
+                            .when(!mon, |d| d.text_color(t.dim).hover(move |st| st.bg(hover)))
+                            .child(div().flex_none().size(px(7.)).rounded_full().bg(match m.online {
+                                Some(true) => t.warm,
+                                Some(false) => t.bad,
+                                None => t.cold,
+                            }))
+                            .child(ui::wrap(m.label.clone()).flex_1().min_w_0())
+                            .when(m.needs_root, |d| d.child(ui::icon("info", 13., t.accent)))
+                            .on_click(
+                                cx.listener(move |this, _: &ClickEvent, _, cx| this.open_machine(name.clone(), cx)),
+                            ),
+                    );
                 }
             }
         }
@@ -1608,17 +2259,39 @@ impl SettingsView {
             Section::Notifications => self.notifications(&t, cx),
             Section::Chrome => self.chrome(&t, cx),
             Section::Budget => self.budget(&t, cx),
+            Section::Updates => self.updates(&t, cx),
+            Section::Privacy => self.privacy(&t, cx),
         };
         div()
             .id("settings")
+            .key_context("Settings")
             .track_focus(&self.focus)
+            .on_action(|_: &crate::view::FocusNext, window, cx| window.focus_next(cx))
+            .on_action(|_: &crate::view::FocusPrev, window, cx| window.focus_prev(cx))
             .size_full()
             .flex()
             .bg(t.panel)
             .font_family(crate::theme::UI)
             .text_color(t.ink)
-            .child(nav)
-            .child(div().id("st-body").flex_1().min_w_0().h_full().overflow_y_scroll().track_scroll(&self.scroll).px(px(32.)).py(px(26.)).child(body))
+            .child(div().relative().flex_none().h_full().child(nav).child(ui::scrollbar(&self.nav_scroll)))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_w_0()
+                    .h_full()
+                    .child(
+                        div()
+                            .id("st-body")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.scroll)
+                            .px(px(32.))
+                            .py(px(26.))
+                            .child(body),
+                    )
+                    .child(ui::scrollbar(&self.scroll)),
+            )
     }
 }
 

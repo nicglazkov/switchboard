@@ -54,6 +54,11 @@ PROSE = re.compile(r'\b(seamless(ly)?|robust|leverag(e|es|ing)|empower(s|ing)?|d
                    r'|holistic|synerg(y|ies)|unleash(es|ing)?|boasts?|nestled|bustling|meticulous(ly)?)\b', re.I)
 PROSE_SUFFIXES = ('.md', '.yml', '.yaml', '.txt')
 
+# Other projects' license texts, copied word for word: their authors' names, emails and punctuation are theirs to keep.
+# Addresses, home folders and keys are still checked in them.
+THIRD_PARTY = {'THIRD-PARTY-NOTICES.txt'}
+THIRD_PARTY_SKIP = {'email address', 'em dash'}
+
 
 def allowed(rule, m):
     s = m.group(0)
@@ -82,12 +87,14 @@ def load_deny(path):
     return out
 
 
-def check_text(where, text, deny, prose, found, binary=False):
+def check_text(where, text, deny, prose, found, binary=False, third_party=False):
+    if third_party:
+        deny, prose = [], False
     for n, line in enumerate(text.splitlines(), 1):
         if 'leakscan: allow' in line:
             continue
         for rule, rx in RULES:
-            if binary and rule in ('email address', 'em dash'):
+            if (binary or third_party) and rule in THIRD_PARTY_SKIP:
                 continue
             for m in rx.finditer(line):
                 if not allowed(rule, m):
@@ -112,7 +119,8 @@ def scan_file(path, shown, deny, found):
         return
     with open(path, 'rb') as f:
         text, is_text = decode(f.read())
-    check_text(shown, text, deny, is_text and shown.endswith(PROSE_SUFFIXES), found, not is_text)
+    check_text(shown, text, deny, is_text and shown.endswith(PROSE_SUFFIXES), found, not is_text,
+               os.path.basename(shown) in THIRD_PARTY)
 
 
 def scan_tree(root, deny, found):
@@ -158,7 +166,7 @@ def scan_history(root, deny, found):
             continue
         text, is_text = decode(data)
         check_text(f'history {sha[:10]} {path}', text, deny, is_text and path.endswith(PROSE_SUFFIXES), found,
-                   not is_text)
+                   not is_text, os.path.basename(path) in THIRD_PARTY)
 
 
 def main():

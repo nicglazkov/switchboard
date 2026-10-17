@@ -8,9 +8,10 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, AnyWindowHandle, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement,
-    Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, px, relative, size,
+    AnyElement, AnyWindowHandle, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, div, prelude::*, px, relative, size,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sb_core::api::{ApiBrowseRow, ApiChatSummary, ApiCompact};
@@ -20,21 +21,32 @@ use crate::state::{AppEvent, AppState, copy_text, open_link};
 use crate::theme::{NUM, Theme};
 use crate::ui;
 
-const STATES: [(&str, &str); 6] = [("", "All"), ("live", "Running"), ("quiet", "Quiet"), ("stopped", "Stopped"), ("archived", "Archived"), ("replaced", "Replaced")];
+const STATES: [(&str, &str); 6] = [
+    ("", "All"),
+    ("live", "Running"),
+    ("quiet", "Quiet"),
+    ("stopped", "Stopped"),
+    ("archived", "Archived"),
+    ("replaced", "Replaced"),
+];
 const PAGE: usize = 200;
 
 /// Opens the browser, or brings it forward when it is open.
 pub fn open(cx: &mut App) {
     let app = crate::state::app(cx);
-    if let Some(h) = app.read(cx).browser_win {
-        if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
-            return;
-        }
+    if let Some(h) = app.read(cx).browser_win
+        && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+    {
+        return;
     }
     let bounds = gpui::Bounds::centered(None, size(px(1180.), px(780.)), cx);
     let opts = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
-        titlebar: Some(TitlebarOptions { title: Some("Sessions, Switchboard".into()), appears_transparent: false, traffic_light_position: None }),
+        titlebar: Some(TitlebarOptions {
+            title: Some("Sessions, Switchboard".into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }),
         window_min_size: Some(size(px(760.), px(480.))),
         app_id: Some("switchboard".into()),
         window_background: WindowBackgroundAppearance::Opaque,
@@ -56,7 +68,11 @@ fn key(machine: &str, sid: &str) -> String {
 
 /// A chat name the server takes: letters, digits, spaces and . , : ' + # ( ) - _ (up to 64).
 fn size_text(bytes: f64) -> String {
-    if bytes >= 1_000_000. { format!("{:.1} MB", bytes / 1_000_000.) } else { format!("{} KB", (bytes / 1000.).round().max(1.) as u64) }
+    if bytes >= 1_000_000. {
+        format!("{:.1} MB", bytes / 1_000_000.)
+    } else {
+        format!("{} KB", (bytes / 1000.).round().max(1.) as u64)
+    }
 }
 
 pub struct BrowserView {
@@ -66,7 +82,8 @@ pub struct BrowserView {
     /// The folder filter ("" is every folder), the folders that have chats, and its menu.
     folder: String,
     folders: Vec<String>,
-    folder_open: bool,
+    /// The open filter dropdown (machine, folder or state), if any.
+    drop: ui::Drop,
     focus: FocusHandle,
     q: Entity<InputState>,
     rn: Entity<InputState>,
@@ -90,7 +107,8 @@ pub struct BrowserView {
     /// Compact into one fresh chat: the thread it is for, and its cost once the server has worked it out.
     compact: Option<(String, Option<Result<ApiCompact, String>>)>,
     renaming: bool,
-    list: ScrollHandle,
+    /// The chat list: only the rows on screen are drawn (a GPUI list, since rows differ in height).
+    list: gpui::ListState,
     side: ScrollHandle,
     _subs: Vec<Subscription>,
 }
@@ -123,7 +141,7 @@ impl BrowserView {
             embedded: false,
             folder: String::new(),
             folders: Vec::new(),
-            folder_open: false,
+            drop: ui::Drop::default(),
             focus,
             q,
             rn,
@@ -142,7 +160,7 @@ impl BrowserView {
             notes: HashMap::new(),
             compact: None,
             renaming: false,
-            list: ScrollHandle::new(),
+            list: gpui::ListState::new(0, gpui::ListAlignment::Top, px(600.)),
             side: ScrollHandle::new(),
             _subs: subs,
         };
@@ -206,13 +224,16 @@ impl BrowserView {
                             s.rows.extend(b.rows);
                         } else {
                             s.rows = b.rows;
-                            s.list.scroll_to_item(0);
+                            // a new result: measure every row again, from the top
+                            s.list.reset(0);
                         }
-                        let still = s.sel.as_ref().is_some_and(|k| s.rows.iter().any(|r| key(&r.machine, &r.sid) == *k));
-                        if !still && s.sel_row.is_none() {
-                            if let Some(r) = s.rows.first().cloned() {
-                                s.pick(r, cx);
-                            }
+                        let still =
+                            s.sel.as_ref().is_some_and(|k| s.rows.iter().any(|r| key(&r.machine, &r.sid) == *k));
+                        if !still
+                            && s.sel_row.is_none()
+                            && let Some(r) = s.rows.first().cloned()
+                        {
+                            s.pick(r, cx);
                         }
                         // Screenshots: SB_SHOT_HIST="<row>[,older][,cost]" picks a thread, one of its earlier chats, the cost.
                         #[cfg(feature = "shots")]
@@ -266,7 +287,12 @@ impl BrowserView {
         self.sel_row = Some(r.clone());
         self.side.scroll_to_item(0);
         cx.notify();
-        let can = self.app.read(cx).snap.machine(&r.machine).is_none_or(|m| m.features.is_empty() || m.features.iter().any(|f| f == "summary"));
+        let can = self
+            .app
+            .read(cx)
+            .snap
+            .machine(&r.machine)
+            .is_none_or(|m| m.features.is_empty() || m.features.iter().any(|f| f == "summary"));
         if self.sums.contains_key(&k) || !can {
             return;
         }
@@ -301,6 +327,52 @@ impl BrowserView {
         .detach();
     }
 
+    /// A filter dropdown over a list that comes from the server (machines, folders): its button and, while open, its
+    /// menu. `pick` gets the chosen value.
+    #[allow(clippy::too_many_arguments)]
+    fn drop_list(
+        &self,
+        t: &Theme,
+        id: &'static str,
+        ic: Option<&str>,
+        label: String,
+        choices: Vec<(String, String)>,
+        cur: String,
+        pick: fn(&mut Self, String, &mut Context<Self>),
+        cx: &Context<Self>,
+    ) -> AnyElement {
+        let open = self.drop.is_open(id);
+        let trigger = ui::dropdown(t, id, ic, label, open).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+            this.drop.toggle(id);
+            cx.notify();
+        }));
+        let menu = open.then(|| {
+            let items = choices
+                .into_iter()
+                .map(|(value, label)| ui::DropItem {
+                    label: label.into(),
+                    on: value == cur,
+                    off: false,
+                    pick: Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.drop.close();
+                        pick(this, value.clone(), cx);
+                        cx.notify();
+                    })),
+                })
+                .collect();
+            ui::drop_menu(
+                t,
+                id,
+                items,
+                cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                    this.drop.close_out();
+                    cx.notify();
+                }),
+            )
+        });
+        div().relative().flex_none().child(trigger).children(menu).into_any_element()
+    }
+
     fn set_filter(&mut self, machine: Option<String>, state: Option<&'static str>, cx: &mut Context<Self>) {
         if let Some(m) = machine {
             self.machine = m;
@@ -329,10 +401,20 @@ impl BrowserView {
                 let title = r.title.clone().unwrap_or_else(|| "Untitled".into());
                 let core = app.read(cx).core.clone();
                 cx.spawn(async move |_, cx| {
-                    let res = cx.background_executor().spawn(async move { core.act(&m, "resume", &sid, None).map(|j| (j, m)) }).await;
-                    let _ = app.update(cx, |s, cx| match res {
-                        Ok((Some(job), machine)) => cx.emit(AppEvent::OpenJobTerm { job, machine, label, title: names::resumed(&names::split(&title).0) }),
-                        Ok((None, _)) => s.toast("The server took the resume but did not say which job it is.", None, true, cx),
+                    let res = cx
+                        .background_executor()
+                        .spawn(async move { core.act(&m, "resume", &sid, None).map(|j| (j, m)) })
+                        .await;
+                    app.update(cx, |s, cx| match res {
+                        Ok((Some(job), machine)) => cx.emit(AppEvent::OpenJobTerm {
+                            job,
+                            machine,
+                            label,
+                            title: names::resumed(&names::split(&title).0),
+                        }),
+                        Ok((None, _)) => {
+                            s.toast("The server took the resume but did not say which job it is.", None, true, cx)
+                        }
                         Err(e) => s.toast(e.to_string(), None, true, cx),
                     });
                 })
@@ -347,7 +429,14 @@ impl BrowserView {
         let typed = self.rn.read(cx).value().to_string();
         let name = names::given(&typed, r.title.as_deref().unwrap_or(""));
         if name.is_empty() && !typed.trim().is_empty() {
-            self.app.update(cx, |s, cx| s.toast("A name needs letters or digits.", Some("It may use letters, digits, spaces and . , : ' + # ( ) - _".into()), true, cx));
+            self.app.update(cx, |s, cx| {
+                s.toast(
+                    "A name needs letters or digits.",
+                    Some("It may use letters, digits, spaces and . , : ' + # ( ) - _".into()),
+                    true,
+                    cx,
+                )
+            });
             return;
         }
         let me = cx.entity().downgrade();
@@ -449,10 +538,20 @@ impl BrowserView {
                             .gap(px(6.))
                             .min_w_0()
                             .flex_wrap()
-                            .child(div().max_w_full().text_size(px(13.5)).line_height(relative(1.35)).font_weight(FontWeight::MEDIUM).text_color(if on { t.ink } else { t.ink2 }).child(topic.to_string()))
+                            .child(
+                                div()
+                                    .max_w_full()
+                                    .text_size(px(13.5))
+                                    .line_height(relative(1.35))
+                                    .font_weight(FontWeight::MEDIUM)
+                                    .text_color(if on { t.ink } else { t.ink2 })
+                                    .child(topic.to_string()),
+                            )
                             .when_some(tag, |d, tg| d.child(ui::tag(t, &tg))),
                     )
-                    .child(ui::wrap(meta.join(" · ")).text_size(px(12.)).line_height(relative(1.4)).text_color(t.faint)),
+                    .child(
+                        ui::wrap(meta.join(" · ")).text_size(px(12.)).line_height(relative(1.4)).text_color(t.faint),
+                    ),
             )
             .when(n_older > 0, |d| {
                 d.child(
@@ -501,7 +600,14 @@ impl BrowserView {
             .flex()
             .flex_col()
             .gap(px(5.))
-            .child(div().flex().items_center().gap(px(8.)).child(ui::lbl(label, t.faint)).children(when.map(|w| div().text_size(px(11.)).text_color(t.faint).child(w))))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(ui::lbl(label, t.faint))
+                    .children(when.map(|w| div().text_size(px(11.)).text_color(t.faint).child(w))),
+            )
             .child(
                 div()
                     .px(px(11.))
@@ -564,7 +670,14 @@ impl BrowserView {
                     .items_center()
                     .gap_x(px(6.))
                     .gap_y(px(3.))
-                    .child(div().max_w_full().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(topic))
+                    .child(
+                        div()
+                            .max_w_full()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.ink)
+                            .child(topic),
+                    )
                     .when_some(tag, |d, tg| d.child(ui::tag(t, &tg)))
                     .when(!badge.is_empty(), |d| d.child(ui::tag(t, badge)))
                     .when(o.handoff == Some(true), |d| d.child(ui::note_tag(t, "handoff", "Summary written"))),
@@ -597,19 +710,49 @@ impl BrowserView {
             )).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.dim));
         let h2 = head.clone();
         card = match ask {
-            None => card.child(div().flex().child(ui::line_btn(t, "br-compact-cost", 30.).px(px(12.)).text_size(px(12.5)).child("See what it costs").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.compact_cost(&h2, cx))))),
-            Some(None) => card.child(div().text_size(px(12.5)).text_color(t.faint).child("Working out the cost on each machine...")),
-            Some(Some(Err(e))) => card.child(ui::wrap(e).text_size(px(12.5)).text_color(t.bad)).child(div().flex().child(ui::line_btn(t, "br-compact-retry", 30.).px(px(12.)).text_size(px(12.5)).child("Try again").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.compact_cost(&h2, cx))))),
+            None => card.child(
+                div().flex().child(
+                    ui::line_btn(t, "br-compact-cost", 30.)
+                        .px(px(12.))
+                        .text_size(px(12.5))
+                        .child("See what it costs")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.compact_cost(&h2, cx))),
+                ),
+            ),
+            Some(None) => card
+                .child(div().text_size(px(12.5)).text_color(t.faint).child("Working out the cost on each machine...")),
+            Some(Some(Err(e))) => card.child(ui::wrap(e).text_size(px(12.5)).text_color(t.bad)).child(
+                div().flex().child(
+                    ui::line_btn(t, "br-compact-retry", 30.)
+                        .px(px(12.))
+                        .text_size(px(12.5))
+                        .child("Try again")
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.compact_cost(&h2, cx))),
+                ),
+            ),
             Some(Some(Ok(c))) => {
                 let cost = c.cost.clone().unwrap_or_default();
                 let mut note = cost.text.clone();
                 if c.found < c.chats {
-                    note.push_str(&format!(" {} of the {} chats could not be read (their machine is offline) and are left out.", c.chats - c.found, c.chats));
+                    note.push_str(&format!(
+                        " {} of the {} chats could not be read (their machine is offline) and are left out.",
+                        c.chats - c.found,
+                        c.chats
+                    ));
                 }
                 if c.notes > 0 {
-                    note.push_str(&format!(" {} already {} a summary, used as it is.", c.notes, if c.notes == 1 { "has" } else { "have" }));
+                    note.push_str(&format!(
+                        " {} already {} a summary, used as it is.",
+                        c.notes,
+                        if c.notes == 1 { "has" } else { "have" }
+                    ));
                 }
-                let (m, sid, title, label) = (c.machine.clone().unwrap_or_else(|| head.machine.clone()), c.sid.clone().unwrap_or_else(|| head.sid.clone()), head.title.clone(), c.label.clone().unwrap_or_else(|| head.label.clone().unwrap_or_else(|| head.machine.clone())));
+                let (m, sid, title, label) = (
+                    c.machine.clone().unwrap_or_else(|| head.machine.clone()),
+                    c.sid.clone().unwrap_or_else(|| head.sid.clone()),
+                    head.title.clone(),
+                    c.label.clone().unwrap_or_else(|| head.label.clone().unwrap_or_else(|| head.machine.clone())),
+                );
                 card.child(ui::wrap(note).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.ink2)).child(
                     div()
                         .flex()
@@ -629,10 +772,16 @@ impl BrowserView {
                                     cx.notify();
                                 })),
                         )
-                        .child(ui::line_btn(t, "br-compact-x", 32.).px(px(12.)).text_size(px(12.5)).child("Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            this.compact = None;
-                            cx.notify();
-                        }))),
+                        .child(
+                            ui::line_btn(t, "br-compact-x", 32.)
+                                .px(px(12.))
+                                .text_size(px(12.5))
+                                .child("Cancel")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.compact = None;
+                                    cx.notify();
+                                })),
+                        ),
                 )
             }
         };
@@ -641,8 +790,17 @@ impl BrowserView {
 
     fn detail(&self, t: &Theme, now: f64, focused: bool, cx: &Context<Self>) -> AnyElement {
         let Some(r) = self.sel_row.clone() else {
-            let msg = if self.loading { "Looking through every machine..." } else { "Pick a chat to see what it was about." };
-            return div().size_full().flex().items_center().justify_center().text_size(px(13.)).text_color(t.faint).child(msg).into_any_element();
+            let msg =
+                if self.loading { "Looking through every machine..." } else { "Pick a chat to see what it was about." };
+            return div()
+                .size_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .text_size(px(13.))
+                .text_color(t.faint)
+                .child(msg)
+                .into_any_element();
         };
         let k = key(&r.machine, &r.sid);
         let app = self.app.read(cx);
@@ -673,11 +831,24 @@ impl BrowserView {
                         .text_color(t.ink)
                         .child(gpui_base::Input::new(&self.rn)),
                 )
-                .child(ui::primary_btn(t, "br-rn-save", 32.).px(px(12.)).text_size(px(12.5)).child("Save").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_name(cx))))
-                .child(ui::ghost(t, "br-rn-x", None, None).h(px(32.)).px(px(8.)).text_size(px(12.5)).child("Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.renaming = false;
-                    cx.notify();
-                })))
+                .child(
+                    ui::primary_btn(t, "br-rn-save", 32.)
+                        .px(px(12.))
+                        .text_size(px(12.5))
+                        .child("Save")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_name(cx))),
+                )
+                .child(
+                    ui::ghost(t, "br-rn-x", None, None)
+                        .h(px(32.))
+                        .px(px(8.))
+                        .text_size(px(12.5))
+                        .child("Cancel")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.renaming = false;
+                            cx.notify();
+                        })),
+                )
                 .into_any_element()
         } else {
             let t2 = title.clone();
@@ -696,26 +867,52 @@ impl BrowserView {
                         .items_center()
                         .gap_x(px(8.))
                         .gap_y(px(4.))
-                        .child(div().max_w_full().text_size(px(16.)).font_weight(FontWeight::BOLD).line_height(relative(1.3)).text_color(t.ink).child(topic))
+                        .child(
+                            div()
+                                .max_w_full()
+                                .text_size(px(16.))
+                                .font_weight(FontWeight::BOLD)
+                                .line_height(relative(1.3))
+                                .text_color(t.ink)
+                                .child(topic),
+                        )
                         .when_some(tag, |d, tg| d.child(ui::tag(t, &tg)))
                 })
                 .when(can_rename, |d| {
-                    d.child(ui::ghost(t, "br-rn", None, None).h(px(26.)).px(px(8.)).text_size(px(12.)).child("Rename").on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                        this.renaming = true;
-                        let v = names::split(&t2).0.to_string();
-                        this.rn.update(cx, |n, cx| {
-                            n.set_value(v, window, cx);
-                            n.focus(window, cx);
-                        });
-                        cx.notify();
-                    })))
+                    d.child(
+                        ui::ghost(t, "br-rn", None, None)
+                            .h(px(26.))
+                            .px(px(8.))
+                            .text_size(px(12.))
+                            .child("Rename")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.renaming = true;
+                                let v = names::split(&t2).0.to_string();
+                                this.rn.update(cx, |n, cx| {
+                                    n.set_value(v, window, cx);
+                                    n.focus(window, cx);
+                                });
+                                cx.notify();
+                            })),
+                    )
                 })
                 .into_any_element()
         };
 
         let state = Self::state_word(&r).unwrap_or("");
-        let mut facts = vec![Self::fact(t, "Where", format!("{label}{}", r.folder.as_ref().filter(|f| !f.is_empty()).map(|f| format!(", {f}")).unwrap_or_default()))];
-        facts.push(Self::fact(t, "State", format!("{state}{}", r.last.map(|l| format!(", last active {}", fmt::ago(l, now))).unwrap_or_default())));
+        let mut facts = vec![Self::fact(
+            t,
+            "Where",
+            format!(
+                "{label}{}",
+                r.folder.as_ref().filter(|f| !f.is_empty()).map(|f| format!(", {f}")).unwrap_or_default()
+            ),
+        )];
+        facts.push(Self::fact(
+            t,
+            "State",
+            format!("{state}{}", r.last.map(|l| format!(", last active {}", fmt::ago(l, now))).unwrap_or_default()),
+        ));
         if let Some(m) = &r.model {
             facts.push(Self::fact(t, "Model", fmt::model(m)));
         }
@@ -742,58 +939,79 @@ impl BrowserView {
             let b = if primary { ui::primary_btn(t, id, 54.) } else { ui::line_btn(t, id, 54.) };
             let (ink, sub) = if primary { (t.on_accent, t.on_accent.alpha(0.82)) } else { (t.ink, t.dim) };
             // Grows taller rather than letting a long note run into the next button.
-            b.flex_1()
-                .min_w(px(110.))
-                .h_auto()
-                .min_h(px(54.))
-                .py(px(8.))
-                .px(px(12.))
-                .justify_start()
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .text_size(px(13.))
-                                .font_weight(FontWeight::SEMIBOLD)
-                                .text_color(ink)
-                                .child(if ic == "fresh" && fresh_busy { ui::spin_icon("br-fresh-spin", ic, 14., ink) } else { ui::icon(ic, 14., ink).into_any_element() })
-                                .child(title.to_string()),
-                        )
-                        .child(div().w_full().text_size(px(11.5)).line_height(relative(1.3)).text_color(sub).child(note)),
-                )
+            b.flex_1().min_w(px(110.)).h_auto().min_h(px(54.)).py(px(8.)).px(px(12.)).justify_start().child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(ink)
+                            .child(if ic == "fresh" && fresh_busy {
+                                ui::spinner("br-fresh-spin", 14., ink)
+                            } else {
+                                ui::icon(ic, 14., ink).into_any_element()
+                            })
+                            .child(title.to_string()),
+                    )
+                    .child(div().w_full().text_size(px(11.5)).line_height(relative(1.3)).text_color(sub).child(note)),
+            )
         };
-        let ctx_note = r.ctx.filter(|c| *c > 0.).map(|c| format!("Re-reads {}", fmt::k(c as u64))).unwrap_or_else(|| "The same chat".into());
+        let ctx_note = r
+            .ctx
+            .filter(|c| *c > 0.)
+            .map(|c| format!("Re-reads {}", fmt::k(c as u64)))
+            .unwrap_or_else(|| "The same chat".into());
         let mut acts = div().flex().flex_wrap().gap(px(8.));
         acts = acts.child(
-            big("br-resume", "resume", if busy { "Resuming" } else if alive { "Open terminal" } else { "Resume" }, if alive { "It is running".into() } else { ctx_note }, true)
-                .when(busy, |d| d.opacity(0.6))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let r = r_res.clone();
-                    if alive { this.terminal(&r, cx) } else { this.resume(&r, cx) }
-                })),
+            big(
+                "br-resume",
+                "resume",
+                if busy {
+                    "Resuming"
+                } else if alive {
+                    "Open terminal"
+                } else {
+                    "Resume"
+                },
+                if alive { "It is running".into() } else { ctx_note },
+                true,
+            )
+            .when(busy, |d| d.opacity(0.6))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let r = r_res.clone();
+                if alive { this.terminal(&r, cx) } else { this.resume(&r, cx) }
+            })),
         );
         acts = acts.child(
-            big("br-fresh", "fresh", if fresh_busy { "Starting" } else { "Start fresh" }, "New chat from a handoff".into(), false)
-                .when(fresh_busy, |d| d.opacity(0.6))
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    let r = r_fresh.clone();
-                    let (m, sid, title) = (r.machine.clone(), r.sid.clone(), r.title.clone());
-                    this.app.update(cx, |s, cx| s.fresh_chat(&m, &sid, title, cx));
-                })),
+            big(
+                "br-fresh",
+                "fresh",
+                if fresh_busy { "Starting" } else { "Start fresh" },
+                "New chat from a handoff".into(),
+                false,
+            )
+            .when(fresh_busy, |d| d.opacity(0.6))
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let r = r_fresh.clone();
+                let (m, sid, title) = (r.machine.clone(), r.sid.clone(), r.title.clone());
+                this.app.update(cx, |s, cx| s.fresh_chat(&m, &sid, title, cx));
+            })),
         );
         if !alive {
-            acts = acts.child(big("br-term", "term", "Open terminal", "Resumes it there".into(), false).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let r = r_term.clone();
-                this.terminal(&r, cx)
-            })));
+            acts = acts.child(big("br-term", "term", "Open terminal", "Resumes it there".into(), false).on_click(
+                cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let r = r_term.clone();
+                    this.terminal(&r, cx)
+                }),
+            ));
         }
         let mut more = div().flex().items_center().gap(px(6.));
         more = more.child(match url {
@@ -808,72 +1026,120 @@ impl BrowserView {
             None => div().into_any_element(),
         });
         let sid = r.sid.clone();
-        more = more.child(ui::ghost(t, "br-copy", None, None).h(px(28.)).px(px(8.)).text_size(px(12.5)).child(ui::icon("copy", 13., t.dim)).child("Copy its id").on_click(cx.listener(
-            move |this, _: &ClickEvent, _, cx| {
-                copy_text(cx, sid.clone());
-                this.app.update(cx, |s, cx| s.toast("Copied the chat's id", None, false, cx));
-            },
-        )));
+        more = more.child(
+            ui::ghost(t, "br-copy", None, None)
+                .h(px(28.))
+                .px(px(8.))
+                .text_size(px(12.5))
+                .child(ui::icon("copy", 13., t.dim))
+                .child("Copy its id")
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    copy_text(cx, sid.clone());
+                    this.app.update(cx, |s, cx| s.toast("Copied the chat's id", None, false, cx));
+                })),
+        );
 
-        let mut body = div().flex().flex_col().gap(px(16.)).child(head).child(acts).child(more).child(div().flex().flex_col().gap(px(6.)).children(facts));
+        let mut body = div()
+            .flex()
+            .flex_col()
+            .gap(px(16.))
+            .child(head)
+            .child(acts)
+            .child(more)
+            .child(div().flex().flex_col().gap(px(6.)).children(facts));
         match self.sums.get(&k) {
             Some(Ok(sum)) => {
                 if let Some(first) = sum.first.as_ref().and_then(|f| f.text.clone()).filter(|x| !x.trim().is_empty()) {
-                    body = body.child(Self::said(t, "First message", &first, sum.first.as_ref().and_then(|f| f.ts).map(|ts| fmt::ago(ts, now))));
+                    body = body.child(Self::said(
+                        t,
+                        "First message",
+                        &first,
+                        sum.first.as_ref().and_then(|f| f.ts).map(|ts| fmt::ago(ts, now)),
+                    ));
                 }
-                let recent: Vec<_> = sum.recent.iter().filter(|x| x.text.as_deref().is_some_and(|s| !s.trim().is_empty())).collect();
+                let recent: Vec<_> =
+                    sum.recent.iter().filter(|x| x.text.as_deref().is_some_and(|s| !s.trim().is_empty())).collect();
                 for (i, x) in recent.iter().rev().take(3).rev().enumerate() {
                     let label = if i == 0 { "Lately" } else { "" };
-                    body = body.child(Self::said(t, label, x.text.as_deref().unwrap_or(""), x.ts.map(|ts| fmt::ago(ts, now))));
+                    body = body.child(Self::said(
+                        t,
+                        label,
+                        x.text.as_deref().unwrap_or(""),
+                        x.ts.map(|ts| fmt::ago(ts, now)),
+                    ));
                 }
                 if let Some(a) = sum.answer.clone().filter(|x| !x.trim().is_empty()) {
                     body = body.child(Self::said(t, "Claude's last answer", &a, None));
                 }
             }
-            Some(Err(e)) => body = body.child(div().text_size(px(12.5)).text_color(t.faint).child(format!("Could not read the chat on {label}. {e}"))),
+            Some(Err(e)) => {
+                body = body.child(
+                    div()
+                        .text_size(px(12.5))
+                        .text_color(t.faint)
+                        .child(format!("Could not read the chat on {label}. {e}")),
+                )
+            }
             None => {
-                body = body.child(div().text_size(px(12.5)).text_color(t.faint).child(match (&r.first_prompt, &r.last_prompt) {
-                    (Some(f), _) if !f.is_empty() => format!("First: {f}"),
-                    (_, Some(l)) if !l.is_empty() => format!("Lately: {l}"),
-                    _ => format!("Reading it on {label}..."),
-                }))
+                body = body.child(match (&r.first_prompt, &r.last_prompt) {
+                    (Some(f), _) if !f.is_empty() => {
+                        div().text_size(px(12.5)).text_color(t.faint).child(format!("First: {f}"))
+                    }
+                    (_, Some(l)) if !l.is_empty() => {
+                        div().text_size(px(12.5)).text_color(t.faint).child(format!("Lately: {l}"))
+                    }
+                    _ => ui::loading(t, "br-read", format!("Reading it on {label}")).text_size(px(12.5)),
+                })
             }
         }
         // Its written summary, when there is one.
         if r.handoff == Some(true) {
             let note = match self.notes.get(&k) {
-                Some(Ok(text)) => ui::wrap(text.clone()).text_size(px(12.5)).line_height(relative(1.5)).text_color(t.ink2),
-                Some(Err(e)) => ui::wrap(format!("Could not read the summary on {label}. {e}")).text_size(px(12.5)).text_color(t.faint),
-                None => ui::wrap(format!("Reading the summary on {label}...")).text_size(px(12.5)).text_color(t.faint),
+                Some(Ok(text)) => {
+                    ui::wrap(text.clone()).text_size(px(12.5)).line_height(relative(1.5)).text_color(t.ink2)
+                }
+                Some(Err(e)) => ui::wrap(format!("Could not read the summary on {label}. {e}"))
+                    .text_size(px(12.5))
+                    .text_color(t.faint),
+                None => ui::loading(t, "br-note", format!("Reading the summary on {label}")).text_size(px(12.5)),
             };
             body = body.child(
                 div()
                     .flex()
                     .flex_col()
                     .gap(px(6.))
-                    .child(div().flex().items_center().gap(px(6.)).child(ui::icon("handoff", 13., t.faint)).child(ui::lbl("Summary", t.faint)))
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(6.))
+                            .child(ui::icon("handoff", 13., t.faint))
+                            .child(ui::lbl("Summary", t.faint)),
+                    )
                     .child(div().p(px(12.)).rounded(px(ui::R_CARD)).bg(t.bg).child(note)),
             );
         }
         // The thread: compact it, and every earlier chat, newest first.
-        let head_row = self.head.as_ref().and_then(|h| self.rows.iter().find(|x| key(&x.machine, &x.sid) == *h)).cloned();
+        let head_row =
+            self.head.as_ref().and_then(|h| self.rows.iter().find(|x| key(&x.machine, &x.sid) == *h)).cloned();
         if let Some(head) = head_row.filter(|h| !h.history.is_empty()) {
             body = body.child(self.compact_card(t, &head, cx));
             let hk = key(&head.machine, &head.sid);
             let n = head.history_count.unwrap_or(head.history.len() as u64);
-            let mut list = div()
-                .flex()
-                .flex_col()
-                .gap(px(8.))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(6.))
-                        .child(ui::icon("history", 13., t.faint))
-                        .child(ui::lbl("Additional history", t.faint))
-                        .child(div().text_size(px(12.)).text_color(t.faint).child(format!("{n} earlier {}", if n == 1 { "chat" } else { "chats" }))),
-                );
+            let mut list = div().flex().flex_col().gap(px(8.)).child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .child(ui::icon("history", 13., t.faint))
+                    .child(ui::lbl("Additional history", t.faint))
+                    .child(
+                        div()
+                            .text_size(px(12.))
+                            .text_color(t.faint)
+                            .child(format!("{n} earlier {}", if n == 1 { "chat" } else { "chats" })),
+                    ),
+            );
             if k != hk {
                 list = list.child(self.older_card(t, &head, "Newest", &k, cx));
             }
@@ -881,11 +1147,32 @@ impl BrowserView {
                 list = list.child(self.older_card(t, o, "", &k, cx));
             }
             if (head.history.len() as u64) < n {
-                list = list.child(ui::wrap(format!("{} older chats are not shown here. Search for them by name.", n - head.history.len() as u64)).text_size(px(12.)).text_color(t.faint));
+                list = list.child(
+                    ui::wrap(format!(
+                        "{} older chats are not shown here. Search for them by name.",
+                        n - head.history.len() as u64
+                    ))
+                    .text_size(px(12.))
+                    .text_color(t.faint),
+                );
             }
             body = body.child(list);
         }
-        div().id("br-side").size_full().overflow_y_scroll().track_scroll(&self.side).px(px(20.)).py(px(18.)).child(body).into_any_element()
+        div()
+            .size_full()
+            .relative()
+            .child(
+                div()
+                    .id("br-side")
+                    .size_full()
+                    .overflow_y_scroll()
+                    .track_scroll(&self.side)
+                    .px(px(20.))
+                    .py(px(18.))
+                    .child(body),
+            )
+            .child(ui::scrollbar(&self.side))
+            .into_any_element()
     }
 }
 
@@ -904,20 +1191,46 @@ impl BrowserView {
         let rn_focused = self.rn.focus_handle(cx).is_focused(window);
         let well = if t.dark { t.bg2 } else { t.bg };
 
-        let machines: Vec<(String, String)> = self.app.read(cx).snap.machines.iter().map(|m| (m.name.clone(), m.label.clone())).collect();
-        let mut mseg = ui::seg_box(&t).child(ui::seg_btn(&t, "br-m-all", self.machine.is_empty(), false).child("All machines").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.set_filter(Some(String::new()), None, cx))));
-        for (name, label) in machines {
-            let on = self.machine == name;
-            mseg = mseg.child(
-                ui::seg_btn(&t, SharedString::from(format!("br-m-{name}")), on, false)
-                    .child(label)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(Some(name.clone()), None, cx))),
-            );
-        }
-        let mut sseg = ui::seg_box(&t);
-        for (v, label) in STATES {
-            sseg = sseg.child(ui::seg_btn(&t, SharedString::from(format!("br-s-{v}")), self.state == v, false).child(label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(None, Some(v), cx))));
-        }
+        let machines: Vec<(String, String)> =
+            self.app.read(cx).snap.machines.iter().map(|m| (m.name.clone(), m.label.clone())).collect();
+        // The machine filter: segmented buttons for up to four choices, a dropdown past that.
+        let mut mchoices = vec![(String::new(), "All machines".to_string())];
+        mchoices.extend(machines);
+        let mseg = if mchoices.len() <= 4 {
+            let mut seg = ui::seg_box(&t);
+            for (name, label) in mchoices {
+                let on = self.machine == name;
+                let id = if name.is_empty() { "br-m-all".to_string() } else { format!("br-m-{name}") };
+                seg = seg.child(ui::seg_btn(&t, SharedString::from(id), on, false).child(label).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(Some(name.clone()), None, cx)),
+                ));
+            }
+            seg.into_any_element()
+        } else {
+            let cur = mchoices.iter().find(|m| m.0 == self.machine).map(|m| m.1.clone()).unwrap_or_default();
+            self.drop_list(
+                &t,
+                "br-machine",
+                Some("mac"),
+                cur,
+                mchoices,
+                self.machine.clone(),
+                |this, m, cx| this.set_filter(Some(m), None, cx),
+                cx,
+            )
+        };
+        let sseg = ui::choice(
+            &t,
+            cx,
+            "br-state",
+            self.drop.is_open("br-state"),
+            &STATES,
+            self.state,
+            false,
+            None,
+            |v| &mut v.drop,
+            |v, st, cx| v.set_filter(None, Some(st), cx),
+        );
         let threads = self.threads;
         let (hover, accent, line2, on_accent) = (t.hover, t.accent, t.line2, t.on_accent);
         let thread_btn = div()
@@ -972,94 +1285,114 @@ impl BrowserView {
 
         // The folder filter: every folder that has chats, in a menu under its button.
         let folder_label = if self.folder.is_empty() { "Every folder".to_string() } else { self.folder.clone() };
-        let folder_btn = ui::line_btn(&t, "br-folder", 28.)
-            .px(px(10.))
-            .text_size(px(12.5))
-            .when(self.folder_open, |d| d.bg(t.press))
-            .child(ui::icon("folder", 13., t.dim))
-            .child(folder_label)
-            .child(ui::icon("down", 11., t.faint))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.folder_open = !this.folder_open;
-                cx.notify();
-            }));
-        let folder_menu = self.folder_open.then(|| {
-            let hover = t.hover;
-            let mut menu = div()
-                .id("br-folders")
-                .absolute()
-                .top(px(96.))
-                .left(px(200.))
-                .w(px(320.))
-                .max_h(px(360.))
-                .overflow_y_scroll()
-                .p(px(6.))
-                .rounded(px(ui::R_POP))
-                .border_1()
-                .border_color(t.line2)
-                .bg(t.panel2)
-                .shadow(t.drop())
-                .occlude();
-            for f in std::iter::once(String::new()).chain(self.folders.iter().cloned()) {
-                let on = self.folder == f;
-                let label = if f.is_empty() { "Every folder".to_string() } else { f.clone() };
-                menu = menu.child(
-                    div()
-                        .id(SharedString::from(format!("br-f-{f}")))
-                        .min_h(px(30.))
-                        .px(px(8.))
-                        .py(px(5.))
-                        .flex()
-                        .items_center()
-                        .gap(px(8.))
-                        .rounded(px(ui::R_ITEM))
-                        .cursor_pointer()
-                        .hover(move |s| s.bg(hover))
-                        .text_size(px(13.))
-                        .text_color(if on { t.ink } else { t.ink2 })
-                        .child(ui::wrap(label).flex_1())
-                        .when(on, |d| d.child(ui::icon("check", 13., t.accent)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.folder = f.clone();
-                            this.folder_open = false;
-                            this.load(false, cx);
-                        })),
-                );
-            }
-            menu
-        });
+        let folders: Vec<(String, String)> = std::iter::once((String::new(), "Every folder".to_string()))
+            .chain(self.folders.iter().map(|f| (f.clone(), f.clone())))
+            .collect();
+        let folder_btn = self.drop_list(
+            &t,
+            "br-folder",
+            Some("folder"),
+            folder_label,
+            folders,
+            self.folder.clone(),
+            |this, f, cx| {
+                this.folder = f;
+                this.load(false, cx);
+            },
+            cx,
+        );
         let count = if self.loading && self.rows.is_empty() {
             "Looking...".to_string()
         } else {
-            format!("{} {}", self.total, if self.total == 1 { "chat" } else if self.threads { "threads" } else { "chats" })
+            format!(
+                "{} {}",
+                self.total,
+                if self.total == 1 {
+                    "chat"
+                } else if self.threads {
+                    "threads"
+                } else {
+                    "chats"
+                }
+            )
         };
 
-        let mut list = div().id("br-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.list).px(px(10.)).pb(px(16.));
+        // The list's lines: a day heading before each day's first chat, the chats, then Show more.
+        let mut lines: Vec<HistLine> = Vec::new();
         if let Some(e) = &self.error {
-            list = list.child(div().px(px(12.)).py(px(18.)).text_size(px(13.)).text_color(t.bad).child(format!("Could not load the chats. {e}")));
+            lines.push(HistLine::Note(format!("Could not load the chats. {e}"), true));
         } else if self.rows.is_empty() && !self.loading {
-            list = list.child(div().px(px(12.)).py(px(18.)).text_size(px(13.)).text_color(t.faint).child("No chats match."));
+            lines.push(HistLine::Note("No chats match.".into(), false));
+        } else if self.rows.is_empty() {
+            lines.push(HistLine::Loading);
         }
         let mut group = String::new();
-        for r in &self.rows {
+        for (i, r) in self.rows.iter().enumerate() {
             let g = fmt::day_heading(r.last.unwrap_or(0.), now);
             if g != group {
-                list = list.child(div().pt(px(16.)).pb(px(6.)).px(px(12.)).text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child(g.clone()));
+                lines.push(HistLine::Day(g.clone()));
                 group = g;
             }
-            list = list.child(self.row(&t, r, now, cx));
+            lines.push(HistLine::Row(i));
         }
         if (self.rows.len() as u64) < self.total {
-            list = list.child(
-                div().pt(px(10.)).flex().justify_center().child(
-                    ui::line_btn(&t, "br-more", 30.)
+            lines.push(HistLine::More);
+        }
+        let n = lines.len();
+        let had = self.list.item_count();
+        if n > had && had > 0 {
+            // Show more added rows at the end: keep the place and the rows already measured
+            self.list.splice(had..had, n - had);
+        } else if n != had {
+            self.list.reset(n);
+        }
+        let lines = std::rc::Rc::new(lines);
+        let list = gpui::list(
+            self.list.clone(),
+            cx.processor(move |this, ix: usize, _, cx| {
+                let t = Theme::get(cx);
+                let now = AppState::now();
+                let line = match lines.get(ix) {
+                    Some(HistLine::Note(text, bad)) => div()
+                        .px(px(12.))
+                        .py(px(18.))
+                        .text_size(px(13.))
+                        .text_color(if *bad { t.bad } else { t.faint })
+                        .child(text.clone()),
+                    Some(HistLine::Loading) => {
+                        ui::loading(&t, "br-list-load", "Loading the chats").px(px(12.)).py(px(18.))
+                    }
+                    Some(HistLine::Day(g)) => div()
+                        .pt(px(16.))
+                        .pb(px(6.))
                         .px(px(12.))
                         .text_size(px(12.5))
-                        .child(if self.loading { "Loading".to_string() } else { format!("Show more ({} left)", self.total - self.rows.len() as u64) })
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load(true, cx))),
-                ),
-            );
-        }
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t.dim)
+                        .child(g.clone()),
+                    Some(HistLine::Row(i)) => match this.rows.get(*i) {
+                        Some(r) => div().child(this.row(&t, r, now, cx)),
+                        None => div(),
+                    },
+                    Some(HistLine::More) => div().pt(px(10.)).pb(px(16.)).flex().justify_center().child(
+                        ui::line_btn(&t, "br-more", 30.)
+                            .px(px(12.))
+                            .text_size(px(12.5))
+                            .when(this.loading, |d| d.child(ui::spinner("br-more-spin", 13., t.dim)))
+                            .child(if this.loading {
+                                "Loading more".to_string()
+                            } else {
+                                format!("Show more ({} left)", this.total.saturating_sub(this.rows.len() as u64))
+                            })
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load(true, cx))),
+                    ),
+                    None => div(),
+                };
+                div().px(px(10.)).child(line).into_any_element()
+            }),
+        )
+        .size_full();
+        let list = div().relative().flex_1().min_h_0().child(list).child(ui::scrollbar(&self.list));
 
         div()
             .id("browser")
@@ -1089,22 +1422,60 @@ impl BrowserView {
                             .flex()
                             .items_center()
                             .gap(px(12.))
-                            .child(div().flex_none().text_size(px(17.)).font_weight(FontWeight::BOLD).child(if self.embedded { "History" } else { "Sessions" }))
+                            .child(
+                                div()
+                                    .flex_none()
+                                    .text_size(px(17.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .child(if self.embedded { "History" } else { "Sessions" }),
+                            )
                             .child(search)
                             .child(div().flex_1())
                             .child(div().flex_none().text_size(px(12.5)).text_color(t.faint).child(count))
-                            .child(ui::ghost(&t, "br-reload", Some("Refresh"), Some("update")).h(px(28.)).px(px(8.)).text_size(px(12.5)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load(false, cx)))),
+                            .child(
+                                ui::ghost(&t, "br-reload", Some("Refresh"), Some("update"))
+                                    .h(px(28.))
+                                    .px(px(8.))
+                                    .text_size(px(12.5))
+                                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load(false, cx))),
+                            ),
                     )
-                    .child(div().flex().flex_wrap().items_center().gap(px(10.)).child(mseg).child(folder_btn).child(sseg).child(thread_btn)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_wrap()
+                            .items_center()
+                            .gap(px(10.))
+                            .child(mseg)
+                            .child(folder_btn)
+                            .child(sseg)
+                            .child(thread_btn),
+                    ),
             )
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(div().flex_1().min_w_0().flex().flex_col().child(list))
-                    .child(div().flex_none().w(px(if self.embedded { 460. } else { 400. })).h_full().min_h_0().border_l_1().border_color(t.rule).bg(t.panel).child(self.detail(&t, now, rn_focused, cx))),
+                div().flex_1().min_h_0().flex().child(div().flex_1().min_w_0().flex().flex_col().child(list)).child(
+                    div()
+                        .flex_none()
+                        .w(px(if self.embedded { 460. } else { 400. }))
+                        .h_full()
+                        .min_h_0()
+                        .border_l_1()
+                        .border_color(t.rule)
+                        .bg(t.panel)
+                        .child(self.detail(&t, now, rn_focused, cx)),
+                ),
             )
-            .children(folder_menu)
     }
+}
+
+/// One line of the History list.
+enum HistLine {
+    /// The list cannot show chats: why (and whether it is an error).
+    Note(String, bool),
+    Loading,
+    /// "Today", "Yesterday", a date: before the first chat of each day.
+    Day(String),
+    /// A chat: its index in the loaded rows.
+    Row(usize),
+    More,
 }

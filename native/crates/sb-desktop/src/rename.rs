@@ -4,7 +4,9 @@
 //! An empty name goes back to the automatic one. The new name shows at once on every view (AppState::rename), and the
 //! server tells the other devices; the machine writes it where Claude Code's own /resume list reads it.
 
-use gpui::{AnyElement, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div, px, relative};
+use gpui::{
+    AnyElement, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, Styled, div, px, relative,
+};
 use sb_core::names;
 
 use crate::ui;
@@ -45,12 +47,19 @@ impl BoardView {
     /// the details sheet (selected for it), else in a small sheet of its own.
     pub fn rename_chat(&mut self, key: String, window: &mut gpui::Window, cx: &mut gpui::Context<Self>) {
         self.menu = None;
-        let shown = self.tab.checked_sub(1).filter(|i| self.tabs.get(*i).and_then(|t| t.read(cx).chat_name(cx)).is_some_and(|(k, _)| k == key));
+        let shown = self
+            .tab
+            .checked_sub(1)
+            .filter(|i| self.tabs.get(*i).and_then(|t| t.read(cx).chat_name(cx)).is_some_and(|(k, _)| k == key));
         if let Some(i) = shown {
             return self.rename_tab(i, window, cx);
         }
         let Some(raw) = self.app.read(cx).snap.session(&key).map(|s| s.raw_title.clone()) else { return };
-        let at = if self.tab == 0 && self.main == Main::Board && self.detached.is_none() { EditAt::Details } else { EditAt::Sheet };
+        let at = if self.tab == 0 && self.main == Main::Board && self.detached.is_none() {
+            EditAt::Details
+        } else {
+            EditAt::Sheet
+        };
         if at == EditAt::Details && self.sel.as_deref() != Some(key.as_str()) {
             self.select(Some(key.clone()), cx);
         }
@@ -81,7 +90,14 @@ impl BoardView {
         }
         let name = names::given(&typed, &e.raw);
         if name.is_empty() && !typed.trim().is_empty() {
-            self.app.update(cx, |s, cx| s.toast("A name needs letters or digits.", Some("It may use letters, digits, spaces and . , : ' + # ( ) - _".into()), true, cx));
+            self.app.update(cx, |s, cx| {
+                s.toast(
+                    "A name needs letters or digits.",
+                    Some("It may use letters, digits, spaces and . , : ' + # ( ) - _".into()),
+                    true,
+                    cx,
+                )
+            });
             return;
         }
         if name == e.raw || (!name.is_empty() && names::split(&name).0 == names::split(&e.raw).0) {
@@ -96,7 +112,8 @@ impl BoardView {
                 name,
                 move |ok, cx| {
                     if ok && cleared {
-                        crate::state::app(cx).update(cx, |s, cx| s.toast("Back to its automatic name", None, false, cx));
+                        crate::state::app(cx)
+                            .update(cx, |s, cx| s.toast("Back to its automatic name", None, false, cx));
                     }
                 },
                 cx,
@@ -136,12 +153,20 @@ impl BoardView {
             .border_1()
             .border_color(t.accent)
             // a soft focus ring outside the border, as text fields have on the Mac
-            .shadow(vec![gpui::BoxShadow { color: t.accent.opacity(0.22), offset: gpui::point(px(0.), px(0.)), blur_radius: px(0.), spread_radius: px(2.5), inset: false }])
+            .shadow(vec![gpui::BoxShadow {
+                color: t.accent.opacity(0.22),
+                offset: gpui::point(px(0.), px(0.)),
+                blur_radius: px(0.),
+                spread_radius: px(2.5),
+                inset: false,
+            }])
             .text_size(px(size))
             .text_color(t.ink)
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-            .child(div().flex_1().min_w_0().h_full().flex().items_center().child(gpui_base::Input::new(&self.chat_name)))
+            .child(
+                div().flex_1().min_w_0().h_full().flex().items_center().child(gpui_base::Input::new(&self.chat_name)),
+            )
     }
 
     /// The details' title while it is being renamed: the field, and a line on what Enter and an empty name do.
@@ -191,8 +216,18 @@ impl BoardView {
                             .shadow(t.drop())
                             .occlude()
                             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                            .child(div().text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.ink).child("Rename chat"))
-                            .child(ui::line(if label.is_empty() { topic } else { format!("{topic}, on {label}") }).text_size(px(12.5)).text_color(t.dim))
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(t.ink)
+                                    .child("Rename chat"),
+                            )
+                            .child(
+                                ui::line(if label.is_empty() { topic } else { format!("{topic}, on {label}") })
+                                    .text_size(px(12.5))
+                                    .text_color(t.dim),
+                            )
                             .child(self.chat_name_field(c, "rename-sheet-field", 34., 14.))
                             .child(hint(c))
                             .child(
@@ -202,20 +237,33 @@ impl BoardView {
                                     .justify_end()
                                     .gap(px(8.))
                                     // On press, not on click: the field losing focus would save first.
-                                    .child(ui::ghost(&t, "rename-cancel", None, None).h(px(30.)).px(px(12.)).text_size(px(13.)).child("Cancel").on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.cancel_chat_name(cx)
-                                        }),
-                                    ))
-                                    .child(ui::primary_btn(&t, "rename-save", 30.).px(px(14.)).text_size(px(13.)).child("Save").on_mouse_down(
-                                        MouseButton::Left,
-                                        cx.listener(|this, _, _, cx| {
-                                            cx.stop_propagation();
-                                            this.commit_chat_name(true, cx)
-                                        }),
-                                    )),
+                                    .child(
+                                        ui::ghost(&t, "rename-cancel", None, None)
+                                            .h(px(30.))
+                                            .px(px(12.))
+                                            .text_size(px(13.))
+                                            .child("Cancel")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.cancel_chat_name(cx)
+                                                }),
+                                            ),
+                                    )
+                                    .child(
+                                        ui::primary_btn(&t, "rename-save", 30.)
+                                            .px(px(14.))
+                                            .text_size(px(13.))
+                                            .child("Save")
+                                            .on_mouse_down(
+                                                MouseButton::Left,
+                                                cx.listener(|this, _, _, cx| {
+                                                    cx.stop_propagation();
+                                                    this.commit_chat_name(true, cx)
+                                                }),
+                                            ),
+                                    ),
                             ),
                     ),
                 )

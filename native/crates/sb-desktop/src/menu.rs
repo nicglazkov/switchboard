@@ -1,7 +1,10 @@
 //! The right-click menu on a chat: the inspector's actions where the pointer is, with Continue spelled out per
 //! machine. A click anywhere else, a right click elsewhere or Escape closes it.
 
-use gpui::{ClickEvent, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, SharedString, StatefulInteractiveElement, Styled, div, prelude::*, px};
+use gpui::{
+    ClickEvent, InteractiveElement, IntoElement, MouseButton, ParentElement, Pixels, Point, SharedString,
+    StatefulInteractiveElement, Styled, div, prelude::*, px,
+};
 use sb_core::actions::{self as acts, ActionId};
 
 use crate::ui;
@@ -72,7 +75,16 @@ impl BoardView {
             if a.id == ActionId::Continue {
                 for m in c.app.snap.other_machines(&s.machine) {
                     let title = format!("Continue on {}", m.label);
-                    rows.push(Row { item: Item::To(m.name.clone()), title, icon: "cont".into(), cap: None, disabled: false, danger: false, thread: false, cost: None });
+                    rows.push(Row {
+                        item: Item::To(m.name.clone()),
+                        title,
+                        icon: "cont".into(),
+                        cap: None,
+                        disabled: false,
+                        danger: false,
+                        thread: false,
+                        cost: None,
+                    });
                 }
                 continue;
             }
@@ -84,7 +96,16 @@ impl BoardView {
                 _ => None,
             });
             let cost = cost.map(|n| format!("about {}", sb_core::fmt::k(n.max(0.).round() as u64)));
-            rows.push(Row { item: Item::Act(a.id), title: a.title.clone(), icon: a.icon.clone(), cap, disabled: a.disabled, danger: a.danger, thread: a.id.is_thread(), cost });
+            rows.push(Row {
+                item: Item::Act(a.id),
+                title: a.title.clone(),
+                icon: a.icon.clone(),
+                cap,
+                disabled: a.disabled,
+                danger: a.danger,
+                thread: a.id.is_thread(),
+                cost,
+            });
         }
         let costs = rows.iter().any(|r| r.cost.is_some());
         // A rule before the first danger row and before the thread rows (never at the top).
@@ -92,7 +113,13 @@ impl BoardView {
         let danger_at = rule_at(&rows, |r| r.danger);
         let thread_at = rule_at(&rows, |r| r.thread);
         let seps = danger_at.iter().chain(thread_at.iter()).collect::<std::collections::HashSet<_>>().len();
-        let menu_h = rows.len() as f32 * ROW + seps as f32 * 9. + 12. + if places { 3. * 30. + 9. } else { 0. } + ROW + 9. + if costs { 48. } else { 0. };
+        let menu_h = rows.len() as f32 * ROW
+            + seps as f32 * 9.
+            + 12.
+            + if places { 3. * 30. + 9. } else { 0. }
+            + ROW
+            + 9.
+            + if costs { 48. } else { 0. };
         let x = f32::from(at.x).min(w - W - 8.).max(8.);
         let y = f32::from(at.y).min(h - menu_h - 8.).max(8.);
 
@@ -114,7 +141,9 @@ impl BoardView {
             .flex()
             .flex_col();
         if places {
-            menu = menu.children(self.place_rows(c, key, "ctx-place")).child(div().my(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule));
+            menu = menu
+                .children(self.place_rows(c, key, "ctx-place"))
+                .child(div().my(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule));
         }
         let fk = key.clone();
         let hover = t.hover;
@@ -141,7 +170,13 @@ impl BoardView {
             if Some(i) == danger_at || Some(i) == thread_at {
                 menu = menu.child(div().my(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule));
             }
-            let ink = if disabled { t.faint } else if danger { t.bad } else { t.ink };
+            let ink = if disabled {
+                t.faint
+            } else if danger {
+                t.bad
+            } else {
+                t.ink
+            };
             let ic = if danger { t.bad } else { t.faint };
             let hover = t.hover;
             let k = key.clone();

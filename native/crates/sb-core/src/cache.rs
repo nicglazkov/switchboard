@@ -31,11 +31,7 @@ pub fn default_dir() -> Option<PathBuf> {
 /// Where small settings live (theme, folded lanes): next to the cache on macOS and Linux config dirs elsewhere.
 pub fn settings_dir() -> Option<PathBuf> {
     let base = dirs::config_dir()?;
-    Some(if cfg!(target_os = "macos") {
-        base.join(DESKTOP_ID)
-    } else {
-        base.join("Switchboard")
-    })
+    Some(if cfg!(target_os = "macos") { base.join(DESKTOP_ID) } else { base.join("Switchboard") })
 }
 
 /// Writes `bytes` to `path` atomically.
@@ -68,7 +64,10 @@ struct SessionsFile {
 
 /// Saves the raw /api/sessions reply as it came (no re-encoding), with when and where it came from.
 pub fn save_sessions(dir: &Path, raw: &[u8], fetched_at: f64, base: &str) -> std::io::Result<()> {
-    let head = format!("{{\"v\":1,\"fetched_at\":{fetched_at},\"base\":{},\"data\":", serde_json::to_string(base).unwrap_or_else(|_| "null".into()));
+    let head = format!(
+        "{{\"v\":1,\"fetched_at\":{fetched_at},\"base\":{},\"data\":",
+        serde_json::to_string(base).unwrap_or_else(|_| "null".into())
+    );
     let mut out = Vec::with_capacity(raw.len() + head.len() + 2);
     out.extend_from_slice(head.as_bytes());
     out.extend_from_slice(raw);
@@ -134,13 +133,23 @@ impl FolderCache {
                         .folders
                         .iter()
                         .filter(|f| !f.folder.is_empty())
-                        .map(|f| ApiFolder { folder: f.folder.clone(), name: Some(f.folder.clone()), kids: Some(false), recent: f.recent })
+                        .map(|f| ApiFolder {
+                            folder: f.folder.clone(),
+                            name: Some(f.folder.clone()),
+                            kids: Some(false),
+                            recent: f.recent,
+                        })
                         .collect();
                     m.tree.insert(String::new(), top);
                 }
             }
             (None, _) => {
-                let mut rec: Vec<ApiFolder> = reply.folders.iter().filter(|f| !f.folder.is_empty() && f.recent.unwrap_or(0.0) > 0.0).cloned().collect();
+                let mut rec: Vec<ApiFolder> = reply
+                    .folders
+                    .iter()
+                    .filter(|f| !f.folder.is_empty() && f.recent.unwrap_or(0.0) > 0.0)
+                    .cloned()
+                    .collect();
                 rec.sort_by(|a, b| b.recent.unwrap_or(0.0).total_cmp(&a.recent.unwrap_or(0.0)));
                 rec.truncate(3);
                 m.recent = rec;

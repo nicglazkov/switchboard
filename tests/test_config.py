@@ -115,12 +115,28 @@ class SettingsApiTest(unittest.TestCase):
             def read(self, n=-1): return self.b
             def __enter__(self): return self
             def __exit__(self, *a): return False
-        with mock.patch.object(server, 'urlopen', return_value=R(json.dumps(page).encode())) as u:
+        text = json.dumps(page, indent=1)
+        files = {'latest.json': text.encode(), 'latest.json.sig': b'c2lnbmF0dXJl\n'}
+
+        def fetch(url, timeout=None):
+            name = url.rsplit('/', 1)[1]
+            if name not in files:
+                raise OSError('404')
+            return R(files[name])
+        with mock.patch.object(server, 'urlopen', side_effect=fetch) as u:
             got = self.app.get('/api/app')
             self.app.get('/api/app')  # kept for a while: one look at the page
-        self.assertEqual(u.call_count, 1)
-        self.assertEqual(u.call_args[0][0], 'http://10.0.0.5:8131/app/latest.json')
-        self.assertEqual(got, {'ok': True, 'latest': page, 'base': 'http://10.0.0.5:8131/app', 'set_up': True})
+        self.assertEqual([c[0][0] for c in u.call_args_list],
+                         ['http://10.0.0.5:8131/app/latest.json', 'http://10.0.0.5:8131/app/latest.json.sig'])
+        # The list goes to the app as the exact text that was signed, so the app can check the signature itself.
+        self.assertEqual(got, {'ok': True, 'latest': page, 'base': 'http://10.0.0.5:8131/app', 'set_up': True,
+                               'feed': {'manifest': text, 'sig': 'c2lnbmF0dXJl'}})
+
+        # A page without a signature still answers; the app offers nothing from it.
+        del files['latest.json.sig']
+        self.app._latest = None
+        with mock.patch.object(server, 'urlopen', side_effect=fetch):
+            self.assertEqual(self.app.get('/api/app')['feed'], {'manifest': text, 'sig': None})
 
     def test_machines_can_be_renamed_reordered_added_and_removed(self):
         v = self.app.get('/api/machines')

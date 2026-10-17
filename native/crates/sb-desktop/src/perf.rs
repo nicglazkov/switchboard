@@ -66,11 +66,11 @@ pub fn watch(cx: &mut gpui::App) {
 
 /// A wheel event: the next frame says how long it took to show.
 pub fn wheel() {
-    if on() {
-        if let Ok(mut g) = ACC.lock() {
-            let a = g.get_or_insert_with(Acc::default);
-            a.wheel_at.get_or_insert(Instant::now());
-        }
+    if on()
+        && let Ok(mut g) = ACC.lock()
+    {
+        let a = g.get_or_insert_with(Acc::default);
+        a.wheel_at.get_or_insert(Instant::now());
     }
 }
 

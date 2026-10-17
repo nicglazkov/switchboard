@@ -7,6 +7,8 @@ pub fn claude_app_link(url: &str) -> Option<String> {
     let rest = url.strip_prefix("https://claude.ai/code/")?;
     let id = rest.split(['?', '#', '/']).next()?;
     let (kind, tail) = id.split_once('_')?;
-    let ok = matches!(kind, "session" | "cse") && !tail.is_empty() && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    let ok = matches!(kind, "session" | "cse")
+        && !tail.is_empty()
+        && tail.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
     ok.then(|| format!("claude://code/{id}"))
 }

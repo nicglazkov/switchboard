@@ -15,6 +15,17 @@ sb_host_opt() {
   printf -v "$v" '%s' "$val"
 }
 
+# The update key's public half and the optional feed URL, for the build scripts to pass to cargo (see
+# docs/building.md). Neither is secret; a build without SB_UPDATE_PUBKEY has updates off, and this says so.
+sb_update_env() {
+  sb_host_opt SB_UPDATE_PUBKEY || SB_UPDATE_PUBKEY=""
+  sb_host_opt SB_UPDATE_FEED || SB_UPDATE_FEED=""
+  case "$SB_UPDATE_PUBKEY$SB_UPDATE_FEED" in
+    *[!A-Za-z0-9+/=:._/%~-]*) echo "SB_UPDATE_PUBKEY or SB_UPDATE_FEED has characters no key or URL has" >&2; exit 1 ;;
+  esac
+  [ -n "$SB_UPDATE_PUBKEY" ] || echo "note: SB_UPDATE_PUBKEY is not set, so this build has updates off" >&2
+}
+
 sb_hosts() {
   local v
   for v in "$@"; do

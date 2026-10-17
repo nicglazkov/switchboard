@@ -31,10 +31,11 @@ use alacritty_terminal::term::cell::Flags;
 use alacritty_terminal::term::{Config, TermMode, viewport_to_point};
 use alacritty_terminal::vte::ansi::{Processor, StdSyncHandler};
 use gpui::{
-    AnyElement, App, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle, Focusable, Hsla,
-    InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    NoAction, ParentElement, Pixels, Render, ScrollWheelEvent, StatefulInteractiveElement, Styled, Subscription,
-    UTF16Selection, Window, actions, canvas, div, point, prelude::*, px, size,
+    AnyElement, App, Bounds, Context, ElementInputHandler, Entity, EntityInputHandler, EventEmitter, FocusHandle,
+    Focusable, Hsla, InteractiveElement, IntoElement, KeyBinding, KeyDownEvent, Modifiers, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, NoAction, ParentElement, Pixels, Render, ScrollWheelEvent,
+    StatefulInteractiveElement, Styled, Subscription, UTF16Selection, Window, actions, canvas, div, point, prelude::*,
+    px, size,
 };
 use sb_core::names;
 use sb_core::term::keys::{self, Mods};
@@ -65,7 +66,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-shift-r", TermRedraw, t),
     ];
     // Text size: Cmd+Plus, Cmd+Minus and Cmd+0 (Ctrl on Windows and Linux), as in every terminal.
-    for (k, big) in [("secondary-=", Some(true)), ("secondary-+", Some(true)), ("secondary-shift-=", Some(true)), ("secondary--", Some(false)), ("secondary-0", None)] {
+    for (k, big) in [
+        ("secondary-=", Some(true)),
+        ("secondary-+", Some(true)),
+        ("secondary-shift-=", Some(true)),
+        ("secondary--", Some(false)),
+        ("secondary-0", None),
+    ] {
         b.push(match big {
             Some(true) => KeyBinding::new(k, TermBigger, t),
             Some(false) => KeyBinding::new(k, TermSmaller, t),
@@ -170,9 +177,16 @@ pub enum Phase {
     Open,
     /// The connection closed: why, and whether Reconnect can help. `code`: what `claude attach` exited with, when it
     /// ended with an error (a clean exit closes the tab instead, like a real terminal).
-    Ended { note: String, retry: bool, code: Option<i64> },
+    Ended {
+        note: String,
+        retry: bool,
+        code: Option<i64>,
+    },
     /// The server would not open it (not running, interactive, offline).
-    Need { need: Need, message: String },
+    Need {
+        need: Need,
+        message: String,
+    },
     Failed(String),
 }
 
@@ -405,7 +419,9 @@ impl TermTab {
             _subs: vec![sub],
         };
         match start {
-            Start::Chat(key) | Start::Resume(key) | Start::Stopped(key) if app.read(cx).snap.session(&key).is_none() => {
+            Start::Chat(key) | Start::Resume(key) | Start::Stopped(key)
+                if app.read(cx).snap.session(&key).is_none() =>
+            {
                 tab.key = Some(key);
                 tab.phase = Phase::Failed("This chat is no longer in the list.".into());
             }
@@ -506,7 +522,10 @@ impl TermTab {
             "parked" => mk(K::Parked, "Parked", "waiting 2d".into(), 0),
             "stalled" => mk(K::Stall, "Stalled", "no word for 7h".into(), 0),
             "stale" => Live { stale: Some("as of 2m ago".into()), ..mk(K::Warm, "Warm", "as of 2m ago".into(), 0) },
-            _ => Live { expensive: Some("re-reads 312k".into()), ..mk(K::Cold, "Cold", "next message re-reads 312k".into(), 0) },
+            _ => Live {
+                expensive: Some("re-reads 312k".into()),
+                ..mk(K::Cold, "Cold", "next message re-reads 312k".into(), 0)
+            },
         };
         self.fake_live = Some(l);
         self.phase = Phase::Open;
@@ -1009,7 +1028,9 @@ impl TermTab {
             return self.reconnect_now(cx);
         }
         match &self.phase {
-            Phase::Ended { retry: true, .. } | Phase::Failed(_) | Phase::Need { need: Need::Offline, .. } => self.connect(cx),
+            Phase::Ended { retry: true, .. } | Phase::Failed(_) | Phase::Need { need: Need::Offline, .. } => {
+                self.connect(cx)
+            }
             Phase::Need { need: Need::Resume, .. } => self.resume(cx),
             Phase::Need { need: Need::Terminal, .. } => {
                 if let Some(u) = self.url.clone() {
@@ -1067,10 +1088,8 @@ impl TermTab {
         self.size = (c, r);
         self.quiet_until = self.quiet_until.max(AppState::now() + 1.0);
         self.term.resize(GridSize { cols: c as usize, rows: r as usize });
-        if send {
-            if let Some(tx) = &self.conn {
-                let _ = tx.try_send(ToHub::Resize { cols: c, rows: r });
-            }
+        if send && let Some(tx) = &self.conn {
+            let _ = tx.try_send(ToHub::Resize { cols: c, rows: r });
         }
     }
 
@@ -1092,15 +1111,18 @@ impl TermTab {
                 }
                 TermEv::TextAreaSizeRequest(f) => {
                     let (cw, lh) = self.geom.map(|(m, _)| (m.cell_w, m.line_h)).unwrap_or((8., 18.));
-                    let ws = WindowSize { num_lines: self.size.1, num_cols: self.size.0, cell_width: cw as u16, cell_height: lh as u16 };
+                    let ws = WindowSize {
+                        num_lines: self.size.1,
+                        num_cols: self.size.0,
+                        cell_width: cw as u16,
+                        cell_height: lh as u16,
+                    };
                     self.send(f(ws).into_bytes());
                 }
                 TermEv::ClipboardStore(_, text) => crate::state::copy_text(cx, text),
-                TermEv::Bell => {
-                    if !self.focused && !self.bell {
-                        self.bell = true;
-                        cx.emit(TermEvent::Changed);
-                    }
+                TermEv::Bell if !self.focused && !self.bell => {
+                    self.bell = true;
+                    cx.emit(TermEvent::Changed);
                 }
                 _ => {}
             }
@@ -1292,7 +1314,15 @@ impl TermTab {
         }
     }
 
-    fn encode_mouse(&self, button: u8, line: usize, col: usize, press: bool, motion: bool, mods: &Modifiers) -> Option<Vec<u8>> {
+    fn encode_mouse(
+        &self,
+        button: u8,
+        line: usize,
+        col: usize,
+        press: bool,
+        motion: bool,
+        mods: &Modifiers,
+    ) -> Option<Vec<u8>> {
         let mut b = button;
         if mods.shift {
             b += 4;
@@ -1325,16 +1355,20 @@ impl TermTab {
         self.line.unknown();
         let Some((line, col, side)) = self.cell_at(ev.position) else { return };
         self.link_press = None;
-        if ev.button == MouseButton::Left {
-            if let Some(f) = self.hover.as_ref().filter(|(l, f)| *l == line && (f.start..f.end).contains(&col)).map(|(_, f)| f.clone()) {
-                let cmd = if MAC { ev.modifiers.platform } else { ev.modifiers.control };
-                if cmd {
-                    self.open_target(f.target, cx);
-                    return;
-                }
-                if !self.reporting(&ev.modifiers) && ev.click_count <= 1 {
-                    self.link_press = Some((line, col));
-                }
+        if ev.button == MouseButton::Left
+            && let Some(f) = self
+                .hover
+                .as_ref()
+                .filter(|(l, f)| *l == line && (f.start..f.end).contains(&col))
+                .map(|(_, f)| f.clone())
+        {
+            let cmd = if MAC { ev.modifiers.platform } else { ev.modifiers.control };
+            if cmd {
+                self.open_target(f.target, cx);
+                return;
+            }
+            if !self.reporting(&ev.modifiers) && ev.click_count <= 1 {
+                self.link_press = Some((line, col));
             }
         }
         if self.reporting(&ev.modifiers) {
@@ -1380,7 +1414,9 @@ impl TermTab {
             cx.notify();
         }
         if let Some(b) = self.mouse_held {
-            if self.term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION) && self.last_cell != Some((line, col)) {
+            if self.term.mode().intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+                && self.last_cell != Some((line, col))
+            {
                 self.report(b, line, col, true, true, &ev.modifiers);
                 self.last_cell = Some((line, col));
             }
@@ -1392,11 +1428,13 @@ impl TermTab {
                 s.update(p, side);
             }
             cx.notify();
-        } else if ev.pressed_button.is_none() && self.reporting(&ev.modifiers) && self.term.mode().contains(TermMode::MOUSE_MOTION) {
-            if self.last_cell != Some((line, col)) {
-                self.report(3, line, col, true, true, &ev.modifiers);
-                self.last_cell = Some((line, col));
-            }
+        } else if ev.pressed_button.is_none()
+            && self.reporting(&ev.modifiers)
+            && self.term.mode().contains(TermMode::MOUSE_MOTION)
+            && self.last_cell != Some((line, col))
+        {
+            self.report(3, line, col, true, true, &ev.modifiers);
+            self.last_cell = Some((line, col));
         }
     }
 
@@ -1414,10 +1452,12 @@ impl TermTab {
                 self.term.selection = None;
                 // a click, not a drag, on a link: open it
                 let here = self.cell_at(pos).map(|(l, c, _)| (l, c));
-                if let (Some(p), Some((l, f))) = (press, self.hover.clone()) {
-                    if here == Some(p) && l == p.0 && (f.start..f.end).contains(&p.1) {
-                        self.open_target(f.target, cx);
-                    }
+                if let (Some(p), Some((l, f))) = (press, self.hover.clone())
+                    && here == Some(p)
+                    && l == p.0
+                    && (f.start..f.end).contains(&p.1)
+                {
+                    self.open_target(f.target, cx);
                 }
             }
             cx.notify();
@@ -1448,7 +1488,11 @@ impl TermTab {
         let cells: Vec<char> = (0..cols)
             .map(|c| {
                 let cell = at(c);
-                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) { '\0' } else { cell.c }
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    '\0'
+                } else {
+                    cell.c
+                }
             })
             .collect();
         links::find(&cells, col)
@@ -1463,7 +1507,9 @@ impl TermTab {
                 crate::state::open_link(cx, &u);
                 return;
             }
-            links::Target::Url(u) => ("Link copied", "It is not a web page, so it was copied instead of opened.".to_string(), u),
+            links::Target::Url(u) => {
+                ("Link copied", "It is not a web page, so it was copied instead of opened.".to_string(), u)
+            }
             links::Target::Path(p) => ("Path copied", format!("The file is on {on}."), p),
         };
         crate::state::copy_text(cx, text);
@@ -1477,14 +1523,16 @@ impl TermTab {
         let o = m.origin(b);
         let x = f32::from(o.x - b.origin.x) + f.start as f32 * m.cell_w;
         let below = (*line + 2) as f32 * m.line_h + 30. < f32::from(b.size.height);
-        let y = f32::from(o.y - b.origin.y) + if below { (*line + 1) as f32 * m.line_h + 4. } else { *line as f32 * m.line_h - 26. };
+        let y = f32::from(o.y - b.origin.y)
+            + if below { (*line + 1) as f32 * m.line_h + 4. } else { *line as f32 * m.line_h - 26. };
         let click = if mouse_mode { if MAC { "⌘-click" } else { "Ctrl-click" } } else { "Click" };
         let (verb, what) = match &f.target {
             links::Target::Url(u) if web(u) => ("to open", u.clone()),
             links::Target::Url(u) => ("to copy", u.clone()),
             links::Target::Path(p) => ("to copy the path", p.clone()),
         };
-        let what = if what.chars().count() > 72 { format!("{}…", what.chars().take(71).collect::<String>()) } else { what };
+        let what =
+            if what.chars().count() > 72 { format!("{}…", what.chars().take(71).collect::<String>()) } else { what };
         Some(
             div()
                 .absolute()
@@ -1508,8 +1556,16 @@ impl TermTab {
                 .items_center()
                 .gap(px(6.))
                 .text_size(px(11.5))
-                .child(div().flex_none().text_color(t.ink).font_weight(gpui::FontWeight::BOLD).child(format!("{click} {verb}")))
-                .child(div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(t.dim).child(what))
+                .child(
+                    div()
+                        .flex_none()
+                        .text_color(t.ink)
+                        .font_weight(gpui::FontWeight::BOLD)
+                        .child(format!("{click} {verb}")),
+                )
+                .child(
+                    div().min_w_0().overflow_hidden().text_ellipsis().whitespace_nowrap().text_color(t.dim).child(what),
+                )
                 .into_any_element(),
         )
     }
@@ -1530,12 +1586,15 @@ impl TermTab {
         let n = lines.unsigned_abs().min(50);
         if self.reporting(&ev.modifiers) {
             // one message for the whole flick, not one per line: each is a trip through the hub to the program
-            if let Some((line, col, _)) = self.cell_at(ev.position) {
-                if let Some(one) = self.encode_mouse(if up { 64 } else { 65 }, line, col, true, false, &ev.modifiers) {
-                    self.send(one.repeat(n as usize));
-                }
+            if let Some((line, col, _)) = self.cell_at(ev.position)
+                && let Some(one) = self.encode_mouse(if up { 64 } else { 65 }, line, col, true, false, &ev.modifiers)
+            {
+                self.send(one.repeat(n as usize));
             }
-        } else if self.phase == Phase::Open && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL) && !ev.modifiers.shift {
+        } else if self.phase == Phase::Open
+            && mode.contains(TermMode::ALT_SCREEN | TermMode::ALTERNATE_SCROLL)
+            && !ev.modifiers.shift
+        {
             // A full-screen program without mouse reporting (less, man): the wheel is the arrow keys.
             let one: &[u8] = match (up, mode.contains(TermMode::APP_CURSOR)) {
                 (true, true) => b"\x1bOA",
@@ -1606,13 +1665,17 @@ impl TermTab {
                 let title = match job.map(|j| (j.kind, j.label.as_str())) {
                     Some((sb_core::JobKind::Start, _)) => format!("Starting the chat on {label}"),
                     // v2, Auto: Claude picks the machine first, then it starts there.
-                    Some((sb_core::JobKind::Auto, l)) if l != sb_core::jobs::AUTO => format!("Starting the chat on {l}"),
+                    Some((sb_core::JobKind::Auto, l)) if l != sb_core::jobs::AUTO => {
+                        format!("Starting the chat on {l}")
+                    }
                     Some((sb_core::JobKind::Auto, _)) => "Claude is picking the machine".into(),
                     _ => "Resuming the chat".into(),
                 };
                 (title, format!("{}. The terminal opens as soon as it is running.", step.trim_end_matches('.')), None)
             }
-            Phase::Ended { note, retry, code: Some(_) } => ("Process exited".into(), note.clone(), retry.then_some("Restart")),
+            Phase::Ended { note, retry, code: Some(_) } => {
+                ("Process exited".into(), note.clone(), retry.then_some("Restart"))
+            }
             Phase::Ended { note, retry, .. } => ("Detached".into(), note.clone(), retry.then_some("Reconnect")),
             // These say it in our own words: the server's message repeats the title.
             Phase::Need { need: Need::Resume, message } if message == STOPPED_STAR => (
@@ -1643,7 +1706,9 @@ impl TermTab {
         };
         let color = self.phase.color(t);
         let connecting = self.phase.connecting();
-        let close = ui::line_btn(t, "tc-close", 30.).on_click(cx.listener(|_, _, _, cx| cx.emit(TermEvent::Close))).child("Close tab");
+        let close = ui::line_btn(t, "tc-close", 30.)
+            .on_click(cx.listener(|_, _, _, cx| cx.emit(TermEvent::Close)))
+            .child("Close tab");
         let main_btn = main.map(|m| {
             ui::primary_btn(t, "tc-main", 30.)
                 .on_click(cx.listener(|this, _, _, cx| this.primary(cx)))
@@ -1678,14 +1743,9 @@ impl TermTab {
                         }])
                         .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .child(
-                            div()
-                                .flex()
-                                .items_center()
-                                .gap(px(10.))
-                                .child(ui::icon("term", 16., color))
-                                .child(div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(t.ink).child(title)),
-                        )
+                        .child(div().flex().items_center().gap(px(10.)).child(ui::icon("term", 16., color)).child(
+                            div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(t.ink).child(title),
+                        ))
                         .child(div().pl(px(26.)).text_size(px(12.5)).line_height(px(18.)).text_color(t.dim).child(body))
                         .when(!connecting, |d| {
                             d.child(
@@ -1712,8 +1772,13 @@ impl TermTab {
         let can = sb_core::actions::for_session(s, &app.snap, AppState::now())
             .into_iter()
             .any(|a| a.id == sb_core::actions::ActionId::Continue && !a.disabled);
-        let to: Vec<(String, String)> =
-            app.snap.other_machines(&s.machine).into_iter().filter(|m| !m.is_offline()).map(|m| (m.name.clone(), m.label.clone())).collect();
+        let to: Vec<(String, String)> = app
+            .snap
+            .other_machines(&s.machine)
+            .into_iter()
+            .filter(|m| !m.is_offline())
+            .map(|m| (m.name.clone(), m.label.clone()))
+            .collect();
         if !can || to.is_empty() {
             return None;
         }
@@ -1788,15 +1853,29 @@ impl TermTab {
         let look = colors::look(cx);
         let chosen = look.scheme.clone();
         let mode = crate::theme::Mode::parse(self.app.read(cx).settings.theme.as_deref());
-        let head = |text: &str| div().px(px(12.)).pt(px(10.)).pb(px(6.)).text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(t.dim).child(text.to_string());
+        let head = |text: &str| {
+            div()
+                .px(px(12.))
+                .pt(px(10.))
+                .pb(px(6.))
+                .text_size(px(12.))
+                .font_weight(gpui::FontWeight::SEMIBOLD)
+                .text_color(t.dim)
+                .child(text.to_string())
+        };
         let mut modes = ui::seg_box(t).mx(px(10.)).mb(px(4.));
-        for (i, (m, label)) in [(crate::theme::Mode::Light, "Light"), (crate::theme::Mode::System, "System"), (crate::theme::Mode::Dark, "Dark")].into_iter().enumerate() {
+        for (i, (m, label)) in [
+            (crate::theme::Mode::Light, "Light"),
+            (crate::theme::Mode::System, "System"),
+            (crate::theme::Mode::Dark, "Dark"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
             modes = modes.child(
-                ui::seg_btn(t, ("term-mode", i), mode == m, false)
-                    .flex_1()
-                    .justify_center()
-                    .child(label)
-                    .on_click(cx.listener(move |_, _: &gpui::ClickEvent, window, cx| crate::theme::set_mode(m, window, cx))),
+                ui::seg_btn(t, ("term-mode", i), mode == m, false).flex_1().justify_center().child(label).on_click(
+                    cx.listener(move |_, _: &gpui::ClickEvent, window, cx| crate::theme::set_mode(m, window, cx)),
+                ),
             );
         }
         let hover = t.hover;
@@ -1815,7 +1894,15 @@ impl TermTab {
                 .when(on, |d| d.bg(t.sel))
                 .when(!on, |d| d.hover(move |st| st.bg(hover)))
                 .child(swatch(t, &pal, 52., 24.))
-                .child(div().flex_1().min_w_0().text_size(px(13.)).text_color(if on { t.ink } else { t.ink2 }).when(on, |d| d.font_weight(gpui::FontWeight::SEMIBOLD)).child(name))
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(13.))
+                        .text_color(if on { t.ink } else { t.ink2 })
+                        .when(on, |d| d.font_weight(gpui::FontWeight::SEMIBOLD))
+                        .child(name),
+                )
                 .when(on, |d| d.child(ui::icon("check", 14., t.accent)))
                 .on_hover(cx.listener(move |_, h: &bool, _, cx| {
                     if *h {
@@ -1841,32 +1928,44 @@ impl TermTab {
             let r = row(s.id.clone(), s.name.clone(), colors::palette_of(s), chosen == s.id);
             if s.dark { dark = dark.child(r) } else { light = light.child(r) }
         }
-        let schemes = div()
-            .id("schemes")
-            .px(px(6.))
-            .flex()
-            .gap(px(6.))
-            .child(dark)
-            .child(light)
-            .on_hover(cx.listener(|_, h: &bool, _, cx| {
+        let schemes = div().id("schemes").px(px(6.)).flex().gap(px(6.)).child(dark).child(light).on_hover(cx.listener(
+            |_, h: &bool, _, cx| {
                 if !*h {
                     colors::set_preview(None, cx);
                 }
-            }));
-        let matching = div().px(px(6.)).pt(px(2.)).child(row(colors::MATCH.to_string(), "Match the app".into(), colors::palette(t), chosen == colors::MATCH));
+            },
+        ));
+        let matching = div().px(px(6.)).pt(px(2.)).child(row(
+            colors::MATCH.to_string(),
+            "Match the app".into(),
+            colors::palette(t),
+            chosen == colors::MATCH,
+        ));
         let size = look.size.unwrap_or(sb_core::term::scheme::SIZE_DEFAULT);
         let step = |id: &'static str, ic: &'static str, up: bool| {
-            ui::icon_btn(t, id, ic, 26.).shadow(vec![Theme::ring(t.line2)]).on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| step_size(Some(up), cx)))
+            ui::icon_btn(t, id, ic, 26.)
+                .shadow(vec![Theme::ring(t.line2)])
+                .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| step_size(Some(up), cx)))
         };
         let mut cursors = ui::seg_box(t);
-        for (i, (v, label)) in [("block", "Block"), ("bar", "Bar"), ("underline", "Underline")].into_iter().enumerate() {
-            cursors = cursors.child(ui::seg_btn(t, ("term-cursor", i), look.cursor == v, false).child(label).on_click(cx.listener(
-                move |_, _: &gpui::ClickEvent, _, cx| crate::theme::save_look(cx, |s| s.term_cursor = Some(v.to_string())),
-            )));
+        for (i, (v, label)) in [("block", "Block"), ("bar", "Bar"), ("underline", "Underline")].into_iter().enumerate()
+        {
+            cursors = cursors.child(ui::seg_btn(t, ("term-cursor", i), look.cursor == v, false).child(label).on_click(
+                cx.listener(move |_, _: &gpui::ClickEvent, _, cx| {
+                    crate::theme::save_look(cx, |s| s.term_cursor = Some(v.to_string()))
+                }),
+            ));
         }
         let blink = look.blink;
         let line = |label: &str, ctl: AnyElement| {
-            div().h(px(36.)).px(px(12.)).flex().items_center().gap(px(10.)).child(div().flex_1().text_size(px(13.)).text_color(t.ink2).child(label.to_string())).child(ctl)
+            div()
+                .h(px(36.))
+                .px(px(12.))
+                .flex()
+                .items_center()
+                .gap(px(10.))
+                .child(div().flex_1().text_size(px(13.)).text_color(t.ink2).child(label.to_string()))
+                .child(ctl)
         };
         let close = cx.listener(|this, _: &MouseDownEvent, _, cx| {
             colors::set_preview(None, cx);
@@ -2057,15 +2156,28 @@ impl TermTab {
         )
     }
 
-    fn strip(&self, t: &Theme, wide: bool, cont: Option<AnyElement>, colors_btn: AnyElement, cx: &Context<Self>) -> impl IntoElement {
+    fn strip(
+        &self,
+        t: &Theme,
+        wide: bool,
+        cont: Option<AnyElement>,
+        colors_btn: AnyElement,
+        cx: &Context<Self>,
+    ) -> impl IntoElement {
         let label = if self.label.is_empty() { self.machine.clone() } else { self.label.clone() };
         let attached = self.phase == Phase::Open || self.has_output;
         let hint = |keys: Vec<String>, text: &str| {
-            div().flex().items_center().gap(px(3.)).children(keys.iter().map(|k| ui::kbd(t, k))).child(div().ml(px(4.)).child(text.to_string()))
+            div()
+                .flex()
+                .items_center()
+                .gap(px(3.))
+                .children(keys.iter().map(|k| ui::kbd(t, k)))
+                .child(div().ml(px(4.)).child(text.to_string()))
         };
         // A calm bar on the footer grid: where it runs, how to move it, and the one key that leaves. Copy, paste and
         // the grid size are what every terminal does; the menus and the shortcut sheet list them.
-        let close: Vec<String> = if MAC { vec!["⌘W".into()] } else { vec!["Ctrl".into(), "Shift".into(), "W".into()] };
+        let close: Vec<String> =
+            if MAC { vec!["⌘W".into()] } else { vec!["Ctrl".into(), "Shift".into(), "W".into()] };
         div()
             .flex_none()
             .h(px(ui::FOOTER))
@@ -2088,7 +2200,9 @@ impl TermTab {
             .child(ui::machine_icon(&self.machine, 14., t.dim))
             .child(div().flex_none().text_color(t.dim).child(label))
             // The attach command and the grid size only mean something once it has been attached.
-            .when(attached, |d| d.when_some(self.bg.clone(), |d, b| d.child(ui::num(format!("claude attach {b}"), 12., t.faint))))
+            .when(attached, |d| {
+                d.when_some(self.bg.clone(), |d, b| d.child(ui::num(format!("claude attach {b}"), 12., t.faint)))
+            })
             .child(ui::spacer())
             .children(self.size_chip(t, cx))
             .children(self.flags_btn(t, wide, cx))
@@ -2117,7 +2231,12 @@ pub(crate) fn swatch(t: &Theme, pal: &colors::Palette, w: f32, h: f32) -> gpui::
         .border_color(t.line)
         .when(w >= 32., |d| d.child(div().flex_none().w(px(dot * 1.6)).h(px(2.)).rounded_full().bg(pal.fg)))
         // Red, green, (yellow,) blue: the small one has room for three.
-        .children([1usize, 2, 3, 4].into_iter().filter(|&i| w >= 32. || i != 3).map(|i| div().flex_none().size(px(dot)).rounded_full().bg(pal.ansi[i])))
+        .children(
+            [1usize, 2, 3, 4]
+                .into_iter()
+                .filter(|&i| w >= 32. || i != 3)
+                .map(|i| div().flex_none().size(px(dot)).rounded_full().bg(pal.ansi[i])),
+        )
 }
 
 /// Links a click may open in the browser. Anything else is copied.
@@ -2171,16 +2290,22 @@ impl Render for TermTab {
         }
         let wide = f32::from(window.viewport_size().width) >= 1100.;
         let mouse_mode = self.phase == Phase::Open && self.term.mode().intersects(TermMode::MOUSE_MODE);
-        if let Some((l, f)) = &self.hover {
-            if self.link_at(*l, f.start).as_ref() != Some(f) {
-                self.hover = None;
-            }
+        if let Some((l, f)) = &self.hover
+            && self.link_at(*l, f.start).as_ref() != Some(f)
+        {
+            self.hover = None;
         }
         let tip = self.link_tip(&t, mouse_mode);
         let on_link = tip.is_some();
         let card = self.card(&t, cx);
         // A light scheme gets light chrome around it (and a dark one dark chrome), so the bar matches the terminal.
-        let ct = if pal.dark == t.dark { t } else if pal.dark { Theme::dark() } else { Theme::light() };
+        let ct = if pal.dark == t.dark {
+            t
+        } else if pal.dark {
+            Theme::dark()
+        } else {
+            Theme::light()
+        };
         let cont = self.continue_keys(&ct, wide, cx);
         let colors_btn = self.colors_btn(&ct, &pal, wide, cx).into_any_element();
         let pop = self.colors_open.then(|| self.colors_pop(&ct, cx).into_any_element());
@@ -2206,7 +2331,9 @@ impl Render for TermTab {
             let word = l.word;
             // Working says for how long (this terminal saw it start); everything else is the shared detail.
             let detail = match self.work_since {
-                Some(t) if l.working() && l.stale.is_none() => format!("for {}", sb_core::live::span((now - t).max(0.) as u64)),
+                Some(t) if l.working() && l.stale.is_none() => {
+                    format!("for {}", sb_core::live::span((now - t).max(0.) as u64))
+                }
                 _ => l.detail.clone(),
             };
             let c = crate::chrome::live_color(&ct, &l);
@@ -2220,7 +2347,13 @@ impl Render for TermTab {
                 Some(s) if s.heavy() => ct.cold,
                 _ => ct.fill,
             };
-            let detail_c = if l.stale.is_some() { ct.faint } else if l.kind == K::Warm && l.urgent { ct.cold } else { ct.dim };
+            let detail_c = if l.stale.is_some() {
+                ct.faint
+            } else if l.kind == K::Warm && l.urgent {
+                ct.cold
+            } else {
+                ct.dim
+            };
             let no_detail = detail.is_empty();
             div()
                 .flex_none()
@@ -2234,10 +2367,19 @@ impl Render for TermTab {
                 .border_color(ct.line)
                 .bg(crate::theme::mix(ct.panel, c, if ct.dark { 0.07 } else { 0.05 }))
                 .child(crate::chrome::live_dot(&ct, &l, "term-live", 8.))
-                .child(div().flex_none().whitespace_nowrap().text_size(px(14.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c).child(word))
+                .child(
+                    div()
+                        .flex_none()
+                        .whitespace_nowrap()
+                        .text_size(px(14.))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .text_color(c)
+                        .child(word),
+                )
                 .when(!no_detail, |d| {
-                    d.child(div().flex_none().size(px(3.)).rounded_full().bg(ct.faint))
-                        .child(ui::line(detail).flex_1().text_size(px(13.)).text_color(detail_c).font_features(ui::tnum()))
+                    d.child(div().flex_none().size(px(3.)).rounded_full().bg(ct.faint)).child(
+                        ui::line(detail).flex_1().text_size(px(13.)).text_color(detail_c).font_features(ui::tnum()),
+                    )
                 })
                 .when(no_detail, |d| d.child(div().flex_1()))
                 .when_some(l.expensive.clone(), |d, e| d.child(crate::chrome::cost_badge(&ct, &e, l.stale.is_some())))
@@ -2277,7 +2419,9 @@ impl Render for TermTab {
                 move |bounds, window, cx| {
                     let m = Metrics::new(window, colors::font_size(cx));
                     this.update(cx, |tab, cx| tab.layout(m, bounds, cx));
-                    crate::perf::time(crate::perf::Kind::Build, || grid::build(this.read(cx), &m, &pal, cursor_look, bounds, window))
+                    crate::perf::time(crate::perf::Kind::Build, || {
+                        grid::build(this.read(cx), &m, &pal, cursor_look, bounds, window)
+                    })
                 }
             },
             move |bounds, frame, window, cx| {
@@ -2298,7 +2442,6 @@ impl Render for TermTab {
             .on_action(cx.listener(Self::on_paste))
             .on_action(cx.listener(|this, _: &TermPageUp, _, cx| this.page(true, cx)))
             .on_action(cx.listener(|this, _: &TermRedraw, _, cx| this.redraw(cx)))
-
             .on_action(cx.listener(|this, _: &TermPageDown, _, cx| this.page(false, cx)))
             .relative()
             .size_full()
@@ -2311,7 +2454,9 @@ impl Render for TermTab {
                     .id("term-grid")
                     .group("term-drop")
                     .relative()
-                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| this.send_files(paths.paths().to_vec(), cx)))
+                    .on_drop(cx.listener(|this, paths: &gpui::ExternalPaths, _, cx| {
+                        this.send_files(paths.paths().to_vec(), cx)
+                    }))
                     .flex_1()
                     .min_h_0()
                     .overflow_hidden()
@@ -2322,13 +2467,31 @@ impl Render for TermTab {
                     .on_mouse_down(MouseButton::Middle, cx.listener(Self::mouse_down))
                     .on_mouse_down(MouseButton::Right, cx.listener(Self::mouse_down))
                     .on_mouse_move(cx.listener(Self::mouse_move))
-                    .on_mouse_up(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)))
-                    .on_mouse_up(MouseButton::Middle, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)))
-                    .on_mouse_up(MouseButton::Right, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)))
-                    .on_mouse_up_out(MouseButton::Left, cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)))
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Middle,
+                        cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Right,
+                        cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, ev: &MouseUpEvent, _, cx| this.mouse_up(ev.position, &ev.modifiers, cx)),
+                    )
                     .on_scroll_wheel(cx.listener(Self::wheel))
                     .child(grid)
-                    .when(dim, |d| d.child(div().absolute().inset_0().bg(if pal.dark { mix(pal.bg, t.scrim, 0.5).opacity(0.72) } else { pal.bg.opacity(0.78) })))
+                    .when(dim, |d| {
+                        d.child(div().absolute().inset_0().bg(if pal.dark {
+                            mix(pal.bg, t.scrim, 0.5).opacity(0.72)
+                        } else {
+                            pal.bg.opacity(0.78)
+                        }))
+                    })
                     .when(back > 0 && card.is_none(), |d| d.child(self.back_pill(&t, back, cx)))
                     .when_some(tip.filter(|_| card.is_none()), |d, c| d.child(c))
                     .when_some(card, |d, c| d.child(c))
@@ -2376,7 +2539,13 @@ impl TermTab {
 }
 
 impl EntityInputHandler for TermTab {
-    fn text_for_range(&mut self, _: Range<usize>, _: &mut Option<Range<usize>>, _: &mut Window, _: &mut Context<Self>) -> Option<String> {
+    fn text_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: &mut Option<Range<usize>>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<String> {
         None
     }
 
@@ -2414,7 +2583,13 @@ impl EntityInputHandler for TermTab {
         cx.notify();
     }
 
-    fn bounds_for_range(&mut self, _: Range<usize>, _: Bounds<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<Bounds<Pixels>> {
+    fn bounds_for_range(
+        &mut self,
+        _: Range<usize>,
+        _: Bounds<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<Bounds<Pixels>> {
         // The input method's window goes under the cursor cell.
         let (m, b) = self.geom?;
         let o = m.origin(b);
@@ -2426,7 +2601,12 @@ impl EntityInputHandler for TermTab {
         ))
     }
 
-    fn character_index_for_point(&mut self, _: gpui::Point<Pixels>, _: &mut Window, _: &mut Context<Self>) -> Option<usize> {
+    fn character_index_for_point(
+        &mut self,
+        _: gpui::Point<Pixels>,
+        _: &mut Window,
+        _: &mut Context<Self>,
+    ) -> Option<usize> {
         None
     }
 

@@ -1,7 +1,10 @@
 //! Settings > Library: every tool in the library as a card (what it is, the keys it needs, each machine's copy, on
 //! for every new chat, its versions), and the two ways in: Import from a machine, and New tool (a chat builds it).
 
-use gpui::{AnyElement, ClickEvent, Context, Focusable, FontWeight, IntoElement, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, ClickEvent, Context, Focusable, FontWeight, IntoElement, ParentElement, SharedString,
+    StatefulInteractiveElement, Styled, Window, div, prelude::*, px, relative,
+};
 use sb_core::api::{ApiLibrary, ApiLibrarySources, ApiTool};
 
 use super::{Edit, SettingsView};
@@ -227,13 +230,18 @@ impl SettingsView {
             body = body.child(self.new_tool_panel(t, n, app, window, cx));
         }
         match &app.library {
-            None => body.child(div().mt(px(22.)).text_size(px(13.)).text_color(t.faint).child("Reading the library")).into_any_element(),
+            None => body.child(ui::loading(t, "lib-load", "Reading the library").mt(px(22.))).into_any_element(),
             Some(Err(e)) => body
                 .child(Self::group(
                     t,
                     "No library here yet",
                     None,
-                    vec![Self::crow(t, "Could not read the library", Some(format!("{e}. The server may need an update to have one.")), None)],
+                    vec![Self::crow(
+                        t,
+                        "Could not read the library",
+                        Some(format!("{e}. The server may need an update to have one.")),
+                        None,
+                    )],
                 ))
                 .into_any_element(),
             Some(Ok(l)) if l.tools.is_empty() => body.child(Self::empty_library(t)).into_any_element(),
@@ -247,29 +255,17 @@ impl SettingsView {
         }
     }
 
+    /// The shared not-set-up card; Import and New tool, above it, are what fill the library.
     fn empty_library(t: &Theme) -> AnyElement {
         div()
             .mt(px(22.))
-            .py(px(36.))
-            .px(px(24.))
-            .rounded(px(ui::R_CARD))
-            .border_1()
-            .border_color(t.line)
-            .bg(t.bg)
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(8.))
-            .child(div().size(px(44.)).rounded(px(11.)).bg(t.accent.alpha(if t.dark { 0.16 } else { 0.1 })).flex().items_center().justify_center().child(ui::icon("cube", 22., t.accent)))
-            .child(div().mt(px(4.)).text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.ink).child("No tools yet"))
-            .child(
-                ui::wrap("Import a skill or an MCP server from one of your machines, or describe a new tool and a chat builds it.")
-                    .max_w(px(420.))
-                    .text_center()
-                    .text_size(px(13.))
-                    .line_height(relative(1.45))
-                    .text_color(t.dim),
-            )
+            .child(ui::setup_card(
+                t,
+                "cube",
+                "No tools yet",
+                "Import a skill or an MCP server from one of your machines, or describe a new tool and a chat builds it.",
+                None,
+            ))
             .into_any_element()
     }
 
@@ -278,18 +274,33 @@ impl SettingsView {
         div().px(px(14.)).py(px(11.)).when(!first, |d| d.border_t_1().border_color(t.line)).child(el)
     }
 
-    fn tool_card(&self, t: &Theme, lib: &ApiLibrary, tool: &ApiTool, app: &AppState, window: &Window, cx: &Context<Self>) -> AnyElement {
+    fn tool_card(
+        &self,
+        t: &Theme,
+        lib: &ApiLibrary,
+        tool: &ApiTool,
+        app: &AppState,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let name = tool.name.clone();
         let soft = t.accent.alpha(if t.dark { 0.16 } else { 0.1 });
-        let mut card = div().mt(px(16.)).rounded(px(ui::R_CARD)).border_1().border_color(t.line).bg(t.bg).flex().flex_col();
+        let mut card =
+            div().mt(px(16.)).rounded(px(ui::R_CARD)).border_1().border_color(t.line).bg(t.bg).flex().flex_col();
 
         // What it is
-        let mut title = div().flex().flex_wrap().items_center().gap(px(7.)).child(ui::wrap(name.clone()).text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.ink));
+        let mut title = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(7.))
+            .child(ui::wrap(name.clone()).text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.ink));
         for k in &tool.kinds {
             title = title.child(soft_tag(t, &kind_label(k)));
         }
         if tool.latest > 0 {
-            title = title.child(div().font_family(NUM).text_size(px(12.)).text_color(t.dim).child(format!("v{}", tool.latest)));
+            title = title
+                .child(div().font_family(NUM).text_size(px(12.)).text_color(t.dim).child(format!("v{}", tool.latest)));
         }
         let desc = if tool.description.trim().is_empty() {
             ui::wrap("No description.").text_size(px(13.)).text_color(t.faint)
@@ -304,13 +315,25 @@ impl SettingsView {
                 .flex()
                 .items_start()
                 .gap(px(12.))
-                .child(div().flex_none().size(px(34.)).rounded(px(8.)).bg(soft).flex().items_center().justify_center().child(ui::icon("cube", 17., t.accent)))
+                .child(
+                    div()
+                        .flex_none()
+                        .size(px(34.))
+                        .rounded(px(8.))
+                        .bg(soft)
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(ui::icon("cube", 17., t.accent)),
+                )
                 .child(div().flex_1().min_w_0().flex().flex_col().gap(px(4.)).child(title).child(desc)),
         );
 
         // The keys it needs, and the warning for a skill that holds them
         if !tool.secrets.is_empty() {
-            let mut keys = div().flex().flex_col().gap(px(6.)).child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Keys it needs"));
+            let mut keys = div().flex().flex_col().gap(px(6.)).child(
+                div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Keys it needs"),
+            );
             for s in &tool.secrets {
                 keys = keys.child(
                     div()
@@ -320,10 +343,16 @@ impl SettingsView {
                         .gap(px(8.))
                         .child(ui::icon("lock", 12., t.faint))
                         .child(div().font_family(NUM).text_size(px(12.5)).text_color(t.ink).child(s.name.clone()))
-                        .when(!s.about.is_empty(), |d| d.child(ui::wrap(s.about.clone()).text_size(px(12.5)).text_color(t.faint))),
+                        .when(!s.about.is_empty(), |d| {
+                            d.child(ui::wrap(s.about.clone()).text_size(px(12.5)).text_color(t.faint))
+                        }),
                 );
             }
-            keys = keys.child(ui::wrap("Each machine keeps its own copy in its keychain. The values never go to the server.").text_size(px(12.)).text_color(t.faint));
+            keys = keys.child(
+                ui::wrap("Each machine keeps its own copy in its keychain. The values never go to the server.")
+                    .text_size(px(12.))
+                    .text_color(t.faint),
+            );
             card = card.child(Self::card_row(t, false, keys));
         }
         if tool.skill_secrets {
@@ -338,7 +367,13 @@ impl SettingsView {
                     .rounded(px(ui::R_CTRL))
                     .bg(t.need.alpha(if t.dark { 0.14 } else { 0.1 }))
                     .child(div().mt(px(1.)).child(ui::icon("warn", 14., t.need)))
-                    .child(ui::wrap("This skill uses keys Claude can read; make it an MCP to keep them hidden").flex_1().text_size(px(12.5)).line_height(relative(1.4)).text_color(t.ink)),
+                    .child(
+                        ui::wrap("This skill uses keys Claude can read; make it an MCP to keep them hidden")
+                            .flex_1()
+                            .text_size(px(12.5))
+                            .line_height(relative(1.4))
+                            .text_color(t.ink),
+                    ),
             ));
         }
 
@@ -352,10 +387,16 @@ impl SettingsView {
             Self::crow(
                 t,
                 "On for every new chat",
-                Some(if def { "New chats on every machine start with it.".into() } else { "Only chats you attach it to get it.".into() }),
+                Some(if def {
+                    "New chats on every machine start with it.".into()
+                } else {
+                    "Only chats you attach it to get it.".into()
+                }),
                 Some(
                     ui::switch(t, SharedString::from(format!("lib-def-{name}")), def, def_busy)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.lib_default(&n1, !def, cx))))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.app.update(cx, |s, cx| s.lib_default(&n1, !def, cx))
+                        }))
                         .into_any_element(),
                 ),
             ),
@@ -373,10 +414,16 @@ impl SettingsView {
                 Self::crow(
                     t,
                     "Include in Auto",
-                    Some(if auto { "Chats that start with Auto tools get it.".into() } else { "Auto leaves it out; pick it to use it.".into() }),
+                    Some(if auto {
+                        "Chats that start with Auto tools get it.".into()
+                    } else {
+                        "Auto leaves it out; pick it to use it.".into()
+                    }),
                     Some(
                         ui::switch(t, SharedString::from(format!("lib-auto-{name}")), auto, busy)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.lib_auto(&n2, !auto, &w2, cx))))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.app.update(cx, |s, cx| s.lib_auto(&n2, !auto, &w2, cx))
+                            }))
                             .into_any_element(),
                     ),
                 ),
@@ -414,7 +461,9 @@ impl SettingsView {
         }
 
         // Each machine
-        let mut machines = div().flex().flex_col().gap(px(2.)).child(div().mb(px(4.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Machines"));
+        let mut machines = div().flex().flex_col().gap(px(2.)).child(
+            div().mb(px(4.)).text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Machines"),
+        );
         for m in &app.snap.machines {
             machines = machines.child(self.machine_line(t, lib, tool, m, app, window, cx));
         }
@@ -426,7 +475,17 @@ impl SettingsView {
     }
 
     /// One machine's copy of a tool: connected or not, the version there, keys it still needs (with Set key...).
-    fn machine_line(&self, t: &Theme, lib: &ApiLibrary, tool: &ApiTool, m: &sb_core::Machine, app: &AppState, window: &Window, cx: &Context<Self>) -> AnyElement {
+    #[allow(clippy::too_many_arguments)] // GPUI render helper: theme, window and context ride along with the data.
+    fn machine_line(
+        &self,
+        t: &Theme,
+        lib: &ApiLibrary,
+        tool: &ApiTool,
+        m: &sb_core::Machine,
+        app: &AppState,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let name = tool.name.clone();
         let mut st = lib.on_machine(&m.name, &name).cloned().unwrap_or_default();
         // This Mac: Set key saves straight into its keychain, and a key saved here stops showing as needed at once.
@@ -452,32 +511,40 @@ impl SettingsView {
         };
         let status = if offline { format!("{status}. Offline now.") } else { status };
         let (n1, m1) = (name.clone(), m.name.clone());
-        let mut note = div().flex().flex_wrap().items_center().gap(px(8.)).child(div().text_size(px(12.5)).text_color(tone).child(status));
+        let mut note = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .child(div().text_size(px(12.5)).text_color(tone).child(status));
         if on {
             for s in &st.missing_secrets {
                 let showing = self.lib_key.as_ref().is_some_and(|(a, b, c)| *a == name && *b == m.name && c == s);
                 let (n2, m2, s2) = (name.clone(), m.name.clone(), s.clone());
-                note = note
-                    .child(div().text_size(px(12.5)).text_color(t.need).child(format!("needs {s}")))
-                    .child(
-                        ui::ghost(t, SharedString::from(format!("lib-key-{name}-{}-{s}", m.name)), Some("Set key..."), Some("lock"))
-                            .text_color(t.accent)
-                            .when(showing, |d| d.bg(t.sel))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                let k = (n2.clone(), m2.clone(), s2.clone());
-                                this.lib_key = if this.lib_key.as_ref() == Some(&k) { None } else { Some(k) };
-                                this.lib_key_err = None;
-                                // The field starts empty each time, and has focus when it is this Mac's.
-                                let open = this.lib_key.is_some();
-                                this.lib_secret.update(cx, |f, cx| {
-                                    f.set_value("", window, cx);
-                                    if open && here {
-                                        f.focus(window, cx);
-                                    }
-                                });
-                                cx.notify();
-                            })),
-                    );
+                note = note.child(div().text_size(px(12.5)).text_color(t.need).child(format!("needs {s}"))).child(
+                    ui::ghost(
+                        t,
+                        SharedString::from(format!("lib-key-{name}-{}-{s}", m.name)),
+                        Some("Set key..."),
+                        Some("lock"),
+                    )
+                    .text_color(t.accent)
+                    .when(showing, |d| d.bg(t.sel))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        let k = (n2.clone(), m2.clone(), s2.clone());
+                        this.lib_key = if this.lib_key.as_ref() == Some(&k) { None } else { Some(k) };
+                        this.lib_key_err = None;
+                        // The field starts empty each time, and has focus when it is this Mac's.
+                        let open = this.lib_key.is_some();
+                        this.lib_secret.update(cx, |f, cx| {
+                            f.set_value("", window, cx);
+                            if open && here {
+                                f.focus(window, cx);
+                            }
+                        });
+                        cx.notify();
+                    })),
+                );
             }
         }
         let row = div()
@@ -486,7 +553,16 @@ impl SettingsView {
             .items_center()
             .gap(px(12.))
             .child(div().flex_none().child(ui::machine_icon(&m.name, 18., if offline { t.faint } else { t.dim })))
-            .child(div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(ui::wrap(m.label.clone()).text_size(px(13.5)).text_color(t.ink)).child(note))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(ui::wrap(m.label.clone()).text_size(px(13.5)).text_color(t.ink))
+                    .child(note),
+            )
             .child(
                 ui::switch(t, SharedString::from(format!("lib-on-{name}-{}", m.name)), on, busy || (offline && !on))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -655,7 +731,13 @@ impl SettingsView {
                     .text_color(t.bad)
                     .when(arming, |d| d.bg(t.bad.alpha(0.12)))
                     .when(deleting, |d| d.opacity(0.55))
-                    .child(if deleting { "Deleting" } else if arming { "Click again to delete" } else { "Delete" })
+                    .child(if deleting {
+                        "Deleting"
+                    } else if arming {
+                        "Click again to delete"
+                    } else {
+                        "Delete"
+                    })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let now = AppState::now();
                         if this.lib_deleting.as_ref().is_some_and(|(x, at)| *x == n2 && now - at < 4.) {
@@ -670,12 +752,16 @@ impl SettingsView {
             );
         let mut out = div().flex().flex_col().gap(px(4.)).child(head);
         if arming {
-            out = out.child(ui::wrap("Deleting takes it off every machine and out of every chat, and removes all its versions.").text_size(px(12.)).text_color(t.faint));
+            out = out.child(
+                ui::wrap("Deleting takes it off every machine and out of every chat, and removes all its versions.")
+                    .text_size(px(12.))
+                    .text_color(t.faint),
+            );
         }
         if open {
             let rolling = app.lib_busy.contains(&format!("rollback:{name}"));
             let mut vs: Vec<_> = tool.versions.iter().collect();
-            vs.sort_by(|a, b| b.v.cmp(&a.v));
+            vs.sort_by_key(|x| std::cmp::Reverse(x.v));
             let mut list = div().mt(px(4.)).flex().flex_col();
             for (i, v) in vs.into_iter().enumerate() {
                 let latest = v.v == tool.latest;
@@ -698,7 +784,16 @@ impl SettingsView {
                         .items_center()
                         .gap(px(12.))
                         .when(i > 0, |d| d.border_t_1().border_color(t.rule))
-                        .child(div().flex_none().w(px(36.)).font_family(NUM).text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(if latest { t.ink } else { t.dim }).child(format!("v{}", v.v)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(36.))
+                                .font_family(NUM)
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(if latest { t.ink } else { t.dim })
+                                .child(format!("v{}", v.v)),
+                        )
                         .child(
                             div()
                                 .flex_1()
@@ -707,7 +802,9 @@ impl SettingsView {
                                 .flex_col()
                                 .gap(px(2.))
                                 .child(div().text_size(px(12.5)).text_color(t.dim).child(sub.join(", ")))
-                                .when(!v.note.is_empty(), |d| d.child(ui::wrap(v.note.clone()).text_size(px(12.5)).text_color(t.ink2))),
+                                .when(!v.note.is_empty(), |d| {
+                                    d.child(ui::wrap(v.note.clone()).text_size(px(12.5)).text_color(t.ink2))
+                                }),
                         )
                         .child(if latest {
                             soft_tag(t, "Latest").into_any_element()
@@ -728,7 +825,8 @@ impl SettingsView {
                 );
             }
             if n == 0 {
-                list = list.child(div().py(px(6.)).text_size(px(12.5)).text_color(t.faint).child("No versions listed."));
+                list =
+                    list.child(div().py(px(6.)).text_size(px(12.5)).text_color(t.faint).child("No versions listed."));
             }
             out = out.child(list).child(ui::wrap("Every version is kept. Machines that have the tool get the one marked latest; running chats keep the version they started with.").mt(px(2.)).text_size(px(12.)).text_color(t.faint));
         }
@@ -736,7 +834,14 @@ impl SettingsView {
     }
 
     /// A panel under the header buttons, like Add one over SSH.
-    fn panel(t: &Theme, id: &'static str, title: &str, sub: &str, cx: &Context<Self>, close: impl Fn(&mut Self, &mut Context<Self>) + 'static) -> gpui::Div {
+    fn panel(
+        t: &Theme,
+        id: &'static str,
+        title: &str,
+        sub: &str,
+        cx: &Context<Self>,
+        close: impl Fn(&mut Self, &mut Context<Self>) + 'static,
+    ) -> gpui::Div {
         div()
             .mt(px(16.))
             .p(px(16.))
@@ -759,8 +864,19 @@ impl SettingsView {
                             .flex()
                             .flex_col()
                             .gap(px(3.))
-                            .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(title.to_string()))
-                            .child(ui::wrap(sub.to_string()).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.dim)),
+                            .child(
+                                div()
+                                    .text_size(px(14.))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(t.ink)
+                                    .child(title.to_string()),
+                            )
+                            .child(
+                                ui::wrap(sub.to_string())
+                                    .text_size(px(12.5))
+                                    .line_height(relative(1.45))
+                                    .text_color(t.dim),
+                            ),
                     )
                     .child(ui::icon_btn(t, id, "x", 26.).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         close(this, cx);
@@ -770,7 +886,14 @@ impl SettingsView {
     }
 
     /// The machines to pick from, as a segmented row (offline ones dimmed and not pickable).
-    fn machine_seg(t: &Theme, prefix: &str, cur: Option<&str>, app: &AppState, cx: &Context<Self>, pick: impl Fn(&mut Self, String, &mut Context<Self>) + Clone + 'static) -> AnyElement {
+    fn machine_seg(
+        t: &Theme,
+        prefix: &str,
+        cur: Option<&str>,
+        app: &AppState,
+        cx: &Context<Self>,
+        pick: impl Fn(&mut Self, String, &mut Context<Self>) + Clone + 'static,
+    ) -> AnyElement {
         let mut seg = div().flex().flex_wrap().gap(px(6.));
         for m in &app.snap.machines {
             let on = cur == Some(m.name.as_str());
@@ -811,9 +934,18 @@ impl SettingsView {
         let lib = app.lib();
         let exists = |n: &str| lib.and_then(|l| l.tool(n)).map(|x| x.latest);
         match &imp.sources {
-            None => p = p.child(div().text_size(px(13.)).text_color(t.faint).child(format!("Asking {label} what it has"))),
-            Some(Err(e)) => p = p.child(ui::wrap(format!("Could not ask {label}. {e}")).text_size(px(13.)).text_color(t.bad)),
-            Some(Ok(s)) if s.skills.is_empty() && s.mcp.is_empty() => p = p.child(div().text_size(px(13.)).text_color(t.faint).child(format!("{label} has no skills or MCP servers to import."))),
+            None => p = p.child(ui::loading(t, "lib-ask", format!("Asking {label} what it has"))),
+            Some(Err(e)) => {
+                p = p.child(ui::wrap(format!("Could not ask {label}. {e}")).text_size(px(13.)).text_color(t.bad))
+            }
+            Some(Ok(s)) if s.skills.is_empty() && s.mcp.is_empty() => {
+                p = p.child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(t.faint)
+                        .child(format!("{label} has no skills or MCP servers to import.")),
+                )
+            }
             Some(Ok(s)) => {
                 let row = |id: String, title: String, detail: String, kind: &'static str, source: String| {
                     let busy = app.lib_busy.contains(&format!("import:{machine}/{kind}/{source}"));
@@ -838,10 +970,21 @@ impl SettingsView {
                                         .flex()
                                         .items_center()
                                         .gap(px(8.))
-                                        .child(ui::wrap(title.clone()).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
+                                        .child(
+                                            ui::wrap(title.clone())
+                                                .text_size(px(13.5))
+                                                .font_weight(FontWeight::SEMIBOLD)
+                                                .text_color(t.ink),
+                                        )
                                         .when(have.is_some(), |d| d.child(ui::tag(t, "In the library"))),
                                 )
-                                .child(ui::wrap(detail).font_family(NUM).text_size(px(11.5)).line_height(relative(1.4)).text_color(t.faint)),
+                                .child(
+                                    ui::wrap(detail)
+                                        .font_family(NUM)
+                                        .text_size(px(11.5))
+                                        .line_height(relative(1.4))
+                                        .text_color(t.faint),
+                                ),
                         )
                         .child(
                             ui::line_btn(t, SharedString::from(id), 30.)
@@ -866,8 +1009,17 @@ impl SettingsView {
                 if !s.skills.is_empty() {
                     let mut list = div().flex().flex_col().child(ui::lbl("Skills", t.label).pb(px(6.)));
                     for (i, k) in s.skills.iter().enumerate() {
-                        let detail = format!("{}{}", k.path, if k.files > 0 { format!(", {} files, {}", k.files, size_text(k.size)) } else { String::new() });
-                        list = list.child(row(format!("lib-imp-s-{i}"), k.name.clone(), detail, "skill", k.name.clone()));
+                        let detail = format!(
+                            "{}{}",
+                            k.path,
+                            if k.files > 0 {
+                                format!(", {} files, {}", k.files, size_text(k.size))
+                            } else {
+                                String::new()
+                            }
+                        );
+                        list =
+                            list.child(row(format!("lib-imp-s-{i}"), k.name.clone(), detail, "skill", k.name.clone()));
                     }
                     p = p.child(list);
                 }
@@ -887,12 +1039,26 @@ impl SettingsView {
         p.into_any_element()
     }
 
-    fn new_tool_panel(&self, t: &Theme, n: &NewTool, app: &AppState, window: &Window, cx: &Context<Self>) -> AnyElement {
+    fn new_tool_panel(
+        &self,
+        t: &Theme,
+        n: &NewTool,
+        app: &AppState,
+        window: &Window,
+        cx: &Context<Self>,
+    ) -> AnyElement {
         let name_focused = self.lib_name.focus_handle(cx).is_focused(window);
         let brief_focused = self.lib_brief.focus_handle(cx).is_focused(window);
         let typed = self.lib_name.read(cx).value().trim().to_string();
         let bad_name = !typed.is_empty() && !valid_tool_name(&typed);
-        let labeled = |l: &str, el: AnyElement| div().flex().flex_col().gap(px(5.)).child(div().text_size(px(12.)).text_color(t.dim).child(l.to_string())).child(el);
+        let labeled = |l: &str, el: AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(5.))
+                .child(div().text_size(px(12.)).text_color(t.dim).child(l.to_string()))
+                .child(el)
+        };
         let name_box = div()
             .w(px(240.))
             .h(px(32.))
@@ -901,7 +1067,13 @@ impl SettingsView {
             .items_center()
             .rounded(px(ui::R_CTRL))
             .border_1()
-            .border_color(if bad_name { t.bad } else if name_focused { t.accent } else { t.line2 })
+            .border_color(if bad_name {
+                t.bad
+            } else if name_focused {
+                t.accent
+            } else {
+                t.line2
+            })
             .bg(t.bg)
             .font_family(NUM)
             .text_size(px(13.))

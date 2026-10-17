@@ -318,7 +318,9 @@ class NewWithFlagsTest(ServerBase):
                     {'presets': [{'name': f'p{i}'} for i in range(13)]}, {'last': {'model': 'gpt'}}]:
             with self.subTest(bad=bad), self.assertRaises(server.HttpError):
                 self.app.post('/api/prefs', bad)
-        self.assertEqual({k: v for k, v in self.app.sessions()['prefs'].items() if k != 'appearance'}, {'chrome_machine': 'tower', 'summary_model': 'opus'})
+        self.assertEqual({k: v for k, v in self.app.sessions()['prefs'].items() if k != 'appearance'}, {'chrome_machine': 'tower', 'summary_model': 'opus', 'ai_ask_cards': False, 'ai_chat_names': False,
+                          'ai_auto_machine': False, 'setup_subagent_rule': False, 'setup_explore_agent': False,
+                          'setup_compact_window': False})
 
 
 class ChromeAutoTest(ServerBase):

@@ -1,7 +1,10 @@
 //! The details popped out of the board into their own window. It shows whatever chat is selected on the board, so it
 //! keeps following as you click around; Dock (or closing the window) brings the floating sheet back.
 
-use gpui::{AnyElement, Context, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, Context, IntoElement, ParentElement, Render, Styled, Subscription, WeakEntity, Window, div, prelude::*,
+    px, relative,
+};
 
 use crate::inspector::InsOpts;
 use crate::state::AppState;
@@ -15,7 +18,12 @@ pub struct DetachedView {
 }
 
 impl DetachedView {
-    fn new(board: gpui::Entity<BoardView>, app: gpui::Entity<AppState>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+    fn new(
+        board: gpui::Entity<BoardView>,
+        app: gpui::Entity<AppState>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let weak = board.downgrade();
         let gone = weak.clone();
         let subs = vec![
@@ -54,10 +62,10 @@ impl Render for DetachedView {
 impl BoardView {
     /// Pop out: the details leave the board for their own window, which follows the selection from now on.
     pub fn pop_out(&mut self, cx: &mut Context<Self>) {
-        if let Some(h) = self.detached {
-            if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
-                return;
-            }
+        if let Some(h) = self.detached
+            && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+        {
+            return;
         }
         let (me, app) = (cx.entity(), self.app.clone());
         // Opened after this click is handled: the new window paints the board's details at once, and the board
@@ -94,10 +102,17 @@ impl BoardView {
         let cx = &*cx;
         let app = app_e.read(cx);
         let now = AppState::now();
-        let selected = self.sel.as_ref().filter(|k| app.snap.session(k).is_some() || app.snap.replaced_row(k).is_some()).cloned();
+        let selected =
+            self.sel.as_ref().filter(|k| app.snap.session(k).is_some() || app.snap.replaced_row(k).is_some()).cloned();
         let c = Ctx { t, app, now, cx, card_w: 200. };
         match selected {
-            Some(k) => div().size_full().min_h_0().flex().flex_col().child(self.inspector(&c, &k, InsOpts { close: true, radius: 0., detached: true })).into_any_element(),
+            Some(k) => div()
+                .size_full()
+                .min_h_0()
+                .flex()
+                .flex_col()
+                .child(self.inspector(&c, &k, InsOpts { close: true, radius: 0., detached: true }))
+                .into_any_element(),
             None => div()
                 .size_full()
                 .flex()
@@ -107,8 +122,17 @@ impl BoardView {
                 .gap(px(10.))
                 .px(px(32.))
                 .child(ui::icon("inspector", 22., t.faint))
-                .child(div().text_size(px(13.)).text_color(t.dim).line_height(relative(1.5)).child("Click a chat on the board to see it here."))
-                .child(ui::icon_btn(&t, "ins-dock-empty", "sidebar", 26.).on_click(c.cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.dock(cx))))
+                .child(
+                    div()
+                        .text_size(px(13.))
+                        .text_color(t.dim)
+                        .line_height(relative(1.5))
+                        .child("Click a chat on the board to see it here."),
+                )
+                .child(
+                    ui::icon_btn(&t, "ins-dock-empty", "sidebar", 26.)
+                        .on_click(c.cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.dock(cx))),
+                )
                 .into_any_element(),
         }
     }

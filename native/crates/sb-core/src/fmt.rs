@@ -101,7 +101,7 @@ pub fn model(raw: &str) -> String {
 
 /// The last path segment: "switchboard/.claude/worktrees/x" -> "x", and "C:\Users\you\code" (a Windows machine's) -> "code".
 pub fn last_seg(f: &str) -> String {
-    f.split(['/', '\\']).filter(|s| !s.is_empty()).last().unwrap_or(f).to_string()
+    f.split(['/', '\\']).rfind(|s| !s.is_empty()).unwrap_or(f).to_string()
 }
 
 fn ampm<T: Timelike>(t: &T, drop_zero: bool) -> String {
@@ -114,8 +114,20 @@ fn ampm<T: Timelike>(t: &T, drop_zero: bool) -> String {
 const WEEKDAYS: [&str; 7] = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
 const WEEKDAYS_LONG: [&str; 7] = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"];
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
-const MONTHS_LONG: [&str; 12] =
-    ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const MONTHS_LONG: [&str; 12] = [
+    "January",
+    "February",
+    "March",
+    "April",
+    "May",
+    "June",
+    "July",
+    "August",
+    "September",
+    "October",
+    "November",
+    "December",
+];
 
 fn at<Tz: TimeZone>(epoch: f64, tz: &Tz) -> DateTime<Tz> {
     let secs = epoch.floor() as i64;
@@ -185,7 +197,12 @@ fn day_heading_tz<Z: TimeZone>(epoch: f64, now: f64, tz: &Z) -> String {
         1 => "Yesterday".into(),
         _ => {
             let d = at(epoch, tz);
-            let mut s = format!("{}, {} {}", WEEKDAYS_LONG[d.weekday().num_days_from_monday() as usize], MONTHS_LONG[d.month0() as usize], d.day());
+            let mut s = format!(
+                "{}, {} {}",
+                WEEKDAYS_LONG[d.weekday().num_days_from_monday() as usize],
+                MONTHS_LONG[d.month0() as usize],
+                d.day()
+            );
             if d.year() != at(now, tz).year() {
                 s.push_str(&format!(", {}", d.year()));
             }
@@ -222,10 +239,7 @@ pub fn month_short(i: usize) -> &'static str {
 }
 
 pub fn now_epoch() -> f64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0)
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
 }
 
 #[cfg(test)]
@@ -288,7 +302,7 @@ mod tests {
 
     #[test]
     fn whens() {
-                let pdt = -7 * 3600;
+        let pdt = -7 * 3600;
         let now = 1_791_761_909.0; // 2026-10-11 16:38:29 PDT
         let t = now + 2.0 * 3600.0 + 3.0 * 60.0;
         assert_eq!(when_at_offset(t, now, pdt), "6:41pm");

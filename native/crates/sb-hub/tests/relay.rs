@@ -7,9 +7,9 @@ use sb_hub::ticket;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tokio_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
-use tokio_tungstenite::tungstenite::Message;
 
 type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
 
@@ -31,12 +31,20 @@ fn now() -> u64 {
 
 async fn lab(tweak: impl FnOnce(&mut Config)) -> Lab {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-    let dir = std::env::temp_dir().join(format!("sbhub-{}-{}", std::process::id(), N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)));
+    let dir = std::env::temp_dir().join(format!(
+        "sbhub-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();
     let machines = dir.join("machines.json");
-    std::fs::write(&machines, r#"{"machines":[{"name":"lab","label":"Lab","target":"me@lab","os":"linux"}],
-        "origins":["http://10.0.0.5:8130","http://100.64.0.5:8130","http://10.0.0.5:8150"]}"#).unwrap();
+    std::fs::write(
+        &machines,
+        r#"{"machines":[{"name":"lab","label":"Lab","target":"me@lab","os":"linux"}],
+        "origins":["http://10.0.0.5:8130","http://100.64.0.5:8130","http://10.0.0.5:8150"]}"#,
+    )
+    .unwrap();
     let mut cfg = Config::defaults_in(&dir);
     cfg.listen = "127.0.0.1:0".parse().unwrap();
     cfg.machines_path = machines;
@@ -67,7 +75,9 @@ impl Lab {
     async fn get(&self, path: &str) -> serde_json::Value {
         let mut s = tokio::net::TcpStream::connect(self.addr).await.unwrap();
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        s.write_all(format!("GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").as_bytes())
+            .await
+            .unwrap();
         let mut out = String::new();
         s.read_to_string(&mut out).await.unwrap();
         let body = out.split("\r\n\r\n").nth(1).unwrap_or("");
@@ -136,7 +146,10 @@ async fn a_terminal_from_open_to_exit() {
     ws.send(Message::Binary(b"size\n".to_vec().into())).await.unwrap();
     read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.out.contains("SIZE 24 80")).await;
     assert!(s.out.contains("SIZE 24 80"));
-    assert!(s.texts.contains(&serde_json::json!({"type": "size", "cols": 80, "rows": 24})), "the size comes back as a frame");
+    assert!(
+        s.texts.contains(&serde_json::json!({"type": "size", "cols": 80, "rows": 24})),
+        "the size comes back as a frame"
+    );
 
     ws.send(Message::Text(r#"{"type":"ping"}"#.into())).await.unwrap();
     ws.send(Message::Text(r#"{"type":"whatever"}"#.into())).await.unwrap(); // ignored
@@ -164,8 +177,12 @@ async fn tickets_are_single_use_and_signed() {
     let mut s = Seen::default();
     read_until(&mut first, &mut s, Duration::from_secs(10), |s| has_type(s, "status") && s.texts.len() >= 2).await;
 
-    for bad in [t.clone(), "nonsense".into(), ticket::mint(&[1u8; 32], "lab", "c03ef0d9", now(), 60),
-        ticket::mint(&lab.key, "lab", "c03ef0d9", now() - 120, 60)] {
+    for bad in [
+        t.clone(),
+        "nonsense".into(),
+        ticket::mint(&[1u8; 32], "lab", "c03ef0d9", now(), 60),
+        ticket::mint(&lab.key, "lab", "c03ef0d9", now() - 120, 60),
+    ] {
         let mut ws = lab.connect(&bad, None, "").await;
         let mut s = Seen::default();
         read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
@@ -177,8 +194,14 @@ async fn tickets_are_single_use_and_signed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn other_web_pages_are_refused() {
     let lab = lab(|c| c.origins = vec!["http://localhost:8151".into()]).await;
-    for (origin, want) in [("http://evil.example", Some(4403)), ("null", Some(4403)), ("http://10.0.0.5:8150", None),
-        ("http://localhost:8151", None), ("http://100.64.0.5:8130", None), ("http://10.0.0.9:8130", Some(4403))] {
+    for (origin, want) in [
+        ("http://evil.example", Some(4403)),
+        ("null", Some(4403)),
+        ("http://10.0.0.5:8150", None),
+        ("http://localhost:8151", None),
+        ("http://100.64.0.5:8130", None),
+        ("http://10.0.0.9:8130", Some(4403)),
+    ] {
         let t = lab.ticket("c03ef0d9");
         let mut ws = lab.connect(&t, Some(origin), "").await;
         let mut s = Seen::default();

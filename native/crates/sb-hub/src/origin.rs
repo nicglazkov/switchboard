@@ -31,7 +31,9 @@ mod tests {
 
     fn list() -> Vec<String> {
         let mut l: Vec<String> = DEFAULT_ORIGINS.iter().map(|s| s.to_string()).collect();
-        l.extend(parse_list("http://10.0.0.5:8130, http://100.64.0.9:8130, http://10.0.0.5:8150, http://localhost:8151"));
+        l.extend(parse_list(
+            "http://10.0.0.5:8130, http://100.64.0.9:8130, http://10.0.0.5:8150, http://localhost:8151",
+        ));
         l
     }
 
@@ -53,8 +55,15 @@ mod tests {
     #[test]
     fn everything_else_is_refused() {
         let l = list();
-        for o in ["http://evil.example", "https://10.0.0.5:8130", "http://10.0.0.5:8131", "http://10.0.0.5",
-            "null", "", "http://10.0.0.5:8130.evil.example"] {
+        for o in [
+            "http://evil.example",
+            "https://10.0.0.5:8130",
+            "http://10.0.0.5:8131",
+            "http://10.0.0.5",
+            "null",
+            "",
+            "http://10.0.0.5:8130.evil.example",
+        ] {
             assert!(!allowed(Some(o), &l), "{o}");
         }
     }

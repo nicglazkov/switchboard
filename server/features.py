@@ -943,8 +943,8 @@ def follow_how(parents, k, chats):
 # ---------------------------------------------------------------- Features: what server.App talks to
 # ---------------------------------------------------------------- v2: auto machine (Claude picks where a task runs)
 # Each machine says what it can do (agent verb caps); which machines share that is the user's choice, in caps.json next to
-# the other settings. A pick is Claude's (Haiku, on one machine that is signed in) with the rules below as the
-# fallback, and as the instant preview while a message is typed.
+# the other settings. A pick is Claude's (Haiku, on one machine that is signed in, only when the user turned on
+# ai_auto_machine) with the rules below as the fallback, and as the instant preview while a message is typed.
 CAPS_EVERY, CAPS_RETRY, CAPS_FRESH_S = 15 * 60, 5 * 60, 8
 ASK_TIMEOUT = 20  # one deadline for the whole ask, shared by the askers; then the rules pick
 NEEDS = (  # (key, words that ask for it, what a machine needs)
@@ -1286,7 +1286,8 @@ class Auto:
                 else 'No machine Auto can use is online right now.')
 
     def route(self, prompt, folder='', rules_only=False, chrome=False, chrome_machine=None):
-        """{'machine', 'label', 'folder', 'create', 'why', 'by'}: Claude's pick, or the rules' when Claude cannot. A
+        """{'machine', 'label', 'folder', 'create', 'why', 'by'}: Claude's pick when the user turned that on
+        (ai_auto_machine), else the rules'; the rules' also when Claude cannot. "ai": False says Claude picks are off. A
         session with Chrome goes to its own Chrome machine (chrome_machine), or the only one that has it."""
         prompt, folder = str(prompt or '')[:8000], str(folder or '').strip().strip('/\\')
         if chrome:
@@ -1317,7 +1318,10 @@ class Auto:
                 raise self.HttpError(400, self.none_reason())
         name, rfolder, why = rules_pick(cands, prompt, folder)
         pick = {'machine': name, 'folder': rfolder, 'why': why, 'by': 'rules'}
-        if not rules_only:
+        ai = self.ai_on()
+        if not rules_only and not ai:  # Claude picks are opt-in (Settings): the rules pick, and the app says why
+            pick['ai'] = False
+        if not rules_only and ai:
             t0 = time.time()
             try:
                 pick = self.ask_claude(cands, snap, prompt, folder)
@@ -1333,6 +1337,13 @@ class Auto:
             pick['folder'] = repo_match(caps.get('repos'), pick.get('folder')) or ''
             pick['create'] = False
         return dict(pick, ok=True, label=self.app._label(pick['machine']))
+
+    def ai_on(self):
+        """Whether the user turned on Claude picks for Auto (the ai_auto_machine setting, options.py)."""
+        try:
+            return self.app.options().get('ai_auto_machine') is True
+        except Exception:
+            return False
 
     def askers(self, cands, snap):
         """Who can run Claude for the pick: a PC runs it over SSH; a Mac only through its launcher."""

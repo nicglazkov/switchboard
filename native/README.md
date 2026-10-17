@@ -32,12 +32,13 @@ serves a fixture snapshot through `native/scripts/fixture-server.py`.
 
 Startup never waits on the network. The first frame paints the snapshot the last run saved to disk;
 the live board replaces it when the server answers, then it refreshes every 10 s (sooner after an
-action). There are no spinners. With no snapshot yet it shows "Connecting to Switchboard", and if the
-server cannot be reached, "Switchboard is not reachable" with the reason, and keeps trying.
+action). The board itself never waits behind a spinner; a small turning ring shows only where one
+part is still loading (a folder, a chat's history, a machine's tools). With no snapshot yet it shows
+"Connecting to Switchboard", and if the server cannot be reached, "Switchboard is not reachable" with the reason, and keeps trying.
 
 Needs-you notifications are native (macOS Notification Center, Windows toast, Linux
 notification daemon), informational only, no action buttons; clicking one brings the board forward
-with that chat selected. They can be turned off from the commands palette.
+with that chat selected. They can be turned off from the commands palette or in Settings > Notifications.
 
 ### Keys
 

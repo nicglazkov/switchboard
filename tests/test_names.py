@@ -2,7 +2,7 @@ import json, unittest
 from unittest import mock
 from tests.test_jobs import JobBase
 from tests.test_rpc import NOW, SID_A
-from tests.helpers import write_transcript
+from tests.helpers import write_transcript, sb_options
 
 
 class NameRulesTest(JobBase):
@@ -60,6 +60,7 @@ class NameRulesTest(JobBase):
 class LaunchNamesTest(JobBase):
     def setUp(self):
         super().setUp()
+        sb_options(self.sb, ai_chat_names=True)  # Haiku names are opt-in
         self.sb.run_claude_opus = lambda text, prompt, **kw: 'Widget refresh bug'
         self.at = self.sb.name_stamp(NOW) + ' '  # continuations lead with when they started
 

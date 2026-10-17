@@ -5,9 +5,10 @@
 //! a new machine. Each opens in a window of its own.
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance,
-    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, px, size,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div,
+    prelude::*, px, size,
 };
 use sb_core::api::{ApiFile, ApiFiles, ApiPair};
 use sb_core::fmt;
@@ -43,7 +44,11 @@ fn files_ok(m: &Machine) -> bool {
 pub(crate) fn options(title: &str, w: f32, h: f32, min: (f32, f32), cx: &App) -> WindowOptions {
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(gpui::Bounds::centered(None, size(px(w), px(h)), cx))),
-        titlebar: Some(TitlebarOptions { title: Some(title.to_string().into()), appears_transparent: false, traffic_light_position: None }),
+        titlebar: Some(TitlebarOptions {
+            title: Some(title.to_string().into()),
+            appears_transparent: false,
+            traffic_light_position: None,
+        }),
         window_min_size: Some(size(px(min.0), px(min.1))),
         app_id: Some("switchboard".into()),
         window_background: WindowBackgroundAppearance::Opaque,
@@ -55,10 +60,10 @@ pub(crate) fn options(title: &str, w: f32, h: f32, min: (f32, f32), cx: &App) ->
 /// Opens Files, or brings it forward when it is open.
 pub fn open_files(cx: &mut App) {
     let app = crate::state::app(cx);
-    if let Some(h) = app.read(cx).files_win {
-        if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
-            return;
-        }
+    if let Some(h) = app.read(cx).files_win
+        && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+    {
+        return;
     }
     let opts = options("Files, Switchboard", 1080., 720., (680., 420.), cx);
     match cx.open_window(opts, |window, cx| cx.new(|cx| FilesView::new(window, cx))) {
@@ -70,10 +75,10 @@ pub fn open_files(cx: &mut App) {
 /// Opens Add a machine, or brings it forward when it is open.
 pub fn open_pair(cx: &mut App) {
     let app = crate::state::app(cx);
-    if let Some(h) = app.read(cx).pair_win {
-        if h.update(cx, |_, window, _| window.activate_window()).is_ok() {
-            return;
-        }
+    if let Some(h) = app.read(cx).pair_win
+        && h.update(cx, |_, window, _| window.activate_window()).is_ok()
+    {
+        return;
     }
     let opts = options("Add a machine, Switchboard", 600., 600., (480., 460.), cx);
     match cx.open_window(opts, |window, cx| cx.new(|cx| PairView::new(window, cx))) {
@@ -96,7 +101,10 @@ pub struct FilesView {
     seq: u64,
     /// The row the keyboard is on (folders first, then files).
     cur: usize,
-    list: ScrollHandle,
+    /// The folder's rows: only the ones on screen are drawn (a uniform list of 35 px rows).
+    list: gpui::UniformListScrollHandle,
+    /// The machine dropdown, when there are more than four machines.
+    drop: ui::Drop,
     pane: ScrollHandle,
     _subs: Vec<Subscription>,
 }
@@ -110,8 +118,12 @@ enum Row {
 impl FilesView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> FilesView {
         let app = crate::state::app(cx);
-        let subs = vec![cx.observe(&app, |_, _, cx| cx.notify()), cx.observe_window_appearance(window, |_, _, cx| cx.notify())];
-        let machine = app.read(cx).snap.machines.iter().find(|m| files_ok(m)).map(|m| m.name.clone()).unwrap_or_default();
+        let subs = vec![
+            cx.observe(&app, |_, _, cx| cx.notify()),
+            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+        ];
+        let machine =
+            app.read(cx).snap.machines.iter().find(|m| files_ok(m)).map(|m| m.name.clone()).unwrap_or_default();
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut v = FilesView {
@@ -127,7 +139,8 @@ impl FilesView {
             preview: None,
             seq: 0,
             cur: 0,
-            list: ScrollHandle::new(),
+            list: gpui::UniformListScrollHandle::new(),
+            drop: ui::Drop::default(),
             pane: ScrollHandle::new(),
             _subs: subs,
         };
@@ -156,7 +169,7 @@ impl FilesView {
                     Ok(r) => {
                         s.root = r.root.clone();
                         s.listing = Some(r);
-                        s.list.scroll_to_item(0);
+                        s.list.scroll_to_item(0, gpui::ScrollStrategy::Top);
                     }
                     Err(e) => s.error = Some(e.to_string()),
                 }
@@ -168,7 +181,11 @@ impl FilesView {
 
     fn rows(&self) -> Vec<Row> {
         let Some(l) = &self.listing else { return Vec::new() };
-        l.dirs.iter().map(|d| Row::Dir(d.folder.clone())).chain(l.files.iter().map(|f| Row::File(f.name.clone(), f.open))).collect()
+        l.dirs
+            .iter()
+            .map(|d| Row::Dir(d.folder.clone()))
+            .chain(l.files.iter().map(|f| Row::File(f.name.clone(), f.open)))
+            .collect()
     }
 
     fn step(&mut self, d: i32, cx: &mut Context<Self>) {
@@ -177,7 +194,7 @@ impl FilesView {
             return;
         }
         self.cur = (self.cur as i32 + d).clamp(0, n as i32 - 1) as usize;
-        self.list.scroll_to_item(self.cur);
+        self.list.scroll_to_item(self.cur, gpui::ScrollStrategy::Nearest);
         // A file under the keyboard shows in the preview, like Quick Look.
         if let Some(Row::File(name, true)) = self.rows().into_iter().nth(self.cur) {
             self.open_file(name, cx);
@@ -213,7 +230,11 @@ impl FilesView {
         let here = self.folder.trim_matches('/');
         m.sessions
             .iter()
-            .filter(|s| !s.stale && (here.is_empty() && s.folder == m.root_label || !here.is_empty() && (s.folder == here || s.folder.starts_with(&format!("{here}/")))))
+            .filter(|s| {
+                !s.stale
+                    && (here.is_empty() && s.folder == m.root_label
+                        || !here.is_empty() && (s.folder == here || s.folder.starts_with(&format!("{here}/"))))
+            })
             .take(6)
             .map(|s| (s.key.clone(), s.topic.clone(), s.alive))
             .collect()
@@ -282,25 +303,53 @@ impl FilesView {
                 .when(!cur, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
                 .children(ic.map(|i| ui::icon(i, 13., if cur { t.ink } else { t.accent })))
                 .child(label)
-                .when_some(to, |d, to| d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(to.clone(), cx))))
+                .when_some(to, |d, to| {
+                    d.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(to.clone(), cx)))
+                })
         };
         let parts: Vec<&str> = if self.folder.is_empty() { Vec::new() } else { self.folder.split('/').collect() };
         let root = if self.root.is_empty() { "Claude folder".to_string() } else { self.root.clone() };
         let at_root = parts.is_empty() && self.file.is_none();
-        let mut row = div().flex().flex_wrap().items_center().gap(px(2.)).child(crumb("fx-c-root".into(), root, Some("home"), (!at_root).then(String::new), cx));
+        let mut row = div().flex().flex_wrap().items_center().gap(px(2.)).child(crumb(
+            "fx-c-root".into(),
+            root,
+            Some("home"),
+            (!at_root).then(String::new),
+            cx,
+        ));
         for (i, p) in parts.iter().enumerate() {
             let last = i + 1 == parts.len() && self.file.is_none();
-            row = row
-                .child(div().text_size(px(13.)).text_color(t.faint).child("/"))
-                .child(crumb(format!("fx-c-{i}"), p.to_string(), None, (!last).then(|| parts[..=i].join("/")), cx));
+            row = row.child(div().text_size(px(13.)).text_color(t.faint).child("/")).child(crumb(
+                format!("fx-c-{i}"),
+                p.to_string(),
+                None,
+                (!last).then(|| parts[..=i].join("/")),
+                cx,
+            ));
         }
         if let Some(f) = &self.file {
-            row = row.child(div().text_size(px(13.)).text_color(t.faint).child("/")).child(crumb("fx-c-file".into(), f.clone(), None, None, cx));
+            row = row.child(div().text_size(px(13.)).text_color(t.faint).child("/")).child(crumb(
+                "fx-c-file".into(),
+                f.clone(),
+                None,
+                None,
+                cx,
+            ));
         }
         row.into_any_element()
     }
 
-    fn entry(&self, t: &Theme, id: String, ic: &str, name: String, meta: Option<String>, on: bool, enabled: bool) -> gpui::Stateful<gpui::Div> {
+    #[allow(clippy::too_many_arguments)] // A row builder: each argument is one thing the row shows.
+    fn entry(
+        &self,
+        t: &Theme,
+        id: String,
+        ic: &str,
+        name: String,
+        meta: Option<String>,
+        on: bool,
+        enabled: bool,
+    ) -> gpui::Stateful<gpui::Div> {
         let (hover, sel) = (t.hover, t.sel);
         div()
             .id(SharedString::from(id))
@@ -313,26 +362,54 @@ impl FilesView {
             .when(on, |d| d.bg(sel))
             .when(enabled && !on, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
             .child(ui::icon(ic, 15., if enabled { t.dim } else { t.faint }))
-            .child(ui::wrap(name).flex_1().text_size(px(13.)).text_color(if enabled { t.ink } else { t.dim }))
+            .child(ui::line(name).flex_1().text_size(px(13.)).text_color(if enabled { t.ink } else { t.dim }))
             .children(meta.map(|m| div().flex_none().font_family(NUM).text_size(px(11.5)).text_color(t.faint).child(m)))
     }
 
+    /// The right pane with the shared scrollbar over it.
     fn pane(&self, t: &Theme, now: f64, cx: &Context<Self>) -> AnyElement {
+        div()
+            .size_full()
+            .relative()
+            .child(self.pane_body(t, now, cx))
+            .child(ui::scrollbar(&self.pane))
+            .into_any_element()
+    }
+
+    fn pane_body(&self, t: &Theme, now: f64, cx: &Context<Self>) -> AnyElement {
         let _ = &self.focus;
-        let here = if self.folder.is_empty() { "New session here".to_string() } else { format!("New session in {}", self.folder.rsplit('/').next().unwrap_or("")) };
+        let here = if self.folder.is_empty() {
+            "New session here".to_string()
+        } else {
+            format!("New session in {}", self.folder.rsplit('/').next().unwrap_or(""))
+        };
         let new_btn = ui::primary_btn(t, "fx-new", 32.)
             .px(px(14.))
             .text_size(px(12.5))
             .child(ui::icon("plus", 12., t.on_accent))
             .child(here)
             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_here(cx)));
-        let col = div().id("fx-pane").size_full().flex().flex_col().overflow_y_scroll().track_scroll(&self.pane).p(px(18.)).gap(px(12.));
+        let col = div()
+            .id("fx-pane")
+            .size_full()
+            .flex()
+            .flex_col()
+            .overflow_y_scroll()
+            .track_scroll(&self.pane)
+            .p(px(18.))
+            .gap(px(12.));
         // The chats in this folder: their terminal one click away, and a file's path straight into one.
         let chats = self.chats_here(cx);
         let path = self.file.as_ref().map(|n| self.path_of(n));
         let hover = t.hover;
         let chats_el = (!chats.is_empty()).then(|| {
-            let mut c = div().flex().flex_col().gap(px(2.)).child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Chats in this folder"));
+            let mut c = div().flex().flex_col().gap(px(2.)).child(
+                div()
+                    .text_size(px(12.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(t.dim)
+                    .child("Chats in this folder"),
+            );
             for (key, topic, alive) in chats {
                 let (k1, k2, p) = (key.clone(), key.clone(), path.clone());
                 c = c.child(
@@ -349,19 +426,34 @@ impl FilesView {
                         .child(ui::icon("term", 14., t.dim))
                         .child(ui::wrap(topic).flex_1().min_w_0().text_size(px(13.)).text_color(t.ink))
                         .when_some(p, |d, p| {
-                            d.child(ui::ghost(t, SharedString::from(format!("fx-paste-{k2}")), Some("Paste the path"), None).h(px(26.)).px(px(8.)).text_size(px(12.)).on_click(cx.listener(
-                                move |this, _: &ClickEvent, _, cx| {
-                                    let (key, text) = (k2.clone(), format!("{p} "));
-                                    this.app.update(cx, |_, cx| cx.emit(AppEvent::PasteInto { key, text }));
-                                },
-                            )))
+                            d.child(
+                                ui::ghost(
+                                    t,
+                                    SharedString::from(format!("fx-paste-{k2}")),
+                                    Some("Paste the path"),
+                                    None,
+                                )
+                                .h(px(26.))
+                                .px(px(8.))
+                                .text_size(px(12.))
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        let (key, text) = (k2.clone(), format!("{p} "));
+                                        this.app.update(cx, |_, cx| cx.emit(AppEvent::PasteInto { key, text }));
+                                    },
+                                )),
+                            )
                         })
-                        .child(ui::line_btn(t, SharedString::from(format!("fx-open-{k1}")), 26.).px(px(9.)).text_size(px(12.)).child(if alive { "Open terminal" } else { "Resume" }).on_click(cx.listener(
-                            move |this, _: &ClickEvent, _, cx| {
-                                let key = k1.clone();
-                                this.app.update(cx, |_, cx| cx.emit(AppEvent::OpenTerm { key, resume: !alive }));
-                            },
-                        ))),
+                        .child(
+                            ui::line_btn(t, SharedString::from(format!("fx-open-{k1}")), 26.)
+                                .px(px(9.))
+                                .text_size(px(12.))
+                                .child(if alive { "Open terminal" } else { "Resume" })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let key = k1.clone();
+                                    this.app.update(cx, |_, cx| cx.emit(AppEvent::OpenTerm { key, resume: !alive }));
+                                })),
+                        ),
                 );
             }
             c
@@ -377,25 +469,57 @@ impl FilesView {
         let col = col.children(chats_el);
         let mut col = col.child(ui::wrap(name.clone()).text_size(px(15.)).font_weight(FontWeight::BOLD));
         match &self.preview {
-            None => col.child(div().text_size(px(12.5)).text_color(t.faint).child("Reading...")),
+            None => col.child(ui::loading(t, "fx-col-load", "Reading").text_size(px(12.5))),
             Some(Err(e)) => col.child(div().text_size(px(12.5)).text_color(t.bad).child(e.clone())),
             Some(Ok(f)) => {
                 let meta = format!("{} · changed {}", size_text(f.size), fmt::ago(f.mtime, now));
-                col = col.child(div().flex().items_center().gap(px(12.)).child(div().flex_1().text_size(px(12.)).text_color(t.dim).child(meta)).child(new_btn));
+                col = col.child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(12.))
+                        .child(div().flex_1().text_size(px(12.)).text_color(t.dim).child(meta))
+                        .child(new_btn),
+                );
                 if f.secret {
-                    return col.child(div().text_size(px(13.)).text_color(t.dim).child("This looks like a key or a secret, so Switchboard does not open it.")).into_any_element();
+                    return col
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(t.dim)
+                                .child("This looks like a key or a secret, so Switchboard does not open it."),
+                        )
+                        .into_any_element();
                 }
                 let Some(text) = f.text.as_ref().filter(|_| !f.binary) else {
-                    return col.child(div().text_size(px(13.)).text_color(t.dim).child("Not a text file, so there is nothing to show here.")).into_any_element();
+                    return col
+                        .child(
+                            div()
+                                .text_size(px(13.))
+                                .text_color(t.dim)
+                                .child("Not a text file, so there is nothing to show here."),
+                        )
+                        .into_any_element();
                 };
-                let mut body = div().p(px(12.)).rounded(px(ui::R_CTRL)).border_1().border_color(t.line).bg(t.bg2).font_family(NUM).text_size(px(12.)).text_color(t.ink).flex().flex_col();
+                let mut body = div()
+                    .p(px(12.))
+                    .rounded(px(ui::R_CTRL))
+                    .border_1()
+                    .border_color(t.line)
+                    .bg(t.bg2)
+                    .font_family(NUM)
+                    .text_size(px(12.))
+                    .text_color(t.ink)
+                    .flex()
+                    .flex_col();
                 let lines: Vec<&str> = text.lines().collect();
                 for l in lines.iter().take(PREVIEW_LINES) {
                     body = body.child(div().min_h(px(16.)).child(l.replace('\t', "    ")));
                 }
                 col = col.child(body);
                 if f.cut || lines.len() > PREVIEW_LINES {
-                    col = col.child(div().text_size(px(12.)).text_color(t.faint).child("Showing the start of the file."));
+                    col =
+                        col.child(div().text_size(px(12.)).text_color(t.faint).child("Showing the start of the file."));
                 }
                 col
             }
@@ -425,16 +549,54 @@ impl FilesView {
     fn body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = Theme::get(cx);
         let now = AppState::now();
-        let machines: Vec<(String, String, bool)> = self.app.read(cx).snap.machines.iter().map(|m| (m.name.clone(), m.label.clone(), files_ok(m))).collect();
-        let mut mseg = ui::seg_box(&t);
-        for (name, label, ok) in machines {
-            let on = self.machine == name;
-            let mut b = ui::seg_btn(&t, SharedString::from(format!("fx-m-{name}")), on, !ok).child(label);
-            if ok {
-                b = b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_machine(name.clone(), cx)));
+        let machines: Vec<(String, String, bool)> =
+            self.app.read(cx).snap.machines.iter().map(|m| (m.name.clone(), m.label.clone(), files_ok(m))).collect();
+        // The machine: segmented buttons for up to four machines, a dropdown past that.
+        let mseg = if machines.len() <= 4 {
+            let mut seg = ui::seg_box(&t);
+            for (name, label, ok) in machines {
+                let on = self.machine == name;
+                let mut b = ui::seg_btn(&t, SharedString::from(format!("fx-m-{name}")), on, !ok).child(label);
+                if ok {
+                    b = b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_machine(name.clone(), cx)));
+                }
+                seg = seg.child(b);
             }
-            mseg = mseg.child(b);
-        }
+            seg.into_any_element()
+        } else {
+            let open = self.drop.is_open("fx-machine");
+            let cur = machines.iter().find(|m| m.0 == self.machine).map(|m| m.1.clone()).unwrap_or_default();
+            let trigger = ui::dropdown(&t, "fx-machine", Some("mac"), cur, open).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.drop.toggle("fx-machine");
+                    cx.notify();
+                },
+            ));
+            let menu = open.then(|| {
+                let items = machines
+                    .into_iter()
+                    .map(|(name, label, ok)| ui::DropItem {
+                        label: label.into(),
+                        on: self.machine == name,
+                        off: !ok,
+                        pick: Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.drop.close();
+                            this.set_machine(name.clone(), cx);
+                        })),
+                    })
+                    .collect();
+                ui::drop_menu(
+                    &t,
+                    "fx-machine",
+                    items,
+                    cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                        this.drop.close_out();
+                        cx.notify();
+                    }),
+                )
+            });
+            div().relative().flex_none().child(trigger).children(menu).into_any_element()
+        };
         let header = div()
             .flex_none()
             .px(px(16.))
@@ -462,44 +624,87 @@ impl FilesView {
                             .child("Add a machine")
                             .on_click(cx.listener(|_, _: &ClickEvent, _, cx| open_pair(cx))),
                     )
-                    .child(ui::icon_btn(&t, "fx-reload", "restore", 28.).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load(cx)))),
+                    .child(
+                        ui::icon_btn(&t, "fx-reload", "restore", 28.)
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.load(cx))),
+                    ),
             )
             .child(self.crumbs(&t, cx));
 
-        let mut list = div().id("fx-list").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.list).p(px(10.)).flex().flex_col().gap(px(1.));
-        if self.machine.is_empty() {
-            list = list.child(div().p(px(12.)).text_size(px(13.)).text_color(t.faint).child("Files show up here once a machine has the latest Switchboard update."));
+        let note = |text: String, color| div().p(px(22.)).text_size(px(13.)).text_color(color).child(text);
+        let list: AnyElement = if self.machine.is_empty() {
+            note("Files show up here once a machine has the latest Switchboard update.".into(), t.faint)
+                .into_any_element()
         } else if let Some(e) = &self.error {
-            list = list.child(div().p(px(12.)).text_size(px(13.)).text_color(t.bad).child(format!("Could not read the folder. {e}")));
+            note(format!("Could not read the folder. {e}"), t.bad).into_any_element()
         } else if let Some(l) = self.listing.as_ref().filter(|l| l.folder == self.folder || !self.loading) {
-            for (i, d) in l.dirs.iter().enumerate() {
-                let to = d.folder.clone();
-                list = list.child(
-                    self.entry(&t, format!("fx-d-{}", d.folder), "folder", d.name.clone(), None, self.cur == i, true)
-                        .child(ui::icon("chev", 11., t.faint))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(to.clone(), cx))),
-                );
-            }
-            let nd = l.dirs.len();
-            for (i, f) in l.files.iter().enumerate() {
-                let meta = format!("{}{} · {}", if f.open { "" } else { "hidden · " }, size_text(f.size), fmt::sago(f.mtime, now));
-                let on = self.file.as_deref() == Some(f.name.as_str()) || self.cur == nd + i;
-                let mut e = self.entry(&t, format!("fx-f-{}", f.name), "file", f.name.clone(), Some(meta), on, f.open);
-                if f.open {
-                    let name = f.name.clone();
-                    e = e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_file(name.clone(), cx)));
-                }
-                list = list.child(e);
-            }
-            if l.dirs.is_empty() && l.files.is_empty() {
-                list = list.child(div().p(px(12.)).text_size(px(13.)).text_color(t.faint).child("Nothing in this folder."));
+            let (nd, n) = (l.dirs.len(), l.dirs.len() + l.files.len());
+            let rows = gpui::uniform_list(
+                "fx-list",
+                n,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    let t = Theme::get(cx);
+                    let now = crate::state::AppState::now();
+                    let Some(l) = this.listing.as_ref() else { return Vec::new() };
+                    let mut out = Vec::with_capacity(range.len());
+                    for i in range {
+                        let e = if let Some(d) = l.dirs.get(i) {
+                            let to = d.folder.clone();
+                            let id = format!("fx-d-{}", d.folder);
+                            this.entry(&t, id, "folder", d.name.clone(), None, this.cur == i, true)
+                                .child(ui::icon("chev", 11., t.faint))
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(to.clone(), cx)))
+                        } else if let Some(f) = i.checked_sub(nd).and_then(|j| l.files.get(j)) {
+                            let meta = format!(
+                                "{}{} · {}",
+                                if f.open { "" } else { "hidden · " },
+                                size_text(f.size),
+                                fmt::sago(f.mtime, now)
+                            );
+                            let on = this.file.as_deref() == Some(f.name.as_str()) || this.cur == i;
+                            let id = format!("fx-f-{}", f.name);
+                            let mut e = this.entry(&t, id, "file", f.name.clone(), Some(meta), on, f.open);
+                            if f.open {
+                                let name = f.name.clone();
+                                e = e.on_click(
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| this.open_file(name.clone(), cx)),
+                                );
+                            }
+                            e
+                        } else {
+                            continue;
+                        };
+                        out.push(div().pb(px(1.)).child(e));
+                    }
+                    out
+                }),
+            )
+            .track_scroll(&self.list)
+            .size_full()
+            .p(px(10.));
+            let mut col = div().flex_1().min_h_0().flex().flex_col();
+            if n == 0 {
+                col = col.child(note("Nothing in this folder.".into(), t.faint));
+            } else {
+                col = col.child(div().relative().flex_1().min_h_0().child(rows).child(ui::scrollbar(&self.list)));
             }
             if l.more {
-                list = list.child(div().p(px(12.)).text_size(px(12.)).text_color(t.faint).child("Showing the first 400 of each."));
+                col = col.child(
+                    div()
+                        .flex_none()
+                        .px(px(22.))
+                        .py(px(8.))
+                        .border_t_1()
+                        .border_color(t.rule)
+                        .text_size(px(12.))
+                        .text_color(t.faint)
+                        .child("Showing the first 400 of each."),
+                );
             }
+            col.into_any_element()
         } else {
-            list = list.child(div().p(px(12.)).text_size(px(13.)).text_color(t.faint).child("Reading the folder..."));
-        }
+            ui::loading(&t, "fx-load", "Reading the folder").p(px(22.)).into_any_element()
+        };
 
         div()
             .id("files")
@@ -523,12 +728,17 @@ impl FilesView {
             .text_color(t.ink)
             .child(header)
             .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .child(div().flex_1().min_w_0().flex().flex_col().child(list))
-                    .child(div().flex_none().w(px(480.)).h_full().min_h_0().border_l_1().border_color(t.rule).bg(t.panel).child(self.pane(&t, now, cx))),
+                div().flex_1().min_h_0().flex().child(div().flex_1().min_w_0().flex().flex_col().child(list)).child(
+                    div()
+                        .flex_none()
+                        .w(px(480.))
+                        .h_full()
+                        .min_h_0()
+                        .border_l_1()
+                        .border_color(t.rule)
+                        .bg(t.panel)
+                        .child(self.pane(&t, now, cx)),
+                ),
             )
     }
 }
@@ -545,15 +755,6 @@ fn remote_path(root: &str, folder: &str, name: &str) -> String {
     p.push_str(sep);
     p.push_str(name);
     p
-}
-
-#[cfg(test)]
-mod tests {
-    #[test]
-    fn a_files_path_on_its_machine() {
-        assert_eq!(super::remote_path("/Users/you/Claude/", "notes/today", "a.md"), "/Users/you/Claude/notes/today/a.md");
-        assert_eq!(super::remote_path("C:\\Users\\you\\code", "", "b.txt"), "C:\\Users\\you\\code\\b.txt");
-    }
 }
 
 const OSES: [(&str, &str); 3] = [("mac", "Mac"), ("linux", "Linux"), ("windows", "Windows")];
@@ -573,7 +774,13 @@ impl PairView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> PairView {
         let app = crate::state::app(cx);
         let subs = vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())];
-        let os = if cfg!(target_os = "macos") { "mac" } else if cfg!(windows) { "windows" } else { "linux" };
+        let os = if cfg!(target_os = "macos") {
+            "mac"
+        } else if cfg!(windows) {
+            "windows"
+        } else {
+            "linux"
+        };
         PairView { app, focus: cx.focus_handle(), os, r: None, error: None, busy: false, copied: false, _subs: subs }
     }
 
@@ -635,14 +842,25 @@ impl PairView {
             ));
         let err = self.error.clone().map(|e| div().text_size(px(12.5)).text_color(t.bad).child(e));
         let Some(r) = self.r.clone() else {
-            let steps = ["Get a code here. It works once, for 10 minutes.", "Paste one line in a terminal on the new machine.", "It shows up on the board within a minute."];
+            let steps = [
+                "Get a code here. It works once, for 10 minutes.",
+                "Paste one line in a terminal on the new machine.",
+                "It shows up on the board within a minute.",
+            ];
             for (i, s) in steps.iter().enumerate() {
                 col = col.child(
                     div()
                         .flex()
                         .gap(px(10.))
                         .text_size(px(13.))
-                        .child(div().flex_none().w(px(18.)).font_family(NUM).text_color(t.faint).child(format!("{}.", i + 1)))
+                        .child(
+                            div()
+                                .flex_none()
+                                .w(px(18.))
+                                .font_family(NUM)
+                                .text_color(t.faint)
+                                .child(format!("{}.", i + 1)),
+                        )
                         .child(div().flex_1().text_color(t.ink2).child(*s)),
                 );
             }
@@ -681,11 +899,15 @@ impl PairView {
         );
         let mut seg = ui::seg_box(&t);
         for (k, label) in OSES {
-            seg = seg.child(ui::seg_btn(&t, SharedString::from(format!("pair-os-{k}")), self.os == k, false).child(label).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.os = k;
-                this.copied = false;
-                cx.notify();
-            })));
+            seg = seg.child(
+                ui::seg_btn(&t, SharedString::from(format!("pair-os-{k}")), self.os == k, false).child(label).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.os = k;
+                        this.copied = false;
+                        cx.notify();
+                    }),
+                ),
+            );
         }
         let line = self.line().unwrap_or_default();
         col.child(div().flex().child(seg))
@@ -720,5 +942,17 @@ impl PairView {
                 "It downloads switchboard-node, links it with the code and starts it at login. If Claude Code there has no Switchboard yet, it adds that too; one already there is left alone.",
             ))
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_files_path_on_its_machine() {
+        assert_eq!(
+            super::remote_path("/Users/you/Claude/", "notes/today", "a.md"),
+            "/Users/you/Claude/notes/today/a.md"
+        );
+        assert_eq!(super::remote_path("C:\\Users\\you\\code", "", "b.txt"), "C:\\Users\\you\\code\\b.txt");
     }
 }

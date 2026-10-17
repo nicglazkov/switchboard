@@ -311,11 +311,7 @@ def pick_folder(api, name, ask):
     except RuntimeError as e:
         ask.out(f'Could not look at its folders ({e}).')
         return ask.line('Type its Claude folder', root)
-    try:
-        desk = api.call('GET', f'/api/folders/{name}?parent=Desktop', timeout=30).get('folders') or []
-    except RuntimeError:
-        desk = []
-    default = 'Desktop/Claude' if any(f.get('name') == 'Claude' for f in desk) else ''
+    default = ''  # the home folder (or the folder set before); the list below shows what exists to pick from
     if ask.yes:
         return _join(root, default)
     here = ''

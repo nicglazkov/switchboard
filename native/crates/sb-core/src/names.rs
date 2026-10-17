@@ -84,14 +84,14 @@ pub fn plain(title: &str) -> String {
 /// "Topic (fresh 2)" -> ("Topic", Some("fresh 2")); "Topic fresh" -> ("Topic", Some("fresh")).
 pub fn split(title: &str) -> (String, Option<String>) {
     let t = plain(title);
-    if t.ends_with(')') {
-        if let Some(open) = t.rfind('(') {
-            let inner = &t[open + 1..t.len() - 1];
-            let head = t[..open].trim_end();
-            let n = inner.chars().count();
-            if (1..=40).contains(&n) && !inner.contains('(') && !inner.contains(')') && !head.is_empty() {
-                return (head.to_string(), Some(inner.to_string()));
-            }
+    if t.ends_with(')')
+        && let Some(open) = t.rfind('(')
+    {
+        let inner = &t[open + 1..t.len() - 1];
+        let head = t[..open].trim_end();
+        let n = inner.chars().count();
+        if (1..=40).contains(&n) && !inner.contains('(') && !inner.contains(')') && !head.is_empty() {
+            return (head.to_string(), Some(inner.to_string()));
         }
     }
     let lower = t.to_lowercase();
@@ -148,8 +148,10 @@ pub fn topic_from(msg: &str, folder: &str) -> String {
         .map(|c| if c.is_alphanumeric() || c.is_whitespace() || "'./-".contains(c) { c } else { ' ' })
         .collect();
     let mut words: Vec<&str> = cleaned.split_whitespace().take(7).collect();
-    const STOP: [&str; 19] =
-        ["a", "an", "the", "to", "of", "for", "in", "on", "at", "by", "and", "or", "with", "from", "into", "that", "so", "is", "my"];
+    const STOP: [&str; 19] = [
+        "a", "an", "the", "to", "of", "for", "in", "on", "at", "by", "and", "or", "with", "from", "into", "that", "so",
+        "is", "my",
+    ];
     while words.len() > 2 {
         let last = words[words.len() - 1].to_lowercase();
         if STOP.contains(&last.as_str()) || last == "our" {
@@ -199,7 +201,8 @@ pub const NAME_MAX: usize = 64;
 /// What a typed name becomes: letters, digits, spaces and . , : ' + # ( ) - _ only (anything else turns into a space,
 /// as the machines do), spaces squeezed, cut at a word to fit `room`.
 pub fn clean_name(typed: &str, room: usize) -> String {
-    let ok: String = typed.chars().map(|c| if c.is_ascii_alphanumeric() || " .,:'+#()-_".contains(c) { c } else { ' ' }).collect();
+    let ok: String =
+        typed.chars().map(|c| if c.is_ascii_alphanumeric() || " .,:'+#()-_".contains(c) { c } else { ' ' }).collect();
     let t = ok.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.len() <= room {
         return t;
@@ -251,7 +254,10 @@ mod tests {
     fn stamps_and_tags() {
         assert_eq!(plain("Oct 11 3:40p Folder audit (fresh)"), "Folder audit (fresh)");
         assert_eq!(split("Oct 11 3:40p Folder audit (fresh)"), ("Folder audit".into(), Some("fresh".into())));
-        assert_eq!(split("Claude plan usage and session management fresh"), ("Claude plan usage and session management".into(), Some("fresh".into())));
+        assert_eq!(
+            split("Claude plan usage and session management fresh"),
+            ("Claude plan usage and session management".into(), Some("fresh".into()))
+        );
         assert_eq!(split("labv2"), ("labv2".into(), None));
         assert_eq!(split("Oct 1 9:05a x"), ("x".into(), None));
         assert_eq!(plain("Oct 1 9:05a "), "Oct 1 9:05a");
@@ -268,7 +274,10 @@ mod tests {
         assert!(!TagKind::Fresh.on_card() && !TagKind::Move.on_card() && !TagKind::Plain.on_card());
         assert!(TagKind::For.on_card() && TagKind::Ultra.on_card() && TagKind::Max.on_card());
         assert_eq!(tag_kind(Some("for Studio")), Some(TagKind::For));
-        assert_eq!(split("Build the Android app (for Studio)"), ("Build the Android app".to_string(), Some("for Studio".to_string())));
+        assert_eq!(
+            split("Build the Android app (for Studio)"),
+            ("Build the Android app".to_string(), Some("for Studio".to_string()))
+        );
         assert_eq!(tag_kind(None), None);
     }
 

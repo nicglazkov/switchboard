@@ -29,7 +29,17 @@ struct Viewer {
 }
 
 /// Connects one viewer and records everything both ways until it closes. Returns (output bytes, snapshots, sizes).
-async fn viewer(hub: &str, key: &[u8], machine: &str, bg: &str, cols: u16, rows: u16, out: &std::path::Path, label: &str) -> Viewer {
+#[allow(clippy::too_many_arguments)] // A probe tool: one argument per connection setting.
+async fn viewer(
+    hub: &str,
+    key: &[u8],
+    machine: &str,
+    bg: &str,
+    cols: u16,
+    rows: u16,
+    out: &std::path::Path,
+    label: &str,
+) -> Viewer {
     let t = sb_hub::ticket::mint(key, machine, bg, sb_hub::server::unix_now(), sb_hub::ticket::TTL);
     let url = format!("ws://{hub}/term?t={t}&cols={cols}&rows={rows}&proto=2");
     let (ws, _) = tokio_tungstenite::connect_async(url).await.expect("the test hub answers");

@@ -12,6 +12,7 @@ import nodes as nodes_mod  # noqa: E402
 import features as features_mod  # noqa: E402
 import flags as flags_mod  # noqa: E402
 import notes as notes_mod  # noqa: E402
+import options as options_mod  # noqa: E402
 from guard import GuardTimer  # noqa: E402
 
 PORT = 8130
@@ -73,7 +74,7 @@ p { margin: 0 0 20px; color: var(--dim); }
 {{LINK}}</main></body></html>
 """
 
-CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com 'self'; "
+CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; "
        f"img-src 'self' data:; connect-src 'self' ws://*:{term_mod.HUB_PORT}; frame-ancestors 'none'")
 
 
@@ -253,8 +254,9 @@ class App:
     def __init__(self, fleet, state_dir, web_dir, pusher=None, guard_delay=20, clock=time.time, sleep=time.sleep,
                  poll_every=3, retry_waits=(5, 15, 30), cfg_dir=None, server_cfg=None):
         self.fleet, self.state_dir, self.web_dir = fleet, Path(state_dir), Path(web_dir)
-        self.state_dir.mkdir(parents=True, exist_ok=True)
         self.cfg_dir = Path(cfg_dir) if cfg_dir else self.state_dir / 'config'
+        had_state = self._had_state()  # before anything below writes a file
+        self.state_dir.mkdir(parents=True, exist_ok=True)
         self.server_cfg = server_cfg  # None in tests: only localhost is its own
         self.live_pusher = None  # Live Activity pushes (main wires it to APNs)
         self.push_ready = False  # main sets it when <config>/apns.json and its key load
@@ -262,7 +264,9 @@ class App:
         if hasattr(fleet, 'on_save'):
             fleet.on_save = self._fleet_saved
             fleet.servers = list(server_cfg.origins) if server_cfg else []
+        self._migrate_options(had_state)
         fleet.summary_model = self.prefs()['summary_model']  # the agents hear it on every poll
+        fleet.options = self.options()  # ... and the opt-in settings (options.py)
         if getattr(fleet, 'history', False) is None:  # every poll writes down the weekly percent for the widgets
             fleet.history = fleet_mod.WeekHistory(self.state_dir / 'week_history.json')
         self.pusher = pusher or (lambda *a: None)
@@ -381,8 +385,8 @@ class App:
         snap['summary']['note'] = self.note(snap['machines'], snap['summary'])
         snap['v'] = self.version
         prefs = self.prefs()
-        snap['prefs'] = {'chrome_machine': prefs.get('chrome_machine'), 'appearance': prefs['appearance'],
-                         'summary_model': prefs['summary_model']}
+        snap['prefs'] = dict({'chrome_machine': prefs.get('chrome_machine'), 'appearance': prefs['appearance'],
+                              'summary_model': prefs['summary_model']}, **options_mod.clean(prefs))
         return self.feat.decorate(snap)
 
     def note(self, machines, summary):
@@ -412,9 +416,12 @@ class App:
     LATEST_FOR = 300  # seconds a look at the download page is kept
 
     def app_latest(self):
-        """GET /api/app: {latest: <the download page's latest.json> | None, base: <its URL>}. Where the page is lives in
-        <config>/downloads.json ({"url": "http://host:port/app"}), which publish.sh writes; without it, nothing is
-        offered and set_up is false. The app only offers "Restart to update"; it never installs on its own."""
+        """GET /api/app: {latest: <the download page's latest.json> | None, base: <its URL>, feed: {manifest, sig}}.
+        Where the page is lives in <config>/downloads.json ({"url": "http://host:port/app"}), which publish.sh writes;
+        without it, nothing is offered and set_up is false. `feed` is latest.json as text, byte for byte, with
+        latest.json.sig (None when the page has none): the app checks that signature itself, so this server is
+        only a messenger and can't change what is offered. `latest` is the parsed copy older apps read. The app
+        never installs on its own."""
         now = time.time()
         c = getattr(self, '_latest', None)
         if c and now - c[0] < self.LATEST_FOR:
@@ -428,8 +435,15 @@ class App:
             base = url.rstrip('/')
             try:
                 with urlopen(base + '/latest.json', timeout=5) as r:
-                    d = json.loads(r.read(200_000))
-                out = {'ok': True, 'latest': d if isinstance(d, dict) else None, 'base': base, 'set_up': True}
+                    text = r.read(200_000).decode('utf-8')
+                d = json.loads(text)
+                try:
+                    with urlopen(base + '/latest.json.sig', timeout=5) as r:
+                        sig = r.read(1000).decode('ascii').strip() or None
+                except Exception:  # an unsigned page: the app shows nothing
+                    sig = None
+                out = {'ok': True, 'latest': d if isinstance(d, dict) else None, 'base': base, 'set_up': True,
+                       'feed': {'manifest': text, 'sig': sig}}
             except Exception as e:  # the page being down never breaks anything else
                 out = {'ok': True, 'latest': None, 'base': base, 'set_up': True, 'error': str(e)[:200]}
         self._latest = (now, out)
@@ -898,15 +912,44 @@ class App:
             self._save_json('chrome.json', dict(list(d.items())[-2000:]))
         self.bump()
 
-    def prefs(self):
+    def _prefs_raw(self):
         try:
             d = json.loads((self.state_dir / 'prefs.json').read_text())
         except (OSError, ValueError):
             d = {}
-        d = d if isinstance(d, dict) else {}
-        return {'chrome_machine': d.get('chrome_machine'), 'last': d.get('last'), 'presets': d.get('presets') or [],
-                'appearance': appearance(d.get('appearance')),
-                'summary_model': d.get('summary_model') if d.get('summary_model') in SUMMARY_MODELS else 'opus'}
+        return d if isinstance(d, dict) else {}
+
+    def prefs(self):
+        d = self._prefs_raw()
+        return dict({'chrome_machine': d.get('chrome_machine'), 'last': d.get('last'), 'presets': d.get('presets') or [],
+                     'appearance': appearance(d.get('appearance')),
+                     'summary_model': d.get('summary_model') if d.get('summary_model') in SUMMARY_MODELS else 'opus',
+                     'migrations': [m for m in d.get('migrations') or [] if isinstance(m, str)]}, **options_mod.clean(d))
+
+    def options(self):
+        """The opt-in settings (options.py): {key: bool}."""
+        return options_mod.clean(self._prefs_raw())
+
+    def _had_state(self):
+        """Whether this server ran before: a machine list, or anything in its state folder."""
+        try:
+            if (self.cfg_dir / 'fleet.json').exists():
+                return True
+            return any(not p.is_dir() or any(p.iterdir()) for p in self.state_dir.iterdir())
+        except OSError:
+            return False
+
+    def _migrate_options(self, had_state):
+        """Once: the opt-in settings start off on a new server, and on for one that was already running, so an
+        existing install keeps working as before. Recorded in prefs.json so it never runs again."""
+        d = self.prefs()
+        opts, done, ran = options_mod.migrate(d, had_state)
+        if not ran:
+            return
+        d.update(opts, migrations=done)
+        self._save_json('prefs.json', d)
+        log('options: ' + ('this server ran before this change, so every opt-in setting stays on' if had_state
+                           else 'a new server: every opt-in setting starts off'))
 
     def flag_set(self, d):
         """A New sheet setup (the last one used, or a preset), checked: model, effort, mode, flags, Other flags."""
@@ -949,8 +992,14 @@ class App:
             if body['summary_model'] not in SUMMARY_MODELS:
                 raise HttpError(400, 'the summary model is opus or sonnet')
             d['summary_model'] = body['summary_model']
+        for k in options_mod.KEYS:  # the opt-in settings: each one true or false
+            if k in body:
+                if not isinstance(body[k], bool):
+                    raise HttpError(400, f'{k} is true or false')
+                d[k] = body[k]
         self._save_json('prefs.json', d)
         self.fleet.summary_model = d['summary_model']
+        self.fleet.options = options_mod.clean(d)
         self.bump()
         return dict(d, ok=True)
 
@@ -1332,7 +1381,7 @@ class App:
         if path == '/api/prefs':
             return dict(self.prefs(), ok=True, flags=sorted(flags_mod.START_FLAGS), chips=flags_mod.CHIP_FLAGS,
                         takes={k: v is not None for k, v in flags_mod.START_FLAGS.items()}, aliases=flags_mod.ALIASES,
-                        live=flags_mod.LIVE, labels=flags_mod.LABELS)
+                        live=flags_mod.LIVE, labels=flags_mod.LABELS, **options_mod.view(self.options(), self.push_ready))
         if path == '/api/summary':
             return self.summary()
         if path == '/api/usage':

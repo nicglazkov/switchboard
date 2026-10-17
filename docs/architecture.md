@@ -52,6 +52,61 @@ has no UI and most of the tests. `sb-desktop` is the app, built with GPUI.
 The app never waits on the network to draw: it shows the last snapshot it saved, then replaces it when the
 service answers, and refreshes in the background.
 
+## Updates
+
+The app updates itself only when the user says so (`sb-core/src/update.rs` for the rules, `sb-desktop/src/update.rs`
+for the app's side).
+
+- **The list.** The download page has `latest.json` (each build's file, size, SHA-256, version and build id) and
+  `latest.json.sig`, an Ed25519 signature of its exact bytes. The app gets both from the server (`GET /api/app`,
+  which passes them on unchanged) or, when the build names one, from a feed URL. It checks the signature with the
+  public key compiled in from `SB_UPDATE_PUBKEY`. A build made without that key has updates off and says so in
+  Settings > Updates.
+- **When.** One check about a minute and a half after launch, then once a day, never two at once. Settings has
+  Check now.
+- **What.** Only a build that is newer in both senses: the version may not go back (semantic version order) and
+  the build id must move forward. A build that was rolled back is not offered again.
+- **Download.** Into the cache folder as `<file>.partial`, resumed with an HTTP Range request after a stop. The
+  finished file must have the size and SHA-256 from the signed list, or it is deleted.
+- **Install.** The user picks Restart to update or Install on quit. The new build is unpacked beside the old one
+  and run once with `--version` to be sure it starts. Then one swap: on a Mac the two `.app` bundles trade places
+  with `renamex_np(RENAME_SWAP)`; on Windows the running exe is renamed to `Switchboard.old.exe` and the new one
+  takes its name; on Linux the new binary is renamed over the old one, which is kept as `Switchboard.old`. The old
+  build stays until the new one reports healthy (20 seconds of running, or a clean quit).
+- **Rollback.** `update.json` in the settings folder notes the install. If the new build starts a second time
+  without having reported healthy, it crashed or would not start, so it puts the old build back, opens it and
+  exits. The swap touches only the app, the kept copy and `update.json`: never settings or first-run choices.
+
+## Diagnostics
+
+The app writes its own log (`native/crates/sb-desktop/src/logs.rs`) and nothing leaves the computer unless you copy
+it out. The log folder is `~/Library/Logs/Switchboard` on macOS, `%LOCALAPPDATA%\Switchboard\logs` on Windows and
+`$XDG_STATE_HOME/switchboard/logs` (or `~/.local/state/switchboard/logs`) on Linux.
+
+- `Switchboard.log` turns into `Switchboard.log.1` past 2 MB, and 5 files are kept. Each line has the time, the
+  level and the module. `SB_LOG` (or `RUST_LOG`) filters it the way env_logger does, for example
+  `SB_LOG=warn,Switchboard=debug`; the app's own modules are `Switchboard::...` and the shared ones `sb_core::...`.
+  The default is `info`.
+- Lines never hold the home folder (it is written as `~`) or a token in a URL, and the app does not log chat text.
+- A panic (`src/panics.rs`) goes to the log and to `crash-<time>.txt` in the same folder, the 10 newest kept, and
+  then ends the process as before. [building.md](building.md) explains how to read its backtrace.
+- About has Show log (opens the folder), Copy diagnostics (version, build, OS and the last 200 log lines, without the
+  server address) and Open source licenses.
+- `switchboard-hub` and `switchboard-node` print to stderr and keep no log files of their own; whatever runs them
+  (launchd, systemd) decides where that goes.
+
+## The Mac installer: `native/crates/sb-install`
+
+`switchboard-install` installs, updates and uninstalls the app. It is one binary with a GPUI window and a
+`--quiet` mode. Everything that differs by system (where apps go, login items, the Dock, asking a running app to
+quit, disk images) is behind the `Platform` trait in `src/platform/`. The Mac has a real backend; other systems
+get a plain one that only copies files, and a Windows backend would be another implementation.
+
+The parts that decide what happens have no UI and are unit tested: version comparison (`version.rs`), the staged
+copy, swap and roll back (`swap.rs`), the first-run record (`record.rs`) and the uninstaller's keep and remove
+lists (`uninstall.rs`). `flow.rs` puts them together for both the window and `--quiet`. The window copies the
+app's color tokens from `sb-desktop/src/theme.rs` and uses its fonts and icons.
+
 ## Ports
 
 | Port | What |

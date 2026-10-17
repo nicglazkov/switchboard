@@ -5,8 +5,8 @@
 use std::time::Duration;
 
 use gpui::{
-    Animation, AnimationExt, AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, div, px, relative,
+    Animation, AnimationExt, AnyElement, ClickEvent, Context, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, SharedString, StatefulInteractiveElement, Styled, div, px, relative,
 };
 
 use crate::theme::Theme;
@@ -132,15 +132,22 @@ impl BoardView {
                             .h(px(2.))
                             .w_full()
                             .bg(gpui::white().alpha(0.55))
-                            .with_animation(SharedString::from(format!("drain-{start}")), Animation::new(Duration::from_millis(((ARM_SECS - gone) * 1000.) as u64)), move |d, k| {
-                                d.w(relative(frac0 * (1. - k)))
-                            }),
+                            .with_animation(
+                                SharedString::from(format!("drain-{start}")),
+                                Animation::new(Duration::from_millis(((ARM_SECS - gone) * 1000.) as u64)),
+                                move |d, k| d.w(relative(frac0 * (1. - k))),
+                            ),
                     )
                     .on_click(c.cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         cx.stop_propagation();
                         this.stop_armed = None;
                         let p = ev.position();
-                        this.flight = Some(Flight { title: title.clone(), mb, from: (f32::from(p.x), f32::from(p.y)), at: crate::state::AppState::now() });
+                        this.flight = Some(Flight {
+                            title: title.clone(),
+                            mb,
+                            from: (f32::from(p.x), f32::from(p.y)),
+                            at: crate::state::AppState::now(),
+                        });
                         go(this, cx);
                         let at = this.flight.as_ref().map(|f| f.at);
                         cx.spawn(async move |this, cx| {
@@ -154,9 +161,11 @@ impl BoardView {
                         })
                         .detach();
                     }))
-                    .with_animation(SharedString::from(format!("morph-{start}")), Animation::new(Duration::from_millis(180)), move |d, k| {
-                        d.bg(bad.alpha(0.35 + 0.65 * k))
-                    })
+                    .with_animation(
+                        SharedString::from(format!("morph-{start}")),
+                        Animation::new(ui::FADE),
+                        move |d, k| d.bg(bad.alpha(0.35 + 0.65 * k)),
+                    )
                     .into_any_element()
             }
             None => ui::line_btn(&t, el, 28.)
@@ -198,14 +207,20 @@ impl BoardView {
                 .text_color(t.ink)
                 .child(div().flex_none().size(px(7.)).rounded_full().bg(t.idle))
                 .child(ui::line(f.title.clone()).flex_1())
-                .children(f.mb.map(|m| div().flex_none().font_weight(FontWeight::BOLD).text_color(t.warm).child(sb_core::fmt::mem(m))))
-                .with_animation(SharedString::from(format!("fly-{}", f.at)), Animation::new(Duration::from_millis(FLIGHT_MS)), move |d, k| {
-                    // Up and over in an arc, shrinking as it lands.
-                    let e = 1. - (1. - k).powi(3);
-                    let x = fx + (tx - fx) * e;
-                    let y = fy + (ty - fy) * e - lift * (4. * e * (1. - e));
-                    d.left(px(x)).top(px(y)).opacity(1. - 0.85 * k * k)
-                })
+                .children(f.mb.map(|m| {
+                    div().flex_none().font_weight(FontWeight::BOLD).text_color(t.warm).child(sb_core::fmt::mem(m))
+                }))
+                .with_animation(
+                    SharedString::from(format!("fly-{}", f.at)),
+                    Animation::new(Duration::from_millis(FLIGHT_MS)),
+                    move |d, k| {
+                        // Up and over in an arc, shrinking as it lands.
+                        let e = 1. - (1. - k).powi(3);
+                        let x = fx + (tx - fx) * e;
+                        let y = fy + (ty - fy) * e - lift * (4. * e * (1. - e));
+                        d.left(px(x)).top(px(y)).opacity(1. - 0.85 * k * k)
+                    },
+                )
                 .into_any_element(),
         )
     }

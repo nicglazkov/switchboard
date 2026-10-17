@@ -4,15 +4,15 @@
 //! v2: Auto, first in the machine row when a machine shares what it can do: Claude picks the machine (and the folder,
 //! unless one is typed). While the message is typed, the rules preview the pick.
 
-use std::collections::{HashMap, HashSet};
 use std::cell::Cell;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, Focusable, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled,
-    Subscription, Window, canvas, div, prelude::*, px, relative,
+    AnyElement, App, ClickEvent, Context, Entity, EventEmitter, Focusable, FontWeight, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Render, ScrollHandle, SharedString,
+    StatefulInteractiveElement, Styled, Subscription, Window, canvas, div, prelude::*, px, relative,
 };
 use gpui_base::input::{InputEvent, InputState, TextareaState};
 use sb_core::actions::{MODELS, MODES, ULTRA_NOTE, ultra_warn, valid_folder_name};
@@ -79,7 +79,10 @@ pub fn valid_auto_folder(v: &str) -> bool {
     let parts: Vec<&str> = v.split('/').collect();
     !v.is_empty()
         && parts.len() <= 6
-        && parts.iter().all(|p| (1..=64).contains(&p.len()) && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ' ' | '-')))
+        && parts.iter().all(|p| {
+            (1..=64).contains(&p.len())
+                && p.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | ' ' | '-'))
+        })
 }
 
 /// 52340 as "52,340".
@@ -87,7 +90,7 @@ fn thousands(n: usize) -> String {
     let d = n.to_string();
     let mut out = String::new();
     for (i, c) in d.chars().enumerate() {
-        if i > 0 && (d.len() - i) % 3 == 0 {
+        if i > 0 && (d.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(c);
@@ -100,7 +103,9 @@ fn lc_first(t: &str) -> String {
     let t = t.trim().trim_end_matches('.');
     let mut ch = t.chars();
     match (ch.next(), ch.next()) {
-        (Some(a), Some(b)) if a.is_ascii_uppercase() && b.is_ascii_lowercase() => format!("{}{}", a.to_ascii_lowercase(), &t[1..]),
+        (Some(a), Some(b)) if a.is_ascii_uppercase() && b.is_ascii_lowercase() => {
+            format!("{}{}", a.to_ascii_lowercase(), &t[1..])
+        }
         _ => t.to_string(),
     }
 }
@@ -115,11 +120,18 @@ enum Preview {
 pub enum SheetEvent {
     Close,
     /// The server took it and "Open its terminal" is on: the window opens a tab that waits for the job.
-    Started { job: String, machine: String, label: String, title: String },
+    Started {
+        job: String,
+        machine: String,
+        label: String,
+        title: String,
+    },
 }
 
 pub struct NewSheet {
     app: Entity<AppState>,
+    /// The open dropdown (effort or permissions), if any.
+    drop: ui::Drop,
     machine: String,
     mode: &'static str,
     model: &'static str,
@@ -188,9 +200,16 @@ pub struct NewSheet {
 impl EventEmitter<SheetEvent> for NewSheet {}
 
 impl NewSheet {
-    pub fn new(app: Entity<AppState>, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> NewSheet {
+    pub fn new(
+        app: Entity<AppState>,
+        machine: Option<String>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> NewSheet {
         let msg = cx.new(|cx| {
-            TextareaState::new(window, cx).placeholder("What should it work on? Leave it empty to start idle.").auto_grow(MSG_MIN_ROWS, 8)
+            TextareaState::new(window, cx)
+                .placeholder("What should it work on? Leave it empty to start idle.")
+                .auto_grow(MSG_MIN_ROWS, 8)
         });
         let newf = cx.new(|cx| InputState::new(window, cx).placeholder("New folder"));
         let other = cx.new(|cx| InputState::new(window, cx).placeholder("--agent reviewer  --worktree feature"));
@@ -234,6 +253,7 @@ impl NewSheet {
             .unwrap_or_default();
         let mut s = NewSheet {
             app,
+            drop: ui::Drop::default(),
             machine: String::new(),
             mode: "normal",
             model: "",
@@ -305,7 +325,9 @@ impl NewSheet {
             st.load_prefs(
                 move |st, cx| {
                     let p = st.prefs.clone();
-                    cx.defer(move |cx| { let _ = me.update(cx, |s, cx| s.take_prefs(p, cx)); });
+                    cx.defer(move |cx| {
+                        let _ = me.update(cx, |s, cx| s.take_prefs(p, cx));
+                    });
                 },
                 cx,
             )
@@ -346,7 +368,9 @@ impl NewSheet {
 
     fn save_preset(&mut self, cx: &mut Context<Self>) {
         let name = self.preset.read(cx).value().trim().to_string();
-        let ok = !name.is_empty() && name.chars().count() <= 64 && name.chars().all(|c| c.is_alphanumeric() || " .,:'+#()-_".contains(c));
+        let ok = !name.is_empty()
+            && name.chars().count() <= 64
+            && name.chars().all(|c| c.is_alphanumeric() || " .,:'+#()-_".contains(c));
         if !ok {
             self.app.update(cx, |s, cx| s.toast("Name it with letters, digits and spaces (up to 64).", None, true, cx));
             return;
@@ -472,7 +496,10 @@ impl NewSheet {
         let para = "Look through the sync client and add retries with backoff where a request can fail. Keep the public API the same and add tests for each case.";
         let path = "/Users/you/Claude/atlas/src/sync/very/deeply/nested/module/path/that/never/breaks/client_retry_backoff_handler.ts";
         let text = match text {
-            "@long" => (0..12).map(|i| if i == 3 { path.to_string() } else { format!("{}. {para}", i + 1) }).collect::<Vec<_>>().join("\n"),
+            "@long" => (0..12)
+                .map(|i| if i == 3 { path.to_string() } else { format!("{}. {para}", i + 1) })
+                .collect::<Vec<_>>()
+                .join("\n"),
             "@huge" => {
                 let mut s = format!("{path}{path}\n");
                 while s.len() < 50_000 {
@@ -514,7 +541,8 @@ impl NewSheet {
                 return;
             }
             let (m2, f2) = (msg.clone(), folder.clone());
-            let res = cx.background_executor().spawn(async move { core.route(&m2, &f2, true, chrome, cm.as_deref()) }).await;
+            let res =
+                cx.background_executor().spawn(async move { core.route(&m2, &f2, true, chrome, cm.as_deref()) }).await;
             let _ = this.update(cx, |s, cx| {
                 if s.prev_seq != seq || !s.is_auto() {
                     return;
@@ -560,7 +588,9 @@ impl NewSheet {
         }
         let core = self.app.read(cx).core.clone();
         let start = core.cached_folders(&machine);
-        self.root = start.root.or_else(|| self.app.read(cx).snap.machine(&machine).map(|m| m.root.clone()).filter(|r| !r.is_empty()));
+        self.root = start
+            .root
+            .or_else(|| self.app.read(cx).snap.machine(&machine).map(|m| m.root.clone()).filter(|r| !r.is_empty()));
         self.recent = start.recent;
         if let Some(top) = start.top {
             self.tree.insert(String::new(), top);
@@ -570,14 +600,14 @@ impl NewSheet {
         cx.spawn(async move |this, cx| {
             let res = cx.background_executor().spawn(async move { c1.folder_recents(&m1) }).await;
             let _ = this.update(cx, |s, cx| {
-                if let Ok(f) = res {
-                    if s.machine == want {
-                        if f.root.is_some() {
-                            s.root = f.root;
-                        }
-                        s.recent = f.recent;
-                        cx.notify();
+                if let Ok(f) = res
+                    && s.machine == want
+                {
+                    if f.root.is_some() {
+                        s.root = f.root;
                     }
+                    s.recent = f.recent;
+                    cx.notify();
                 }
             });
         })
@@ -672,6 +702,12 @@ impl NewSheet {
         self.app.read(cx).snap.label_of(&self.machine).unwrap_or_else(|| self.machine.clone())
     }
 
+    /// True when Let Claude pick for Auto is off on the server, so Auto's pick comes from its rules. An older
+    /// server that has no such switch keeps the old wording.
+    fn rules_pick(&self) -> bool {
+        self.prefs.as_ref().and_then(|p| p.option("ai_auto_machine")).is_some_and(|o| !o.on)
+    }
+
     fn root_text(&self) -> String {
         self.root.clone().unwrap_or_else(|| "its Claude folder".into())
     }
@@ -687,7 +723,13 @@ impl NewSheet {
             return if self.is_auto() { "Check the folder name" } else { "Check the new folder name" }.into();
         };
         let auto_place = if folder.is_empty() { String::new() } else { format!(", in {folder}") };
-        let place = if create { format!("a new folder, {folder}") } else if folder.is_empty() { self.root_text() } else { folder };
+        let place = if create {
+            format!("a new folder, {folder}")
+        } else if folder.is_empty() {
+            self.root_text()
+        } else {
+            folder
+        };
         let mode = match self.mode {
             "ultracode" => ", UltraCode on Opus",
             "max" => ", max effort",
@@ -699,14 +741,19 @@ impl NewSheet {
             String::new()
         };
         if self.is_auto() {
-            return format!("Claude picks the machine{auto_place}{mode}{model}");
+            let who = if self.rules_pick() { "Rules pick" } else { "Claude picks" };
+            return format!("{who} the machine{auto_place}{mode}{model}");
         }
         format!("On {} in {place}{mode}{model}", self.label(cx))
     }
 
     fn can_start(&self, cx: &App) -> bool {
         let snap = &self.app.read(cx).snap;
-        let online = if self.is_auto() { snap.auto_ready() } else { snap.machine(&self.machine).is_some_and(|m| !m.is_offline()) };
+        let online = if self.is_auto() {
+            snap.auto_ready()
+        } else {
+            snap.machine(&self.machine).is_some_and(|m| !m.is_offline())
+        };
         !self.sending && online && self.target(cx).is_some() && self.other_error().is_none()
     }
 
@@ -716,7 +763,11 @@ impl NewSheet {
         }
         let Some((folder, create)) = self.target(cx) else { return };
         let prompt = self.msg.read(cx).value().trim().to_string();
-        let model = if self.locked() { Some("opus".to_string()) } else { (!self.model.is_empty()).then(|| self.model.to_string()) };
+        let model = if self.locked() {
+            Some("opus".to_string())
+        } else {
+            (!self.model.is_empty()).then(|| self.model.to_string())
+        };
         let effort = (!flags::effort_locked(self.mode) && !self.opt.effort.is_empty()).then(|| self.opt.effort.clone());
         let req = NewRequest {
             machine: self.machine.clone(),
@@ -843,19 +894,30 @@ impl NewSheet {
         }
         let pick = self.tools_pick;
         let seg = ui::seg_box(t)
-            .child(ui::seg_btn(t, "nw-tools-auto", !pick, false).child(ui::icon("auto", 12., if pick { t.dim } else { t.accent })).child("Auto").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.tools_pick = false;
-                cx.notify();
-            })))
-            .child(ui::seg_btn(t, "nw-tools-pick", pick, false).child("Pick").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.tools_pick = true;
-                cx.notify();
-            })));
+            .child(
+                ui::seg_btn(t, "nw-tools-auto", !pick, false)
+                    .child(ui::icon("auto", 12., if pick { t.dim } else { t.accent }))
+                    .child("Auto")
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        this.tools_pick = false;
+                        cx.notify();
+                    })),
+            )
+            .child(ui::seg_btn(t, "nw-tools-pick", pick, false).child("Pick").on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.tools_pick = true;
+                    cx.notify();
+                },
+            )));
         let mut row = div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(10.)).child(seg);
         if !pick {
             let (skills, all_skills, mcps) = lib.auto_counts();
             let plural = |n: usize, one: &str| format!("{n} {one}{}", if n == 1 { "" } else { "s" });
-            let skill_part = if skills > 0 && skills == all_skills { Some("All skills".to_string()) } else { (skills > 0).then(|| plural(skills, "skill")) };
+            let skill_part = if skills > 0 && skills == all_skills {
+                Some("All skills".to_string())
+            } else {
+                (skills > 0).then(|| plural(skills, "skill"))
+            };
             let mcp_part = (mcps > 0).then(|| plural(mcps, "MCP tool"));
             let what = match (skill_part, mcp_part) {
                 (Some(a), Some(b)) => format!("{a} + {b}"),
@@ -863,9 +925,18 @@ impl NewSheet {
                 (None, Some(b)) => b,
                 (None, None) => "No tools".to_string(),
             };
-            let on = if self.machine == AUTO_MACHINE { "the machine Auto picks".to_string() } else { app.snap.label_of(&self.machine).unwrap_or_else(|| self.machine.clone()) };
+            let on = if self.machine == AUTO_MACHINE {
+                "the machine Auto picks".to_string()
+            } else {
+                app.snap.label_of(&self.machine).unwrap_or_else(|| self.machine.clone())
+            };
             let n = skills + mcps;
-            row = row.child(ui::line(format!("{what} {} ready on {on}", if n == 1 { "is" } else { "are" })).flex_1().text_size(px(12.5)).text_color(t.dim));
+            row = row.child(
+                ui::line(format!("{what} {} ready on {on}", if n == 1 { "is" } else { "are" }))
+                    .flex_1()
+                    .text_size(px(12.5))
+                    .text_color(t.dim),
+            );
         }
         Some(row.into_any_element())
     }
@@ -875,13 +946,12 @@ impl NewSheet {
         let lib = self.app.read(cx).lib()?;
         let mut row = div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(6.));
         if lib.tools.is_empty() {
+            let open =
+                ui::setup_btn(t, "nw-tools-lib", "Open Library").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                    crate::settings::open_at(crate::settings::Section::Library, cx)
+                }));
             return Some(
-                row.text_size(px(12.))
-                    .text_color(t.faint)
-                    .child("No tools in the library yet.")
-                    .child(Self::link(t, "nw-tools-lib", "Open Library").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
-                        crate::settings::open_at(crate::settings::Section::Library, cx)
-                    })))
+                ui::setup_note(t, "cube", "No tools in the library yet. Add one there to offer it to new chats.", open)
                     .into_any_element(),
             );
         }
@@ -892,20 +962,24 @@ impl NewSheet {
             let on = locked || self.tools.contains(&tool.name);
             let name = tool.name.clone();
             let ic = if tool.kinds.iter().any(|k| k == "mcp") { "cube" } else { "spark" };
-            row = row.child(ui::check_chip(t, SharedString::from(format!("nw-tool-{}", tool.name)), on, locked, ic, &tool.name).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                if locked {
-                    return;
-                }
-                if !this.tools.contains(&name) {
-                    this.tools.push(name.clone());
-                } else {
-                    this.tools.retain(|x| x != &name);
-                }
-                cx.notify();
-            })));
+            row = row.child(
+                ui::check_chip(t, SharedString::from(format!("nw-tool-{}", tool.name)), on, locked, ic, &tool.name)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if locked {
+                            return;
+                        }
+                        if !this.tools.contains(&name) {
+                            this.tools.push(name.clone());
+                        } else {
+                            this.tools.retain(|x| x != &name);
+                        }
+                        cx.notify();
+                    })),
+            );
         }
         if locked_any {
-            row = row.child(div().text_size(px(12.)).text_color(t.faint).child("Locked ones are on for every new chat."));
+            row =
+                row.child(div().text_size(px(12.)).text_color(t.faint).child("Locked ones are on for every new chat."));
         }
         Some(row.into_any_element())
     }
@@ -913,7 +987,13 @@ impl NewSheet {
     /// A word that acts, in the accent color.
     fn link(t: &Theme, id: impl Into<gpui::ElementId>, text: impl Into<SharedString>) -> gpui::Stateful<gpui::Div> {
         let accent = t.accent;
-        div().id(id).flex_none().cursor_pointer().text_color(accent).hover(move |s| s.text_color(accent.alpha(0.75))).child(text.into())
+        div()
+            .id(id)
+            .flex_none()
+            .cursor_pointer()
+            .text_color(accent)
+            .hover(move |s| s.text_color(accent.alpha(0.75)))
+            .child(text.into())
     }
 
     /// An option that is on or off: a check box, an icon and its name.
@@ -961,38 +1041,62 @@ impl NewSheet {
                         .text_color(t.ink)
                         .child(gpui_base::Input::new(&self.preset)),
                 )
-                .child(ui::primary_btn(t, "nw-ps-save", 28.).px(px(10.)).text_size(px(12.5)).child("Save").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_preset(cx))))
-                .child(ui::ghost(t, "nw-ps-cancel", None, None).h(px(28.)).px(px(8.)).text_size(px(12.5)).child("Cancel").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.naming = false;
-                    cx.notify();
-                })))
+                .child(
+                    ui::primary_btn(t, "nw-ps-save", 28.)
+                        .px(px(10.))
+                        .text_size(px(12.5))
+                        .child("Save")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.save_preset(cx))),
+                )
+                .child(
+                    ui::ghost(t, "nw-ps-cancel", None, None)
+                        .h(px(28.))
+                        .px(px(8.))
+                        .text_size(px(12.5))
+                        .child("Cancel")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            this.naming = false;
+                            cx.notify();
+                        })),
+                )
                 .into_any_element();
         }
         if let Some(last) = p.last.clone().filter(|l| !flags::same_setup(l, &blank)) {
             let on = flags::same_setup(&cur, &last);
-            row = row.child(chip("nw-ps-last".into(), "Last used".into(), on).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_setup(&last, cx))));
+            row = row.child(
+                chip("nw-ps-last".into(), "Last used".into(), on)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_setup(&last, cx))),
+            );
         }
         for (i, ps) in p.presets.iter().enumerate().take(6) {
             let on = flags::same_setup(&cur, ps);
             let ps2 = ps.clone();
             row = row.child(
-                chip(SharedString::from(format!("nw-ps-{i}")), ps.name.clone().unwrap_or_else(|| format!("Setup {}", i + 1)), on)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_setup(&ps2, cx))),
+                chip(
+                    SharedString::from(format!("nw-ps-{i}")),
+                    ps.name.clone().unwrap_or_else(|| format!("Setup {}", i + 1)),
+                    on,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_setup(&ps2, cx))),
             );
         }
         let saved = p.presets.iter().any(|x| flags::same_setup(&cur, x));
         if !saved && !flags::same_setup(&cur, &blank) {
             row = row.child(
-                ui::ghost(t, "nw-ps-new", None, None).h(px(26.)).px(px(8.)).text_size(px(12.)).child(ui::icon("plus", 12., t.dim)).child("Save setup").on_click(
-                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                ui::ghost(t, "nw-ps-new", None, None)
+                    .h(px(26.))
+                    .px(px(8.))
+                    .text_size(px(12.))
+                    .child(ui::icon("plus", 12., t.dim))
+                    .child("Save setup")
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                         this.naming = true;
                         this.preset.update(cx, |n, cx| {
                             n.set_value("", window, cx);
                             n.focus(window, cx);
                         });
                         cx.notify();
-                    }),
-                ),
+                    })),
             );
         }
         row.into_any_element()
@@ -1035,7 +1139,9 @@ impl NewSheet {
                     .items_center()
                     .justify_between()
                     .child(ui::lbl("First message", t.label))
-                    .when_some(count, |d, c| d.child(div().font_family(NUM).text_size(px(11.)).text_color(t.faint).child(c))),
+                    .when_some(count, |d, c| {
+                        d.child(div().font_family(NUM).text_size(px(11.)).text_color(t.faint).child(c))
+                    }),
             )
             .child(
                 div()
@@ -1052,7 +1158,11 @@ impl NewSheet {
                     .line_height(relative(1.5))
                     .text_color(t.ink)
                     .child(gpui_base::Textarea::new(&self.msg))
-                    .child(canvas(move |b, _, _| hcell.set(f32::from(b.size.height)), |_, _, _, _| {}).absolute().inset_0())
+                    .child(
+                        canvas(move |b, _, _| hcell.set(f32::from(b.size.height)), |_, _, _, _| {})
+                            .absolute()
+                            .inset_0(),
+                    )
                     // The handle: drag it to make the box taller or shorter; a double click lets it follow the text again.
                     .child(
                         div()
@@ -1066,7 +1176,11 @@ impl NewSheet {
                             .justify_center()
                             .items_center()
                             .cursor_ns_resize()
-                            .child(div().w(px(28.)).h(px(3.)).rounded_full().bg(if self.msg_drag.is_some() { t.accent } else { t.line2 }))
+                            .child(div().w(px(28.)).h(px(3.)).rounded_full().bg(if self.msg_drag.is_some() {
+                                t.accent
+                            } else {
+                                t.line2
+                            }))
                             .on_mouse_down(
                                 MouseButton::Left,
                                 cx.listener(|this, e: &MouseDownEvent, _, cx| {
@@ -1102,10 +1216,16 @@ impl NewSheet {
                 None => "Auto sends it to a machine with Claude in Chrome.".into(),
             };
         } else if let Some(m) = snap.machine(&self.machine) {
-            let alt = pref.filter(|p| up(p) && p.name != m.name).or_else(|| snap.machines.iter().find(|x| x.name != m.name && up(x) && has(x)));
+            let alt = pref
+                .filter(|p| up(p) && p.name != m.name)
+                .or_else(|| snap.machines.iter().find(|x| x.name != m.name && up(x) && has(x)));
             match &m.chrome {
                 Some(c) if !c.connector => {
-                    text = format!("{} does not have Claude in Chrome{}.", m.label, if c.installed { " (Chrome is there, the extension is not)" } else { "" });
+                    text = format!(
+                        "{} does not have Claude in Chrome{}.",
+                        m.label,
+                        if c.installed { " (Chrome is there, the extension is not)" } else { "" }
+                    );
                     match alt {
                         Some(a) => use_to = Some((a.name.clone(), a.label.clone())),
                         None => text.push_str(" No machine online has it right now."),
@@ -1122,24 +1242,57 @@ impl NewSheet {
                 },
             }
         }
-        let mut row = div().flex().flex_wrap().items_center().gap(px(8.)).text_size(px(12.)).text_color(t.dim).child(ui::icon("globe", 13., t.faint));
+        // No machine online has Claude in Chrome: the shared not-set-up note, pointing at the Chrome settings.
+        if !snap.machines.iter().any(|x| up(x) && has(x)) && pref.is_none() {
+            let open =
+                ui::setup_btn(t, "nw-chrome-set", "Open Settings").on_click(cx.listener(|_, _: &ClickEvent, _, cx| {
+                    crate::settings::open_at(crate::settings::Section::Chrome, cx)
+                }));
+            return Some(
+                ui::setup_note(
+                    t,
+                    "globe",
+                    "No machine online has Claude in Chrome yet. Settings shows which machines have it.",
+                    open,
+                )
+                .into_any_element(),
+            );
+        }
+        let mut row = div()
+            .flex()
+            .flex_wrap()
+            .items_center()
+            .gap(px(8.))
+            .text_size(px(12.))
+            .text_color(t.dim)
+            .child(ui::icon("globe", 13., t.faint));
         if !text.is_empty() {
             row = row.child(text);
         }
         if let Some((name, label)) = use_to {
-            row = row.child(Self::link(t, "nw-chrome-use", format!("Use {label}")).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.chrome_machine = Some(name.clone());
-                this.set_machine(name.clone(), cx)
-            })));
+            row = row.child(Self::link(t, "nw-chrome-use", format!("Use {label}")).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.chrome_machine = Some(name.clone());
+                    this.set_machine(name.clone(), cx)
+                },
+            )));
         }
         row = row.child(
-            Self::link(t, "nw-chrome-set", if self.chrome_set { "Done" } else { "Change" }).text_color(t.dim).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                this.chrome_set = !this.chrome_set;
-                cx.notify();
-            })),
+            Self::link(t, "nw-chrome-set", if self.chrome_set { "Done" } else { "Change" }).text_color(t.dim).on_click(
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.chrome_set = !this.chrome_set;
+                    cx.notify();
+                }),
+            ),
         );
         if self.chrome_set {
-            let mut keys = div().w_full().flex().flex_wrap().items_center().gap(px(6.)).child(div().text_color(t.faint).child("This chat's Chrome machine:"));
+            let mut keys = div()
+                .w_full()
+                .flex()
+                .flex_wrap()
+                .items_center()
+                .gap(px(6.))
+                .child(div().text_color(t.faint).child("This chat's Chrome machine:"));
             for m in &snap.machines {
                 let on = self.chrome_machine.as_deref() == Some(m.name.as_str());
                 let name = m.name.clone();
@@ -1177,43 +1330,48 @@ impl NewSheet {
     /// The options band under the message and the folder: effort, Chrome, permissions, extra folders, Other
     /// flags, and the command the machine runs.
     fn options(&self, t: &Theme, other_focused: bool, cx: &Context<Self>) -> impl IntoElement {
-        let label = |text: &str| div().flex_none().w(px(84.)).text_size(px(12.)).text_color(t.label).child(text.to_string());
+        let label =
+            |text: &str| div().flex_none().w(px(84.)).text_size(px(12.)).text_color(t.label).child(text.to_string());
         let locked = flags::effort_locked(self.mode);
-        let mut efforts = ui::seg_box(t);
-        for (v, name) in EFFORTS {
-            let on = !locked && self.opt.effort == v;
-            let b = ui::seg_btn(t, SharedString::from(format!("eff-{v}")), on, locked).child(name);
-            efforts = efforts.child(if locked {
-                b.into_any_element()
-            } else {
-                b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.opt.effort = v.to_string();
-                    this.touched = true;
-                    cx.notify();
-                }))
-                .into_any_element()
-            });
-        }
-        let mut perms = ui::seg_box(t);
-        for (v, name) in PERMS {
-            let on = self.opt.perm == v;
-            perms = perms.child(
-                ui::seg_btn(t, SharedString::from(format!("perm-{v}")), on, false)
-                    .when(on && v == "bypassPermissions", |d| d.text_color(t.bad))
-                    .child(name)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.opt.perm = v.to_string();
-                        this.touched = true;
-                        cx.notify();
-                    })),
-            );
-        }
-        let chrome = Self::toggle_chip(t, "nw-chrome", self.opt.chrome, "globe", "Claude in Chrome").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.opt.chrome = !this.opt.chrome;
-            this.touched = true;
-            this.preview(cx);
-            cx.notify();
-        }));
+        // Five choices each: dropdowns (two to four short choices are segmented buttons).
+        let efforts = ui::choice(
+            t,
+            cx,
+            "nw-effort",
+            self.drop.is_open("nw-effort"),
+            &EFFORTS,
+            &self.opt.effort,
+            locked,
+            None,
+            |v| &mut v.drop,
+            |v, e, _| {
+                v.opt.effort = e.to_string();
+                v.touched = true;
+            },
+        );
+        let perms = ui::choice(
+            t,
+            cx,
+            "nw-perm",
+            self.drop.is_open("nw-perm"),
+            &PERMS,
+            &self.opt.perm,
+            false,
+            Some("bypassPermissions"),
+            |v| &mut v.drop,
+            |v, p, _| {
+                v.opt.perm = p.to_string();
+                v.touched = true;
+            },
+        );
+        let chrome = Self::toggle_chip(t, "nw-chrome", self.opt.chrome, "globe", "Claude in Chrome").on_click(
+            cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.opt.chrome = !this.opt.chrome;
+                this.touched = true;
+                this.preview(cx);
+                cx.notify();
+            }),
+        );
         let mut dirs = div().flex_1().min_w_0().flex().flex_wrap().items_center().gap(px(6.));
         for d in &self.opt.dirs {
             let d2 = d.clone();
@@ -1232,7 +1390,10 @@ impl NewSheet {
                     .text_color(t.chip_ink)
                     .child(ui::icon("folder", 12., t.dim))
                     .child(fmt::last_seg(d))
-                    .child(ui::icon_btn(t, SharedString::from(format!("nw-dir-x-{d}")), "x", 20.).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_dir(d2.clone(), cx)))),
+                    .child(
+                        ui::icon_btn(t, SharedString::from(format!("nw-dir-x-{d}")), "x", 20.)
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.toggle_dir(d2.clone(), cx))),
+                    ),
             );
         }
         let auto = self.is_auto();
@@ -1264,7 +1425,13 @@ impl NewSheet {
             .items_center()
             .rounded(px(ui::R_CTRL))
             .border_1()
-            .border_color(if err.is_some() { t.bad } else if other_focused { t.accent } else { t.line })
+            .border_color(if err.is_some() {
+                t.bad
+            } else if other_focused {
+                t.accent
+            } else {
+                t.line
+            })
             .bg(well)
             .font_family(NUM)
             .text_size(px(12.))
@@ -1283,21 +1450,31 @@ impl NewSheet {
             .border_color(t.rule)
             .child(div().flex().items_center().gap(px(10.)).child(label("Browser")).child(chrome))
             .children(self.chrome_line(t, cx).map(|l| div().pl(px(94.)).child(l)))
-            .children(self.tools_mode_line(t, cx).map(|l| div().flex().items_center().gap(px(10.)).child(label("Tools")).child(l)))
-            .children(self.tools_line(t, cx).filter(|_| self.tools_pick || !self.app.read(cx).lib().is_some_and(|l| l.has_auto())).map(|l| {
-                let auto = self.app.read(cx).lib().is_some_and(|l| l.has_auto());
-                div().flex().items_start().gap(px(10.)).child(if auto { label("").pt(px(7.)) } else { label("Tools").pt(px(7.)) }).child(l)
-            }))
-            .child(div().flex().items_center().gap(px(10.)).child(label("Permissions")).child(perms))
-            .child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .child(label("Effort"))
-                    .child(efforts)
-                    .when(locked, |d| d.child(div().text_size(px(12.)).text_color(t.faint).child(if self.mode == "max" { "Max sets it." } else { "UltraCode sets it." }))),
+            .children(
+                self.tools_mode_line(t, cx)
+                    .map(|l| div().flex().items_center().gap(px(10.)).child(label("Tools")).child(l)),
             )
+            .children(
+                self.tools_line(t, cx)
+                    .filter(|_| self.tools_pick || !self.app.read(cx).lib().is_some_and(|l| l.has_auto()))
+                    .map(|l| {
+                        let auto = self.app.read(cx).lib().is_some_and(|l| l.has_auto());
+                        div()
+                            .flex()
+                            .items_start()
+                            .gap(px(10.))
+                            .child(if auto { label("").pt(px(7.)) } else { label("Tools").pt(px(7.)) })
+                            .child(l)
+                    }),
+            )
+            .child(div().flex().items_center().gap(px(10.)).child(label("Permissions")).child(perms))
+            .child(div().flex().items_center().gap(px(10.)).child(label("Effort")).child(efforts).when(locked, |d| {
+                d.child(div().text_size(px(12.)).text_color(t.faint).child(if self.mode == "max" {
+                    "Max sets it."
+                } else {
+                    "UltraCode sets it."
+                }))
+            }))
             .child(div().flex().items_center().gap(px(10.)).child(label("Folders")).child(dirs))
             .child(div().flex().items_center().gap(px(10.)).child(label("Other flags")).child(other))
             .when_some(err, |d, e| d.child(div().pl(px(94.)).text_size(px(12.)).text_color(t.bad).child(e)))
@@ -1364,7 +1541,14 @@ impl NewSheet {
                 .when(!on, |d| d.hover(move |s| s.bg(hover)))
                 .child(ui::line(name).flex_1())
                 .when_some(f.recent.filter(|r| *r > 0.0 && !self.adding), |d, r| {
-                    d.child(div().flex_none().font_family(NUM).text_size(px(11.5)).text_color(t.faint).child(fmt::sago(r, AppState::now())))
+                    d.child(
+                        div()
+                            .flex_none()
+                            .font_family(NUM)
+                            .text_size(px(11.5))
+                            .text_color(t.faint)
+                            .child(fmt::sago(r, AppState::now())),
+                    )
                 })
                 .when(added, |d| d.child(ui::icon("check", 13., accent)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1379,7 +1563,7 @@ impl NewSheet {
     }
 
     /// Auto's line under the machine row: the rules' pick for what is typed so far.
-    fn preview_line(&self, t: &Theme) -> impl IntoElement {
+    fn preview_line(&self, t: &Theme, cx: &Context<Self>) -> impl IntoElement {
         use sb_core::TextRun;
         let run = |text: &str, bold: bool| TextRun { text: text.to_string(), bold };
         let body = match &self.prev {
@@ -1392,18 +1576,37 @@ impl NewSheet {
                     runs.push(run(&format!(", {why}"), false));
                 }
                 div()
+                    .flex_1()
+                    .min_w_0()
                     .flex()
                     .flex_col()
                     .gap(px(2.))
                     .child(div().text_color(t.ink2).child(ui::runs_text(&runs, t.ink)))
-                    .child(div().text_size(px(11.5)).text_color(t.faint).child(if *typed {
-                        "A preview. Claude makes the final pick when you start."
+                    .child(if self.rules_pick() {
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_start()
+                            .gap(px(2.))
+                            .text_size(px(11.5))
+                            .text_color(t.faint)
+                            .child(ui::wrap(rules_note()))
+                            .child(ui::link(t, "nw-ai-auto", "Open Settings").on_click(cx.listener(
+                                |_, _: &ClickEvent, _, cx| {
+                                    crate::settings::open_at(crate::settings::Section::Privacy, cx)
+                                },
+                            )))
                     } else {
-                        "Type the first message and the pick follows it."
-                    }))
+                        div().text_size(px(11.5)).text_color(t.faint).child(if *typed {
+                            "A preview. Claude makes the final pick when you start."
+                        } else {
+                            "Type the first message and the pick follows it."
+                        })
+                    })
             }
         };
         div()
+            .w_full()
             .flex()
             .items_start()
             .gap(px(7.))
@@ -1450,10 +1653,18 @@ impl NewSheet {
 
     fn tree_rows(&self, t: &Theme, parent: &str, depth: usize, out: &mut Vec<AnyElement>, cx: &Context<Self>) {
         let note = |text: &str, depth: usize| {
-            div().ml(px(26. + depth as f32 * 16.)).my(px(6.)).text_size(px(12.5)).text_color(t.faint).child(text.to_string()).into_any_element()
+            div()
+                .ml(px(26. + depth as f32 * 16.))
+                .my(px(6.))
+                .text_size(px(12.5))
+                .text_color(t.faint)
+                .child(text.to_string())
+                .into_any_element()
         };
         match self.tree.get(parent) {
-            Some(list) if list.is_empty() => out.push(note(if parent.is_empty() { "No folders here yet." } else { "No folders inside" }, depth)),
+            Some(list) if list.is_empty() => {
+                out.push(note(if parent.is_empty() { "No folders here yet." } else { "No folders inside" }, depth))
+            }
             Some(list) => {
                 for f in list {
                     out.push(self.folder_row(t, f, depth, true, cx));
@@ -1462,7 +1673,9 @@ impl NewSheet {
                     }
                 }
             }
-            None if self.failed.contains(parent) => out.push(note("Could not load the folders. It tries again next time.", depth)),
+            None if self.failed.contains(parent) => {
+                out.push(note("Could not load the folders. It tries again next time.", depth))
+            }
             None => {}
         }
     }
@@ -1471,13 +1684,23 @@ impl NewSheet {
         let label = self.label(cx);
         let hover = t.hover;
         let on = self.folder.is_empty() && !self.adding;
-        let group = |text: &str| div().mt(px(12.)).mb(px(4.)).ml(px(26.)).child(ui::lbl(text, t.faint)).into_any_element();
+        let group =
+            |text: &str| div().mt(px(12.)).mb(px(4.)).ml(px(26.)).child(ui::lbl(text, t.faint)).into_any_element();
         let mut rows: Vec<AnyElement> = vec![
             div()
                 .flex()
                 .items_center()
                 .gap(px(2.))
-                .child(div().flex_none().w(px(24.)).h(px(30.)).flex().items_center().justify_center().child(ui::icon("home", 15., t.faint)))
+                .child(
+                    div()
+                        .flex_none()
+                        .w(px(24.))
+                        .h(px(30.))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(ui::icon("home", 15., t.faint)),
+                )
                 .child(
                     div()
                         .id("fr-home")
@@ -1499,7 +1722,16 @@ impl NewSheet {
                         .justify_between()
                         .child(ui::wrap(format!("{label} Claude folder")).flex_shrink(1.).line_height(relative(1.3)))
                         .when_some(self.root.clone(), |d, r| {
-                            d.child(div().flex_shrink(1.).min_w_0().max_w(px(120.)).font_family(NUM).text_size(px(11.)).text_color(t.faint).child(ui::line(r)))
+                            d.child(
+                                div()
+                                    .flex_shrink(1.)
+                                    .min_w_0()
+                                    .max_w(px(120.))
+                                    .font_family(NUM)
+                                    .text_size(px(11.))
+                                    .text_color(t.faint)
+                                    .child(ui::line(r)),
+                            )
                         })
                         .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                             if this.adding {
@@ -1523,7 +1755,16 @@ impl NewSheet {
         }
         rows.push(group("All folders"));
         self.tree_rows(t, "", 0, &mut rows, cx);
-        div().id("fpick").flex_1().min_h_0().overflow_y_scroll().track_scroll(&self.scroll).px(px(6.)).pt(px(4.)).pb(px(8.)).children(rows)
+        div()
+            .id("fpick")
+            .flex_1()
+            .min_h_0()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .px(px(6.))
+            .pt(px(4.))
+            .pb(px(8.))
+            .children(rows)
     }
 }
 
@@ -1550,7 +1791,9 @@ impl Render for NewSheet {
         let auto_ready = snap.auto_ready();
         if auto_ready || self.is_auto() {
             let on = self.is_auto();
-            let b = ui::seg_btn(&t, "nm-auto", on, !auto_ready).child(ui::icon("auto", 13., if on { t.accent } else { t.dim })).child("Auto");
+            let b = ui::seg_btn(&t, "nm-auto", on, !auto_ready)
+                .child(ui::icon("auto", 13., if on { t.accent } else { t.dim }))
+                .child("Auto");
             machines = machines.child(if auto_ready {
                 b.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pick_auto(cx))).into_any_element()
             } else {
@@ -1570,7 +1813,8 @@ impl Render for NewSheet {
             machines = machines.child(if off {
                 b.into_any_element()
             } else {
-                b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_machine(name.clone(), cx))).into_any_element()
+                b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.set_machine(name.clone(), cx)))
+                    .into_any_element()
             });
         }
         // Mode
@@ -1618,7 +1862,15 @@ impl Render for NewSheet {
                 .line_height(relative(1.45))
                 .text_color(t.ink2)
                 .child(ULTRA_NOTE)
-                .child(div().flex().items_center().gap(px(6.)).text_color(t.cold).child(ui::icon("lock", 13., t.cold)).child("The model is locked to Opus."))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_color(t.cold)
+                        .child(ui::icon("lock", 13., t.cold))
+                        .child("The model is locked to Opus."),
+                )
                 .when_some(warn, |d, w| d.child(div().text_color(t.cold).child(w)))
         });
 
@@ -1642,7 +1894,8 @@ impl Render for NewSheet {
         }
         let bad_name = matches!(self.new_name(cx), Some(Err(())));
         let place = if self.folder.is_empty() { self.root_text() } else { self.folder.clone() };
-        let ph = if auto { "Folder (optional), like switchboard".to_string() } else { format!("New folder in {place}") };
+        let ph =
+            if auto { "Folder (optional), like switchboard".to_string() } else { format!("New folder in {place}") };
         if self.newf_ph != ph {
             self.newf_ph = ph.clone();
             self.newf.update(cx, |n, cx| n.set_placeholder(ph, window, cx));
@@ -1660,11 +1913,10 @@ impl Render for NewSheet {
             .flex()
             .flex_col()
             .gap(px(14.))
-            .child(Self::field(&t, "Machine", machines).when(auto, |d| d.child(self.preview_line(&t))))
-            .child(
-                Self::field(&t, "Mode", modes)
-                    .when(!locked, |d| d.child(div().text_size(px(12.)).line_height(relative(1.35)).text_color(t.faint).child(mode_hint))),
-            )
+            .child(Self::field(&t, "Machine", machines).when(auto, |d| d.child(self.preview_line(&t, cx))))
+            .child(Self::field(&t, "Mode", modes).when(!locked, |d| {
+                d.child(div().text_size(px(12.)).line_height(relative(1.35)).text_color(t.faint).child(mode_hint))
+            }))
             .children(ultra)
             .child(Self::field(&t, "Model", models))
             .child(self.message_box(&t, msg_focused, cx));
@@ -1704,12 +1956,12 @@ impl Render for NewSheet {
                             .text_color(t.ink)
                             .child(ui::icon("plus", 13., t.accent))
                             .child(ui::line("Folders Claude may also use").flex_1())
-                            .child(
-                                Self::link(&t, "nw-dirs-done", "Done").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            .child(Self::link(&t, "nw-dirs-done", "Done").on_click(cx.listener(
+                                |this, _: &ClickEvent, _, cx| {
                                     this.adding = false;
                                     cx.notify();
-                                })),
-                            )
+                                },
+                            )))
                     } else {
                         div()
                             .flex_none()
@@ -1726,7 +1978,11 @@ impl Render for NewSheet {
                             .child(if auto { ui::icon("auto", 14., t.accent) } else { ui::icon("folder", 14., t.dim) })
                             .child(ui::wrap(path).flex_1())
                     })
-                    .child(if auto { self.auto_note(&t).into_any_element() } else { self.picker(&t, cx).into_any_element() }),
+                    .child(if auto {
+                        self.auto_note(&t).into_any_element()
+                    } else {
+                        self.picker(&t, cx).into_any_element()
+                    }),
             )
             .child(
                 div()
@@ -1738,15 +1994,34 @@ impl Render for NewSheet {
                     .gap(px(8.))
                     .rounded(px(ui::R_CTRL))
                     .border_1()
-                    .border_color(if bad_name { t.bad } else if newf_focused { t.accent } else { t.line })
+                    .border_color(if bad_name {
+                        t.bad
+                    } else if newf_focused {
+                        t.accent
+                    } else {
+                        t.line
+                    })
                     .bg(well)
                     .text_size(px(12.5))
                     .text_color(t.ink)
                     .child(ui::icon(if auto { "folder" } else { "plus" }, 13., t.faint))
-                    .child(div().flex_1().min_w_0().h_full().flex().items_center().child(gpui_base::Input::new(&self.newf))),
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .items_center()
+                            .child(gpui_base::Input::new(&self.newf)),
+                    ),
             )
             .when(bad_name, |d| {
-                d.child(div().text_size(px(11.5)).text_color(t.bad).child("Use letters, numbers, spaces, dots, dashes or underscores."))
+                d.child(
+                    div()
+                        .text_size(px(11.5))
+                        .text_color(t.bad)
+                        .child("Use letters, numbers, spaces, dots, dashes or underscores."),
+                )
             });
         let right = div().relative().w(px(300.)).flex_none().min_h(px(300.)).child(right);
 
@@ -1805,11 +2080,25 @@ impl Render for NewSheet {
                             .flex()
                             .flex_col()
                             .gap(px(4.))
-                            .child(div().text_size(px(15.)).font_weight(FontWeight::BOLD).text_color(t.ink).child("New session"))
-                            .child(div().text_size(px(12.)).text_color(t.faint).child("Runs in the background on that machine, with a link to open it anywhere.")),
+                            .child(
+                                div()
+                                    .text_size(px(15.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(t.ink)
+                                    .child("New session"),
+                            )
+                            .child(
+                                div()
+                                    .text_size(px(12.))
+                                    .text_color(t.faint)
+                                    .child("Runs in the background on that machine, with a link to open it anywhere."),
+                            ),
                     )
                     .child(self.setups(&t, preset_focused, cx))
-                    .child(ui::icon_btn(&t, "nw-close", "x", 26.).on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SheetEvent::Close)))),
+                    .child(
+                        ui::icon_btn(&t, "nw-close", "x", 26.)
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SheetEvent::Close))),
+                    ),
             )
             .child(
                 div()
@@ -1825,7 +2114,9 @@ impl Render for NewSheet {
                             .min_h_0()
                             .overflow_y_scroll()
                             .track_scroll(&self.body_scroll)
-                            .child(div().flex().gap(px(22.)).pt(px(10.)).px(px(22.)).pb(px(14.)).child(left).child(right))
+                            .child(
+                                div().flex().gap(px(22.)).pt(px(10.)).px(px(22.)).pb(px(14.)).child(left).child(right),
+                            )
                             .child(self.options(&t, other_focused, cx)),
                     )
                     .child(div().absolute().inset_0().child(gpui_base::Scrollbar::vertical(&self.body_scroll))),
@@ -1854,7 +2145,12 @@ impl Render for NewSheet {
                                     .items_center()
                                     .gap(px(6.))
                                     .min_w_0()
-                                    .child(ui::wrap(topic).text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(t.ink))
+                                    .child(
+                                        ui::wrap(topic)
+                                            .text_size(px(13.))
+                                            .font_weight(FontWeight::BOLD)
+                                            .text_color(t.ink),
+                                    )
                                     .when_some(tag, |d, tg| d.child(ui::tag(&t, &tg))),
                             )
                             .child(match &self.error {
@@ -1864,15 +2160,32 @@ impl Render for NewSheet {
                                     .gap(px(6.))
                                     .min_w_0()
                                     .child(ui::icon("x", 13., t.bad))
-                                    .child(ui::wrap(format!("Did not start. {e}")).text_size(px(12.)).text_color(t.bad)),
-                                None => ui::wrap(where_text).text_size(px(12.)).text_color(if bad_name { t.bad } else { t.dim }),
+                                    .child(
+                                        ui::wrap(format!("Did not start. {e}")).text_size(px(12.)).text_color(t.bad),
+                                    ),
+                                None => ui::wrap(where_text).text_size(px(12.)).text_color(if bad_name {
+                                    t.bad
+                                } else {
+                                    t.dim
+                                }),
                             }),
                     )
                     .child(self.term_toggle(&t, cx))
-                    .child(ui::line_btn(&t, "nw-cancel", 32.).px(px(12.)).text_size(px(13.)).child("Cancel").on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SheetEvent::Close))))
+                    .child(
+                        ui::line_btn(&t, "nw-cancel", 32.)
+                            .px(px(12.))
+                            .text_size(px(13.))
+                            .child("Cancel")
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SheetEvent::Close))),
+                    )
                     .child(start),
             )
     }
+}
+
+/// What Auto says when its pick came from its rules, because Let Claude pick for Auto is off.
+pub fn rules_note() -> &'static str {
+    "Picked by rules. Turn on Let Claude pick for Auto in Settings to have Claude choose."
 }
 
 #[cfg(test)]
@@ -1883,7 +2196,12 @@ mod tests {
     fn a_draft_comes_back_until_it_starts_or_a_week_passes() {
         let dir = std::env::temp_dir().join(format!("sb-draft-{}", std::process::id()));
         let p = dir.join("new-draft.json");
-        let d = Draft { msg: "Fix the build 🚀 日本語".into(), machine: "studio".into(), saved: 1000., ..Default::default() };
+        let d = Draft {
+            msg: "Fix the build 🚀 日本語".into(),
+            machine: "studio".into(),
+            saved: 1000.,
+            ..Default::default()
+        };
         d.save(&p);
         assert_eq!(Draft::load(&p, 1000. + 3600.).as_ref(), Some(&d));
         assert_eq!(Draft::load(&p, 1000. + DRAFT_KEEP_S + 1.), None);

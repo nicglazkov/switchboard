@@ -21,7 +21,8 @@ fn main() {
     };
     let check = args.iter().any(|a| a == "--check");
     let screens = args.iter().any(|a| a == "--screens");
-    let until: Option<u64> = args.iter().position(|a| a == "--until").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok());
+    let until: Option<u64> =
+        args.iter().position(|a| a == "--until").and_then(|i| args.get(i + 1)).and_then(|v| v.parse().ok());
     let data = std::fs::read(path).unwrap_or_else(|e| {
         eprintln!("{path}: {e}");
         std::process::exit(2);
@@ -62,15 +63,29 @@ struct Replay {
 }
 
 fn initial_size(frames: &[rec::Frame]) -> (u16, u16) {
-    let note = frames.iter().find(|f| f.kind == Kind::Note).map(|f| String::from_utf8_lossy(&f.bytes).to_string()).unwrap_or_default();
-    let get = |k: &str, d: u16| note.split(['&', ' ']).find_map(|p| p.strip_prefix(k)).and_then(|v| v.parse().ok()).unwrap_or(d);
+    let note = frames
+        .iter()
+        .find(|f| f.kind == Kind::Note)
+        .map(|f| String::from_utf8_lossy(&f.bytes).to_string())
+        .unwrap_or_default();
+    let get = |k: &str, d: u16| {
+        note.split(['&', ' ']).find_map(|p| p.strip_prefix(k)).and_then(|v| v.parse().ok()).unwrap_or(d)
+    };
     (get("cols=", 120), get("rows=", 36))
 }
 
 fn replay(frames: &[rec::Frame], until: Option<u64>, screens: bool) -> Replay {
     let (c, r) = initial_size(frames);
     let mut term: Screen<VoidListener> = Screen::new(c, r, 5000, VoidListener);
-    let mut out = Replay { screen: vec![], out_bytes: 0, in_bytes: 0, sizes: vec![(c, r)], snapshots: 0, checked: 0, mismatches: vec![] };
+    let mut out = Replay {
+        screen: vec![],
+        out_bytes: 0,
+        in_bytes: 0,
+        sizes: vec![(c, r)],
+        snapshots: 0,
+        checked: 0,
+        mismatches: vec![],
+    };
     let mut snap: Option<Vec<u8>> = None;
     let mut had_output = false;
     for f in frames {
@@ -117,9 +132,13 @@ fn replay(frames: &[rec::Frame], until: Option<u64>, screens: bool) -> Replay {
                             let (ws, gs) = (screen::state(&term.term), screen::state(&alone.term));
                             if want != got || ws != gs {
                                 let line = want.iter().zip(&got).position(|(a, b)| a != b);
-                                let mut m = format!("snapshot at {} ms ({c}x{r}) differs from the replayed screen", f.ms);
+                                let mut m =
+                                    format!("snapshot at {} ms ({c}x{r}) differs from the replayed screen", f.ms);
                                 if let Some(l) = line {
-                                    m.push_str(&format!("\n  line {l}\n  replay:   {}\n  snapshot: {}", want[l], got[l]));
+                                    m.push_str(&format!(
+                                        "\n  line {l}\n  replay:   {}\n  snapshot: {}",
+                                        want[l], got[l]
+                                    ));
                                 }
                                 if ws != gs {
                                     m.push_str(&format!("\n  replay:   {ws}\n  snapshot: {gs}"));

@@ -3,7 +3,7 @@ card's validation and limits, the cache by transcript mtime, and `list` never wa
 import json, os, sys, time, unittest
 from pathlib import Path
 from tempfile import mkdtemp
-from tests.helpers import entry, user, assistant, write_transcript
+from tests.helpers import entry, user, assistant, write_transcript, sb_options
 from tests.test_rpc import RpcBase, NOW as RPC_NOW, SID_A
 from tests.test_week_history import NOW, MACH
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
@@ -129,6 +129,7 @@ class ValidateTest(RpcBase):
 class BuildAskTest(RpcBase):
     def setUp(self):
         super().setUp()
+        sb_options(self.sb, ai_ask_cards=True)  # these test the Haiku pass, which is opt-in
         rows = [user('2026-10-01T00:00:00Z', 'plan it'),
                 assistant('2026-10-01T00:00:05Z', 'Option 1 (I recommend it) or option 2?'),
                 entry('user', '2026-10-01T00:00:06Z', isMeta=True, message={'role': 'user', 'content': 'caveat'}),
@@ -220,6 +221,10 @@ class BuildAskTest(RpcBase):
 
 class ListAskTest(RpcBase):
     SHORT = 'bbbbbbbb'
+
+    def setUp(self):
+        super().setUp()
+        sb_options(self.sb, ai_ask_cards=True)
 
     def row(self, rows=None, **a):
         if rows is None:

@@ -17,10 +17,17 @@ log.workspace = true
 async-tungstenite.workspace = true
 smol.workspace = true
 futures-util.workspace = true
-# Checks a downloaded update against the download page's SHA-256 before it is installed.
+# Checks a downloaded update against the SHA-256 in the signed list before it is installed.
 sha2 = "=0.10.9"
+# The update list's Ed25519 signature (update.rs), and the base64 key and signature that come with it.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+base64 = "=0.22.1"
 # The terminal's screen as bytes (term/screen.rs): the hub and the desktop app share it.
 alacritty_terminal = { workspace = true, optional = true }
+
+[build-dependencies]
+# build.rs checks that SB_UPDATE_PUBKEY is a 32-byte base64 key.
+base64 = "=0.22.1"
 
 [features]
 grid = ["dep:alacritty_terminal"]

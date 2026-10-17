@@ -18,12 +18,12 @@ pub mod board;
 pub mod brand;
 pub mod cache;
 pub mod discover;
-pub mod live;
 pub mod flags;
 pub mod fmt;
 pub mod groups;
 pub mod jobs;
 pub mod links;
+pub mod live;
 pub mod model;
 pub mod names;
 pub mod net;
@@ -38,7 +38,10 @@ use std::sync::Mutex;
 pub use actions::{Action, ActionId};
 pub use board::{Board, Column, Tally};
 pub use jobs::{Job, JobKind, JobState};
-pub use model::{Activity, Cache, Chip, Kind, Lamp, Machine, MachineLamp, Mem, Plan, Reaped, Replaced, Session, Snapshot, TextRun, Tone};
+pub use model::{
+    Activity, Cache, Chip, Kind, Lamp, Machine, MachineLamp, Mem, Plan, Reaped, Replaced, Session, Snapshot, TextRun,
+    Tone,
+};
 pub use net::{BusyInfo, ContinueRequest, CoreError, NewRequest};
 pub use term::{Need, TermError, TermRequest, TermTicket};
 
@@ -78,9 +81,13 @@ impl CleanStopped {
             .iter()
             .filter_map(|e| Some((e.get("key")?.as_str()?.to_string(), e.get("job")?.as_str()?.to_string())))
             .collect();
-        let mut not_stopped: Vec<(String, String)> = list("skipped").iter().filter_map(|k| Some((k.as_str()?.to_string(), String::new()))).collect();
+        let mut not_stopped: Vec<(String, String)> =
+            list("skipped").iter().filter_map(|k| Some((k.as_str()?.to_string(), String::new()))).collect();
         not_stopped.extend(list("failed").iter().filter_map(|e| {
-            Some((e.get("key")?.as_str()?.to_string(), e.get("error").and_then(|x| x.as_str()).unwrap_or("").to_string()))
+            Some((
+                e.get("key")?.as_str()?.to_string(),
+                e.get("error").and_then(|x| x.as_str()).unwrap_or("").to_string(),
+            ))
         }));
         CleanStopped { queued, not_stopped }
     }
@@ -126,10 +133,10 @@ impl Core {
     pub fn refresh(&self) -> Result<Snapshot, CoreError> {
         let (raw, bytes, base) = self.client.sessions()?;
         let now = fmt::now_epoch();
-        if let Some(dir) = &self.dir {
-            if let Err(e) = cache::save_sessions(dir, &bytes, now, &base) {
-                log::warn!("could not save the snapshot: {e}");
-            }
+        if let Some(dir) = &self.dir
+            && let Err(e) = cache::save_sessions(dir, &bytes, now, &base)
+        {
+            log::warn!("could not save the snapshot: {e}");
         }
         Ok(model::normalize(&raw, now))
     }
@@ -168,11 +175,8 @@ impl Core {
     pub fn folder_level(&self, machine: &str, parent: &str) -> Result<FolderLevel, CoreError> {
         let r = self.client.folders(machine, Some(parent))?;
         self.remember(machine, Some(parent), &r);
-        let folders = if r.parent.is_some() {
-            r.folders.clone()
-        } else {
-            self.cached_level(machine, parent).unwrap_or_default()
-        };
+        let folders =
+            if r.parent.is_some() { r.folders.clone() } else { self.cached_level(machine, parent).unwrap_or_default() };
         Ok(FolderLevel { root: r.root.clone(), folders })
     }
 
@@ -198,7 +202,14 @@ impl Core {
     }
 
     /// The same, after the user answered a need "busy": `when` "idle" (queued until the chat's work ends) or "now".
-    pub fn act_when(&self, machine: &str, verb: &str, sid: &str, close: Option<bool>, when: Option<&str>) -> Result<Option<String>, CoreError> {
+    pub fn act_when(
+        &self,
+        machine: &str,
+        verb: &str,
+        sid: &str,
+        close: Option<bool>,
+        when: Option<&str>,
+    ) -> Result<Option<String>, CoreError> {
         Ok(self.client.action(machine, verb, sid, close, when)?.job)
     }
 
@@ -240,7 +251,14 @@ impl Core {
     }
 
     /// v2: where Auto would run a task. `rules`: the instant preview (no Claude call).
-    pub fn route(&self, prompt: &str, folder: &str, rules: bool, chrome: bool, chrome_machine: Option<&str>) -> Result<api::ApiRoute, CoreError> {
+    pub fn route(
+        &self,
+        prompt: &str,
+        folder: &str,
+        rules: bool,
+        chrome: bool,
+        chrome_machine: Option<&str>,
+    ) -> Result<api::ApiRoute, CoreError> {
         self.client.route(prompt, folder, rules, chrome, chrome_machine)
     }
 
@@ -281,13 +299,25 @@ impl Core {
     }
 
     /// v2: sends a file to `machine` (where the chat runs); answers with the path there.
-    pub fn upload(&self, machine: &str, name: &str, data: &[u8], sent: &std::sync::atomic::AtomicU64) -> Result<api::ApiUpload, CoreError> {
+    pub fn upload(
+        &self,
+        machine: &str,
+        name: &str,
+        data: &[u8],
+        sent: &std::sync::atomic::AtomicU64,
+    ) -> Result<api::ApiUpload, CoreError> {
         self.client.upload(machine, name, data, sent)
     }
 
-    /// v2: a newer build of this app on the download page, if there is one.
-    pub fn update_offer(&self) -> Result<Option<update::Offer>, CoreError> {
-        Ok(update::offer(&self.client.app_latest()?, update::platform(), update::this_build()))
+    /// v2: a newer build of this app on the download page, if there is one. Always None in a build with updates off
+    /// (update::off_reason). The list comes from the build's feed URL when it has one, else from the server.
+    pub fn update_offer(&self, bad_build: Option<&str>) -> Result<Option<update::Offer>, CoreError> {
+        let (Some(key), Some(mine)) = (update::key(), update::this_build()) else { return Ok(None) };
+        let app = match update::feed_url() {
+            Some(feed) => update::fetch_feed(feed, &format!("SwitchboardDesktop/{}", version()))?,
+            None => self.client.app_latest()?,
+        };
+        update::offer(&app, &key, update::platform(), mine, bad_build)
     }
 
     /// v2, Settings: the machines as configured.
@@ -321,12 +351,23 @@ impl Core {
     }
 
     /// v2: the changes from what it runs with to `want`, and how each applies.
-    pub fn flags_plan(&self, machine: &str, sid: &str, want: &serde_json::Value) -> Result<api::ApiFlagsPlan, CoreError> {
+    pub fn flags_plan(
+        &self,
+        machine: &str,
+        sid: &str,
+        want: &serde_json::Value,
+    ) -> Result<api::ApiFlagsPlan, CoreError> {
         self.client.flags_plan(machine, sid, want)
     }
 
     /// v2: restarts the chat with these flags (`body` from the plan); `when` after a need "busy" ("idle" or "now").
-    pub fn relaunch(&self, machine: &str, sid: &str, body: &serde_json::Value, when: Option<&str>) -> Result<api::ApiRelaunch, CoreError> {
+    pub fn relaunch(
+        &self,
+        machine: &str,
+        sid: &str,
+        body: &serde_json::Value,
+        when: Option<&str>,
+    ) -> Result<api::ApiRelaunch, CoreError> {
         let mut b = serde_json::json!({"machine": machine, "sid": sid});
         if let Some(o) = body.as_object() {
             for k in ["model", "effort", "flags"] {
@@ -363,7 +404,14 @@ impl Core {
 
     /// Library: packs a skill or MCP server (`kind` "skill" or "mcp") on `machine` and stores it as a tool's next
     /// version. `tool` None: named after the source.
-    pub fn library_import(&self, machine: &str, kind: &str, source: &str, tool: Option<&str>, description: Option<&str>) -> Result<api::ApiToolStored, CoreError> {
+    pub fn library_import(
+        &self,
+        machine: &str,
+        kind: &str,
+        source: &str,
+        tool: Option<&str>,
+        description: Option<&str>,
+    ) -> Result<api::ApiToolStored, CoreError> {
         let mut b = serde_json::json!({"machine": machine, "kind": kind, "source": source});
         if let Some(t) = tool.filter(|t| !t.is_empty()) {
             b["tool"] = serde_json::json!(t);
@@ -415,6 +463,11 @@ impl Core {
 
     pub fn set_prefs(&self, body: &serde_json::Value) -> Result<(), CoreError> {
         self.client.set_prefs(body)
+    }
+
+    /// Turns one opt-in switch (server/options.py) on or off: POST /api/prefs {"<key>": true|false}.
+    pub fn set_option(&self, key: &str, on: bool) -> Result<(), CoreError> {
+        self.client.set_prefs(&api::option_body(key, on))
     }
 
     pub fn browse(&self, query: &str) -> Result<api::ApiBrowse, CoreError> {

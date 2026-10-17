@@ -40,7 +40,9 @@ pub fn week_days(u: &ApiUsage, week_reset: Option<f64>, now: f64, offset_secs: i
     let rows: Vec<(NaiveDate, Option<f64>)> = u
         .days
         .iter()
-        .filter_map(|d| NaiveDate::parse_from_str(d.day.trim(), "%Y-%m-%d").ok().map(|day| (day, d.used.map(|x| x.max(0.0)))))
+        .filter_map(|d| {
+            NaiveDate::parse_from_str(d.day.trim(), "%Y-%m-%d").ok().map(|day| (day, d.used.map(|x| x.max(0.0))))
+        })
         .collect();
     let reset = week_reset.or(u.week.as_ref().and_then(|w| w.reset)).filter(|r| *r > 0.0);
     let mut start = match reset.and_then(|r| local_date(r - 7.0 * 86400.0, &tz)) {
@@ -118,7 +120,11 @@ mod tests {
         ApiUsage {
             ok: true,
             days: days.iter().map(|(d, u)| ApiUsageDay { day: d.to_string(), used: *u }).collect(),
-            weeks: weeks.iter().enumerate().map(|(i, p)| ApiUsageWeek { reset: Some(1000.0 - i as f64), pct: *p }).collect(),
+            weeks: weeks
+                .iter()
+                .enumerate()
+                .map(|(i, p)| ApiUsageWeek { reset: Some(1000.0 - i as f64), pct: *p })
+                .collect(),
             ..Default::default()
         }
     }
@@ -188,7 +194,10 @@ mod tests {
         assert_eq!(u.five, Some(ApiUsageWindow { pct: Some(12.0), reset: Some(0.0), pace: None }));
         assert_eq!(u.days[0].used, Some(4.5));
         assert_eq!(u.weeks[0].pct, Some(78.0));
-        let odd: ApiUsage = serde_json::from_str(r#"{"week": {"pct": "x"}, "days": [{"day": "2026-10-13", "used": null}, 5], "weeks": null}"#).unwrap();
+        let odd: ApiUsage = serde_json::from_str(
+            r#"{"week": {"pct": "x"}, "days": [{"day": "2026-10-13", "used": null}, 5], "weeks": null}"#,
+        )
+        .unwrap();
         assert_eq!(odd.week.unwrap().pct, None);
         assert_eq!(odd.days.len(), 1);
         assert!(odd.weeks.is_empty());

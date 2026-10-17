@@ -67,8 +67,16 @@ impl Hub {
     pub fn new(cfg: Config) -> std::io::Result<Arc<Hub>> {
         let key = ticket::load_or_create_key(&cfg.key_path)?;
         let nodes = Nodes::load(&cfg.nodes_path);
-        Ok(Arc::new(Hub { cfg, nodes, links: Links::default(), key, nonces: Nonces::default(), open: Mutex::new(HashMap::new()), next: AtomicU64::new(1),
-                         sessions: tokio::sync::Mutex::new(HashMap::new()) }))
+        Ok(Arc::new(Hub {
+            cfg,
+            nodes,
+            links: Links::default(),
+            key,
+            nonces: Nonces::default(),
+            open: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(1),
+            sessions: tokio::sync::Mutex::new(HashMap::new()),
+        }))
     }
 
     pub fn open_terms(&self) -> Vec<OpenTerm> {
@@ -88,13 +96,32 @@ impl Hub {
     }
 
     fn origins(&self, file: &[String]) -> Vec<String> {
-        origin::DEFAULT_ORIGINS.iter().map(|s| s.to_string()).chain(file.iter().cloned()).chain(self.cfg.origins.iter().cloned()).collect()
+        origin::DEFAULT_ORIGINS
+            .iter()
+            .map(|s| s.to_string())
+            .chain(file.iter().cloned())
+            .chain(self.cfg.origins.iter().cloned())
+            .collect()
     }
 
     fn ssh_argv(&self, m: &Machine, bg: &str) -> Vec<String> {
-        let mut a: Vec<String> = vec![self.cfg.ssh.clone(), "-tt".into(), "-e".into(), "none".into(), "-i".into(), self.cfg.ssh_key.display().to_string()];
+        let mut a: Vec<String> = vec![
+            self.cfg.ssh.clone(),
+            "-tt".into(),
+            "-e".into(),
+            "none".into(),
+            "-i".into(),
+            self.cfg.ssh_key.display().to_string(),
+        ];
         // -e none: a `~.` typed or pasted at the start of a line goes to Claude Code, not to ssh as a disconnect
-        for o in ["BatchMode=yes", "IdentitiesOnly=yes", "ConnectTimeout=10", "ServerAliveInterval=15", "ServerAliveCountMax=4", "LogLevel=ERROR"] {
+        for o in [
+            "BatchMode=yes",
+            "IdentitiesOnly=yes",
+            "ConnectTimeout=10",
+            "ServerAliveInterval=15",
+            "ServerAliveCountMax=4",
+            "LogLevel=ERROR",
+        ] {
             a.push("-o".into());
             a.push(o.into());
         }
@@ -132,7 +159,8 @@ fn internal_ok(h: &HeaderMap, method: &axum::http::Method) -> bool {
         Some(rest) => rest.split(']').next().unwrap_or(""),
         None => host.rsplit_once(':').map_or(host, |(n, _)| n),
     };
-    let json = h.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/json"));
+    let json =
+        h.get(header::CONTENT_TYPE).and_then(|v| v.to_str().ok()).is_some_and(|c| c.starts_with("application/json"));
     matches!(name, "127.0.0.1" | "localhost" | "::1") && (method != axum::http::Method::POST || json)
 }
 
@@ -168,7 +196,12 @@ pub struct TermQuery {
     history: Option<String>,
 }
 
-async fn term(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>, headers: HeaderMap, Query(q): Query<TermQuery>) -> Response {
+async fn term(
+    ws: WebSocketUpgrade,
+    State(hub): State<Arc<Hub>>,
+    headers: HeaderMap,
+    Query(q): Query<TermQuery>,
+) -> Response {
     // a header that is not text counts as an origin, and matches nothing
     let origin = headers.get(header::ORIGIN).map(|v| v.to_str().unwrap_or("").to_string());
     ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| session(hub, socket, origin, q))
@@ -237,18 +270,35 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
     };
     let paired = hub.nodes.get(&claims.m);
     let route = match (hub.links.get(&claims.m), &paired, &file) {
-        (Some(link), _, _) => Route::Node(link, paired.as_ref().map(|n| n.label().to_string()).unwrap_or_else(|| claims.m.clone())),
+        (Some(link), _, _) => {
+            Route::Node(link, paired.as_ref().map(|n| n.label().to_string()).unwrap_or_else(|| claims.m.clone()))
+        }
         (None, Some(n), _) => {
-            let msg = format!("{} is not linked to the hub right now. Check that switchboard-node is running there.", n.label());
+            let msg = format!(
+                "{} is not linked to the hub right now. Check that switchboard-node is running there.",
+                n.label()
+            );
             return refuse(&mut ws, proto::CLOSE_INTERNAL, &msg).await;
         }
         (None, None, Err(e)) => {
             log(format!("term failed: machine list: {e}"));
-            return refuse(&mut ws, proto::CLOSE_INTERNAL, "The hub has no machine list yet. Restart the Switchboard server.").await;
+            return refuse(
+                &mut ws,
+                proto::CLOSE_INTERNAL,
+                "The hub has no machine list yet. Restart the Switchboard server.",
+            )
+            .await;
         }
         (None, None, Ok(f)) => match f.machines.iter().find(|m| m.name == claims.m) {
             Some(m) => Route::Ssh(m.clone()),
-            None => return refuse(&mut ws, proto::CLOSE_INTERNAL, &format!("The hub does not know the machine {}.", claims.m)).await,
+            None => {
+                return refuse(
+                    &mut ws,
+                    proto::CLOSE_INTERNAL,
+                    &format!("The hub does not know the machine {}.", claims.m),
+                )
+                .await;
+            }
         },
     };
     let Some(slot) = hub.admit(&claims) else {
@@ -257,7 +307,8 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         return refuse(&mut ws, proto::CLOSE_LIMIT, &msg).await;
     };
     let (cols, rows) = size_from(&q);
-    let hello = Hello { cols, rows, modern: q.proto.as_deref() == Some("2"), history: q.history.as_deref() != Some("0") };
+    let hello =
+        Hello { cols, rows, modern: q.proto.as_deref() == Some("2"), history: q.history.as_deref() != Some("0") };
     if !send_text(&mut ws, proto::status("connecting")).await {
         return;
     }
@@ -304,7 +355,11 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
     drop(slot); // and the reaper may stop the session again
     let note = match &end {
         End::Exited(code) => Some((*code, proto::exit_note(*code, &shared.label), format!("exit {code:?}"))),
-        End::Idle => Some((None, format!("Closed after {} with nothing typed or shown. The session keeps running.", hours(hub.cfg.idle)), "idle".into())),
+        End::Idle => Some((
+            None,
+            format!("Closed after {} with nothing typed or shown. The session keeps running.", hours(hub.cfg.idle)),
+            "idle".into(),
+        )),
         End::ClientLeft => None,
     };
     let why = match note {
@@ -364,7 +419,13 @@ async fn pump(hub: Arc<Hub>, shared: Arc<Shared>, mut io: pty::TermIo) {
     shared.ended(code);
 }
 
-async fn spawn_ssh(hub: &Hub, machine: &Machine, bg: &str, cols: u16, rows: u16) -> std::io::Result<(Term, pty::TermIo)> {
+async fn spawn_ssh(
+    hub: &Hub,
+    machine: &Machine,
+    bg: &str,
+    cols: u16,
+    rows: u16,
+) -> std::io::Result<(Term, pty::TermIo)> {
     let argv = hub.ssh_argv(machine, bg);
     let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
     let env = [

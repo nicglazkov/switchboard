@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-node"]
+members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-install", "crates/sb-node"]
 
 [workspace.package]
 version = "0.8.4"
@@ -38,13 +38,21 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["sin
 opt-level = 3
 lto = "fat"         # slower builds, a smaller and faster app; builds are rare
 codegen-units = 1
+# Symbols live outside the shipped app, so a crash backtrace can still be read (docs/building.md). Line tables are
+# enough for function, file and line. macOS: rustc writes Switchboard.dSYM, then strips the binary. Windows: the
+# build script sets CARGO_PROFILE_RELEASE_STRIP=none, since any strip on MSVC also drops the .pdb (the exe never
+# holds debug info there). Linux: the build script sets SPLIT_DEBUGINFO=off and STRIP=none and splits the binary
+# with objcopy --only-keep-debug.
+debug = "line-tables-only"
+split-debuginfo = "packed"
 strip = true
-debug = false
 
 # Verification builds (scripts/mac-shots.sh and friends): release speed without the long full-LTO link.
 [profile.shots]
 inherits = "release"
 lto = false
+debug = false
+split-debuginfo = "off"
 codegen-units = 256
 incremental = true
 

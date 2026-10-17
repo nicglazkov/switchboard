@@ -70,7 +70,8 @@ pub async fn run(cfg: NodeConfig) -> i32 {
 async fn shutdown() {
     #[cfg(unix)]
     {
-        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
+        let mut term =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("signal handler");
         tokio::select! {
             _ = term.recv() => {}
             _ = tokio::signal::ctrl_c() => {}
@@ -85,7 +86,8 @@ async fn shutdown() {
 /// One link, from connect to close. Ok(why) means try again; Err(Ok) means stop; Err(Err) is a failed connect.
 async fn link_once(cfg: &NodeConfig) -> Result<String, Result<Stop, String>> {
     let mut req = format!("ws://{}/node", cfg.hub).into_client_request().map_err(|e| Err(e.to_string()))?;
-    let auth = format!("Bearer {}", cfg.token).parse().map_err(|_| Err("the saved token is not valid text".to_string()))?;
+    let auth =
+        format!("Bearer {}", cfg.token).parse().map_err(|_| Err("the saved token is not valid text".to_string()))?;
     req.headers_mut().insert("Authorization", auth);
     let ws = match tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(req)).await {
         Err(_) => return Err(Err("timed out".into())),
@@ -101,7 +103,11 @@ async fn link_once(cfg: &NodeConfig) -> Result<String, Result<Stop, String>> {
     let (tx, mut rx) = mpsc::channel::<Message>(LINK_BACKLOG); // bounded: output waits for the hub, never piles up
     let (done_tx, mut done_rx) = mpsc::unbounded_channel::<u32>();
     let label = crate::hostname_label();
-    let _ = tx.send(Message::Text(link_proto::encode(&FromNode::Hello { version: VERSION.into(), os: crate::os_name().into(), label }).into())).await;
+    let _ = tx
+        .send(Message::Text(
+            link_proto::encode(&FromNode::Hello { version: VERSION.into(), os: crate::os_name().into(), label }).into(),
+        ))
+        .await;
     let writer = tokio::spawn(async move {
         while let Some(m) = rx.recv().await {
             if sink.send(m).await.is_err() {
@@ -181,7 +187,10 @@ async fn link_once(cfg: &NodeConfig) -> Result<String, Result<Stop, String>> {
     if open > 0 {
         log(format!("{open} terminal(s) detached"));
     }
-    let _ = tx.try_send(Message::Close(Some(tungstenite::protocol::CloseFrame { code: CloseCode::Normal, reason: "".into() })));
+    let _ = tx.try_send(Message::Close(Some(tungstenite::protocol::CloseFrame {
+        code: CloseCode::Normal,
+        reason: "".into(),
+    })));
     drop(tx);
     let _ = tokio::time::timeout(Duration::from_secs(2), writer).await;
     end
@@ -212,7 +221,11 @@ async fn rpc(cfg: &NodeConfig, req: &Value, timeout: u64) -> Value {
         None => {
             let err = String::from_utf8_lossy(&out.stderr);
             let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
-            let why = if last.is_empty() { format!("sb.py exited {} with no answer", out.status.code().unwrap_or(-1)) } else { last };
+            let why = if last.is_empty() {
+                format!("sb.py exited {} with no answer", out.status.code().unwrap_or(-1))
+            } else {
+                last
+            };
             json!({"ok": false, "error": why})
         }
     }
@@ -246,7 +259,15 @@ async fn open_term(
     let home = crate::home();
     let (c, r) = sb_hub::proto::clamp_size(cols.into(), rows.into());
     let spawned = tokio::task::spawn_blocking(move || {
-        pty::spawn(pty::Spawn { argv: &argv, env: &env, env_remove: &[], cwd: Some(&home), cols: c, rows: r, rate: RATE })
+        pty::spawn(pty::Spawn {
+            argv: &argv,
+            env: &env,
+            env_remove: &[],
+            cwd: Some(&home),
+            cols: c,
+            rows: r,
+            rate: RATE,
+        })
     })
     .await;
     let (term, mut io) = match spawned {
@@ -268,7 +289,8 @@ async fn open_term(
                 break;
             }
         }
-        let code = tokio::time::timeout(Duration::from_secs(3), &mut io.exited).await.ok().and_then(|r| r.ok()).flatten();
+        let code =
+            tokio::time::timeout(Duration::from_secs(3), &mut io.exited).await.ok().and_then(|r| r.ok()).flatten();
         let _ = tx.send(Message::Text(link_proto::encode(&FromNode::TermExit { ch, code }).into())).await;
         let _ = done.send(ch);
         log(format!("terminal {ch} closed ({code:?})"));

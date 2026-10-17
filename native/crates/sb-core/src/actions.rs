@@ -81,7 +81,17 @@ pub struct Action {
 }
 
 fn a(id: ActionId, title: &str, note: &str, icon: &str) -> Action {
-    Action { id, title: title.into(), note: note.into(), primary: false, danger: false, disabled: false, icon: icon.into(), key: None, href: None }
+    Action {
+        id,
+        title: title.into(),
+        note: note.into(),
+        primary: false,
+        danger: false,
+        disabled: false,
+        icon: icon.into(),
+        key: None,
+        href: None,
+    }
 }
 
 pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
@@ -107,7 +117,12 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
         x.href = Some(url.clone());
         items.push(x);
     } else if let (Lamp::Wait, true, Some(id)) = (l, bg, &s.bg_id) {
-        items.push(a(ActionId::Attach, "Copy the attach command", &format!("claude attach {id}, then run it on {label} to answer"), "copy"));
+        items.push(a(
+            ActionId::Attach,
+            "Copy the attach command",
+            &format!("claude attach {id}, then run it on {label} to answer"),
+            "copy",
+        ));
     }
     if alive && !bg {
         let mut x = a(
@@ -131,7 +146,11 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
     });
     let fresh_note = format!(
         "{}{}",
-        if s.held { "New chat with your notes and the held message" } else { "New chat that starts from a summary of this one" },
+        if s.held {
+            "New chat with your notes and the held message"
+        } else {
+            "New chat that starts from a summary of this one"
+        },
         fresh_cost.unwrap_or_default()
     );
     let mut fresh = a(ActionId::Fresh, "Start fresh", &fresh_note, "fresh");
@@ -139,7 +158,12 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
     fresh.key = Some("F".into());
     items.push(fresh);
     if s.held {
-        items.push(a(ActionId::Pass, "Send anyway", &format!("Re-reads {} once, then the guard leaves it alone", s.ctx_label()), "send"));
+        items.push(a(
+            ActionId::Pass,
+            "Send anyway",
+            &format!("Re-reads {} once, then the guard leaves it alone", s.ctx_label()),
+            "send",
+        ));
     }
     let resume_note = if alive && !bg {
         format!("Already open in a terminal on {label}")
@@ -147,11 +171,15 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
         match s.cost.as_ref() {
             Some(c) if warm => format!("Re-opens the full chat, about {} while the cache is warm", kc(c.resume.warm)),
             Some(c) => format!("Re-opens the full chat, about {} because the cache is cold", kc(c.resume.cold)),
-            None => format!("Re-opens the full chat{}", if l == Lamp::Cold { format!(", re-reading {}", s.ctx_label()) } else { String::new() }),
+            None => format!(
+                "Re-opens the full chat{}",
+                if l == Lamp::Cold { format!(", re-reading {}", s.ctx_label()) } else { String::new() }
+            ),
         }
     };
     if !alive {
-        let mut x = a(ActionId::ResumeOpen, "Resume and open", "Resumes it in the background, then opens its terminal", "term");
+        let mut x =
+            a(ActionId::ResumeOpen, "Resume and open", "Resumes it in the background, then opens its terminal", "term");
         x.primary = !recommend_fresh;
         items.push(x);
     }
@@ -166,7 +194,11 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
     items.push(a(
         ActionId::Handoff,
         if bg && alive { "Hand off and stop" } else { "Write a handoff" },
-        if s.handoff { "A handoff exists; this writes a newer one if needed" } else { "Saves notes you can start from later" },
+        if s.handoff {
+            "A handoff exists; this writes a newer one if needed"
+        } else {
+            "Saves notes you can start from later"
+        },
         "handoff",
     ));
     if s.can_keep() {
@@ -199,21 +231,31 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
     let mut rename = a(
         ActionId::Rename,
         "Rename chat",
-        if can_rename { "Shows on every device, and in Claude Code's own list" } else { "Update Switchboard on that machine to rename its chats" },
+        if can_rename {
+            "Shows on every device, and in Claude Code's own list"
+        } else {
+            "Update Switchboard on that machine to rename its chats"
+        },
         "pencil",
     );
     rename.disabled = !can_rename;
     items.push(rename);
     items.push(a(ActionId::Link, "This continues...", "Pick the older chat it carries on from", "link"));
     if s.history > 0 {
-        let what = if s.history == 1 { "the earlier chat".to_string() } else { format!("the {} earlier chats", s.history) };
-        items.push(a(ActionId::Unlink, "Not the same topic", &format!("Splits it from {what} in its history"), "unlink"));
+        let what =
+            if s.history == 1 { "the earlier chat".to_string() } else { format!("the {} earlier chats", s.history) };
+        items.push(a(
+            ActionId::Unlink,
+            "Not the same topic",
+            &format!("Splits it from {what} in its history"),
+            "unlink",
+        ));
     }
-    if let Some(pi) = items.iter().position(|x| x.primary) {
-        if pi > 0 {
-            let p = items.remove(pi);
-            items.insert(0, p);
-        }
+    if let Some(pi) = items.iter().position(|x| x.primary)
+        && pi > 0
+    {
+        let p = items.remove(pi);
+        items.insert(0, p);
     }
     items
 }
@@ -227,7 +269,12 @@ pub fn for_replaced(r: &Replaced, snap: &Snapshot) -> Vec<Action> {
         out.push(x);
     }
     if let Some(url) = &r.url {
-        let mut x = a(ActionId::ArchiveInClaude, "Archive it in Claude", "Opens the old chat in Claude; archive it there so only the new one shows", "out");
+        let mut x = a(
+            ActionId::ArchiveInClaude,
+            "Archive it in Claude",
+            "Opens the old chat in Claude; archive it there so only the new one shows",
+            "out",
+        );
         x.href = Some(url.clone());
         out.push(x);
     }
@@ -282,7 +329,8 @@ pub const MODES: [(&str, &str, &str); 3] = [
     ("ultracode", "UltraCode", "Multi-agent workflows for big builds"),
 ];
 pub const MODELS: [(&str, &str); 4] = [("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
-pub const ULTRA_NOTE: &str = "Runs multi-agent workflows for big builds, on Opus at extra high effort. Uses the plan faster.";
+pub const ULTRA_NOTE: &str =
+    "Runs multi-agent workflows for big builds, on Opus at extra high effort. Uses the plan faster.";
 
 /// A new folder name the server accepts: letters, numbers, spaces, dots, dashes, underscores, 1 to 64.
 pub fn valid_folder_name(name: &str) -> bool {
@@ -297,10 +345,10 @@ pub fn ultra_warn(plan: &crate::model::Plan, now: f64) -> Option<String> {
         return None;
     }
     let mut w = format!("The 5-hour window is at {five}%. Workflows stop if it fills mid-run.");
-    if plan.five_live(now) {
-        if let Some(r) = plan.five_hour_reset {
-            w.push_str(&format!(" It resets at {}.", crate::fmt::when(r, now)));
-        }
+    if plan.five_live(now)
+        && let Some(r) = plan.five_hour_reset
+    {
+        w.push_str(&format!(" It resets at {}.", crate::fmt::when(r, now)));
     }
     Some(w)
 }
@@ -341,9 +389,17 @@ pub fn suggest(s: &Session, now: f64) -> Suggest {
     };
     let (pick, why) = match s.lamp(now) {
         Lamp::Run => (None, "It is working right now. Open the terminal to watch or steer it.".to_string()),
-        _ if s.held => (Some(Pick::Fresh), format!("It went cold at {kk}. Sending your held message would re-read all of it first.")),
-        _ if left > 0 => (Some(Pick::Resume), format!("It is still warm for {}, so resuming only pays for your new message.", crate::fmt::mins(left))),
-        _ if s.ctx >= NEAR_COMPACT => (Some(Pick::Fresh), format!("At {kk} it is close to the 300k point where Claude squeezes the chat down.")),
+        _ if s.held => (
+            Some(Pick::Fresh),
+            format!("It went cold at {kk}. Sending your held message would re-read all of it first."),
+        ),
+        _ if left > 0 => (
+            Some(Pick::Resume),
+            format!("It is still warm for {}, so resuming only pays for your new message.", crate::fmt::mins(left)),
+        ),
+        _ if s.ctx >= NEAR_COMPACT => {
+            (Some(Pick::Fresh), format!("At {kk} it is close to the 300k point where Claude squeezes the chat down."))
+        }
         _ if s.ctx == 0 => (Some(Pick::Resume), "It has no history to re-read yet.".to_string()),
         _ => {
             // Cold: the cheaper one up front by the cost model, else by size band.
@@ -358,8 +414,12 @@ pub fn suggest(s: &Session, now: f64) -> Suggest {
             let why = match (pick, band) {
                 (_, Band::Small) => format!("It is small ({kk}), so going back is cheap even with the cache cold."),
                 (Pick::Fresh, Band::Big) => format!("{went} and holds {kk}. Resuming re-reads all of it."),
-                (Pick::Fresh, Band::Medium) => format!("{went}. Resuming re-reads all {kk}; Start fresh is cheaper if you do not need the history."),
-                (Pick::Resume, _) => format!("{went}, but resuming its {kk} still costs less than writing a summary and starting over."),
+                (Pick::Fresh, Band::Medium) => format!(
+                    "{went}. Resuming re-reads all {kk}; Start fresh is cheaper if you do not need the history."
+                ),
+                (Pick::Resume, _) => {
+                    format!("{went}, but resuming its {kk} still costs less than writing a summary and starting over.")
+                }
             };
             (Some(pick), why)
         }

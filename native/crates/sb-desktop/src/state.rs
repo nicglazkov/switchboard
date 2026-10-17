@@ -10,7 +10,10 @@ use std::time::Duration;
 use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SystemNotification};
 use sb_core::actions::{self, ActionId};
 use sb_core::api::{ApiCleanItem, ApiJob, ApiPrefs, ApiThreadChat};
-use sb_core::{BusyInfo, ContinueRequest, Core, CoreConfig, CoreError, Job, JobKind, JobState, Lamp, NewRequest, Snapshot, cache, fmt, names};
+use sb_core::{
+    BusyInfo, ContinueRequest, Core, CoreConfig, CoreError, Job, JobKind, JobState, Lamp, NewRequest, Snapshot, cache,
+    fmt, names,
+};
 use serde::{Deserialize, Serialize};
 
 const REFRESH: Duration = Duration::from_secs(10);
@@ -85,6 +88,9 @@ pub struct Settings {
     /// Where the board window was and how big, so it reopens the same way.
     #[serde(default)]
     pub window: Option<SavedWindow>,
+    /// The docked details panel's width, as its drag handle left it (absent: the default for the window's width).
+    #[serde(default)]
+    pub inspector_w: Option<f32>,
     /// The board window's terminal tabs (chat keys, in order) and which one showed (0: the board), reopened on launch.
     #[serde(default)]
     pub tabs: Vec<String>,
@@ -172,8 +178,24 @@ const NOTICES_KEEP: usize = 80;
 
 /// Whether a toast's title says something was done (it gets a check).
 fn toast_ok(title: &str) -> bool {
-    const DONE: [&str; 16] =
-        ["Stopped", "Fixed", "Copied", "Saved", "Sent", "Kept", "Dismissed", "Renamed", "Moved", "Resumed", "Started", "Done", "Updated", "Added", "Removed", "Starred"];
+    const DONE: [&str; 16] = [
+        "Stopped",
+        "Fixed",
+        "Copied",
+        "Saved",
+        "Sent",
+        "Kept",
+        "Dismissed",
+        "Renamed",
+        "Moved",
+        "Resumed",
+        "Started",
+        "Done",
+        "Updated",
+        "Added",
+        "Removed",
+        "Starred",
+    ];
     DONE.iter().any(|w| title.starts_with(w))
 }
 
@@ -183,23 +205,52 @@ fn toast_ok(title: &str) -> bool {
 pub enum AppEvent {
     Select(String),
     /// v2, from the session browser: open a chat's terminal in the board window (`resume` when it is stopped).
-    OpenTerm { key: String, resume: bool },
+    OpenTerm {
+        key: String,
+        resume: bool,
+    },
     /// v2, from the session browser: a chat resumed by id; its terminal follows the job.
-    OpenJobTerm { job: String, machine: String, label: String, title: String },
+    OpenJobTerm {
+        job: String,
+        machine: String,
+        label: String,
+        title: String,
+    },
     /// v2, from Files: a new session in that folder.
-    NewIn { machine: String, folder: String },
-    JobDone { id: String, machine: Option<String>, sid: Option<String>, bg: Option<String> },
-    JobFailed { id: String, error: String },
+    NewIn {
+        machine: String,
+        folder: String,
+    },
+    JobDone {
+        id: String,
+        machine: Option<String>,
+        sid: Option<String>,
+        bg: Option<String>,
+    },
+    JobFailed {
+        id: String,
+        error: String,
+    },
     /// The synced look changed (from the server, or Settings): every window applies it.
     Appearance,
     /// Open the flags drawer for this chat in the board window (from a terminal in its own window).
     Flags(String),
     /// From Files: open the chat's terminal and paste this (a file's path there) into it.
-    PasteInto { key: String, text: String },
+    PasteInto {
+        key: String,
+        text: String,
+    },
     /// v2, the flags drawer: a relaunch is under way (its terminal follows the job).
-    Relaunching { key: String, job: String },
+    Relaunching {
+        key: String,
+        job: String,
+    },
     /// v2, the flags drawer: the chat is open in a terminal Switchboard does not own; run this there instead.
-    RelaunchCmd { key: String, command: String, error: String },
+    RelaunchCmd {
+        key: String,
+        command: String,
+        error: String,
+    },
 }
 
 /// v2: a chat's thread as the inspector's History shows it, fetched when the chat is shown and again after a minute
@@ -233,11 +284,20 @@ pub struct BusyAsk {
 }
 
 pub enum BusyRetry {
-    Act { id: ActionId, key: String },
+    Act {
+        id: ActionId,
+        key: String,
+    },
     Clean(Vec<ApiCleanItem>),
-    Continue { key: String, to: String },
+    Continue {
+        key: String,
+        to: String,
+    },
     /// v2, the flags drawer: relaunch with this body (the plan's {model, effort, flags}).
-    Relaunch { key: String, body: serde_json::Value },
+    Relaunch {
+        key: String,
+        body: serde_json::Value,
+    },
 }
 
 impl BusyAsk {
@@ -313,10 +373,13 @@ pub struct AppState {
     minute: i64,
     /// When /api/prefs was last read (the synced look is checked every half minute).
     prefs_at: f64,
-    /// A newer build on the download page, the download under way, and when it was last looked for.
+    /// A newer build on the download page, the download under way, when it was last looked for (None: not since
+    /// launch, which was at `update_started`) and whether a look is under way.
     pub update: Option<sb_core::update::Offer>,
     pub upd: crate::update::Upd,
-    pub update_at: f64,
+    pub update_at: Option<f64>,
+    pub update_started: f64,
+    pub update_busy: bool,
     /// The tool library (Settings > Library, the New sheet's Tools, a chat's Tools), once asked for.
     pub library: Option<Result<sb_core::api::ApiLibrary, String>>,
     /// Library changes in flight, by what they change ("connect:tool@machine", "default:tool", "attach:key").
@@ -334,7 +397,9 @@ pub fn open_flags_in_board(key: String, cx: &mut App) {
 }
 
 fn remember_os(snap: &Snapshot) {
-    crate::ui::set_machine_os(snap.machines.iter().map(|m| (m.name.clone(), m.os.clone().unwrap_or_default())).collect());
+    crate::ui::set_machine_os(
+        snap.machines.iter().map(|m| (m.name.clone(), m.os.clone().unwrap_or_default())).collect(),
+    );
 }
 
 pub fn clean_key(d: &ApiCleanItem) -> String {
@@ -357,7 +422,9 @@ impl AppState {
         // nothing (Core looks on the local network, and the board asks for an address if that finds none).
         let mut servers: Vec<String> = std::env::var("SWITCHBOARD_URL")
             .ok()
-            .map(|v| v.split(',').map(|s| s.trim().trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).collect())
+            .map(|v| {
+                v.split(',').map(|s| s.trim().trim_end_matches('/').to_string()).filter(|s| !s.is_empty()).collect()
+            })
             .unwrap_or_default();
         if servers.is_empty() {
             servers = settings.servers.clone();
@@ -419,7 +486,9 @@ impl AppState {
                 prefs_at: 0.0,
                 update: None,
                 upd: Default::default(),
-                update_at: 0.0,
+                update_at: None,
+                update_started: AppState::now(),
+                update_busy: false,
                 library: None,
                 lib_busy: HashSet::new(),
                 lib_keys_here: HashSet::new(),
@@ -428,6 +497,7 @@ impl AppState {
             s.listen(cx);
             s.load_prefs(|_, _| {}, cx);
             s.load_library(cx);
+            s.update_hooks(cx);
             cx.spawn(async move |this, cx| {
                 loop {
                     cx.background_executor().timer(REFRESH).await;
@@ -570,7 +640,9 @@ impl AppState {
                 self.keep_server();
                 let snap = &self.snap;
                 let hidden = self.hidden.len();
-                self.hidden.retain(|k, t| now - *t < HIDE_SECS && (snap.session(k).is_some() || snap.replaced_row(k).is_some()));
+                self.hidden.retain(|k, t| {
+                    now - *t < HIDE_SECS && (snap.session(k).is_some() || snap.replaced_row(k).is_some())
+                });
                 if same && hidden == self.hidden.len() {
                     return;
                 }
@@ -618,7 +690,13 @@ impl AppState {
         cx.spawn(async move |this, cx| {
             let Ok(list) = cx.background_executor().spawn(async move { core.machines() }).await else { return };
             let _ = this.update(cx, |s, cx| {
-                let Some(m) = list.machines.iter().find(|m| m.needs_root && m.online == Some(true) && !s.settings.root_asked.contains(&m.name)) else { return };
+                let Some(m) = list
+                    .machines
+                    .iter()
+                    .find(|m| m.needs_root && m.online == Some(true) && !s.settings.root_asked.contains(&m.name))
+                else {
+                    return;
+                };
                 s.settings.root_asked.push(m.name.clone());
                 s.save_settings();
                 let name = m.name.clone();
@@ -637,15 +715,17 @@ impl AppState {
             t.until = t.until.max(now + 1.5);
         }
         // What leaves the corner by itself goes to the Notices tray, where it can be looked at again.
-        let (gone, keep): (Vec<Toast>, Vec<Toast>) = std::mem::take(&mut self.toasts).into_iter().partition(|t| t.until <= now);
+        let (gone, keep): (Vec<Toast>, Vec<Toast>) =
+            std::mem::take(&mut self.toasts).into_iter().partition(|t| t.until <= now);
         self.toasts = keep;
         // A finished job stays on screen for 9 s, one called off for 5, an error until it is clicked away (or a minute).
-        let (done, keep): (Vec<Job>, Vec<Job>) = std::mem::take(&mut self.jobs).into_iter().partition(|j| match (j.state, j.ended) {
-            (JobState::Done, Some(e)) => now - e >= 9.0,
-            (JobState::Error, Some(e)) if j.cancelled => now - e >= 5.0,
-            (JobState::Error, Some(e)) => now - e >= 60.0,
-            _ => false,
-        });
+        let (done, keep): (Vec<Job>, Vec<Job>) =
+            std::mem::take(&mut self.jobs).into_iter().partition(|j| match (j.state, j.ended) {
+                (JobState::Done, Some(e)) => now - e >= 9.0,
+                (JobState::Error, Some(e)) if j.cancelled => now - e >= 5.0,
+                (JobState::Error, Some(e)) => now - e >= 60.0,
+                _ => false,
+            });
         self.jobs = keep;
         if !gone.is_empty() || !done.is_empty() {
             for t in gone {
@@ -697,10 +777,10 @@ impl AppState {
     }
 
     pub fn save_settings(&self) {
-        if let Some(p) = &self.settings_path {
-            if let Err(e) = cache::save_json(p, &self.settings) {
-                log::warn!("could not save settings: {e}");
-            }
+        if let Some(p) = &self.settings_path
+            && let Err(e) = cache::save_json(p, &self.settings)
+        {
+            log::warn!("could not save settings: {e}");
         }
     }
 
@@ -729,7 +809,14 @@ impl AppState {
 
     /// A toast with a button. It stays long enough to read (about 15 characters a second), longer for an error or a
     /// button, and while the pointer is on it. The same message again refreshes the one on screen.
-    pub fn toast_with(&mut self, title: impl Into<String>, sub: Option<String>, bad: bool, act: Option<NoticeAct>, cx: &mut Context<Self>) {
+    pub fn toast_with(
+        &mut self,
+        title: impl Into<String>,
+        sub: Option<String>,
+        bad: bool,
+        act: Option<NoticeAct>,
+        cx: &mut Context<Self>,
+    ) {
         let title = title.into();
         let now = Self::now();
         let chars = title.chars().count() + sub.as_ref().map_or(0, |s| s.chars().count());
@@ -790,7 +877,13 @@ impl AppState {
     }
 
     fn park_toast(&mut self, t: Toast) {
-        let tone = if t.bad { Tone::Bad } else if t.ok { Tone::Ok } else { Tone::Info };
+        let tone = if t.bad {
+            Tone::Bad
+        } else if t.ok {
+            Tone::Ok
+        } else {
+            Tone::Info
+        };
         let id = self.notice_id();
         self.park(Notice { id, at: Self::now(), title: t.title, sub: t.sub, tone, act: t.act, new: true });
     }
@@ -798,18 +891,36 @@ impl AppState {
     fn park_job(&mut self, j: &Job) {
         let now = Self::now();
         let done = j.state == JobState::Done;
-        let tone = if j.cancelled { Tone::Info } else if done { Tone::Ok } else { Tone::Bad };
+        let tone = if j.cancelled {
+            Tone::Info
+        } else if done {
+            Tone::Ok
+        } else {
+            Tone::Bad
+        };
         let act = if !done {
             None
         } else if j.kind == JobKind::Stop {
-            j.key.as_deref().and_then(|k| k.split_once(':')).map(|(m, s)| NoticeAct::Resume { machine: m.into(), sid: s.into(), title: j.from.clone() })
+            j.key.as_deref().and_then(|k| k.split_once(':')).map(|(m, s)| NoticeAct::Resume {
+                machine: m.into(),
+                sid: s.into(),
+                title: j.from.clone(),
+            })
         } else if let (Some(m), Some(s), false) = (&j.new_machine, &j.new_sid, j.kind == JobKind::Handoff) {
             Some(NoticeAct::Terminal { key: format!("{m}:{s}") })
         } else {
             j.url.clone().map(|url| NoticeAct::Link { url })
         };
         let id = self.notice_id();
-        self.park(Notice { id, at: j.ended.unwrap_or(now), title: j.headline(), sub: Some(j.detail(now)), tone, act, new: true });
+        self.park(Notice {
+            id,
+            at: j.ended.unwrap_or(now),
+            title: j.headline(),
+            sub: Some(j.detail(now)),
+            tone,
+            act,
+            new: true,
+        });
     }
 
     /// Setup problems closed with their X that are still there and not ignored.
@@ -1116,7 +1227,10 @@ impl AppState {
                     let sub = if s.alive && !s.background() {
                         format!("It is open in the terminal on {}.", s.machine_label)
                     } else if let (true, Some(id)) = (s.alive, &s.bg_id) {
-                        format!("It runs in the background on {}. Run claude attach {id} there to watch it.", s.machine_label)
+                        format!(
+                            "It runs in the background on {}. Run claude attach {id} there to watch it.",
+                            s.machine_label
+                        )
                     } else {
                         "Resume it to get one.".to_string()
                     };
@@ -1124,10 +1238,10 @@ impl AppState {
                     self.toast(title, Some(sub), false, cx);
                 }
             }
-        } else if let Some(r) = self.snap.replaced_row(key) {
-            if let Some(u) = &r.url {
-                open_link(cx, u);
-            }
+        } else if let Some(r) = self.snap.replaced_row(key)
+            && let Some(u) = &r.url
+        {
+            open_link(cx, u);
         }
     }
 
@@ -1149,7 +1263,14 @@ impl AppState {
         }
     }
 
-    fn ask_busy(&mut self, what: &'static str, message: String, busy: Vec<BusyInfo>, retry: BusyRetry, cx: &mut Context<Self>) {
+    fn ask_busy(
+        &mut self,
+        what: &'static str,
+        message: String,
+        busy: Vec<BusyInfo>,
+        retry: BusyRetry,
+        cx: &mut Context<Self>,
+    ) {
         self.busy_ask = Some(BusyAsk { what, message, busy, retry });
         cx.notify();
     }
@@ -1222,7 +1343,9 @@ impl AppState {
                     Ok(job) if id.is_job() => {
                         let (topic, tag) = names::split(&title);
                         let (kind, name) = match id {
-                            ActionId::Fresh => (JobKind::Fresh, Some(names::fresh(&topic, names::fresh_n(tag.as_deref())))),
+                            ActionId::Fresh => {
+                                (JobKind::Fresh, Some(names::fresh(&topic, names::fresh_n(tag.as_deref()))))
+                            }
                             ActionId::Resume => (JobKind::Resume, Some(names::resumed(&topic))),
                             _ => (JobKind::Handoff, None),
                         };
@@ -1242,7 +1365,11 @@ impl AppState {
                             ActionId::Stop => Some(format!("On {label}. Its memory is free again.")),
                             _ => None,
                         };
-                        let act = (id == ActionId::Stop).then(|| NoticeAct::Resume { machine: machine.clone(), sid: sid.clone(), title: Some(title.clone()) });
+                        let act = (id == ActionId::Stop).then(|| NoticeAct::Resume {
+                            machine: machine.clone(),
+                            sid: sid.clone(),
+                            title: Some(title.clone()),
+                        });
                         st.toast_with(msg, sub, false, act, cx);
                         st.refresh_in(Duration::from_millis(600), cx);
                     }
@@ -1258,9 +1385,6 @@ impl AppState {
         );
     }
 
-    // ---------- v2: Keep running, threads ----------
-
-    /// Keep running on or off (the reaper leaves a kept chat alone).
     // ---------- v2: the cleanup card, prefs, rename ----------
 
     /// Stops what the card lists (one row or all of them). Only ever on a click.
@@ -1293,28 +1417,50 @@ impl AppState {
                     // running: say so instead of "Stopped".
                     Ok(r) if !r.not_stopped.is_empty() => {
                         for (k, jid) in &r.queued {
-                            let Some(d) = info.iter().find(|d| d.sid.as_ref().is_some_and(|s| format!("{}/{s}", d.machine) == *k)) else { continue };
+                            let Some(d) = info
+                                .iter()
+                                .find(|d| d.sid.as_ref().is_some_and(|s| format!("{}/{s}", d.machine) == *k))
+                            else {
+                                continue;
+                            };
                             let label = d.label.clone().unwrap_or_else(|| d.machine.clone());
                             let key = d.sid.as_ref().map(|s| format!("{}:{s}", d.machine));
                             st.start_job(jid, JobKind::Stop, key, &label, &label, d.title.clone(), None, cx);
                         }
                         let left = r.not_stopped.len();
-                        let why = r.not_stopped.iter().map(|(_, e)| e.as_str()).find(|e| !e.is_empty()).map(str::to_string);
-                        let title = if left < n { format!("Stopped {}, {left} still running", n - left) } else if n == 1 { "Did not stop it".into() } else { format!("Did not stop {n}") };
+                        let why =
+                            r.not_stopped.iter().map(|(_, e)| e.as_str()).find(|e| !e.is_empty()).map(str::to_string);
+                        let title = if left < n {
+                            format!("Stopped {}, {left} still running", n - left)
+                        } else if n == 1 {
+                            "Did not stop it".into()
+                        } else {
+                            format!("Did not stop {n}")
+                        };
                         st.toast(title, Some(why.unwrap_or_else(|| "In use again, or kept.".into())), true, cx)
                     }
                     // Those still working wait for it, each with its own card (Stop now, Keep running).
                     Ok(r) if !r.queued.is_empty() => {
                         let queued = r.queued;
                         for (k, jid) in &queued {
-                            let Some(d) = info.iter().find(|d| d.sid.as_ref().is_some_and(|s| format!("{}/{s}", d.machine) == *k)) else { continue };
+                            let Some(d) = info
+                                .iter()
+                                .find(|d| d.sid.as_ref().is_some_and(|s| format!("{}/{s}", d.machine) == *k))
+                            else {
+                                continue;
+                            };
                             let label = d.label.clone().unwrap_or_else(|| d.machine.clone());
                             let key = d.sid.as_ref().map(|s| format!("{}:{s}", d.machine));
                             st.start_job(jid, JobKind::Stop, key, &label, &label, d.title.clone(), None, cx);
                         }
                         if queued.len() < n {
                             let left = n - queued.len();
-                            st.toast(format!("Stopped {left}"), Some("The rest stop when their work is done.".into()), false, cx)
+                            st.toast(
+                                format!("Stopped {left}"),
+                                Some("The rest stop when their work is done.".into()),
+                                false,
+                                cx,
+                            )
                         }
                     }
                     Ok(_) => {
@@ -1324,8 +1470,18 @@ impl AppState {
                             None if n == 1 => "Stopped".to_string(),
                             None => format!("Stopped {n}"),
                         };
-                        let sub = if mb > 0.0 { format!("About {} freed. Resume any time today.", fmt::mem(mb)) } else { "Resume any time today.".into() };
-                        let act = one.and_then(|d| d.sid.clone().map(|sid| NoticeAct::Resume { machine: d.machine.clone(), sid, title: d.title.clone() }));
+                        let sub = if mb > 0.0 {
+                            format!("About {} freed. Resume any time today.", fmt::mem(mb))
+                        } else {
+                            "Resume any time today.".into()
+                        };
+                        let act = one.and_then(|d| {
+                            d.sid.clone().map(|sid| NoticeAct::Resume {
+                                machine: d.machine.clone(),
+                                sid,
+                                title: d.title.clone(),
+                            })
+                        });
                         st.toast_with(title, Some(sub), false, act, cx)
                     }
                     Err(e) => st.toast(e.to_string(), None, true, cx),
@@ -1424,7 +1580,9 @@ impl AppState {
                         st.start_job(&jid, JobKind::Fresh, Some(key), &label, &label, title, topic, cx)
                     }
                     Ok(None) => st.toast(format!("Starting fresh on {label}"), None, false, cx),
-                    Err(CoreError::Busy { message, busy }) => st.ask_busy("Start fresh", message, busy, BusyRetry::Act { id: ActionId::Fresh, key }, cx),
+                    Err(CoreError::Busy { message, busy }) => {
+                        st.ask_busy("Start fresh", message, busy, BusyRetry::Act { id: ActionId::Fresh, key }, cx)
+                    }
                     Err(e) => st.toast(e.to_string(), None, true, cx),
                 }
                 cx.notify();
@@ -1433,7 +1591,14 @@ impl AppState {
     }
 
     /// Compacts a History thread into one fresh chat, after the user saw the cost (POST /api/compact, confirm).
-    pub fn compact_thread(&mut self, machine: &str, sid: &str, title: Option<String>, label: String, cx: &mut Context<Self>) {
+    pub fn compact_thread(
+        &mut self,
+        machine: &str,
+        sid: &str,
+        title: Option<String>,
+        label: String,
+        cx: &mut Context<Self>,
+    ) {
         let key = format!("{machine}:{sid}");
         let busy = format!("{key}:compact");
         if !self.busy.insert(busy.clone()) {
@@ -1489,7 +1654,11 @@ impl AppState {
         );
     }
 
-    pub fn load_prefs(&mut self, done: impl FnOnce(&mut AppState, &mut Context<AppState>) + 'static, cx: &mut Context<Self>) {
+    pub fn load_prefs(
+        &mut self,
+        done: impl FnOnce(&mut AppState, &mut Context<AppState>) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         self.call(
             cx,
             |core| core.prefs(),
@@ -1528,16 +1697,26 @@ impl AppState {
     /// Sends the look to the server, so every device agrees (the local settings stay as the offline cache).
     pub fn sync_appearance(&mut self, cx: &mut Context<Self>) {
         let body = self.appearance_body();
-        self.call(cx, move |core| core.set_prefs(&body), |_, res, _| {
-            if let Err(e) = res {
-                log::info!("appearance not synced: {e}");
-            }
-        });
+        self.call(
+            cx,
+            move |core| core.set_prefs(&body),
+            |_, res, _| {
+                if let Err(e) = res {
+                    log::info!("appearance not synced: {e}");
+                }
+            },
+        );
     }
 
     /// Takes the server's look when it differs from the cache. True when anything changed.
     pub fn take_appearance(&mut self, a: &sb_core::term::scheme::Appearance) -> bool {
-        let before = (self.settings.theme.clone(), self.settings.term_colors.clone(), self.settings.term_size, self.settings.term_cursor.clone(), self.settings.term_blink);
+        let before = (
+            self.settings.theme.clone(),
+            self.settings.term_colors.clone(),
+            self.settings.term_size,
+            self.settings.term_cursor.clone(),
+            self.settings.term_blink,
+        );
         // A shots run picks its theme with SB_THEME; the server's never overrides it there.
         if let Some(th) = a.theme.as_deref().filter(|_| std::env::var_os("SB_THEME").is_none()) {
             self.settings.theme = match th {
@@ -1551,7 +1730,13 @@ impl AppState {
             self.settings.term_cursor = Some(t.cursor.clone());
             self.settings.term_blink = Some(t.blink);
         }
-        let after = (self.settings.theme.clone(), self.settings.term_colors.clone(), self.settings.term_size, self.settings.term_cursor.clone(), self.settings.term_blink);
+        let after = (
+            self.settings.theme.clone(),
+            self.settings.term_colors.clone(),
+            self.settings.term_size,
+            self.settings.term_cursor.clone(),
+            self.settings.term_blink,
+        );
         if before != after {
             self.save_settings();
             true
@@ -1582,7 +1767,14 @@ impl AppState {
     }
 
     /// One chat's own Chrome machine (None clears it). Only that chat: there is no Chrome machine for all.
-    pub fn set_chat_chrome(&mut self, machine: String, sid: String, chrome: Option<String>, ok: String, cx: &mut Context<Self>) {
+    pub fn set_chat_chrome(
+        &mut self,
+        machine: String,
+        sid: String,
+        chrome: Option<String>,
+        ok: String,
+        cx: &mut Context<Self>,
+    ) {
         self.call(
             cx,
             move |core| core.set_chrome(&machine, &sid, chrome.as_deref()),
@@ -1601,7 +1793,14 @@ impl AppState {
 
     /// Renames a chat everywhere (and in a stopped chat's transcript); `done` hears whether it worked.
     /// An empty name clears it: the chat goes back to its automatic name. A new name shows at once everywhere.
-    pub fn rename(&mut self, machine: String, sid: String, name: String, done: impl FnOnce(bool, &mut App) + 'static, cx: &mut Context<Self>) {
+    pub fn rename(
+        &mut self,
+        machine: String,
+        sid: String,
+        name: String,
+        done: impl FnOnce(bool, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         if !name.is_empty() && self.snap.retitle(&format!("{machine}:{sid}"), &name) {
             cx.notify();
         }
@@ -1707,7 +1906,8 @@ impl AppState {
                     Ok((server, new_id)) => {
                         if let Some(temp) = created {
                             let waiting = std::mem::take(&mut st.group_waiting);
-                            let (mine, rest): (Vec<Op>, Vec<Op>) = waiting.into_iter().partition(|o| names(o).as_deref() == Some(temp.as_str()));
+                            let (mine, rest): (Vec<Op>, Vec<Op>) =
+                                waiting.into_iter().partition(|o| names(o).as_deref() == Some(temp.as_str()));
                             st.group_waiting = rest;
                             if let Some(real) = new_id {
                                 st.group_ids.insert(temp, real);
@@ -1772,7 +1972,12 @@ impl AppState {
         let snap = &mut self.snap;
         self.star_want.retain(|key, (on, at)| {
             let Some((m, sid)) = key.split_once(':') else { return false };
-            let Some(s) = snap.machines.iter_mut().find(|x| x.name == m).and_then(|x| x.sessions.iter_mut().find(|x| x.sid == sid)) else {
+            let Some(s) = snap
+                .machines
+                .iter_mut()
+                .find(|x| x.name == m)
+                .and_then(|x| x.sessions.iter_mut().find(|x| x.sid == sid))
+            else {
                 return now - *at < 15.0;
             };
             if s.star == *on && now - *at > 1.0 {
@@ -1801,11 +2006,20 @@ impl AppState {
                     Ok(kept) => {
                         // Say it at once; the next refresh agrees.
                         if let Some((m, sid)) = key.split_once(':')
-                            && let Some(s) = st.snap.machines.iter_mut().find(|x| x.name == m).and_then(|x| x.sessions.iter_mut().find(|x| x.sid == sid))
+                            && let Some(s) = st
+                                .snap
+                                .machines
+                                .iter_mut()
+                                .find(|x| x.name == m)
+                                .and_then(|x| x.sessions.iter_mut().find(|x| x.sid == sid))
                         {
                             s.keep = kept;
                         }
-                        let msg = if kept { "Switchboard will keep it running." } else { "Switchboard may stop it again when it sits idle." };
+                        let msg = if kept {
+                            "Switchboard will keep it running."
+                        } else {
+                            "Switchboard may stop it again when it sits idle."
+                        };
                         st.toast(msg, None, false, cx);
                         st.refresh_in(Duration::from_millis(400), cx);
                     }
@@ -1944,7 +2158,14 @@ impl AppState {
         if !self.busy.insert(busy.clone()) {
             return;
         }
-        let req = ContinueRequest { machine: s.machine.clone(), sid: s.sid.clone(), to: to.to_string(), folder: String::new(), create: false, when: when.map(str::to_string) };
+        let req = ContinueRequest {
+            machine: s.machine.clone(),
+            sid: s.sid.clone(),
+            to: to.to_string(),
+            folder: String::new(),
+            create: false,
+            when: when.map(str::to_string),
+        };
         let to_s = to.to_string();
         let src = s.machine_label.clone();
         let dst = self.snap.label_of(to).unwrap_or_else(|| to.to_string());
@@ -1963,7 +2184,9 @@ impl AppState {
                         st.start_job(&jid, JobKind::Continue, Some(key), &dst, &src, Some(title), Some(name), cx);
                     }
                     Ok(None) => st.toast("Sent", None, false, cx),
-                    Err(CoreError::Busy { message, busy }) => st.ask_busy("Move it", message, busy, BusyRetry::Continue { key, to: to_s }, cx),
+                    Err(CoreError::Busy { message, busy }) => {
+                        st.ask_busy("Move it", message, busy, BusyRetry::Continue { key, to: to_s }, cx)
+                    }
                     Err(e) => st.toast(e.to_string(), None, true, cx),
                 }
                 cx.notify();
@@ -1996,12 +2219,28 @@ impl AppState {
                     }),
                     Ok(r) => match r.job {
                         Some(jid) => {
-                            st.start_job(&jid, JobKind::Relaunch, Some(key.clone()), &label, &label, Some(title), None, cx);
+                            st.start_job(
+                                &jid,
+                                JobKind::Relaunch,
+                                Some(key.clone()),
+                                &label,
+                                &label,
+                                Some(title),
+                                None,
+                                cx,
+                            );
                             cx.emit(AppEvent::Relaunching { key, job: jid });
                         }
-                        None => st.toast(r.error.unwrap_or_else(|| "Switchboard could not relaunch it.".into()), None, true, cx),
+                        None => st.toast(
+                            r.error.unwrap_or_else(|| "Switchboard could not relaunch it.".into()),
+                            None,
+                            true,
+                            cx,
+                        ),
                     },
-                    Err(CoreError::Busy { message, busy }) => st.ask_busy("Relaunch it", message, busy, BusyRetry::Relaunch { key, body }, cx),
+                    Err(CoreError::Busy { message, busy }) => {
+                        st.ask_busy("Relaunch it", message, busy, BusyRetry::Relaunch { key, body }, cx)
+                    }
                     Err(e) => st.toast(e.to_string(), None, true, cx),
                 }
                 cx.notify();
@@ -2041,11 +2280,17 @@ impl AppState {
 
     /// Resume and open: the resume job, whose id `done` hears. The terminal tab follows the job and asks for its
     /// ticket when it ends.
-    pub fn resume_for_term(&mut self, key: &str, done: impl FnOnce(Result<String, String>, &mut App) + 'static, cx: &mut Context<Self>) {
+    pub fn resume_for_term(
+        &mut self,
+        key: &str,
+        done: impl FnOnce(Result<String, String>, &mut App) + 'static,
+        cx: &mut Context<Self>,
+    ) {
         let Some(s) = self.snap.session(key) else {
             return cx.defer(move |cx| done(Err("This chat is no longer in the list.".into()), cx));
         };
-        let (machine, sid, title, label, topic) = (s.machine.clone(), s.sid.clone(), s.title.clone(), s.machine_label.clone(), s.topic.clone());
+        let (machine, sid, title, label, topic) =
+            (s.machine.clone(), s.sid.clone(), s.title.clone(), s.machine_label.clone(), s.topic.clone());
         let busy = format!("{key}:resume");
         self.busy.insert(busy.clone());
         let key = key.to_string();
@@ -2057,10 +2302,21 @@ impl AppState {
                 st.busy.remove(&busy);
                 match res {
                     Ok(Some(jid)) => {
-                        st.start_job(&jid, JobKind::Resume, Some(key), &label, &label, Some(title), Some(names::resumed(&topic)), cx);
+                        st.start_job(
+                            &jid,
+                            JobKind::Resume,
+                            Some(key),
+                            &label,
+                            &label,
+                            Some(title),
+                            Some(names::resumed(&topic)),
+                            cx,
+                        );
                         cx.defer(move |cx| done(Ok(jid), cx));
                     }
-                    Ok(None) => cx.defer(move |cx| done(Err("The server took the resume but did not say which job it is.".into()), cx)),
+                    Ok(None) => cx.defer(move |cx| {
+                        done(Err("The server took the resume but did not say which job it is.".into()), cx)
+                    }),
                     Err(e) => cx.defer(move |cx| done(Err(e.to_string()), cx)),
                 }
                 cx.notify();
@@ -2071,7 +2327,17 @@ impl AppState {
     // ---------- jobs ----------
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start_job(&mut self, id: &str, kind: JobKind, key: Option<String>, label: &str, src: &str, from: Option<String>, name: Option<String>, cx: &mut Context<Self>) {
+    pub(crate) fn start_job(
+        &mut self,
+        id: &str,
+        kind: JobKind,
+        key: Option<String>,
+        label: &str,
+        src: &str,
+        from: Option<String>,
+        name: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
         self.jobs.push(Job::new(id, kind, key, label, src, from, name, Self::now()));
         self.poll_job(id.to_string(), Duration::from_millis(1200), cx);
         self.refresh_in(Duration::from_millis(1200), cx);
@@ -2104,20 +2370,31 @@ impl AppState {
             Ok(j) => job.update(&j, now),
             // The job carries on at the server; look again.
             Err(CoreError::Unreachable) => return Some(Duration::from_secs(3)),
-            Err(CoreError::Server { status: 404, .. }) => job.fail("Switchboard lost track of this one. Check the list in a minute.", now),
+            Err(CoreError::Server { status: 404, .. }) => {
+                job.fail("Switchboard lost track of this one. Check the list in a minute.", now)
+            }
             Err(e) => job.fail(&e.to_string(), now),
         }
         let finished = job.state.finished();
-        let note = (finished && !was.finished() && !job.cancelled).then(|| (job.id.clone(), job.headline(), job.detail(now)));
+        let note =
+            (finished && !was.finished() && !job.cancelled).then(|| (job.id.clone(), job.headline(), job.detail(now)));
         if finished && !was.finished() {
             let ev = if job.state == JobState::Done {
-                AppEvent::JobDone { id: job.id.clone(), machine: job.new_machine.clone(), sid: job.new_sid.clone(), bg: job.new_bg.clone() }
+                AppEvent::JobDone {
+                    id: job.id.clone(),
+                    machine: job.new_machine.clone(),
+                    sid: job.new_sid.clone(),
+                    bg: job.new_bg.clone(),
+                }
             } else {
-                AppEvent::JobFailed { id: job.id.clone(), error: job.error.clone().unwrap_or_else(|| "Something went wrong.".into()) }
+                AppEvent::JobFailed {
+                    id: job.id.clone(),
+                    error: job.error.clone().unwrap_or_else(|| "Something went wrong.".into()),
+                }
             };
             cx.emit(ev);
         }
-        let Some(job) = self.jobs.iter().find(|j| j.id == id) else { return None };
+        let job = self.jobs.iter().find(|j| j.id == id)?;
         let select = if job.state == JobState::Done && !was.finished() {
             match (&job.new_machine, &job.new_sid) {
                 (Some(m), Some(s)) => Some(format!("{m}:{s}")),
@@ -2148,7 +2425,12 @@ impl AppState {
             && self.notify_on()
             && cx.active_window().is_none()
         {
-            cx.show_system_notification(SystemNotification { tag: format!("job:{jid}").into(), title: head.into(), body: body.into(), actions: vec![] });
+            cx.show_system_notification(SystemNotification {
+                tag: format!("job:{jid}").into(),
+                title: head.into(),
+                body: body.into(),
+                actions: vec![],
+            });
         }
         cx.notify();
         if finished { None } else { Some(Duration::from_millis(1500)) }
@@ -2171,11 +2453,20 @@ mod tests {
     fn callbacks_run_after_app_state_is_released() {
         let src = include_str!("state.rs");
         let body = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
-        let bad: Vec<&str> = body
-            .lines()
-            .map(str::trim)
-            .filter(|l| l.contains("done(") && !l.starts_with("//") && !l.contains("done: impl"))
-            .filter(|l| !l.contains("cx.defer(move |cx| done(") && *l != "done(st, cx);" && !l.contains("|s, cx| done(s, res, cx)"))
+        let lines: Vec<&str> = body.lines().map(str::trim).collect();
+        // A call rustfmt wrapped onto its own line counts when the line before opens the deferred closure.
+        let deferred = |i: usize| i > 0 && lines[i - 1].ends_with("cx.defer(move |cx| {");
+        let bad: Vec<&str> = lines
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.contains("done(") && !l.starts_with("//") && !l.contains("done: impl"))
+            .filter(|&(i, l)| {
+                !l.contains("cx.defer(move |cx| done(")
+                    && !deferred(i)
+                    && *l != "done(st, cx);"
+                    && !l.contains("|s, cx| done(s, res, cx)")
+            })
+            .map(|(_, l)| *l)
             .collect();
         assert!(bad.is_empty(), "call these through cx.defer: {bad:#?}");
     }

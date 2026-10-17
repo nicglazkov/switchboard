@@ -134,7 +134,10 @@ impl Nodes {
             Ok(t) => match serde_json::from_str::<NodeFile>(&t) {
                 Ok(f) => f.nodes.into_iter().filter(|n| crate::ticket::valid_machine(&n.name)).collect(),
                 Err(e) => {
-                    crate::server::log(format!("{}: {e}; moved to .bad, starting with no linked machines", path.display()));
+                    crate::server::log(format!(
+                        "{}: {e}; moved to .bad, starting with no linked machines",
+                        path.display()
+                    ));
                     let _ = std::fs::rename(path, path.with_extension("json.bad"));
                     vec![]
                 }
@@ -186,7 +189,15 @@ impl Nodes {
     /// Trade a code for a token. `taken` names an ssh machine that already has `name` (its label), if any.
     /// Pairing a name that is already a node replaces it: the old token stops working. (`/pair` lets that happen only
     /// with the node's current token: nodeapi.rs passes the node's label as `taken` otherwise.)
-    pub fn pair(&self, code: &str, name: &str, label: &str, os: &str, taken: Option<&str>, now: u64) -> Result<(Node, String), PairError> {
+    pub fn pair(
+        &self,
+        code: &str,
+        name: &str,
+        label: &str,
+        os: &str,
+        taken: Option<&str>,
+        now: u64,
+    ) -> Result<(Node, String), PairError> {
         let code = normalize_code(code);
         {
             let mut c = self.codes.lock().unwrap_or_else(|e| e.into_inner());
@@ -213,8 +224,11 @@ impl Nodes {
             c.live.remove(&code);
         }
         let token = hex(&random(32));
-        let clean = |s: &str, max: usize| s.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string();
-        let node = Node { name: name.into(), label: clean(label, 40), os: clean(os, 16), token: hash(&token), paired: now };
+        let clean = |s: &str, max: usize| {
+            s.chars().filter(|c| !c.is_control()).take(max).collect::<String>().trim().to_string()
+        };
+        let node =
+            Node { name: name.into(), label: clean(label, 40), os: clean(os, 16), token: hash(&token), paired: now };
         let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
         let mut next: Vec<Node> = list.iter().filter(|n| n.name != name).cloned().collect();
         next.push(node.clone());
@@ -228,7 +242,16 @@ impl Nodes {
 
     /// `pair` for a request from `ip`: an address that guessed wrong too often is refused on its own.
     #[allow(clippy::too_many_arguments)]
-    pub fn pair_from(&self, ip: std::net::IpAddr, code: &str, name: &str, label: &str, os: &str, taken: Option<&str>, now: u64) -> Result<(Node, String), PairError> {
+    pub fn pair_from(
+        &self,
+        ip: std::net::IpAddr,
+        code: &str,
+        name: &str,
+        label: &str,
+        os: &str,
+        taken: Option<&str>,
+        now: u64,
+    ) -> Result<(Node, String), PairError> {
         {
             let c = self.codes.lock().unwrap_or_else(|e| e.into_inner());
             let fresh = now >= c.window + MISS_WINDOW;
@@ -360,7 +383,8 @@ mod tests {
         // security M5: 20 wrong codes from anyone locked Add a machine for everyone
         let p = tmp("perip");
         let n = Nodes::load(&p);
-        let (bad, good): (std::net::IpAddr, std::net::IpAddr) = ("10.0.0.66".parse().unwrap(), "10.0.0.5".parse().unwrap());
+        let (bad, good): (std::net::IpAddr, std::net::IpAddr) =
+            ("10.0.0.66".parse().unwrap(), "10.0.0.5".parse().unwrap());
         for _ in 0..MAX_IP_MISSES {
             assert_eq!(n.pair_from(bad, "AAAAAA", "x", "", "", None, 1), Err(PairError::BadCode));
         }

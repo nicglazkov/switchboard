@@ -5,8 +5,9 @@
 use std::time::Duration;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, Entity, EventEmitter, Focusable, FontWeight, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::*, px, relative,
+    AnyElement, ClickEvent, Context, Entity, EventEmitter, Focusable, FontWeight, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollHandle, StatefulInteractiveElement, Styled, Subscription, Window, div, prelude::*, px,
+    relative,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sb_core::api::ApiChatPick;
@@ -199,7 +200,11 @@ impl LinkSheet {
         let sending = self.sending.as_deref() == Some(key.as_str());
         let (topic, tag) = names::split(first_line(c.title.as_deref(), "Untitled session"));
         let kind = names::tag_kind(tag.as_deref());
-        let label = c.label.clone().or_else(|| self.app.read(cx).snap.label_of(&c.machine)).unwrap_or_else(|| c.machine.clone());
+        let label = c
+            .label
+            .clone()
+            .or_else(|| self.app.read(cx).snap.label_of(&c.machine))
+            .unwrap_or_else(|| c.machine.clone());
         let sub = [
             Some(label),
             c.folder.clone().filter(|f| !f.is_empty()),
@@ -235,7 +240,11 @@ impl LinkSheet {
                 }
             }))
             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.pick(i, cx)))
-            .when(current, |d| d.child(div().absolute().left(px(3.)).top(px(10.)).bottom(px(10.)).w(px(2.)).rounded_full().bg(t.accent)))
+            .when(current, |d| {
+                d.child(
+                    div().absolute().left(px(3.)).top(px(10.)).bottom(px(10.)).w(px(2.)).rounded_full().bg(t.accent),
+                )
+            })
             .child(
                 div()
                     .flex_1()
@@ -249,7 +258,13 @@ impl LinkSheet {
                             .items_center()
                             .gap(px(6.))
                             .min_w_0()
-                            .child(ui::wrap(topic).flex_shrink(1.).text_size(px(13.)).font_weight(FontWeight::BOLD).text_color(if on { t.ink } else { t.ink2 }))
+                            .child(
+                                ui::wrap(topic)
+                                    .flex_shrink(1.)
+                                    .text_size(px(13.))
+                                    .font_weight(FontWeight::BOLD)
+                                    .text_color(if on { t.ink } else { t.ink2 }),
+                            )
                             .when_some(tag, |d, tg| d.child(ui::name_tag(t, &tg, kind))),
                     )
                     .child(
@@ -261,7 +276,14 @@ impl LinkSheet {
                             .text_color(t.dim)
                             .child(ui::line(sub).flex_shrink(1.))
                             .when_some(note, |d, (n, col)| {
-                                d.child(div().flex_none().whitespace_nowrap().text_color(col).when(current, |d| d.font_weight(FontWeight::BOLD)).child(format!(" · {n}")))
+                                d.child(
+                                    div()
+                                        .flex_none()
+                                        .whitespace_nowrap()
+                                        .text_color(col)
+                                        .when(current, |d| d.font_weight(FontWeight::BOLD))
+                                        .child(format!(" · {n}")),
+                                )
                             }),
                     ),
             )
@@ -293,13 +315,21 @@ impl Render for LinkSheet {
         let h = f32::from(window.viewport_size().height);
         let well = if t.dark { t.bg2 } else { t.bg };
         let focused = self.q.focus_handle(cx).is_focused(window);
-        let mut list = div().id("link-list").max_h(px(330f32.min(h - 300.).max(140.))).overflow_y_scroll().track_scroll(&self.scroll).p(px(6.));
+        let mut list = div()
+            .id("link-list")
+            .max_h(px(330f32.min(h - 300.).max(140.)))
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll)
+            .p(px(6.));
         let note = |text: String| div().px(px(12.)).py(px(18.)).text_size(px(13.)).text_color(t.faint).child(text);
         match (&self.rows, &self.failed) {
             (_, Some(e)) => list = list.child(note(format!("Could not load the chats: {e}"))),
-            (None, None) => list = list.child(note("Loading...".into())),
+            (None, None) => list = list.child(ui::loading(&t, "lk-load", "Loading the chats").px(px(12.)).py(px(18.))),
             (Some(rows), None) if rows.is_empty() => {
-                list = list.child(note(if self.shown.is_empty() { "No older chats to pick from." } else { "No older chat matches that." }.into()))
+                list = list.child(note(
+                    if self.shown.is_empty() { "No older chats to pick from." } else { "No older chat matches that." }
+                        .into(),
+                ))
             }
             (Some(rows), None) => {
                 let parent = self.parent(cx);
@@ -310,7 +340,9 @@ impl Render for LinkSheet {
         }
         let n = self.rows.as_ref().map(|r| r.len()).unwrap_or(0);
         let cap = |k: &str| ui::kbd(&t, k);
-        let foot = |keys: Vec<&str>, text: &str| div().flex().items_center().gap(px(4.)).children(keys.into_iter().map(cap)).child(text.to_string());
+        let foot = |keys: Vec<&str>, text: &str| {
+            div().flex().items_center().gap(px(4.)).children(keys.into_iter().map(cap)).child(text.to_string())
+        };
         div()
             .key_context("LinkSheet")
             .on_action(cx.listener(|this, _: &PalNext, _, cx| this.step(1, cx)))
@@ -389,7 +421,7 @@ impl Render for LinkSheet {
                             .child(div().flex_1().min_w_0().h_full().flex().items_center().text_size(px(13.5)).text_color(t.ink).child(gpui_base::input::Input::new(&self.q))),
                     ),
             )
-            .child(div().px(px(16.)).pb(px(8.)).child(list))
+            .child(div().px(px(16.)).pb(px(8.)).child(div().relative().child(list).child(ui::scrollbar(&self.scroll))))
             .child(
                 div()
                     .flex_none()

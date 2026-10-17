@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 
 use async_tungstenite::tungstenite::client::IntoClientRequest;
 use async_tungstenite::tungstenite::http::HeaderValue;
-use async_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use async_tungstenite::tungstenite::protocol::CloseFrame;
+use async_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use async_tungstenite::tungstenite::{Error as WsError, Message};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -38,7 +38,10 @@ pub const INPUT_FRAME: usize = 64 * 1024;
 pub enum ToHub {
     Input(Vec<u8>),
     /// The size this viewer would like. The grid here changes only when the hub's `Size` comes back.
-    Resize { cols: u16, rows: u16 },
+    Resize {
+        cols: u16,
+        rows: u16,
+    },
     /// This viewer has focus: the terminal takes its size.
     Focus,
     /// Send the screen again (a snapshot).
@@ -55,7 +58,10 @@ pub enum FromHub {
     Status(String),
     Data(Vec<u8>),
     /// The terminal's size from here on: output after this is drawn at it.
-    Size { cols: u16, rows: u16 },
+    Size {
+        cols: u16,
+        rows: u16,
+    },
     /// Whether this viewer sets the size (it had focus or typed last). Only the one that does answers the program's
     /// questions (cursor position, colors), so it never gets two answers.
     Owner(bool),
@@ -63,7 +69,10 @@ pub enum FromHub {
     SnapshotBegin,
     SnapshotEnd,
     /// `claude attach` ended (the user detached, or the session stopped).
-    Exit { code: Option<i64>, note: Option<String> },
+    Exit {
+        code: Option<i64>,
+        note: Option<String>,
+    },
     Error(String),
     /// Always last, exactly once.
     Closed(Closed),
@@ -226,7 +235,13 @@ async fn dial(host: &str, port: u16) -> Result<Async<TcpStream>, String> {
     Ok(stream)
 }
 
-async fn run(url: &str, user_agent: &str, to_rx: Receiver<ToHub>, from_tx: &Sender<FromHub>, rec: &mut Option<super::rec::Recorder>) -> Closed {
+async fn run(
+    url: &str,
+    user_agent: &str,
+    to_rx: Receiver<ToHub>,
+    from_tx: &Sender<FromHub>,
+    rec: &mut Option<super::rec::Recorder>,
+) -> Closed {
     use super::rec::Kind;
     let mut note = |k: Kind, b: &[u8]| {
         if let Some(r) = rec.as_mut() {
@@ -354,11 +369,17 @@ mod tests {
             parse_control(r#"{"type":"exit","code":0,"note":"Detached. The session keeps running."}"#),
             Some(FromHub::Exit { code: Some(0), note: Some("Detached. The session keeps running.".into()) })
         );
-        assert_eq!(parse_control(r#"{"type":"error","error":"ssh failed"}"#), Some(FromHub::Error("ssh failed".into())));
+        assert_eq!(
+            parse_control(r#"{"type":"error","error":"ssh failed"}"#),
+            Some(FromHub::Error("ssh failed".into()))
+        );
         assert_eq!(parse_control(r#"{"type":"pong"}"#), None);
         assert_eq!(parse_control("nope"), None);
         assert_eq!(resize_frame(120, 36), r#"{"type":"resize","cols":120,"rows":36}"#);
-        assert_eq!(parse_control(r#"{"type":"size","cols":100,"rows":30}"#), Some(FromHub::Size { cols: 100, rows: 30 }));
+        assert_eq!(
+            parse_control(r#"{"type":"size","cols":100,"rows":30}"#),
+            Some(FromHub::Size { cols: 100, rows: 30 })
+        );
         assert_eq!(parse_control(r#"{"type":"size","cols":0,"rows":30}"#), None);
         assert_eq!(parse_control(r#"{"type":"size"}"#), None);
         assert_eq!(parse_control(r#"{"type":"owner","owner":true}"#), Some(FromHub::Owner(true)));
@@ -401,7 +422,10 @@ mod tests {
                         seen.push(format!("in:{s}"));
                         ws.send(Message::binary(format!("echo:{s}").into_bytes())).unwrap();
                         if s == "q" {
-                            ws.send(Message::text(r#"{"type":"exit","code":0,"note":"Detached. The session keeps running."}"#)).unwrap();
+                            ws.send(Message::text(
+                                r#"{"type":"exit","code":0,"note":"Detached. The session keeps running."}"#,
+                            ))
+                            .unwrap();
                             ws.close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })).unwrap();
                         }
                     }
@@ -453,7 +477,10 @@ mod tests {
         assert_eq!(evs.first(), Some(&FromHub::Connected));
         assert!(evs.contains(&FromHub::Status("open".into())), "{evs:?}");
         assert!(evs.contains(&FromHub::Data(b"echo:ls\r".to_vec())), "{evs:?}");
-        assert!(evs.contains(&FromHub::Exit { code: Some(0), note: Some("Detached. The session keeps running.".into()) }), "{evs:?}");
+        assert!(
+            evs.contains(&FromHub::Exit { code: Some(0), note: Some("Detached. The session keeps running.".into()) }),
+            "{evs:?}"
+        );
         assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::Normal)));
         let seen = hub.join().unwrap();
         assert_eq!(seen[0], r#"text:{"type":"resize","cols":100,"rows":30}"#);
@@ -493,7 +520,10 @@ mod tests {
         drop(l);
         let c = connect(format!("ws://127.0.0.1:{port}/term?t=x"), "t".into());
         let evs = collect(&c.rx);
-        assert_eq!(evs, vec![FromHub::Closed(Closed::Failed(format!("Could not reach the terminal hub at 127.0.0.1:{port}.")))]);
+        assert_eq!(
+            evs,
+            vec![FromHub::Closed(Closed::Failed(format!("Could not reach the terminal hub at 127.0.0.1:{port}.")))]
+        );
     }
 
     #[test]

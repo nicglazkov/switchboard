@@ -8,9 +8,9 @@
 use std::time::Duration;
 
 use gpui::{
-    AnimationExt,
-    AnyElement, AppContext, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, SharedString,
-    StatefulInteractiveElement, Styled, Window, div, prelude::*, px, relative,
+    AnimationExt, AnyElement, AppContext, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, SharedString, StatefulInteractiveElement, Styled, Window, div, prelude::*, px,
+    relative,
 };
 use gpui_base::input::{InputEvent, InputState};
 use sb_core::api::{ApiFlagsPlan, ApiFlagsView};
@@ -20,9 +20,22 @@ use crate::ui;
 use crate::view::{BoardView, Ctx};
 
 pub const MODELS: [(&str, &str); 4] = [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")];
-pub const EFFORTS: [(&str, &str); 6] = [("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra high"), ("max", "Max"), ("ultracode", "UltraCode")];
-pub const PERMS: [(&str, &str); 6] =
-    [("default", "Asks first"), ("acceptEdits", "Accept edits"), ("plan", "Plan"), ("auto", "Auto"), ("bypassPermissions", "Bypass"), ("dontAsk", "Never asks")];
+pub const EFFORTS: [(&str, &str); 6] = [
+    ("low", "Low"),
+    ("medium", "Medium"),
+    ("high", "High"),
+    ("xhigh", "Extra high"),
+    ("max", "Max"),
+    ("ultracode", "UltraCode"),
+];
+pub const PERMS: [(&str, &str); 6] = [
+    ("default", "Asks first"),
+    ("acceptEdits", "Accept edits"),
+    ("plan", "Plan"),
+    ("auto", "Auto"),
+    ("bypassPermissions", "Bypass"),
+    ("dontAsk", "Never asks"),
+];
 /// Never removable from the drawer: the model, effort and permissions always have a value; Remote Control is Switchboard's.
 const FIXED: [&str; 4] = ["--model", "--effort", "--permission-mode", "--remote-control"];
 const DIRS_MAX: usize = 8;
@@ -46,7 +59,13 @@ impl Want {
             match x.name.as_str() {
                 "--model" => w.model = x.value.clone(),
                 "--effort" => w.effort = x.value.clone(),
-                "--permission-mode" => w.perm = if x.value.as_deref() == Some("manual") { "default".into() } else { x.value.clone().unwrap_or_else(|| "default".into()) },
+                "--permission-mode" => {
+                    w.perm = if x.value.as_deref() == Some("manual") {
+                        "default".into()
+                    } else {
+                        x.value.clone().unwrap_or_else(|| "default".into())
+                    }
+                }
                 "--chrome" => w.chrome = true,
                 "--add-dir" => w.dirs.extend(x.value.clone()),
                 "--remote-control" => {}
@@ -82,7 +101,10 @@ pub enum Stage {
     /// Sent; the job runs in the corner and any terminal on it reconnects.
     Sent,
     /// Open in a terminal Switchboard does not own: the command to run there.
-    Cmd { cmd: String, err: String },
+    Cmd {
+        cmd: String,
+        err: String,
+    },
     /// Typed into the chat.
     Applied(Vec<String>),
     /// Waiting for the reply to end before typing.
@@ -143,7 +165,8 @@ impl BoardView {
                 let Some(d) = v.flags.as_mut().filter(|d| d.key == key) else { return };
                 match res {
                     Ok(view) => {
-                        let keep = quiet && d.stage == Stage::Edit && d.plan.as_ref().is_some_and(|p| !p.changes.is_empty());
+                        let keep =
+                            quiet && d.stage == Stage::Edit && d.plan.as_ref().is_some_and(|p| !p.changes.is_empty());
                         if !keep {
                             d.want = Want::of(&view);
                             d.plan = None;
@@ -231,7 +254,10 @@ impl BoardView {
             cx.spawn(async move |this, cx| {
                 for _ in 0..300 {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
-                    if this.update(cx, |v, _| v.flags.as_ref().map(|d| d.stage.clone()) != Some(Stage::WaitLive)).unwrap_or(true) {
+                    if this
+                        .update(cx, |v, _| v.flags.as_ref().map(|d| d.stage.clone()) != Some(Stage::WaitLive))
+                        .unwrap_or(true)
+                    {
                         return;
                     }
                     let (c, m, s) = (core.clone(), m.clone(), sid.clone());
@@ -289,10 +315,13 @@ impl BoardView {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .on_mouse_down(MouseButton::Left, c.cx.listener(|this, _, _, cx| {
-                    this.flags = None;
-                    cx.notify();
-                }))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    c.cx.listener(|this, _, _, cx| {
+                        this.flags = None;
+                        cx.notify();
+                    }),
+                )
                 .child(
                     div()
                         .id("flags-drawer")
@@ -312,9 +341,11 @@ impl BoardView {
                         .flex()
                         .flex_col()
                         .child(self.flags_body(c, d))
-                        .with_animation("flags-in", gpui::Animation::new(Duration::from_millis(220)).with_easing(gpui::ease_out_quint()), |e, k| {
-                            e.opacity(k).mr(px(-24. * (1. - k)))
-                        }),
+                        .with_animation(
+                            "flags-in",
+                            gpui::Animation::new(ui::FADE).with_easing(gpui::ease_out_quint()),
+                            |e, k| e.opacity(k).mr(px(-24. * (1. - k))),
+                        ),
                 )
                 .into_any_element(),
         )
@@ -389,7 +420,12 @@ impl BoardView {
                     .gap(px(3.))
                     .child(div().text_size(px(17.)).font_weight(FontWeight::BOLD).text_color(t.ink).child("Flags"))
                     .child(ui::wrap(format!("{} on {}", d.title, d.label)).text_size(px(13.)).text_color(t.dim))
-                    .children(d.view.as_ref().filter(|v| !v.summary.is_empty()).map(|v| ui::wrap(v.summary.clone()).text_size(px(12.)).text_color(t.faint))),
+                    .children(
+                        d.view
+                            .as_ref()
+                            .filter(|v| !v.summary.is_empty())
+                            .map(|v| ui::wrap(v.summary.clone()).text_size(px(12.)).text_color(t.faint)),
+                    ),
             )
             .child(ui::icon_btn(&t, "flags-x", "x", 28.).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                 this.flags = None;
@@ -403,13 +439,15 @@ impl BoardView {
                     .flex_col()
                     .gap(px(12.))
                     .child(ui::wrap(e.clone()).text_size(px(13.)).text_color(t.bad))
-                    .child(ui::line_btn(&t, "fl-retry", 30.).child("Try again").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if let Some(d) = this.flags.as_mut() {
-                            d.stage = Stage::Load;
-                        }
-                        this.flags_load(false, cx);
-                    }))),
-                _ => div().p(px(20.)).text_size(px(13.)).text_color(t.dim).child("Reading what it runs with"),
+                    .child(ui::line_btn(&t, "fl-retry", 30.).child("Try again").on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| {
+                            if let Some(d) = this.flags.as_mut() {
+                                d.stage = Stage::Load;
+                            }
+                            this.flags_load(false, cx);
+                        },
+                    ))),
+                _ => ui::loading(&t, "fl-load", "Reading what it runs with").p(px(20.)),
             };
             return div().size_full().flex().flex_col().child(head).child(body).into_any_element();
         };
@@ -434,7 +472,18 @@ impl BoardView {
                 "locked" => ("Kept on", t.faint),
                 _ => ("Relaunch", t.cold),
             };
-            div().flex_none().px(px(7.)).h(px(20.)).flex().items_center().rounded(px(ui::R_CHIP)).bg(col.alpha(0.12)).text_size(px(11.5)).font_weight(FontWeight::SEMIBOLD).text_color(col).child(text)
+            div()
+                .flex_none()
+                .px(px(7.))
+                .h(px(20.))
+                .flex()
+                .items_center()
+                .rounded(px(ui::R_CHIP))
+                .bg(col.alpha(0.12))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(col)
+                .child(text)
         };
         // Active now: what, its value, how it changes, and remove (or keep it, once removed).
         let mut active = div().flex().flex_col();
@@ -453,7 +502,14 @@ impl BoardView {
                     .border_color(t.line)
                     .when(!kept, |d| d.opacity(0.5))
                     .child(div().w(px(120.)).flex_none().text_size(px(13.)).text_color(t.ink2).child(x.label.clone()))
-                    .child(ui::wrap(x.text.clone()).flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
+                    .child(
+                        ui::wrap(x.text.clone())
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.ink),
+                    )
                     .child(tag(&x.how))
                     .child(if fixed {
                         div().w(px(26.)).into_any_element()
@@ -468,17 +524,15 @@ impl BoardView {
                                             "--chrome" => w.chrome = !kept,
                                             "--add-dir" => {
                                                 let v = val.clone().unwrap_or_default();
-                                                if kept {
-                                                    w.dirs.retain(|d| *d != v)
-                                                } else {
-                                                    w.dirs.push(v)
-                                                }
+                                                if kept { w.dirs.retain(|d| *d != v) } else { w.dirs.push(v) }
                                             }
                                             _ => {
                                                 if kept {
                                                     w.extra.retain(|f| !(f[0] == name && f.get(1) == val.as_ref()))
                                                 } else {
-                                                    w.extra.push(std::iter::once(name.clone()).chain(val.clone()).collect())
+                                                    w.extra.push(
+                                                        std::iter::once(name.clone()).chain(val.clone()).collect(),
+                                                    )
                                                 }
                                             }
                                         }
@@ -490,41 +544,63 @@ impl BoardView {
                     }),
             );
         }
-        let chips = |prefix: &'static str, opts: &[(&'static str, &'static str)], cur: Option<&str>, set: fn(&mut Want, &str)| {
-            let mut row = div().flex().flex_wrap().gap(px(5.));
-            for (k, l) in opts.iter().copied() {
-                let on = cur == Some(k);
-                row = row.child(chip(&t, SharedString::from(format!("{prefix}-{k}")), on, l).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.flags_pick(move |w| set(w, k), cx)
-                })));
-            }
-            row
-        };
+        // Four models: segmented buttons. Six efforts and five permission modes: dropdowns.
+        let mut models = ui::seg_box(&t);
+        for (k, l) in MODELS {
+            models = models.child(
+                ui::seg_btn(&t, SharedString::from(format!("fl-m-{k}")), w.model.as_deref() == Some(k), false)
+                    .child(l)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.flags_pick(move |w| w.model = Some(k.into()), cx)
+                    })),
+            );
+        }
         let orow = |label: &str, ctl: AnyElement| {
-            div().flex().items_start().gap(px(10.)).py(px(4.)).child(div().w(px(96.)).flex_none().pt(px(5.)).text_size(px(12.5)).text_color(t.dim).child(label.to_string())).child(div().flex_1().min_w_0().child(ctl))
+            div()
+                .flex()
+                .items_start()
+                .gap(px(10.))
+                .py(px(4.))
+                .child(
+                    div()
+                        .w(px(96.))
+                        .flex_none()
+                        .pt(px(5.))
+                        .text_size(px(12.5))
+                        .text_color(t.dim)
+                        .child(label.to_string()),
+                )
+                .child(div().flex_1().min_w_0().child(ctl))
         };
         let mut dirs = div().flex().flex_wrap().items_center().gap(px(5.));
         for dd in &w.dirs {
             let d2 = dd.clone();
-            dirs = dirs.child(chip(&t, SharedString::from(format!("fl-dir-{dd}")), true, dd).child(ui::icon("x", 11., t.dim)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                let d2 = d2.clone();
-                this.flags_pick(move |w| w.dirs.retain(|x| *x != d2), cx)
-            })));
+            dirs = dirs.child(
+                chip(&t, SharedString::from(format!("fl-dir-{dd}")), true, dd)
+                    .child(ui::icon("x", 11., t.dim))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let d2 = d2.clone();
+                        this.flags_pick(move |w| w.dirs.retain(|x| *x != d2), cx)
+                    })),
+            );
         }
         if d.adding {
             if let Some(inp) = &d.dir {
                 dirs = dirs.child(field(&t, inp, 200.));
             }
         } else if w.dirs.len() < DIRS_MAX {
-            dirs = dirs.child(chip(&t, "fl-adddir", false, "Add a folder").child(ui::icon("plus", 11., t.dim)).on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
-                if let Some(d) = this.flags.as_mut() {
-                    d.adding = true;
-                    if let Some(i) = &d.dir {
-                        i.update(cx, |i, cx| i.focus(window, cx));
-                    }
-                }
-                cx.notify();
-            })));
+            dirs =
+                dirs.child(chip(&t, "fl-adddir", false, "Add a folder").child(ui::icon("plus", 11., t.dim)).on_click(
+                    cx.listener(|this, _: &ClickEvent, window, cx| {
+                        if let Some(d) = this.flags.as_mut() {
+                            d.adding = true;
+                            if let Some(i) = &d.dir {
+                                i.update(cx, |i, cx| i.focus(window, cx));
+                            }
+                        }
+                        cx.notify();
+                    }),
+                ));
         }
         // Two groups, so what changes live and what relaunches the chat can never be mistaken for each other.
         let running = v.status.as_deref() != Some("stopped");
@@ -545,35 +621,75 @@ impl BoardView {
                         .items_center()
                         .gap(px(8.))
                         .child(ui::icon(if live { "bolt" } else { "relaunch" }, 15., col))
-                        .child(ui::wrap(title.to_string()).flex_1().min_w_0().text_size(px(13.5)).font_weight(FontWeight::BOLD).text_color(t.ink))
+                        .child(
+                            ui::wrap(title.to_string())
+                                .flex_1()
+                                .min_w_0()
+                                .text_size(px(13.5))
+                                .font_weight(FontWeight::BOLD)
+                                .text_color(t.ink),
+                        )
                         .child(tag(if live { "live" } else { "relaunch" })),
                 )
-                .child(ui::wrap(sub.to_string()).mb(px(6.)).text_size(px(12.)).line_height(relative(1.45)).text_color(t.dim))
+                .child(
+                    ui::wrap(sub.to_string())
+                        .mb(px(6.))
+                        .text_size(px(12.))
+                        .line_height(relative(1.45))
+                        .text_color(t.dim),
+                )
                 .child(rows)
         };
         let orig_perm = Want::of(v).perm;
         let plan_on = w.perm == "plan";
-        let plan_chip = chip(&t, "fl-plan", plan_on, "Plan mode").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-            let back = if orig_perm == "plan" { "default".to_string() } else { orig_perm.clone() };
-            this.flags_pick(move |w| w.perm = if w.perm == "plan" { back } else { "plan".into() }, cx)
-        }));
+        let plan_chip =
+            chip(&t, "fl-plan", plan_on, "Plan mode").on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let back = if orig_perm == "plan" { "default".to_string() } else { orig_perm.clone() };
+                this.flags_pick(move |w| w.perm = if w.perm == "plan" { back } else { "plan".into() }, cx)
+            }));
         let perms: Vec<(&'static str, &'static str)> = PERMS.iter().copied().filter(|(k, _)| *k != "plan").collect();
+        let efforts = ui::choice(
+            &t,
+            cx,
+            "fl-effort",
+            self.drop.is_open("fl-effort"),
+            &EFFORTS,
+            w.effort.as_deref().unwrap_or(""),
+            false,
+            None,
+            |v| &mut v.drop,
+            |v, k, cx| v.flags_pick(move |w| w.effort = Some(k.into()), cx),
+        );
+        let perm_drop = ui::choice(
+            &t,
+            cx,
+            "fl-perm",
+            self.drop.is_open("fl-perm"),
+            &perms,
+            &w.perm,
+            false,
+            Some("bypassPermissions"),
+            |v| &mut v.drop,
+            |v, k, cx| v.flags_pick(move |w| w.perm = k.into(), cx),
+        );
         let live_rows = div()
             .flex()
             .flex_col()
-            .child(orow("Model", chips("fl-m", &MODELS, w.model.as_deref(), |w, k| w.model = Some(k.into())).into_any_element()))
-            .child(orow("Effort", chips("fl-e", &EFFORTS, w.effort.as_deref(), |w, k| w.effort = Some(k.into())).into_any_element()))
+            .child(orow("Model", div().flex().child(models).into_any_element()))
+            .child(orow("Effort", div().flex().child(efforts).into_any_element()))
             .child(orow("Plan", div().flex().child(plan_chip).into_any_element()))
             .child(orow("Also open", dirs.into_any_element()));
         let relaunch_rows = div()
             .flex()
             .flex_col()
-            .child(orow("Permissions", chips("fl-p", &perms, Some(w.perm.as_str()), |w, k| w.perm = k.into()).into_any_element()))
+            .child(orow("Permissions", div().flex().child(perm_drop).into_any_element()))
             .child(orow(
                 "Browser",
                 div()
                     .flex()
-                    .child(chip(&t, "fl-chrome", w.chrome, "Claude in Chrome").on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.flags_pick(|w| w.chrome = !w.chrome, cx))))
+                    .child(chip(&t, "fl-chrome", w.chrome, "Claude in Chrome").on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.flags_pick(|w| w.chrome = !w.chrome, cx)),
+                    ))
                     .into_any_element(),
             ))
             .children(d.other.as_ref().map(|inp| orow("Other flags", field(&t, inp, 0.).into_any_element())));
@@ -621,30 +737,61 @@ impl BoardView {
                     .border_b_1()
                     .border_color(t.line)
                     .child(div().w(px(120.)).flex_none().text_size(px(13.)).text_color(t.ink2).child(ch.label.clone()))
-                    .child(ui::wrap(what).flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
+                    .child(
+                        ui::wrap(what)
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.ink),
+                    )
                     .child(tag(&ch.how)),
             );
         }
         if let Some(p) = d.plan.as_ref().filter(|p| p.relaunch && !p.dropped.is_empty()) {
-            pend = pend.child(ui::wrap(format!("The relaunch leaves out {}.", p.dropped.join(" "))).mt(px(6.)).text_size(px(12.)).text_color(t.dim));
+            pend = pend.child(
+                ui::wrap(format!("The relaunch leaves out {}.", p.dropped.join(" ")))
+                    .mt(px(6.))
+                    .text_size(px(12.))
+                    .text_color(t.dim),
+            );
         }
         let body = div()
             .id("flags-body")
             .flex_1()
             .min_h_0()
             .overflow_y_scroll()
+            .track_scroll(&self.flags_scroll)
             .px(px(20.))
             .pb(px(16.))
             .child(section("Active now", Some(v.active.len())))
             .child(active)
             .when(!v.other.is_empty(), |e| {
-                e.child(ui::wrap(format!("Also on its command line: {}. A relaunch leaves {} out.", v.other.join(" "), if v.other.len() == 1 { "it" } else { "them" })).mt(px(6.)).text_size(px(12.)).text_color(t.dim))
+                e.child(
+                    ui::wrap(format!(
+                        "Also on its command line: {}. A relaunch leaves {} out.",
+                        v.other.join(" "),
+                        if v.other.len() == 1 { "it" } else { "them" }
+                    ))
+                    .mt(px(6.))
+                    .text_size(px(12.))
+                    .text_color(t.dim),
+                )
             })
-            .when(!v.complete, |e| e.child(ui::wrap("Switchboard on that machine does not report every flag yet. Update it to see them all.").mt(px(6.)).text_size(px(12.)).text_color(t.dim)))
+            .when(!v.complete, |e| {
+                e.child(
+                    ui::wrap("Switchboard on that machine does not report every flag yet. Update it to see them all.")
+                        .mt(px(6.))
+                        .text_size(px(12.))
+                        .text_color(t.dim),
+                )
+            })
             .child(section("What you can change", None))
             .child(can)
             .child(section("Pending", Some(changes.len())))
             .child(pend);
+        let body =
+            div().flex_1().min_h_0().relative().flex().flex_col().child(body).child(ui::scrollbar(&self.flags_scroll));
         div().size_full().flex().flex_col().child(head).child(body).child(self.flags_foot(c, d, v)).into_any_element()
     }
 
@@ -654,26 +801,43 @@ impl BoardView {
         let plan = d.plan.as_ref();
         let n = plan.map(|p| p.changes.len()).unwrap_or(0);
         // Its own shade, with the drawer's bottom radius (less the 1 px border) so the corners stay round.
-        let foot = div().flex_none().px(px(20.)).py(px(14.)).border_t_1().border_color(t.line).bg(t.panel2).rounded_b(px(ui::R_SHEET - 1.)).flex().flex_col().gap(px(10.));
+        let foot = div()
+            .flex_none()
+            .px(px(20.))
+            .py(px(14.))
+            .border_t_1()
+            .border_color(t.line)
+            .bg(t.panel2)
+            .rounded_b(px(ui::R_SHEET - 1.))
+            .flex()
+            .flex_col()
+            .gap(px(10.));
         let note = |text: String, col| ui::wrap(text).text_size(px(13.)).line_height(relative(1.45)).text_color(col);
-        let reset = ui::ghost(&t, "fl-reset", Some("Undo the changes"), None).h(px(32.)).px(px(10.)).text_size(px(13.)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            if let Some(d) = this.flags.as_mut() {
-                if let Some(v) = &d.view {
-                    d.want = Want::of(v);
+        let reset = ui::ghost(&t, "fl-reset", Some("Undo the changes"), None)
+            .h(px(32.))
+            .px(px(10.))
+            .text_size(px(13.))
+            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                if let Some(d) = this.flags.as_mut() {
+                    if let Some(v) = &d.view {
+                        d.want = Want::of(v);
+                    }
+                    d.plan = None;
+                    d.plan_err = None;
+                    d.stage = Stage::Edit;
                 }
-                d.plan = None;
-                d.plan_err = None;
-                d.stage = Stage::Edit;
-            }
-            cx.notify();
-        }));
-        let primary = |id: &'static str, label: String| ui::primary_btn(&t, id, 34.).px(px(14.)).text_size(px(13.)).child(label);
-        let back = ui::line_btn(&t, "fl-back", 34.).px(px(14.)).child("Back").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-            if let Some(d) = this.flags.as_mut() {
-                d.stage = Stage::Edit;
-            }
-            cx.notify();
-        }));
+                cx.notify();
+            }));
+        let primary =
+            |id: &'static str, label: String| ui::primary_btn(&t, id, 34.).px(px(14.)).text_size(px(13.)).child(label);
+        let back = ui::line_btn(&t, "fl-back", 34.).px(px(14.)).child("Back").on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                if let Some(d) = this.flags.as_mut() {
+                    d.stage = Stage::Edit;
+                }
+                cx.notify();
+            },
+        ));
         let el = match &d.stage {
             Stage::Confirm => {
                 let busy = plan.is_some_and(|p| p.busy);
@@ -690,28 +854,67 @@ impl BoardView {
                         ))),
                     )
             }
-            Stage::Sent => foot.child(note("Relaunching. Its progress is in the corner, and a terminal open on it reconnects when it is done.".into(), t.ink2)).child(
-                div().flex().justify_end().child(ui::line_btn(&t, "fl-done", 34.).px(px(14.)).child("Done").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.flags = None;
-                    cx.notify();
-                }))),
-            ),
+            Stage::Sent => foot
+                .child(note(
+                    "Relaunching. Its progress is in the corner, and a terminal open on it reconnects when it is done."
+                        .into(),
+                    t.ink2,
+                ))
+                .child(div().flex().justify_end().child(
+                    ui::line_btn(&t, "fl-done", 34.).px(px(14.)).child("Done").on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| {
+                            this.flags = None;
+                            cx.notify();
+                        },
+                    )),
+                )),
             Stage::Cmd { cmd, err } => {
                 let cmd2 = cmd.clone();
                 foot.child(note(err.clone(), t.ink2))
-                    .child(div().p(px(10.)).rounded(px(ui::R_CTRL)).bg(t.panel3).font_family(NUM).text_size(px(12.)).text_color(t.ink).child(ui::wrap(cmd.clone())))
-                    .child(div().flex().justify_end().gap(px(8.)).child(back).child(primary("fl-copy", "Copy the command".into()).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        crate::state::copy_text(cx, cmd2.clone());
-                        this.app.update(cx, |s, cx| s.toast("Copied. Paste it in that terminal once Claude has exited.", None, false, cx));
-                    }))))
+                    .child(
+                        div()
+                            .p(px(10.))
+                            .rounded(px(ui::R_CTRL))
+                            .bg(t.panel3)
+                            .font_family(NUM)
+                            .text_size(px(12.))
+                            .text_color(t.ink)
+                            .child(ui::wrap(cmd.clone())),
+                    )
+                    .child(div().flex().justify_end().gap(px(8.)).child(back).child(
+                        primary("fl-copy", "Copy the command".into()).on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                crate::state::copy_text(cx, cmd2.clone());
+                                this.app.update(cx, |s, cx| {
+                                    s.toast(
+                                        "Copied. Paste it in that terminal once Claude has exited.",
+                                        None,
+                                        false,
+                                        cx,
+                                    )
+                                });
+                            },
+                        )),
+                    ))
             }
-            Stage::Applied(cmds) => foot.child(note(format!("Typed into the chat: {}. It shows here within a few seconds.", cmds.join(", ")), t.warm)),
-            Stage::WaitLive => foot.child(note("Claude is replying. The changes are typed in once it finishes.".into(), t.ink2)).child(div().flex().justify_end().child(back)),
+            Stage::Applied(cmds) => foot.child(note(
+                format!("Typed into the chat: {}. It shows here within a few seconds.", cmds.join(", ")),
+                t.warm,
+            )),
+            Stage::WaitLive => foot
+                .child(note("Claude is replying. The changes are typed in once it finishes.".into(), t.ink2))
+                .child(div().flex().justify_end().child(back)),
             Stage::Error(e) => foot.child(note(e.clone(), t.bad)).child(div().flex().justify_end().child(back)),
-            Stage::Load | Stage::Edit if n == 0 => foot.child(div().flex().justify_end().child(ui::line_btn(&t, "fl-none", 34.).px(px(14.)).opacity(0.6).child("Nothing to apply yet"))),
+            Stage::Load | Stage::Edit if n == 0 => foot.child(
+                div()
+                    .flex()
+                    .justify_end()
+                    .child(ui::line_btn(&t, "fl-none", 34.).px(px(14.)).opacity(0.6).child("Nothing to apply yet")),
+            ),
             Stage::Load | Stage::Edit => {
                 let p = plan.cloned().unwrap_or_default();
-                let mine = v.kind.as_deref() == Some("interactive") && v.status.as_deref().is_some_and(|s| s != "stopped");
+                let mine =
+                    v.kind.as_deref() == Some("interactive") && v.status.as_deref().is_some_and(|s| s != "stopped");
                 // The summary bar: how many of each kind, so what the button will do is never a surprise.
                 let lives = p.changes.iter().filter(|c| c.how == "live" || c.how == "key").count();
                 let rels = p.changes.len() - lives;
@@ -723,33 +926,58 @@ impl BoardView {
                     parts.push(format!("{} {} a relaunch", rels, if rels == 1 { "needs" } else { "need" }));
                 }
                 let count = |n: usize, col, ic: &'static str| {
-                    div().flex_none().flex().items_center().gap(px(5.)).child(ui::icon(ic, 13., col)).child(div().text_size(px(12.5)).font_weight(FontWeight::SEMIBOLD).text_color(col).child(n.to_string()))
+                    div().flex_none().flex().items_center().gap(px(5.)).child(ui::icon(ic, 13., col)).child(
+                        div()
+                            .text_size(px(12.5))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(col)
+                            .child(n.to_string()),
+                    )
                 };
                 let summary = div()
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .child(ui::wrap(parts.join(", ")).flex_1().min_w_0().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
+                    .child(
+                        ui::wrap(parts.join(", "))
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(13.))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .text_color(t.ink),
+                    )
                     .when(lives > 0, |d| d.child(count(lives, t.warm, "bolt")))
                     .when(rels > 0, |d| d.child(count(rels, t.cold, "relaunch")));
                 let act = if mine {
-                    primary("fl-relaunch", "Get the command to relaunch it".into()).on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        if let Some(d) = this.flags.as_ref() {
-                            let (k, b) = (d.key.clone(), d.plan.as_ref().map(|p| p.body.clone()).unwrap_or_default());
-                            this.app.update(cx, |s, cx| s.relaunch(&k, b, None, cx));
-                        }
-                    }))
-                } else if !p.relaunch && p.running {
-                    primary("fl-apply", "Apply live".into()).child(ui::icon("bolt", 14., t.on_accent)).on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.flags_apply(cx)))
-                } else {
-                    primary("fl-relaunch", if p.running { "Apply and relaunch".to_string() } else { format!("Resume with {}", plural(n, "change")) })
-                        .child(ui::icon("relaunch", 14., t.on_accent))
-                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                            if let Some(d) = this.flags.as_mut() {
-                                d.stage = Stage::Confirm;
+                    primary("fl-relaunch", "Get the command to relaunch it".into()).on_click(cx.listener(
+                        |this, _: &ClickEvent, _, cx| {
+                            if let Some(d) = this.flags.as_ref() {
+                                let (k, b) =
+                                    (d.key.clone(), d.plan.as_ref().map(|p| p.body.clone()).unwrap_or_default());
+                                this.app.update(cx, |s, cx| s.relaunch(&k, b, None, cx));
                             }
-                            cx.notify();
-                        }))
+                        },
+                    ))
+                } else if !p.relaunch && p.running {
+                    primary("fl-apply", "Apply live".into())
+                        .child(ui::icon("bolt", 14., t.on_accent))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.flags_apply(cx)))
+                } else {
+                    primary(
+                        "fl-relaunch",
+                        if p.running {
+                            "Apply and relaunch".to_string()
+                        } else {
+                            format!("Resume with {}", plural(n, "change"))
+                        },
+                    )
+                    .child(ui::icon("relaunch", 14., t.on_accent))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if let Some(d) = this.flags.as_mut() {
+                            d.stage = Stage::Confirm;
+                        }
+                        cx.notify();
+                    }))
                 };
                 let how = if mine {
                     format!("It is open in a terminal on {}. Switchboard gives you the command to run there.", d.label)
@@ -762,7 +990,9 @@ impl BoardView {
                 } else {
                     "Resumes the chat with --resume and these flags. It keeps its history.".to_string()
                 };
-                foot.child(summary).child(note(how, t.dim)).child(div().flex().items_center().justify_end().gap(px(8.)).child(reset).child(act))
+                foot.child(summary)
+                    .child(note(how, t.dim))
+                    .child(div().flex().items_center().justify_end().gap(px(8.)).child(reset).child(act))
             }
         };
         el.into_any_element()
@@ -775,9 +1005,8 @@ fn plural(n: usize, one: &str) -> String {
 
 /// A choice chip: on (filled) or off (a ring).
 fn chip(t: &Theme, id: impl Into<gpui::ElementId>, on: bool, label: &str) -> gpui::Stateful<gpui::Div> {
-    let hover = t.hover;
-    div()
-        .id(id.into())
+    let (hover, press) = (t.hover, t.press);
+    ui::focusable(div().id(id.into()), t)
         .flex_none()
         .h(px(28.))
         .px(px(10.))
@@ -787,7 +1016,13 @@ fn chip(t: &Theme, id: impl Into<gpui::ElementId>, on: bool, label: &str) -> gpu
         .rounded(px(ui::R_CTRL))
         .text_size(px(12.5))
         .cursor_pointer()
-        .when(on, |d| d.bg(t.accent.alpha(if t.dark { 0.2 } else { 0.12 })).shadow(vec![Theme::ring(t.accent)]).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
+        .active(move |s| s.bg(press))
+        .when(on, |d| {
+            d.bg(t.accent.alpha(if t.dark { 0.2 } else { 0.12 }))
+                .shadow(vec![Theme::ring(t.accent)])
+                .text_color(t.ink)
+                .font_weight(FontWeight::SEMIBOLD)
+        })
         .when(!on, |d| d.shadow(vec![Theme::ring(t.line2)]).text_color(t.ink2).hover(move |s| s.bg(hover)))
         .child(label.to_string())
 }
@@ -817,7 +1052,13 @@ mod tests {
     use sb_core::api::ApiFlagItem;
 
     fn item(name: &str, value: Option<&str>) -> ApiFlagItem {
-        ApiFlagItem { name: name.into(), value: value.map(str::to_string), label: name.into(), text: value.unwrap_or("On").into(), how: "relaunch".into() }
+        ApiFlagItem {
+            name: name.into(),
+            value: value.map(str::to_string),
+            label: name.into(),
+            text: value.unwrap_or("On").into(),
+            how: "relaunch".into(),
+        }
     }
 
     #[test]
@@ -835,7 +1076,10 @@ mod tests {
             ..Default::default()
         };
         let w = Want::of(&v);
-        assert_eq!((w.model.as_deref(), w.effort.as_deref(), w.perm.as_str(), w.chrome), (Some("opus"), Some("high"), "default", true));
+        assert_eq!(
+            (w.model.as_deref(), w.effort.as_deref(), w.perm.as_str(), w.chrome),
+            (Some("opus"), Some("high"), "default", true)
+        );
         assert_eq!(w.dirs, vec!["notes".to_string()]);
         assert_eq!(w.extra, vec![vec!["--verbose".to_string()]]);
         assert!(w.keeps("--remote-control", None), "Switchboard's own flag never drops");

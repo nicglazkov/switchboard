@@ -88,16 +88,39 @@ impl JobKind {
     /// The steps shown while it runs. `label` is the machine doing the work.
     pub fn steps(self, label: &str) -> Vec<String> {
         match self {
-            JobKind::Fresh => vec![format!("Sent to {label}"), "Writing the handoff (about a minute)".into(), "Starting the new chat".into(), "Ready".into()],
+            JobKind::Fresh => vec![
+                format!("Sent to {label}"),
+                "Writing the handoff (about a minute)".into(),
+                "Starting the new chat".into(),
+                "Ready".into(),
+            ],
             JobKind::Start => vec![format!("Sent to {label}"), "Naming and starting it".into(), "Ready".into()],
             JobKind::Resume => vec![format!("Sent to {label}"), "Opening the session".into(), "Ready".into()],
-            JobKind::Continue => vec!["Writing the handoff (about a minute)".into(), format!("Starting on {label}"), "Ready".into()],
-            JobKind::Handoff => vec![format!("Sent to {label}"), "Writing the handoff (about a minute)".into(), "Saved".into()],
-            JobKind::Auto if label == AUTO => {
-                vec!["Claude picks the machine".into(), "Sent to that machine".into(), "Naming and starting it".into(), "Ready".into()]
+            JobKind::Continue => {
+                vec!["Writing the handoff (about a minute)".into(), format!("Starting on {label}"), "Ready".into()]
             }
-            JobKind::Auto => vec![format!("Claude picked {label}"), format!("Sent to {label}"), "Naming and starting it".into(), "Ready".into()],
-            JobKind::Relaunch => vec![format!("Sent to {label}"), "Restarting Claude Code with the new flags".into(), "Chat continued".into()],
+            JobKind::Handoff => {
+                vec![format!("Sent to {label}"), "Writing the handoff (about a minute)".into(), "Saved".into()]
+            }
+            JobKind::Auto if label == AUTO => {
+                vec![
+                    "Claude picks the machine".into(),
+                    "Sent to that machine".into(),
+                    "Naming and starting it".into(),
+                    "Ready".into(),
+                ]
+            }
+            JobKind::Auto => vec![
+                format!("Claude picked {label}"),
+                format!("Sent to {label}"),
+                "Naming and starting it".into(),
+                "Ready".into(),
+            ],
+            JobKind::Relaunch => vec![
+                format!("Sent to {label}"),
+                "Restarting Claude Code with the new flags".into(),
+                "Chat continued".into(),
+            ],
             JobKind::Compact => vec![
                 "Gathering the thread's chats".into(),
                 "Writing one summary of the whole thread (a minute or two)".into(),
@@ -176,7 +199,17 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn new(id: &str, kind: JobKind, key: Option<String>, label: &str, src: &str, from: Option<String>, name: Option<String>, now: f64) -> Job {
+    #[allow(clippy::too_many_arguments)] // One argument per field a new job starts with; a struct would only repeat them.
+    pub fn new(
+        id: &str,
+        kind: JobKind,
+        key: Option<String>,
+        label: &str,
+        src: &str,
+        from: Option<String>,
+        name: Option<String>,
+        now: f64,
+    ) -> Job {
         Job {
             id: id.into(),
             kind,
@@ -210,8 +243,9 @@ impl Job {
             self.step = j.step.clone();
         }
         let waited = self.waiting.is_some();
-        self.waiting = (self.state == JobState::Queued && self.step.as_deref() == Some("waiting"))
-            .then(|| j.note.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Waiting for its work to finish".into()));
+        self.waiting = (self.state == JobState::Queued && self.step.as_deref() == Some("waiting")).then(|| {
+            j.note.clone().filter(|n| !n.trim().is_empty()).unwrap_or_else(|| "Waiting for its work to finish".into())
+        });
         if waited && self.waiting.is_none() {
             self.started = now; // its own steps start now: the wait does not count toward them
         }
@@ -269,7 +303,7 @@ impl Job {
     }
 
     /// The topic of the chat it came from.
-    fn from_topic(&self) -> Option<String> {
+    fn source_topic(&self) -> Option<String> {
         self.from.as_deref().map(|f| names::split(f).0.to_string()).filter(|t| !t.is_empty())
     }
 
@@ -331,7 +365,8 @@ impl Job {
             return None;
         }
         if self.label == AUTO {
-            return (!self.state.finished()).then(|| ("Auto".to_string(), "Claude is reading what each machine can do.".to_string()));
+            return (!self.state.finished())
+                .then(|| ("Auto".to_string(), "Claude is reading what each machine can do.".to_string()));
         }
         let who = if self.by.as_deref() == Some("rules") { "Picked by the rules" } else { "Claude picked" };
         let what = match &self.why {
@@ -356,12 +391,12 @@ impl Job {
     /// The line under it.
     pub fn detail(&self, now: f64) -> String {
         match self.state {
-            JobState::Error if self.cancelled => match self.from_topic() {
+            JobState::Error if self.cancelled => match self.source_topic() {
                 Some(t) => format!("{t}. Nothing was changed."),
                 None => "Nothing was changed.".into(),
             },
             JobState::Error => self.error.clone().unwrap_or_else(|| "Something went wrong.".into()),
-            JobState::Done if self.kind == JobKind::Stop => match self.from_topic() {
+            JobState::Done if self.kind == JobKind::Stop => match self.source_topic() {
                 Some(t) => format!("{t}, on {}. Resume it any time.", self.label),
                 None => format!("On {}. Resume it any time.", self.label),
             },
@@ -375,7 +410,7 @@ impl Job {
             _ => {
                 if let Some(w) = &self.waiting {
                     let w = w.trim_end_matches('.');
-                    return match self.from_topic() {
+                    return match self.source_topic() {
                         Some(t) => format!("{t}. {w}."),
                         None => format!("{w}."),
                     };
@@ -397,20 +432,46 @@ mod tests {
 
     #[test]
     fn compact_job_follows_the_servers_steps() {
-        let mut j = Job::new("s-0123456789ab", JobKind::Compact, Some("studio:x".into()), "Studio", "Studio", Some("Topic".into()), None, 1000.0);
+        let mut j = Job::new(
+            "s-0123456789ab",
+            JobKind::Compact,
+            Some("studio:x".into()),
+            "Studio",
+            "Studio",
+            Some("Topic".into()),
+            None,
+            1000.0,
+        );
         assert_eq!(j.detail(1001.0), "Gathering the thread's chats");
         j.update(&ApiJob { state: Some("running".into()), step: Some("summary".into()), ..Default::default() }, 1010.0);
         assert_eq!(j.detail(1010.0), "Writing one summary of the whole thread (a minute or two)");
         j.update(&ApiJob { state: Some("running".into()), step: Some("running".into()), ..Default::default() }, 1080.0);
         assert_eq!(j.detail(1080.0), "Starting the new chat on Studio");
-        j.update(&ApiJob { state: Some("done".into()), name: Some("Topic (compacted)".into()), ..Default::default() }, 1090.0);
+        j.update(
+            &ApiJob { state: Some("done".into()), name: Some("Topic (compacted)".into()), ..Default::default() },
+            1090.0,
+        );
         assert_eq!(j.headline(), "The new chat is ready");
     }
 
     #[test]
     fn fresh_job_on_a_busy_chat_says_it_is_waiting() {
-        let mut j = Job::new("s-0123456789ab", JobKind::Fresh, Some("studio:x".into()), "Studio", "Studio", Some("Topic".into()), None, 1000.0);
-        let wait = |note: Option<&str>| ApiJob { state: Some("queued".into()), step: Some("waiting".into()), note: note.map(Into::into), ..Default::default() };
+        let mut j = Job::new(
+            "s-0123456789ab",
+            JobKind::Fresh,
+            Some("studio:x".into()),
+            "Studio",
+            "Studio",
+            Some("Topic".into()),
+            None,
+            1000.0,
+        );
+        let wait = |note: Option<&str>| ApiJob {
+            state: Some("queued".into()),
+            step: Some("waiting".into()),
+            note: note.map(Into::into),
+            ..Default::default()
+        };
         j.update(&wait(Some("Claude is replying")), 1100.0);
         assert_eq!(j.detail(1300.0), "Topic. Claude is replying.");
         assert_eq!(j.headline(), "Starts fresh when its work is done");
@@ -420,7 +481,14 @@ mod tests {
         j.update(&ApiJob { state: Some("running".into()), step: Some("summary".into()), ..Default::default() }, 1320.0);
         assert_eq!(j.waiting, None);
         assert_eq!(j.detail(1320.0), "Writing the handoff (about a minute)");
-        j.update(&ApiJob { state: Some("error".into()), error: Some("Cancelled. Nothing was changed.".into()), ..Default::default() }, 1330.0);
+        j.update(
+            &ApiJob {
+                state: Some("error".into()),
+                error: Some("Cancelled. Nothing was changed.".into()),
+                ..Default::default()
+            },
+            1330.0,
+        );
         assert_eq!(j.waiting, None);
         assert_eq!(j.detail(1330.0), "Topic. Nothing was changed.");
         assert_eq!(j.headline(), "Start fresh called off");
@@ -428,8 +496,25 @@ mod tests {
 
     #[test]
     fn queued_stop_waits_then_stops_or_keeps_running() {
-        let mut j = Job::new("s-0123456789ab", JobKind::Stop, Some("studio:x".into()), "Studio", "Studio", Some("Soap (2)".into()), None, 1000.0);
-        j.update(&ApiJob { state: Some("queued".into()), step: Some("waiting".into()), note: Some("Claude is replying".into()), ..Default::default() }, 1001.0);
+        let mut j = Job::new(
+            "s-0123456789ab",
+            JobKind::Stop,
+            Some("studio:x".into()),
+            "Studio",
+            "Studio",
+            Some("Soap (2)".into()),
+            None,
+            1000.0,
+        );
+        j.update(
+            &ApiJob {
+                state: Some("queued".into()),
+                step: Some("waiting".into()),
+                note: Some("Claude is replying".into()),
+                ..Default::default()
+            },
+            1001.0,
+        );
         assert_eq!(j.headline(), "Stops when its work is done");
         assert_eq!(j.state_word(), "Stops after this work");
         let mut kept = j.clone();
@@ -443,11 +528,29 @@ mod tests {
 
     #[test]
     fn fresh_job_walks_its_steps() {
-        let mut j = Job::new("s-0123456789ab", JobKind::Fresh, Some("studio:x".into()), "Studio", "Studio", Some("Topic".into()), Some("Topic (fresh)".into()), 1000.0);
+        let mut j = Job::new(
+            "s-0123456789ab",
+            JobKind::Fresh,
+            Some("studio:x".into()),
+            "Studio",
+            "Studio",
+            Some("Topic".into()),
+            Some("Topic (fresh)".into()),
+            1000.0,
+        );
         assert_eq!(j.detail(1001.0), "Writing the handoff (about a minute)");
         j.update(&ApiJob { state: Some("running".into()), ..Default::default() }, 1060.0);
         assert_eq!(j.detail(1060.0), "Starting the new chat");
-        j.update(&ApiJob { state: Some("done".into()), name: Some("Oct 11 3:40p Topic (fresh)".into()), sid: Some("y".into()), machine: Some("studio".into()), ..Default::default() }, 1090.0);
+        j.update(
+            &ApiJob {
+                state: Some("done".into()),
+                name: Some("Oct 11 3:40p Topic (fresh)".into()),
+                sid: Some("y".into()),
+                machine: Some("studio".into()),
+                ..Default::default()
+            },
+            1090.0,
+        );
         assert_eq!(j.headline(), "The new chat is ready");
         assert_eq!(j.detail(1090.0), "Topic, on Studio");
         assert_eq!(j.ended, Some(1090.0));
@@ -461,7 +564,10 @@ mod tests {
         assert_eq!(j.detail(2.0), "Starting on Laptop");
         j.update(&ApiJob { state: Some("running".into()), step: Some("retrying".into()), ..Default::default() }, 3.0);
         assert_eq!(j.detail(3.0), "Studio is not answering yet. Still trying.");
-        j.update(&ApiJob { state: Some("error".into()), error: Some("Laptop is offline".into()), ..Default::default() }, 4.0);
+        j.update(
+            &ApiJob { state: Some("error".into()), error: Some("Laptop is offline".into()), ..Default::default() },
+            4.0,
+        );
         assert_eq!(j.headline(), "Continue elsewhere did not finish");
         assert_eq!(j.detail(4.0), "Laptop is offline");
     }
@@ -471,7 +577,16 @@ mod tests {
         let mut j = Job::new("s-2", JobKind::Auto, None, AUTO, AUTO, None, Some("Topic".into()), 0.0);
         assert_eq!(j.detail(1.0), "Claude picks the machine");
         assert_eq!(j.pick(), Some(("Auto".into(), "Claude is reading what each machine can do.".into())));
-        j.update(&ApiJob { state: Some("queued".into()), step: Some("choosing".into()), machine: Some("auto".into()), label: Some("auto".into()), ..Default::default() }, 2.0);
+        j.update(
+            &ApiJob {
+                state: Some("queued".into()),
+                step: Some("choosing".into()),
+                machine: Some("auto".into()),
+                label: Some("auto".into()),
+                ..Default::default()
+            },
+            2.0,
+        );
         assert_eq!(j.label, AUTO);
         j.update(
             &ApiJob {
@@ -490,7 +605,17 @@ mod tests {
         j.update(&ApiJob { state: Some("running".into()), by: Some("rules".into()), ..Default::default() }, 4.0);
         assert_eq!(j.detail(4.0), "Naming and starting it");
         assert_eq!(j.pick().unwrap().0, "Picked by the rules");
-        j.update(&ApiJob { state: Some("done".into()), name: Some("Topic".into()), sid: Some("y".into()), machine: Some("laptop".into()), label: Some("Laptop".into()), ..Default::default() }, 5.0);
+        j.update(
+            &ApiJob {
+                state: Some("done".into()),
+                name: Some("Topic".into()),
+                sid: Some("y".into()),
+                machine: Some("laptop".into()),
+                label: Some("Laptop".into()),
+                ..Default::default()
+            },
+            5.0,
+        );
         assert_eq!(j.detail(5.0), "Topic, on Laptop");
     }
 }

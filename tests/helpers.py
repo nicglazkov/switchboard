@@ -13,6 +13,10 @@ def fresh_sb(tmp):
     sb.spawn_ask = lambda *a: None  # tests never start a real Haiku pass; test_ask swaps in its own
     return sb
 
+def sb_options(sb, **on):
+    """Turn opt-in settings on (or off) on this agent, as the server's poll would (server/options.py)."""
+    sb.remember_identity({'options': dict({k: False for k in sb.OPTION_KEYS}, **on)})
+
 def entry(kind, ts, **kw):
     d = {'type': kind, 'timestamp': ts, 'sessionId': 'S1'}
     d.update(kw)

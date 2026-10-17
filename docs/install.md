@@ -76,8 +76,8 @@ Setup runs at the end of the installer. Run it again any time with `switchboard 
      a key that can only run the helper (no shell). Then you type `user@host`. The machine needs an ssh server
      running: on a Mac, turn on Remote Login (System Settings, General, Sharing).
 3. **Each machine's Claude folder.** This is where new sessions start and where folders are picked from. Setup
-   lets you browse the machine's folders and suggests `~/Desktop/Claude` when it exists. You can change it later
-   in Settings, Machines.
+   lets you browse the machine's folders, starting from its home folder. You can change it later in Settings,
+   Machines.
 
 Setup also has options for scripts. Run `switchboard setup --help` to see them all:
 

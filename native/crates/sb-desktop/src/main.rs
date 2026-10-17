@@ -6,39 +6,40 @@
 mod about;
 mod archive;
 mod askcard;
+mod assets;
 mod browser;
 mod chrome;
+mod claude_app;
+mod clean;
+mod detached;
+mod files;
 mod firstrun;
 mod flagsui;
-mod history;
-mod lanes;
-mod place;
-mod rename;
-mod stop;
-mod clean;
-mod notices;
-mod files;
 mod frame;
-mod assets;
-mod claude_app;
+mod history;
 mod inspector;
+mod lanes;
 mod library;
 mod link;
+mod logs;
 mod menu;
+mod notices;
 mod palette;
 mod panics;
 mod perf;
+mod place;
+mod rename;
 mod settings;
 mod sheet;
-mod tabgroups;
 mod state;
+mod stop;
+mod tabgroups;
 mod term;
 mod theme;
 mod ui;
 mod update;
 mod usage;
 mod view;
-mod detached;
 mod wake;
 
 use gpui::{App, Menu, MenuItem, WindowAppearance};
@@ -56,6 +57,14 @@ fn main() {
         println!("Switchboard {}", sb_core::version());
         return;
     }
+    logs::install();
+    log::info!("Switchboard {} starting", sb_core::version());
+    // A deliberate crash, to check that a build's crash file and symbols match (docs/building.md).
+    if std::env::var_os("SB_PANIC_TEST").is_some() {
+        panic!("SB_PANIC_TEST is set: a test crash");
+    }
+    // The first start after an update: count it, or put the previous version back if this one failed before.
+    update::at_launch();
     #[cfg(target_os = "windows")]
     update::sweep_old();
     gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
@@ -64,7 +73,10 @@ fn main() {
 
         let app = AppState::init(cx);
         // The theme before the first window, so the first frame is already the right one.
-        let mode = std::env::var("SB_THEME").ok().map(|v| Mode::parse(Some(v.as_str()))).unwrap_or_else(|| Mode::parse(app.read(cx).settings.theme.as_deref()));
+        let mode = std::env::var("SB_THEME")
+            .ok()
+            .map(|v| Mode::parse(Some(v.as_str())))
+            .unwrap_or_else(|| Mode::parse(app.read(cx).settings.theme.as_deref()));
         let dark = match mode {
             Mode::Dark => true,
             Mode::Light => false,

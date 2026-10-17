@@ -22,10 +22,14 @@ text_light = "#1B1C1F"
 text_dark = "#ECECEE"
 
 [dmg]
+# The disk image's Finder window (points). The background art is drawn to this size by
+# native/scripts/make-installer-art.sh, so change both together (the script reads these).
 window_width = 660
-window_height = 420
-icon_size = 128
-app_x = 180
-app_y = 210
-applications_x = 480
-applications_y = 210
+window_height = 460
+icon_size = 112
+app_x = 170
+app_y = 196
+applications_x = 490
+applications_y = 196
+installer_x = 330
+installer_y = 346

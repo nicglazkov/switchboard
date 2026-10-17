@@ -100,7 +100,11 @@ fn one_line(s: &str) -> String {
 
 fn cap(s: &str, max: usize) -> String {
     let t = one_line(s);
-    if t.chars().count() <= max { t } else { format!("{}...", t.chars().take(max.saturating_sub(3)).collect::<String>().trim_end()) }
+    if t.chars().count() <= max {
+        t
+    } else {
+        format!("{}...", t.chars().take(max.saturating_sub(3)).collect::<String>().trim_end())
+    }
 }
 
 fn text(v: Option<&str>, max: usize) -> Option<String> {
@@ -187,11 +191,14 @@ impl Ask {
                 }
             }
             Some("fix") => {
-                if let Some(f) = a.fix.as_ref().filter(|f| f.action.as_deref().is_some_and(|x| FIXES.contains(&x.trim()))) {
+                if let Some(f) =
+                    a.fix.as_ref().filter(|f| f.action.as_deref().is_some_and(|x| FIXES.contains(&x.trim())))
+                {
                     k.kind = AskKind::Fix;
                     k.fix = Some(AskFix {
                         action: f.action.clone().unwrap_or_default().trim().to_string(),
-                        label: text(f.label.as_deref(), LABEL_MAX).unwrap_or_else(|| "Restart this chat with Chrome".into()),
+                        label: text(f.label.as_deref(), LABEL_MAX)
+                            .unwrap_or_else(|| "Restart this chat with Chrome".into()),
                         alt_reply: text(f.alt_reply.as_deref(), REPLY_MAX),
                     });
                 }
@@ -216,7 +223,11 @@ impl Ask {
         let n = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
         match self.kind {
             AskKind::Choose if self.assumptions.is_empty() => Some(n(self.options.len(), "option", "options")),
-            AskKind::Choose => Some(format!("{} + {}", n(self.options.len(), "option", "options"), n(self.assumptions.len(), "assumption", "assumptions"))),
+            AskKind::Choose => Some(format!(
+                "{} + {}",
+                n(self.options.len(), "option", "options"),
+                n(self.assumptions.len(), "assumption", "assumptions")
+            )),
             AskKind::Questions => Some(format!("Claude asked {}", n(self.questions.len(), "thing", "things"))),
             AskKind::Task => Some(n(self.steps.len(), "step", "steps")),
             AskKind::Fix | AskKind::Open => None,
@@ -228,7 +239,9 @@ impl Ask {
     pub fn quick(&self) -> (String, Quick) {
         match self.kind {
             AskKind::Choose if self.assumptions.is_empty() => match self.options.iter().position(|o| o.recommended) {
-                Some(i) => (self.options[i].label.clone(), Quick::Send(compose_choose(self, i, &[], "").unwrap_or_default())),
+                Some(i) => {
+                    (self.options[i].label.clone(), Quick::Send(compose_choose(self, i, &[], "").unwrap_or_default()))
+                }
                 None => ("Answer...".into(), Quick::Answer),
             },
             AskKind::Task => ("Done".into(), Quick::Send(compose_task(self))),
@@ -248,7 +261,13 @@ pub fn compose_choose(a: &Ask, pick: usize, ticked: &[bool], note: &str) -> Opti
     let o = a.options.get(pick)?;
     let mut m = o.reply.clone();
     if !a.assumptions.is_empty() {
-        let wrong: Vec<&str> = a.assumptions.iter().enumerate().filter(|(i, _)| !ticked.get(*i).copied().unwrap_or(true)).map(|(_, s)| no_dot(s)).collect();
+        let wrong: Vec<&str> = a
+            .assumptions
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| !ticked.get(*i).copied().unwrap_or(true))
+            .map(|(_, s)| no_dot(s))
+            .collect();
         if wrong.is_empty() {
             m.push_str(" Your assumptions are right.");
         } else {
@@ -293,7 +312,8 @@ pub fn questions_ready(a: &Ask, picks: &[Vec<usize>], typed: &[String]) -> bool 
 
 /// "1) No  2) Dutch oven, Cast iron  3) Yes, that's fine". None until every question is answered.
 pub fn compose_questions(a: &Ask, picks: &[Vec<usize>], typed: &[String]) -> Option<String> {
-    let parts: Option<Vec<String>> = answers(a, picks, typed).into_iter().enumerate().map(|(i, x)| x.map(|x| format!("{}) {x}", i + 1))).collect();
+    let parts: Option<Vec<String>> =
+        answers(a, picks, typed).into_iter().enumerate().map(|(i, x)| x.map(|x| format!("{}) {x}", i + 1))).collect();
     parts.filter(|p| !p.is_empty()).map(|p| p.join("  "))
 }
 
@@ -322,25 +342,21 @@ pub mod tests {
 
     fn choose() -> Ask {
         Ask::from_api(
-            &api(
-                r#"{"kind": "choose", "summary": "Pick option 1 or 2", "options": [
+            &api(r#"{"kind": "choose", "summary": "Pick option 1 or 2", "options": [
                     {"label": "Option 1: new Builder window", "reply": "Option 1.", "recommended": true},
                     {"label": "Option 2: grow the Vibes editor", "reply": "Option 2."}],
                   "assumptions": ["OR within a field, AND across fields", "Songs added by search have no tags.", "Saving again only adds songs"],
-                  "source": "haiku", "for": 1791782309.5}"#,
-            ),
+                  "source": "haiku", "for": 1791782309.5}"#),
             None,
         )
     }
 
     fn questions() -> Ask {
         Ask::from_api(
-            &api(
-                r#"{"kind": "questions", "summary": "Answer 3 questions", "questions": [
+            &api(r#"{"kind": "questions", "summary": "Answer 3 questions", "questions": [
                     {"q": "Are you a Cook Well member?", "options": ["Yes", "No"], "about_you": true, "recommended": 0},
                     {"q": "What pots and pans do you have?", "options": ["Dutch oven", "Big stockpot", "Sheet pans", "Cast iron"], "multi": true, "about_you": true},
-                    {"q": "OK to braise raw pork or beef the day you buy it?", "options": ["Yes, that's fine", "No, buy it a day ahead"], "recommended": 0}]}"#,
-            ),
+                    {"q": "OK to braise raw pork or beef the day you buy it?", "options": ["Yes, that's fine", "No, buy it a day ahead"], "recommended": 0}]}"#),
             None,
         )
     }
@@ -369,7 +385,10 @@ pub mod tests {
 
     #[test]
     fn choose_without_assumptions_says_nothing_about_them() {
-        let a = Ask::from_api(&api(r#"{"kind": "choose", "options": [{"label": "Ship it"}, {"label": "Wait", "recommended": true}]}"#), Some("Ship or wait?"));
+        let a = Ask::from_api(
+            &api(r#"{"kind": "choose", "options": [{"label": "Ship it"}, {"label": "Wait", "recommended": true}]}"#),
+            Some("Ship or wait?"),
+        );
         assert_eq!(a.summary, "Ship or wait?");
         assert_eq!(compose_choose(&a, 0, &[], "now").unwrap(), "Ship it now");
         assert_eq!(a.quick(), ("Wait".to_string(), Quick::Send("Wait".into())));
@@ -389,24 +408,40 @@ pub mod tests {
         assert_eq!(compose_questions(&a, &a.default_answers(), &none), None);
         let picks = vec![vec![1], vec![3, 0], vec![0]];
         assert!(questions_ready(&a, &picks, &none));
-        assert_eq!(compose_questions(&a, &picks, &none).unwrap(), "1) No  2) Dutch oven, Cast iron  3) Yes, that's fine");
+        assert_eq!(
+            compose_questions(&a, &picks, &none).unwrap(),
+            "1) No  2) Dutch oven, Cast iron  3) Yes, that's fine"
+        );
         // typed answers count, and join the chips
         let typed = vec!["Not yet".to_string(), " a wok ".to_string(), String::new()];
-        assert_eq!(compose_questions(&a, &[vec![], vec![2], vec![1]], &typed).unwrap(), "1) Not yet  2) Sheet pans, a wok  3) No, buy it a day ahead");
+        assert_eq!(
+            compose_questions(&a, &[vec![], vec![2], vec![1]], &typed).unwrap(),
+            "1) Not yet  2) Sheet pans, a wok  3) No, buy it a day ahead"
+        );
         assert_eq!(a.caption().unwrap(), "Claude asked 3 things");
         assert_eq!(a.quick().1, Quick::Answer);
     }
 
     #[test]
     fn task_done_and_fix_alt() {
-        let a = Ask::from_api(&api(r#"{"kind": "task", "steps": ["Plug it in", " "], "done_reply": "root.pem is on the Kitchen remodel."}"#), Some("Load root.pem"));
+        let a = Ask::from_api(
+            &api(
+                r#"{"kind": "task", "steps": ["Plug it in", " "], "done_reply": "root.pem is on the Kitchen remodel."}"#,
+            ),
+            Some("Load root.pem"),
+        );
         assert_eq!(a.steps, vec!["Plug it in"]);
         assert_eq!(compose_task(&a), "root.pem is on the Kitchen remodel.");
         assert_eq!(a.quick(), ("Done".to_string(), Quick::Send("root.pem is on the Kitchen remodel.".into())));
         let a = Ask::from_api(&api(r#"{"kind": "task", "steps": ["x"]}"#), None);
         assert_eq!(compose_task(&a), "Done.");
 
-        let f = Ask::from_api(&api(r#"{"kind": "fix", "fix": {"action": "relaunch_chrome", "label": "Restart this chat with Chrome", "alt_reply": "Chrome is open now. Try again."}}"#), None);
+        let f = Ask::from_api(
+            &api(
+                r#"{"kind": "fix", "fix": {"action": "relaunch_chrome", "label": "Restart this chat with Chrome", "alt_reply": "Chrome is open now. Try again."}}"#,
+            ),
+            None,
+        );
         assert_eq!(f.kind, AskKind::Fix);
         assert_eq!(compose_fix_alt(&f).unwrap(), "Chrome is open now. Try again.");
         assert_eq!(f.quick(), ("Restart this chat with Chrome".to_string(), Quick::Fix));

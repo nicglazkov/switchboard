@@ -45,9 +45,7 @@ pub fn encode(key: &str, mods: Mods, app_cursor: bool) -> Option<Vec<u8>> {
         }
     };
     // Tilde keys: CSI n ~, CSI n;m ~ with modifiers.
-    let tilde = |n: u8| -> Vec<u8> {
-        if m > 1 { csi(&format!("{n};{m}~")) } else { csi(&format!("{n}~")) }
-    };
+    let tilde = |n: u8| -> Vec<u8> { if m > 1 { csi(&format!("{n};{m}~")) } else { csi(&format!("{n}~")) } };
     let meta = |bytes: Vec<u8>| -> Vec<u8> {
         if mods.alt {
             let mut v = vec![ESC];
@@ -135,7 +133,9 @@ pub enum Edit {
 /// `alt_screen`: a full-screen program (vim, less) gets Home and End as the keys themselves.
 /// None: not one of these, so the usual encoding applies.
 pub fn edit_key(key: &str, mods: Mods, mac: bool, alt_screen: bool) -> Option<Edit> {
-    let only = |platform: bool, alt: bool, ctrl: bool| mods.platform == platform && mods.alt == alt && mods.ctrl == ctrl && !mods.shift;
+    let only = |platform: bool, alt: bool, ctrl: bool| {
+        mods.platform == platform && mods.alt == alt && mods.ctrl == ctrl && !mods.shift
+    };
     let send = |b: &[u8]| Some(Edit::Send(b.to_vec()));
     if mac {
         if only(true, false, false) {

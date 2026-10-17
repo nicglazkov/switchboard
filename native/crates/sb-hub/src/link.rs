@@ -194,7 +194,10 @@ impl NodeTerm {
                 Ok(Ok(())) => {}
                 Ok(Err(_)) => return false,
                 Err(_) => {
-                    crate::server::log(format!("node {}: terminal {} input stuck, closing it", self.link.name, self.ch));
+                    crate::server::log(format!(
+                        "node {}: terminal {} input stuck, closing it",
+                        self.link.name, self.ch
+                    ));
                     self.link.end_chan(self.ch, None);
                     return false;
                 }
@@ -204,7 +207,9 @@ impl NodeTerm {
     }
 
     pub fn write(&self, bytes: Vec<u8>) {
-        if let Err(mpsc::error::TrySendError::Full(_)) = self.link.tx.try_send(Message::Binary(link_proto::frame(self.ch, &bytes).into())) {
+        if let Err(mpsc::error::TrySendError::Full(_)) =
+            self.link.tx.try_send(Message::Binary(link_proto::frame(self.ch, &bytes).into()))
+        {
             // typed faster than the machine takes it: end this terminal rather than grow the link's queue without limit
             crate::server::log(format!("node {}: terminal {} input fell behind, closing it", self.link.name, self.ch));
             self.link.end_chan(self.ch, None);

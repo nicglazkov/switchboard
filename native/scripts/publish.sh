@@ -12,8 +12,13 @@
 #   Switchboard-android.apk          (optional; android/dist/, else the copy on the publish
 #                                     host in ~/switchboard-android from android/scripts/build.sh)
 #
-# Runs nothing heavy here: it uploads, and the publish host hashes the files, renders the page and
-# swaps the folder into place (scripts/publish_render.py).
+# Here it makes latest.json (each build's size, SHA-256 and build id) and signs it with the update key, so the
+# key never leaves this computer. Then it uploads, and the publish host checks latest.json against the files,
+# renders the page and swaps the folder into place (scripts/publish_render.py).
+#
+# The update key: SB_UPDATE_KEY_FILE names the Ed25519 private key file (native/scripts/update-key.sh makes
+# one), from the environment or the hosts file. It is never in the repo. When SB_UPDATE_PUBKEY is set too, a key
+# that does not match it is refused. OpenSSL 3 signs; SB_OPENSSL names another openssl.
 #
 # Options:
 #   --dest DIR         remote folder, relative to the remote home (default switchboard-lab/app)
@@ -21,6 +26,7 @@
 #   --host USER@HOST   default SB_PUBLISH_HOST
 #   --allow-missing    publish whichever builds exist; the page marks the rest as not published
 #   --dist DIR         read the builds from DIR instead of native/dist (for testing)
+#   --unsigned         publish without signing; no app offers these builds as an update
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -30,6 +36,7 @@ H=""
 DEST=switchboard-lab/app
 BASE=""
 ALLOW=""
+UNSIGNED=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,7 +45,8 @@ while [ $# -gt 0 ]; do
     --host) H="${2:?--host needs user@host}"; shift 2 ;;
     --allow-missing) ALLOW=--allow-missing; shift ;;
     --dist) DIST="$(cd "${2:?--dist needs a folder}" && pwd)"; shift 2 ;;
-    -h|--help) sed -n '2,23p' "$0"; exit 0 ;;
+    --unsigned) UNSIGNED=1; shift ;;
+    -h|--help) sed -n '2,29p' "$0"; exit 0 ;;
     *) echo "publish: unknown option $1 (see --help)" >&2; exit 2 ;;
   esac
 done
@@ -64,10 +72,6 @@ for f in Switchboard-mac.zip Switchboard-windows.zip Switchboard-linux-x86_64; d
   if [ -f "$DIST/$f" ]; then FILES+=("$DIST/$f"); else MISSING+=("$f"); fi
 done
 [ -f "$DIST/Switchboard-linux-x86_64.tar.gz" ] && FILES+=("$DIST/Switchboard-linux-x86_64.tar.gz")
-# Each build's id (SB_BUILD, written next to it by the build scripts) goes into latest.json for "Restart to update".
-for b in "$DIST"/Switchboard-mac.zip.build "$DIST"/Switchboard-windows.zip.build "$DIST"/Switchboard-linux-x86_64.build; do
-  [ -f "$b" ] && FILES+=("$b")
-done
 APK="$NATIVE/../android/dist/Switchboard-android.apk"
 [ -f "$APK" ] && FILES+=("$APK")
 
@@ -81,6 +85,33 @@ if [ ${#MISSING[@]} -gt 0 ]; then
   echo "publish: skipping ${MISSING[*]}"
 fi
 [ ${#FILES[@]} -gt 0 ] || { echo "publish: nothing in $DIST to publish" >&2; exit 1; }
+
+# latest.json and its signature, made here. Each build's id (SB_BUILD, written next to it by the build scripts)
+# goes into it, and the apps offer only a newer version and build.
+KEY=""
+if [ -z "$UNSIGNED" ]; then
+  sb_host_opt SB_UPDATE_KEY_FILE || {
+    echo "publish: SB_UPDATE_KEY_FILE is not set, so the update list can't be signed." >&2
+    echo "  make a key with native/scripts/update-key.sh and point SB_UPDATE_KEY_FILE at it," >&2
+    echo "  or pass --unsigned to publish without updates (see docs/building.md)." >&2
+    exit 1
+  }
+  KEY=$SB_UPDATE_KEY_FILE
+  [ -f "$KEY" ] || { echo "publish: SB_UPDATE_KEY_FILE names $KEY, which is not there" >&2; exit 1; }
+fi
+SIGNED="$(mktemp -d)"
+trap 'rm -rf "${SIGNED:?}"' EXIT
+python3 "$HERE/publish_render.py" manifest --dist "$DIST" --version "$VERSION" --out "$SIGNED/latest.json"
+FILES+=("$SIGNED/latest.json")
+if [ -n "$KEY" ]; then
+  sb_host_opt SB_UPDATE_PUBKEY || true
+  python3 "$HERE/publish_render.py" sign --key "$KEY" --in "$SIGNED/latest.json" --out "$SIGNED/latest.json.sig" \
+    ${SB_UPDATE_PUBKEY:+--expect "$SB_UPDATE_PUBKEY"}
+  FILES+=("$SIGNED/latest.json.sig")
+  echo "publish: latest.json signed"
+else
+  echo "publish: --unsigned: no app will offer these builds as an update"
+fi
 
 echo "publish: Switchboard $VERSION to $H:~/$DEST"
 ssh "$H" "mkdir -p '$STAGE'"

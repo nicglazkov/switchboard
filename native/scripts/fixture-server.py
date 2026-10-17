@@ -23,6 +23,7 @@ import sb  # noqa: E402  (the agent's cost model, so every chat carries the cost
 # How old the plan numbers are, in seconds (SB_FIXTURE_LIMITS_AGE), to see the "as of" states.
 LIMITS_AGE = float(os.environ.get('SB_FIXTURE_LIMITS_AGE') or 60)
 import features  # noqa: E402  (tab groups: the server's own store and rules, kept in a scratch file)
+import options as options_mod  # noqa: E402  (the opt-in switches, as the server words them)
 
 
 class HttpError(Exception):
@@ -50,6 +51,10 @@ PREFS = {'chrome_machine': None, 'last': None, 'presets': [],
          'appearance': {'theme': 'system', 'term': {'scheme': 'converge-dark', 'size': None, 'size_phone': None,
                                                     'cursor': 'block', 'blink': True}}}
 VERSION = {'version': '0.1.0', 'build': 'fixture'}
+# The opt-in switches, worded by the server's own options.py. SB_FIXTURE_OPTIONS=on starts them all on (an install
+# that had them before); SB_FIXTURE_PUSH=1 has iPhone notifications set up.
+OPTIONS = {k: os.environ.get('SB_FIXTURE_OPTIONS') == 'on' for k in options_mod.KEYS}
+PUSH_READY = bool(os.environ.get('SB_FIXTURE_PUSH'))
 
 
 # SB_FIXTURE_LIBRARY=auto: a tool library from a server that knows Auto (tools say `auto` and `when`, chats say
@@ -419,7 +424,7 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/summary':
             return self._json(shifted()['summary'])
         if p == '/api/prefs':
-            return self._json(dict(PREFS, ok=True))
+            return self._json(dict(PREFS, ok=True, **options_mod.view(OPTIONS, PUSH_READY)))
         if p == '/api/machines':
             return self._json(machines())
         if p.startswith('/api/machines/'):
@@ -485,6 +490,8 @@ class H(BaseHTTPRequestHandler):
                 if k == 'appearance' and isinstance(v, dict):
                     PREFS['appearance']['theme'] = v.get('theme', PREFS['appearance']['theme'])
                     PREFS['appearance']['term'].update(v.get('term') or {})
+                elif k in options_mod.KEYS:
+                    OPTIONS[k] = v is True
                 else:
                     PREFS[k] = v
             return self._json(dict(PREFS, ok=True))

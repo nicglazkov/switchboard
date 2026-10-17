@@ -2,7 +2,10 @@
 //! it: the board's header already holds the window buttons (chrome.rs), the other windows get a slim title bar here,
 //! and every window gets edges to resize it by. A Mac or Windows window never draws any of this.
 
-use gpui::{AnyElement, Decorations, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, ResizeEdge, Styled, Tiling, Window, div, prelude::*, px};
+use gpui::{
+    AnyElement, Decorations, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, ResizeEdge,
+    Styled, Tiling, Window, div, prelude::*, px,
+};
 
 use crate::theme::Theme;
 use crate::ui;
@@ -32,41 +35,88 @@ pub fn edges(tiling: Tiling) -> Vec<AnyElement> {
     const C: f32 = 12.;
     use gpui::CursorStyle as Cur;
     let handle = |id: &'static str, edge: ResizeEdge, cursor: Cur| {
-        div()
-            .id(id)
-            .absolute()
-            .occlude()
-            .cursor(cursor)
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                cx.stop_propagation();
-                window.start_window_resize(edge);
-            })
+        div().id(id).absolute().occlude().cursor(cursor).on_mouse_down(MouseButton::Left, move |_, window, cx| {
+            cx.stop_propagation();
+            window.start_window_resize(edge);
+        })
     };
     let (t, l, r, b) = (!tiling.top, !tiling.left, !tiling.right, !tiling.bottom);
     let mut out = Vec::new();
     if t {
-        out.push(handle("rz-t", ResizeEdge::Top, Cur::ResizeUpDown).top_0().left(px(C)).right(px(C)).h(px(E)).into_any_element());
+        out.push(
+            handle("rz-t", ResizeEdge::Top, Cur::ResizeUpDown)
+                .top_0()
+                .left(px(C))
+                .right(px(C))
+                .h(px(E))
+                .into_any_element(),
+        );
     }
     if b {
-        out.push(handle("rz-b", ResizeEdge::Bottom, Cur::ResizeUpDown).bottom_0().left(px(C)).right(px(C)).h(px(E)).into_any_element());
+        out.push(
+            handle("rz-b", ResizeEdge::Bottom, Cur::ResizeUpDown)
+                .bottom_0()
+                .left(px(C))
+                .right(px(C))
+                .h(px(E))
+                .into_any_element(),
+        );
     }
     if l {
-        out.push(handle("rz-l", ResizeEdge::Left, Cur::ResizeLeftRight).left_0().top(px(C)).bottom(px(C)).w(px(E)).into_any_element());
+        out.push(
+            handle("rz-l", ResizeEdge::Left, Cur::ResizeLeftRight)
+                .left_0()
+                .top(px(C))
+                .bottom(px(C))
+                .w(px(E))
+                .into_any_element(),
+        );
     }
     if r {
-        out.push(handle("rz-r", ResizeEdge::Right, Cur::ResizeLeftRight).right_0().top(px(C)).bottom(px(C)).w(px(E)).into_any_element());
+        out.push(
+            handle("rz-r", ResizeEdge::Right, Cur::ResizeLeftRight)
+                .right_0()
+                .top(px(C))
+                .bottom(px(C))
+                .w(px(E))
+                .into_any_element(),
+        );
     }
     if t && l {
-        out.push(handle("rz-tl", ResizeEdge::TopLeft, Cur::ResizeUpLeftDownRight).top_0().left_0().size(px(C)).into_any_element());
+        out.push(
+            handle("rz-tl", ResizeEdge::TopLeft, Cur::ResizeUpLeftDownRight)
+                .top_0()
+                .left_0()
+                .size(px(C))
+                .into_any_element(),
+        );
     }
     if t && r {
-        out.push(handle("rz-tr", ResizeEdge::TopRight, Cur::ResizeUpRightDownLeft).top_0().right_0().size(px(C)).into_any_element());
+        out.push(
+            handle("rz-tr", ResizeEdge::TopRight, Cur::ResizeUpRightDownLeft)
+                .top_0()
+                .right_0()
+                .size(px(C))
+                .into_any_element(),
+        );
     }
     if b && l {
-        out.push(handle("rz-bl", ResizeEdge::BottomLeft, Cur::ResizeUpRightDownLeft).bottom_0().left_0().size(px(C)).into_any_element());
+        out.push(
+            handle("rz-bl", ResizeEdge::BottomLeft, Cur::ResizeUpRightDownLeft)
+                .bottom_0()
+                .left_0()
+                .size(px(C))
+                .into_any_element(),
+        );
     }
     if b && r {
-        out.push(handle("rz-br", ResizeEdge::BottomRight, Cur::ResizeUpLeftDownRight).bottom_0().right_0().size(px(C)).into_any_element());
+        out.push(
+            handle("rz-br", ResizeEdge::BottomRight, Cur::ResizeUpLeftDownRight)
+                .bottom_0()
+                .right_0()
+                .size(px(C))
+                .into_any_element(),
+        );
     }
     out
 }
@@ -79,7 +129,10 @@ pub fn buttons(t: &Theme, maxed: bool) -> impl IntoElement {
         .items_center()
         .gap(px(2.))
         .child(ui::icon_btn(t, "w-min", "min", 28.).on_click(|_, window, _| window.minimize_window()))
-        .child(ui::icon_btn(t, "w-max", if maxed { "restore" } else { "max" }, 28.).on_click(|_, window, _| window.zoom_window()))
+        .child(
+            ui::icon_btn(t, "w-max", if maxed { "restore" } else { "max" }, 28.)
+                .on_click(|_, window, _| window.zoom_window()),
+        )
         .child(ui::icon_btn(t, "w-close", "close", 28.).on_click(|_, window, _| window.remove_window()))
 }
 

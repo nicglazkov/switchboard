@@ -1,7 +1,10 @@
 //! The command palette (Cmd-K): chats and commands in one list. Typing filters both; the arrows move, Enter runs.
 //! Cmd-T opens it with chats only, and Enter opens the chat in a terminal tab.
 
-use gpui::{AnyElement, App, ClickEvent, InteractiveElement, IntoElement, MouseButton, ParentElement, StatefulInteractiveElement, Styled, Window, div, prelude::*, px, relative};
+use gpui::{
+    AnyElement, App, ClickEvent, InteractiveElement, IntoElement, MouseButton, ParentElement,
+    StatefulInteractiveElement, Styled, Window, div, prelude::*, px, relative,
+};
 use sb_core::actions::{self as acts, ActionId};
 use sb_core::{Lamp, search};
 
@@ -10,6 +13,7 @@ use crate::theme::Theme;
 use crate::ui;
 use crate::view::{BoardView, Ctx};
 
+#[derive(Clone)]
 pub enum PalIcon {
     Icon(String),
     Machine(String),
@@ -39,6 +43,7 @@ pub enum PalRun {
     Pair,
 }
 
+#[derive(Clone)]
 pub struct PalRow {
     pub title: String,
     pub sub: Option<String>,
@@ -50,6 +55,7 @@ pub struct PalRow {
     pub group: Option<sb_core::groups::GroupColor>,
 }
 
+#[derive(Clone)]
 pub enum PalItem {
     Head(&'static str),
     Row(PalRow),
@@ -77,17 +83,55 @@ impl BoardView {
         let snap = &app.snap;
         let now = crate::state::AppState::now();
         let mut out = vec![row("New session", None, PalIcon::Icon("plus".into()), Some("N"), PalRun::New(None))];
-        out.push(row("Open a chat in a terminal", None, PalIcon::Icon("term".into()), Some(&ui::mod_cap("T")), PalRun::Chats));
-        out.push(row("Browse every session", Some("Search, threads, summaries".into()), PalIcon::Icon("search".into()), Some(&ui::mod_cap("B")), PalRun::Browse));
-        out.push(row("Files", Some("The Claude folder on each machine".into()), PalIcon::Icon("folder".into()), None, PalRun::Files));
-        out.push(row("Add a machine", Some("A code and one line to paste".into()), PalIcon::Icon("plus".into()), None, PalRun::Pair));
+        out.push(row(
+            "Open a chat in a terminal",
+            None,
+            PalIcon::Icon("term".into()),
+            Some(&ui::mod_cap("T")),
+            PalRun::Chats,
+        ));
+        out.push(row(
+            "Browse every session",
+            Some("Search, threads, summaries".into()),
+            PalIcon::Icon("search".into()),
+            Some(&ui::mod_cap("B")),
+            PalRun::Browse,
+        ));
+        out.push(row(
+            "Files",
+            Some("The Claude folder on each machine".into()),
+            PalIcon::Icon("folder".into()),
+            None,
+            PalRun::Files,
+        ));
+        out.push(row(
+            "Add a machine",
+            Some("A code and one line to paste".into()),
+            PalIcon::Icon("plus".into()),
+            None,
+            PalRun::Pair,
+        ));
         for m in snap.machines.iter().filter(|m| !m.is_offline()) {
-            out.push(row(format!("New session on {}", m.label), None, PalIcon::Machine(m.name.clone()), None, PalRun::New(Some(m.name.clone()))));
+            out.push(row(
+                format!("New session on {}", m.label),
+                None,
+                PalIcon::Machine(m.name.clone()),
+                None,
+                PalRun::New(Some(m.name.clone())),
+            ));
         }
         // The terminal in front: Rename chat names the chat it shows (the selected chat's actions follow).
         let in_front = self.tab.checked_sub(1).and_then(|i| self.tabs.get(i)).and_then(|t| t.read(cx).chat_name(cx));
-        if let Some((k, raw)) = in_front.filter(|(k, _)| self.sel.as_deref() != Some(k.as_str()) && snap.can_rename(k.split(':').next().unwrap_or(""))) {
-            out.push(row("Rename chat", Some(sb_core::names::split(&raw).0), PalIcon::Icon("pencil".into()), None, PalRun::Act(ActionId::Rename, k)));
+        if let Some((k, raw)) = in_front.filter(|(k, _)| {
+            self.sel.as_deref() != Some(k.as_str()) && snap.can_rename(k.split(':').next().unwrap_or(""))
+        }) {
+            out.push(row(
+                "Rename chat",
+                Some(sb_core::names::split(&raw).0),
+                PalIcon::Icon("pencil".into()),
+                None,
+                PalRun::Act(ActionId::Rename, k),
+            ));
         }
         if let Some(s) = self.sel.as_deref().and_then(|k| snap.session(k)) {
             for a in acts::for_session(s, snap, now) {
@@ -111,7 +155,13 @@ impl BoardView {
                     Some(k @ ("F" | "R" | "C")) => Some(k),
                     _ => None,
                 };
-                out.push(row(a.title.clone(), Some(s.topic.clone()), PalIcon::Icon(a.icon.clone()), cap, PalRun::Act(a.id, s.key.clone())));
+                out.push(row(
+                    a.title.clone(),
+                    Some(s.topic.clone()),
+                    PalIcon::Icon(a.icon.clone()),
+                    cap,
+                    PalRun::Act(a.id, s.key.clone()),
+                ));
             }
         }
         for m in snap.machines.iter().filter(|m| self.solo.as_deref().is_none_or(|o| o == m.name)) {
@@ -124,11 +174,29 @@ impl BoardView {
                 PalRun::Shut(m.name.clone(), !shut),
             ));
             if self.solo.is_none() {
-                out.push(row(format!("Open the {} lane in a new window", m.label), None, PalIcon::Icon("window".into()), None, PalRun::Tear(m.name.clone())));
+                out.push(row(
+                    format!("Open the {} lane in a new window", m.label),
+                    None,
+                    PalIcon::Icon("window".into()),
+                    None,
+                    PalRun::Tear(m.name.clone()),
+                ));
             }
         }
-        out.push(row("Show older chats", Some(app.older().len().to_string()), PalIcon::Icon("archive".into()), None, PalRun::Archive(ArcTab::Older)));
-        out.push(row("Show replaced chats", Some(app.replaced().len().to_string()), PalIcon::Icon("archive".into()), None, PalRun::Archive(ArcTab::Replaced)));
+        out.push(row(
+            "Show older chats",
+            Some(app.older().len().to_string()),
+            PalIcon::Icon("archive".into()),
+            None,
+            PalRun::Archive(ArcTab::Older),
+        ));
+        out.push(row(
+            "Show replaced chats",
+            Some(app.replaced().len().to_string()),
+            PalIcon::Icon("archive".into()),
+            None,
+            PalRun::Archive(ArcTab::Replaced),
+        ));
         let dark = Theme::get(cx).dark;
         out.push(row(
             if dark { "Switch to light" } else { "Switch to dark" },
@@ -161,7 +229,15 @@ impl BoardView {
             .filter_map(|s| {
                 let chips: Vec<String> = s.chips(true).into_iter().map(|c| c.long).collect();
                 let group = app.snap.group_of(s).map(|g| g.name.as_str()).unwrap_or("");
-                let text = format!("{} {} {} {} {} {} {group}", s.topic, s.machine_label, s.project, s.folder, s.tag.as_deref().unwrap_or(""), chips.join(" "));
+                let text = format!(
+                    "{} {} {} {} {} {} {group}",
+                    s.topic,
+                    s.machine_label,
+                    s.project,
+                    s.folder,
+                    s.tag.as_deref().unwrap_or(""),
+                    chips.join(" ")
+                );
                 let sc = search::score(&text, q);
                 (sc > 0).then_some((sc, s))
             })
@@ -198,7 +274,13 @@ impl BoardView {
                         if s.stale { PalRun::Older(s.key.clone()) } else { PalRun::Select(s.key.clone()) },
                     )
                 };
-                let mut r = row(s.topic.clone(), Some(sub), PalIcon::Lamp(s.lamp(now), s.stale || app.live_of(s, now, None).stale.is_some()), None, run);
+                let mut r = row(
+                    s.topic.clone(),
+                    Some(sub),
+                    PalIcon::Lamp(s.lamp(now), s.stale || app.live_of(s, now, None).stale.is_some()),
+                    None,
+                    run,
+                );
                 r.score = sc;
                 r.group = app.snap.group_of(s).map(|g| g.color);
                 r
@@ -226,7 +308,7 @@ impl BoardView {
             })
             .collect();
         if !q.is_empty() {
-            cmds.sort_by(|a, b| b.score.cmp(&a.score));
+            cmds.sort_by_key(|c| std::cmp::Reverse(c.score));
         }
         let chats = self.chat_rows(&q, false, cx);
         let top_cmd = cmds.first().map(|c| c.score).unwrap_or(0);
@@ -263,7 +345,7 @@ impl BoardView {
         for (ci, it) in items.iter().enumerate() {
             if let PalItem::Row(_) = it {
                 if seen == self.pal_idx {
-                    self.pal_scroll.scroll_to_item(ci);
+                    self.pal_scroll.scroll_to_item(ci, gpui::ScrollStrategy::Nearest);
                     break;
                 }
                 seen += 1;
@@ -321,70 +403,59 @@ impl BoardView {
         let items = self.pal_items(cx);
         let q = self.pal.read(cx).value().trim().to_string();
         let pw = 600f32.min(w - 32.);
-        let mut ri = 0usize;
-        let mut list = div()
-            .id("pal-list")
-            .max_h(px(374f32.min(h - 220.).max(120.)))
-            .overflow_y_scroll()
-            .track_scroll(&self.pal_scroll)
-            .p(px(6.));
+        // Only the rows on screen are drawn: a uniform list (heads and rows are both 34 px), sized to its rows up to
+        // the cap, so a long chat list opens and scrolls as fast as a short one.
         let any = items.iter().any(|i| matches!(i, PalItem::Row(_)));
-        for it in &items {
-            match it {
-                PalItem::Head(name) => {
-                    list = list.child(div().h(px(26.)).flex().items_end().px(px(10.)).pb(px(6.)).child(ui::lbl(name, t.label)));
-                }
-                PalItem::Row(r) => {
-                    let i = ri;
-                    ri += 1;
-                    let on = i == self.pal_idx;
-                    let icon: AnyElement = match &r.icon {
-                        PalIcon::Icon(n) => ui::icon(n, 15., if on { t.ink2 } else { t.faint }).into_any_element(),
-                        PalIcon::Machine(m) => ui::machine_icon(m, 15., if on { t.ink2 } else { t.faint }).into_any_element(),
-                        PalIcon::Lamp(l, stale) => {
-                            let d = if *stale { div().size(px(8.)).rounded_full().border_1().border_color(t.lamp(*l)) } else { ui::lamp(&t, *l, 8.) };
-                            div().flex_none().w(px(15.)).flex().justify_center().child(d).into_any_element()
-                        }
-                    };
-                    list = list.child(
-                        div()
-                            .id(("pal-row", i))
-                            .h(px(34.))
-                            .px(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .rounded(px(ui::R_ITEM))
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .text_color(if on { t.ink } else { t.ink2 })
-                            .when(on, |d| d.bg(t.sel))
-                            .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
-                                if this.pal_idx != i {
-                                    this.pal_idx = i;
-                                    cx.notify();
-                                }
-                            }))
-                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.pal_run(i, window, cx)))
-                            .overflow_hidden()
-                            .child(icon)
-                            // one line each: the name keeps at least half the row, a long status ("Needs: ...") ends
-                            // in an ellipsis instead of pushing the name into a column of letters
-                            .child(div().flex_1().min_w(relative(0.5)).truncate().child(r.title.clone()))
-                            .when_some(r.group, |d, gc| d.child(div().flex_none().child(crate::tabgroups::group_dot(&t, gc, 7.))))
-                            .when_some(r.sub.clone(), |d, s| {
-                                d.child(div().flex_shrink(1.).min_w_0().max_w(relative(0.45)).pl(px(12.)).text_size(px(12.)).text_color(t.faint).truncate().child(s))
-                            })
-                            .when_some(r.key.clone(), |d, k| d.child(div().flex_none().ml(px(8.)).child(ui::kbd(&t, &k)))),
-                    );
-                }
-            }
-        }
-        if !any {
-            list = list.child(div().px(px(12.)).py(px(18.)).text_size(px(13.)).text_color(t.faint).child(format!("Nothing matches \"{q}\".")));
-        }
+        let max_h = 374f32.min(h - 220.).max(120.);
+        let list = if any {
+            let n = items.len();
+            let list_h = (n as f32 * PAL_ROW + 12.).min(max_h);
+            let items = std::rc::Rc::new(items);
+            let list = gpui::uniform_list(
+                "pal-list",
+                n,
+                cx.processor(move |this, range: std::ops::Range<usize>, _, cx| {
+                    let t = Theme::get(cx);
+                    let mut ri = items[..range.start].iter().filter(|i| matches!(i, PalItem::Row(_))).count();
+                    let mut out = Vec::with_capacity(range.len());
+                    for it in &items[range] {
+                        out.push(match it {
+                            PalItem::Head(name) => div()
+                                .w_full()
+                                .h(px(PAL_ROW))
+                                .flex()
+                                .items_end()
+                                .px(px(10.))
+                                .pb(px(6.))
+                                .child(ui::lbl(name, t.label))
+                                .into_any_element(),
+                            PalItem::Row(r) => {
+                                let i = ri;
+                                ri += 1;
+                                pal_row(&t, r, i, i == this.pal_idx, cx)
+                            }
+                        });
+                    }
+                    out
+                }),
+            )
+            .track_scroll(&self.pal_scroll)
+            .h(px(list_h))
+            .p(px(6.));
+            div().relative().child(list).child(ui::scrollbar(&self.pal_scroll)).into_any_element()
+        } else {
+            div()
+                .px(px(18.))
+                .py(px(24.))
+                .text_size(px(13.))
+                .text_color(t.faint)
+                .child(format!("Nothing matches \"{q}\"."))
+                .into_any_element()
+        };
         let cap = |k: &str| ui::kbd(&t, k);
-        let foot = |keys: Vec<&str>, text: &str| div().flex().items_center().gap(px(4.)).children(keys.into_iter().map(cap)).child(text.to_string());
+        let foot = |keys: Vec<&str>, text: &str| {
+            div().flex().items_center().gap(px(4.)).children(keys.into_iter().map(cap)).child(text.to_string())
+        };
         div()
             .absolute()
             .inset_0()
@@ -420,7 +491,16 @@ impl BoardView {
                             .border_b_1()
                             .border_color(t.rule)
                             .child(ui::icon("search", 16., t.faint))
-                            .child(div().flex_1().h_full().flex().items_center().text_size(px(15.)).text_color(t.ink).child(gpui_base::input::Input::new(&self.pal)))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .h_full()
+                                    .flex()
+                                    .items_center()
+                                    .text_size(px(15.))
+                                    .text_color(t.ink)
+                                    .child(gpui_base::input::Input::new(&self.pal)),
+                            )
                             .child(ui::kbd(&t, "esc")),
                     )
                     .child(list)
@@ -445,4 +525,64 @@ impl BoardView {
             )
             .into_any_element()
     }
+}
+
+/// Each palette line (a section head or a row) is this tall, so the list can draw only what is on screen.
+const PAL_ROW: f32 = 34.;
+
+/// One palette row: its mark, its name (and the status after it), and its shortcut.
+fn pal_row(t: &Theme, r: &PalRow, i: usize, on: bool, cx: &mut gpui::Context<BoardView>) -> AnyElement {
+    let icon: AnyElement = match &r.icon {
+        PalIcon::Icon(n) => ui::icon(n, 15., if on { t.ink2 } else { t.faint }).into_any_element(),
+        PalIcon::Machine(m) => ui::machine_icon(m, 15., if on { t.ink2 } else { t.faint }).into_any_element(),
+        PalIcon::Lamp(l, stale) => {
+            let d = if *stale {
+                div().size(px(8.)).rounded_full().border_1().border_color(t.lamp(*l))
+            } else {
+                ui::lamp(t, *l, 8.)
+            };
+            div().flex_none().w(px(15.)).flex().justify_center().child(d).into_any_element()
+        }
+    };
+    div()
+        .id(("pal-row", i))
+        .w_full()
+        .h(px(PAL_ROW))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .gap(px(10.))
+        .rounded(px(ui::R_ITEM))
+        .cursor_pointer()
+        .text_size(px(13.))
+        .text_color(if on { t.ink } else { t.ink2 })
+        .when(on, |d| d.bg(t.sel))
+        .on_mouse_move(cx.listener(move |this, _: &gpui::MouseMoveEvent, _, cx| {
+            if this.pal_idx != i {
+                this.pal_idx = i;
+                cx.notify();
+            }
+        }))
+        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| this.pal_run(i, window, cx)))
+        .overflow_hidden()
+        .child(icon)
+        // one line each: the name keeps at least half the row, a long status ("Needs: ...") ends in an ellipsis
+        // instead of pushing the name into a column of letters
+        .child(div().flex_1().min_w(relative(0.5)).truncate().child(r.title.clone()))
+        .when_some(r.group, |d, gc| d.child(div().flex_none().child(crate::tabgroups::group_dot(t, gc, 7.))))
+        .when_some(r.sub.clone(), |d, s| {
+            d.child(
+                div()
+                    .flex_shrink(1.)
+                    .min_w_0()
+                    .max_w(relative(0.45))
+                    .pl(px(12.))
+                    .text_size(px(12.))
+                    .text_color(t.faint)
+                    .truncate()
+                    .child(s),
+            )
+        })
+        .when_some(r.key.clone(), |d, k| d.child(div().flex_none().ml(px(8.)).child(ui::kbd(t, &k))))
+        .into_any_element()
 }

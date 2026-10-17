@@ -62,9 +62,12 @@ mod tests {
 
     #[test]
     fn reads_the_server_file() {
-        let f = parse(r#"{"machines":[{"name":"studio","label":"Studio","target":"me@10.0.0.11","os":"mac"},
+        let f = parse(
+            r#"{"machines":[{"name":"studio","label":"Studio","target":"me@10.0.0.11","os":"mac"},
             {"name":"tower","label":"Tower","target":"me@10.0.0.12","os":"windows"}],
-            "origins":["http://10.0.0.5:8130"]}"#).unwrap();
+            "origins":["http://10.0.0.5:8130"]}"#,
+        )
+        .unwrap();
         assert_eq!(f.machines.len(), 2);
         assert_eq!(f.machines[1].label(), "Tower");
         assert_eq!(f.origins, vec!["http://10.0.0.5:8130"]);
@@ -72,8 +75,11 @@ mod tests {
 
     #[test]
     fn bare_list_and_bad_rows() {
-        let f = parse(r#"[{"name":"studio","target":"me@10.0.0.11"},{"name":"x","target":"-oProxyCommand=sh"},
-            {"name":"Bad","target":"a@b"},{"name":"lab","target":"lab"}]"#).unwrap();
+        let f = parse(
+            r#"[{"name":"studio","target":"me@10.0.0.11"},{"name":"x","target":"-oProxyCommand=sh"},
+            {"name":"Bad","target":"a@b"},{"name":"lab","target":"lab"}]"#,
+        )
+        .unwrap();
         let names: Vec<_> = f.machines.iter().map(|m| m.name.as_str()).collect();
         assert_eq!(names, vec!["studio", "lab"]);
         assert_eq!(f.machines[0].label(), "studio");

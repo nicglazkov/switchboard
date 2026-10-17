@@ -280,6 +280,68 @@ pub struct ApiPrefs {
     /// Who writes Start fresh and Compact summaries: "opus" (the default) or "sonnet".
     #[serde(default)]
     pub summary_model: Option<String>,
+    /// The opt-in switches (server/options.py): features that send chat text to Claude, and changes to each
+    /// machine's own Claude setup. All off for a new server. Shown as the server words them.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub options: Vec<ApiOption>,
+    /// Whether iPhone notifications are set up on the server, and what that means.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub push: Option<ApiPush>,
+}
+
+impl ApiPrefs {
+    /// One opt-in switch by key (`ai_auto_machine`, ...), when the server knows it.
+    pub fn option(&self, key: &str) -> Option<&ApiOption> {
+        self.options.iter().find(|o| o.key == key)
+    }
+
+    /// The options of one kind ("ai" or "setup"), in the server's order.
+    pub fn options_of<'a>(&'a self, kind: &'a str) -> impl Iterator<Item = &'a ApiOption> + 'a {
+        self.options.iter().filter(move |o| o.kind == kind)
+    }
+
+    /// Flips one option here, as soon as it is clicked; the POST that saves it follows.
+    pub fn set_option(&mut self, key: &str, on: bool) {
+        if let Some(o) = self.options.iter_mut().find(|o| o.key == key) {
+            o.on = on;
+        }
+    }
+}
+
+/// The POST /api/prefs body that turns one opt-in switch on or off: `{"<key>": true|false}`.
+pub fn option_body(key: &str, on: bool) -> serde_json::Value {
+    let mut m = serde_json::Map::new();
+    m.insert(key.to_string(), serde_json::Value::Bool(on));
+    serde_json::Value::Object(m)
+}
+
+/// One opt-in switch: its key, its kind ("ai" sends chat text to Claude, "setup" changes each machine's Claude
+/// setup), its label, whether it is on, what it does when on, and what happens when it is off.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiOption {
+    pub key: String,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default)]
+    pub explain: String,
+    #[serde(default)]
+    pub off: String,
+}
+
+/// iPhone notifications: `ready` once the server has its APNs key, `explain` in words, and `setup`, the file to add
+/// while it is not ready.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiPush {
+    #[serde(default)]
+    pub ready: bool,
+    #[serde(default)]
+    pub explain: String,
+    #[serde(default)]
+    pub setup: Option<String>,
 }
 
 /// A New sheet setup: the last one used, or a preset.
@@ -1077,6 +1139,16 @@ pub struct ApiRoute {
     /// "claude" | "rules"
     #[serde(default)]
     pub by: Option<String>,
+    /// false when Claude picks are off (Settings, Let Claude pick for Auto), so the rules picked. Absent otherwise.
+    #[serde(default)]
+    pub ai: Option<bool>,
+}
+
+impl ApiRoute {
+    /// The rules picked because Claude picks are turned off, so the app can say where to turn them on.
+    pub fn ai_off(&self) -> bool {
+        self.ai == Some(false)
+    }
 }
 
 /// v2: the reply to the keep verb.
@@ -1098,7 +1170,9 @@ where
 {
     let v = serde_json::Value::deserialize(d)?;
     match v {
-        serde_json::Value::Array(items) => Ok(items.into_iter().filter_map(|x| serde_json::from_value(x).ok()).collect()),
+        serde_json::Value::Array(items) => {
+            Ok(items.into_iter().filter_map(|x| serde_json::from_value(x).ok()).collect())
+        }
         _ => Ok(Vec::new()),
     }
 }
@@ -1336,7 +1410,9 @@ impl ApiMcpServer {
     /// "npx -y @modelcontextprotocol/server-github", or the URL.
     pub fn line(&self) -> String {
         match (&self.command, &self.url) {
-            (Some(c), _) => std::iter::once(c.as_str()).chain(self.args.iter().map(|a| a.as_str())).collect::<Vec<_>>().join(" "),
+            (Some(c), _) => {
+                std::iter::once(c.as_str()).chain(self.args.iter().map(|a| a.as_str())).collect::<Vec<_>>().join(" ")
+            }
             (None, Some(u)) => u.clone(),
             _ => String::new(),
         }
@@ -1500,7 +1576,11 @@ impl ApiLibrary {
         let mcp = |t: &ApiTool| t.kinds.iter().any(|k| k == "mcp");
         let skills: Vec<&ApiTool> = self.tools.iter().filter(|t| !mcp(t)).collect();
         let in_auto = |t: &ApiTool| t.auto != Some(false);
-        (skills.iter().filter(|t| in_auto(t)).count(), skills.len(), self.tools.iter().filter(|t| mcp(t) && in_auto(t)).count())
+        (
+            skills.iter().filter(|t| in_auto(t)).count(),
+            skills.len(),
+            self.tools.iter().filter(|t| mcp(t) && in_auto(t)).count(),
+        )
     }
 
     /// The tool's state on `machine`, if the machine has said anything about it.
@@ -1696,7 +1776,8 @@ mod library_tests {
         assert_eq!(b.settings().hard().on, Some(true));
         assert!(b.status().blocking() && b.status().over_daily() && !b.status().lifted());
         // Odd types drop the field, not the snapshot; an older server has no budget.
-        let odd: ApiSessions = serde_json::from_str(r#"{"budget": {"settings": {"daily": "lots"}, "status": 3}}"#).unwrap();
+        let odd: ApiSessions =
+            serde_json::from_str(r#"{"budget": {"settings": {"daily": "lots"}, "status": 3}}"#).unwrap();
         assert_eq!(odd.budget.unwrap().settings().daily, None);
         assert!(serde_json::from_str::<ApiSessions>("{}").unwrap().budget.is_none());
     }
@@ -1744,5 +1825,75 @@ mod library_tests {
         assert!(null.tools.is_empty());
         let new: ApiSession = serde_json::from_str(r#"{"sid":"a","tools":["web-fetch","video-notes"]}"#).unwrap();
         assert_eq!(new.tools, vec!["web-fetch", "video-notes"]);
+    }
+}
+
+#[cfg(test)]
+mod options_tests {
+    use super::*;
+
+    /// The shape server/options.py view() returns, inside GET /api/prefs.
+    const PREFS: &str = r#"{"ok": true, "chrome_machine": null, "presets": [], "summary_model": "opus",
+      "options": [
+        {"key": "ai_ask_cards", "kind": "ai", "label": "Summarize waiting chats", "on": false,
+         "explain": "Uses your Claude plan to write a short summary of what a waiting chat is asking. The chat's last message is sent to Claude.",
+         "off": "When off, the card shows what the chat says it needs, as it said it."},
+        {"key": "ai_auto_machine", "kind": "ai", "label": "Let Claude pick for Auto", "on": true,
+         "explain": "Uses your Claude plan to pick the machine for a task sent to Auto.", "off": "When off, Auto picks by fixed rules."},
+        {"key": "setup_explore_agent", "kind": "setup", "label": "Explore agent on Sonnet", "on": false,
+         "explain": "Writes ~/.claude/agents/Explore.md on each machine.",
+         "off": "When off, Switchboard deletes the file only if it is the one Switchboard wrote."},
+        {"kind": "ai", "label": "no key"}, "odd"],
+      "push": {"ready": false, "explain": "Notifications are off.", "setup": "~/.config/switchboard/apns.json"}}"#;
+
+    #[test]
+    fn options_and_push_read() {
+        let p: ApiPrefs = serde_json::from_str(PREFS).unwrap();
+        assert_eq!(p.options.len(), 3, "a row with no key, and one that is not an object, are dropped");
+        let ai: Vec<&str> = p.options_of("ai").map(|o| o.key.as_str()).collect();
+        assert_eq!(ai, ["ai_ask_cards", "ai_auto_machine"]);
+        assert_eq!(p.options_of("setup").count(), 1);
+        let a = p.option("ai_ask_cards").unwrap();
+        assert_eq!(a.label, "Summarize waiting chats");
+        assert!(!a.on);
+        assert!(a.off.starts_with("When off,"));
+        assert!(p.option("ai_auto_machine").unwrap().on);
+        let push = p.push.as_ref().unwrap();
+        assert!(!push.ready);
+        assert_eq!(push.setup.as_deref(), Some("~/.config/switchboard/apns.json"));
+    }
+
+    #[test]
+    fn push_ready_has_no_setup() {
+        let raw = r#"{"push": {"ready": true, "explain": "Notifications go through Apple.", "setup": null}}"#;
+        let push = serde_json::from_str::<ApiPrefs>(raw).unwrap().push.unwrap();
+        assert!(push.ready && push.setup.is_none());
+    }
+
+    #[test]
+    fn an_older_server_has_no_options() {
+        let p: ApiPrefs = serde_json::from_str(r#"{"ok": true, "presets": [], "options": "nope", "push": 3}"#).unwrap();
+        assert!(p.options.is_empty() && p.push.is_none() && p.option("ai_ask_cards").is_none());
+    }
+
+    #[test]
+    fn set_option_and_body() {
+        let mut p: ApiPrefs = serde_json::from_str(PREFS).unwrap();
+        p.set_option("ai_ask_cards", true);
+        assert!(p.option("ai_ask_cards").unwrap().on);
+        p.set_option("not_a_key", true);
+        assert_eq!(p.options.len(), 3);
+        assert_eq!(option_body("setup_explore_agent", false), serde_json::json!({"setup_explore_agent": false}));
+        assert_eq!(option_body("ai_chat_names", true).to_string(), r#"{"ai_chat_names":true}"#);
+    }
+
+    #[test]
+    fn route_says_when_claude_picks_are_off() {
+        let raw = r#"{"ok": true, "machine": "studio", "label": "Studio", "folder": "", "create": false,
+            "why": "free memory", "by": "rules", "ai": false}"#;
+        assert!(serde_json::from_str::<ApiRoute>(raw).unwrap().ai_off());
+        let r: ApiRoute =
+            serde_json::from_str(r#"{"ok": true, "machine": "studio", "by": "claude", "ms": 900}"#).unwrap();
+        assert!(!r.ai_off());
     }
 }

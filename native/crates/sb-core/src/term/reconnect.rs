@@ -76,7 +76,10 @@ mod tests {
         let lost = Closed::Lost("The terminal hub stopped answering.".into());
         assert!(after_close(&lost, None, true), "a dropped link while attached");
         assert!(!after_close(&lost, None, false), "never attached: show why instead");
-        assert!(after_close(&Closed::Failed("Could not reach the terminal hub.".into()), None, true), "the hub is away for a moment");
+        assert!(
+            after_close(&Closed::Failed("Could not reach the terminal hub.".into()), None, true),
+            "the hub is away for a moment"
+        );
         assert!(after_close(&lost, Some(Some(255)), true), "ssh lost the machine");
         assert!(!after_close(&Closed::Normal, Some(Some(0)), true), "detached on purpose");
         assert!(!after_close(&Closed::Normal, Some(Some(1)), true), "the attach ended with an error");
