@@ -392,17 +392,14 @@ impl BoardView {
                 || drop_at == Some(g);
             div().flex_none().w(px(1.)).h(px(16.)).rounded(px(0.5)).when(!hide, |d| d.bg(line2))
         };
-        // About the room each terminal tab gets (the window less the brand, Board, History, "+", the group chips and
-        // the chips on the right). Many tabs give way in this order: "Updated ..." in the header goes, then the
-        // machine labels (under 150 px), then the titles shrink (the hover star goes under 120, and under 100 the
-        // close button shows only on the tab that shows and the one under the pointer), down to 64 px, which still
-        // shows 4 or 5 letters. Group names shrink to about 6 letters. Past that the row scrolls sideways, with the
-        // tab that shows kept in sight.
+        // About the room each terminal tab would get (the window less the brand, Board, History, "+", the group chips
+        // and the chips on the right). Every terminal tab is TAB_W wide whatever its title, so nothing moves under the
+        // pointer; with many tabs "Updated ..." in the header goes first, group names shrink to about 6 letters, and
+        // past that the row scrolls sideways, with the tab that shows kept in sight.
         // (With 40 px to spare: the Week chip and the header's own padding vary, and an estimate a little short scrolls the
         // first group's chip half out of sight.)
         let fixed = if self.solo.is_some() { 730. } else { 810. };
         let n_vis = slots.iter().filter(|s| matches!(s, crate::tabgroups::Slot::Tab(_))).count();
-        let n_star = infos.iter().filter(|x| x.star).count() as f32;
         let chip_room = |max: f32| -> f32 {
             slots
                 .iter()
@@ -419,28 +416,12 @@ impl BoardView {
                 })
                 .sum()
         };
-        // A tab being renamed takes RENAME_W for its field; the others share what is left.
-        const RENAME_W: f32 = 200.;
-        let renaming = slots.iter().any(|s| matches!(s, crate::tabgroups::Slot::Tab(i) if self.renaming_tab(*i)));
-        let (n_share, held) = if renaming { (n_vis.saturating_sub(1), RENAME_W + 5.) } else { (n_vis, 0.) };
-        let room = |fixed: f32, max: f32| {
-            if n_share == 0 {
-                240.
-            } else {
-                (self.win_w - fixed - 16. * n_star - chip_room(max) - held) / n_share as f32 - 5.
-            }
-        };
-        let is_crowded = room(fixed, 120.) < 120.;
+        // What is left once every tab has its TAB_W: below zero, the row would have to scroll.
+        let spare = |fixed: f32, max: f32| self.win_w - fixed - chip_room(max) - n_vis as f32 * (TAB_W + 5.);
+        let is_crowded = spare(fixed, 120.) < 0.;
         self.tabs_crowded.set(is_crowded);
         let fixed = if is_crowded { fixed - 100. } else { fixed };
-        let chip_max = if room(fixed, 120.) >= 120. { 120. } else { 60. };
-        let per = room(fixed, chip_max);
-        let slim = per < 100.;
-        // Tiny: past 64 px a tab keeps only its dot (and its close button where wanted), like Chrome's pinned-size
-        // tabs, down to 40 px, before the row has to scroll. The tab that shows keeps its title.
-        let tiny = per < 64.;
-        let tab_min = per.clamp(40., 120.);
-        let show_label = per >= 150.;
+        let chip_max = if spare(fixed, 120.) >= 0. { 120. } else { 60. };
         // Room above and below for the shown tab's ring, which the clip would cut.
         let mut terms = div()
             .id("tab-row")
@@ -517,20 +498,8 @@ impl BoardView {
             let end_mark = chip_mark.is_some_and(|(g, left)| {
                 !left && infos[i].group == Some(g) && !next_tab_in(&slots, si, &infos, Some(g))
             });
-            // Slim: the close button only where it is wanted, so the title keeps its letters.
-            let no_x = slim && !on && !hovered;
             terms = terms.child(
                 term_tab(&t, ("tab", i), on)
-                    .min_w(px(if editing {
-                        RENAME_W
-                    } else if tiny && on {
-                        64.
-                    } else {
-                        tab_min
-                    } + if starred { 16. } else { 0. }
-                        + if slim && on && !editing { 25. } else { 0. }))
-                    .when(slim, |d| d.pl(px(10.)).pr(px(6.)).gap(px(6.)))
-                    .when(tiny && !on && !editing, |d| d.justify_center().px(px(6.)))
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         let next = if *h {
                             Some(i)
@@ -620,27 +589,23 @@ impl BoardView {
                                 .child(ui::icon("star-on", 11., t.cold)),
                         )
                     })
-                    // The title takes the room and is what gives way (an ellipsis); the machine label keeps its size
-                    // (up to 72 px) until the title is down to a few letters, and the dot, star and close button never shrink.
+                    // The title takes the room and is what gives way (an ellipsis); the machine label (up to 72 px), the
+                    // dot, star and close button never shrink.
                     // Being renamed: the name field in its place (rename.rs), and the machine label steps aside for it.
-                    // A tiny tab (its dot only) shows no title unless it is the one that shows.
-                    .when(editing || !tiny || on, |d| {
-                        d.child(if editing {
-                            self.chat_name_field(c, "tab-rename", 22., 13.)
-                                .font_weight(FontWeight::NORMAL)
-                                .flex_grow(1.)
-                                .flex_shrink(1.)
-                                .min_w(px(150.))
-                                .into_any_element()
-                        } else {
-                            ui::line(topic).flex_grow(1.).flex_shrink(1.).min_w(px(12.)).into_any_element()
-                        })
+                    .child(if editing {
+                        self.chat_name_field(c, "tab-rename", 22., 13.)
+                            .font_weight(FontWeight::NORMAL)
+                            .flex_grow(1.)
+                            .flex_shrink(1.)
+                            .min_w(px(150.))
+                            .into_any_element()
+                    } else {
+                        ui::line(topic).flex_grow(1.).flex_shrink(1.).min_w(px(12.)).into_any_element()
                     })
-                    .when(!editing && show_label && !tb.label.is_empty(), |d| {
+                    .when(!editing && !tb.label.is_empty(), |d| {
                         d.child(
                             ui::line(tb.label.clone())
-                                .flex_shrink(0.05)
-                                .min_w_0()
+                                .flex_none()
                                 .max_w(px(72.))
                                 .text_color(t.faint)
                                 .text_size(px(12.5)),
@@ -649,7 +614,7 @@ impl BoardView {
                     .when(tb.bell && !on, |d| d.child(div().flex_none().size(px(6.)).rounded_full().bg(t.need)))
                     // Under the pointer: a star button just before the close button (both fixed, so neither covers
                     // the other; the title gives way).
-                    .when(hovered && can_star && !starred && per >= 120., |d| {
+                    .when(hovered && can_star && !starred, |d| {
                         d.child(
                             div()
                                 .id(("tab-star", i))
@@ -668,25 +633,23 @@ impl BoardView {
                                 .child(ui::icon("star", 12., t.faint)),
                         )
                     })
-                    .when(!no_x, |d| {
-                        d.child(
-                            div()
-                                .id(("tab-x", i))
-                                .flex_none()
-                                .size(px(18.))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded(px(ui::R_CHIP))
-                                .hover(move |s| s.bg(press))
-                                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    cx.stop_propagation();
-                                    this.close_tab(i, cx);
-                                }))
-                                .child(ui::icon("x", 11., if on { t.dim } else { t.faint })),
-                        )
-                    }),
+                    .child(
+                        div()
+                            .id(("tab-x", i))
+                            .flex_none()
+                            .size(px(18.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(ui::R_CHIP))
+                            .hover(move |s| s.bg(press))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(i, cx);
+                            }))
+                            .child(ui::icon("x", 11., if on { t.dim } else { t.faint })),
+                    ),
             );
             prev_tab = true;
         }
@@ -854,7 +817,7 @@ impl BoardView {
                 .child(ui::kbd(&t, &keys))
         };
         // Kept inside the window when many tabs push "+" toward the right edge.
-        let x = (lead() + self.tab_strip_width(c) - 16.).min(win_w - 348.).max(8.);
+        let x = (lead() + self.tab_strip_width() - 16.).min(win_w - 348.).max(8.);
         Some(
             div()
                 .absolute()
@@ -929,18 +892,10 @@ impl BoardView {
     }
 
     /// About where "+" sits, for its menu: the Board tab, the brand and the terminal tabs before it.
-    fn tab_strip_width(&self, c: &Ctx) -> f32 {
+    fn tab_strip_width(&self) -> f32 {
         let brand = 16. + 7. + 92. + 10. + 1. + 10.;
         let board = 110. + if self.solo.is_some() { 60. } else { 100. };
-        let tabs: f32 = self
-            .tabs
-            .iter()
-            .map(|tb| {
-                let tb = tb.read(c.cx);
-                let n = sb_core::names::split(&tb.title).0.chars().count() + tb.label.chars().count();
-                (n as f32 * 7.2 + 64.).clamp(120., 240.) + 5.
-            })
-            .sum();
+        let tabs = self.tabs.len() as f32 * (TAB_W + 5.);
         brand + board + tabs
     }
 }
@@ -1131,17 +1086,21 @@ fn tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<gp
         .when(!on, |d| d.text_color(t.dim))
 }
 
-/// A terminal tab, Chrome style: its own padding, 120 to 240 px wide, a raised fill when it shows and a soft one
-/// under the pointer. Board and History keep `tab` (fixed tabs with an underline).
+/// Every terminal tab's width. It never changes with the title, the hover buttons or the number of tabs: a tab that
+/// grew under the pointer could push itself out from under it and flicker. It fits a two-word title, the machine
+/// label (up to 72 px), the dot and the star and close buttons.
+const TAB_W: f32 = 240.;
+
+/// A terminal tab, Chrome style: its own padding, TAB_W wide, a raised fill when it shows and a soft one under the
+/// pointer. Board and History keep `tab` (fixed tabs with an underline).
 fn term_tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<gpui::Div> {
     let hover = t.hover;
     div()
         .id(id.into())
         .relative()
-        .flex_shrink(1.)
-        .flex_basis(px(240.))
-        .min_w(px(120.))
-        .max_w(px(240.))
+        .flex_none()
+        .w(px(TAB_W))
+        .overflow_hidden()
         .h(px(30.))
         .pl(px(12.))
         .pr(px(7.))

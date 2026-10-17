@@ -92,3 +92,4 @@ One line per judgment call, newest last. Older history lives with the private wo
 - 2026-10-17: A probe that answered but lost the race clears that address's failure but is not marked as used, so two working addresses do not trade places every poll.
 - 2026-10-17: With `SWITCHBOARD_URL` set the app does not touch the saved list unless `SB_SETTINGS` gives the run its own settings file, so pointing a dev build at a test server never adds its addresses to the user's settings.
 - 2026-10-17: The upgrade seed marks the last server as learned (it was not typed) with the cache's fetch time as when it last worked, so it is tried first and can still go stale later.
+- 2026-10-17: Every terminal tab is one fixed width (240 px) whatever its title, hover buttons or the number of tabs; a tab that grew under the pointer could slide out from under it and flicker. The title shortens with an ellipsis, the machine name never does, and many tabs scroll sideways.

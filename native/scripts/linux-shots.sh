@@ -16,7 +16,7 @@ URL=${SWITCHBOARD_URL:-}
 [ -n "$URL" ] || { sb_hosts SB_SHOTS_URL; URL=$SB_SHOTS_URL; }
 mkdir -p "$OUT"
 ssh -q $H "mkdir -p $REMOTE"
-rsync -a --delete --exclude target --exclude dist --exclude frames ./ $H:$REMOTE/
+rsync -a --delete --exclude target --exclude dist --exclude frames ./ ../branding.toml $H:$REMOTE/
 DRIVE=""
 if [ -n "${SB_DRIVE_FILE:-}" ]; then
   scp -q "$SB_DRIVE_FILE" $H:$REMOTE/drive.txt
