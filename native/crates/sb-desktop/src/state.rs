@@ -99,10 +99,11 @@ pub struct Settings {
     /// Tab groups folded on this Mac (group ids). Groups themselves are shared through the server; folding is not.
     #[serde(default)]
     pub folded_groups: Vec<String>,
-    /// The computer that runs Switchboard: its addresses, in order of preference ("http://192.0.2.10:8130"). Empty
-    /// until one answers or the user types one; until then the app looks on the local network.
-    #[serde(default)]
-    pub servers: Vec<String>,
+    /// The computer that runs Switchboard: its addresses ("http://192.0.2.10:8130"), typed and learned from the
+    /// server, as `servers` with `server_notes` beside it (sb_core::servers). Empty until one answers or the user
+    /// types one; until then the app looks on the local network.
+    #[serde(flatten)]
+    pub saved: sb_core::servers::Saved,
 }
 
 /// The board window's last frame in screen points, and whether it was zoomed to fill the screen.
@@ -416,9 +417,9 @@ impl AppState {
             Some(p) => Some(std::path::PathBuf::from(p)),
             None => cache::settings_dir().map(|d| d.join("settings.json")),
         };
-        let settings: Settings = settings_path.as_deref().map(cache::load_json).unwrap_or_default();
+        let mut settings: Settings = settings_path.as_deref().map(cache::load_json).unwrap_or_default();
         let cache_dir = std::env::var("SWITCHBOARD_CACHE").ok().filter(|s| !s.is_empty());
-        // Where the server is: SWITCHBOARD_URL, else the saved addresses, else the one that answered last time, else
+        // Where the server is: SWITCHBOARD_URL, else the saved addresses (the last one that worked first), else
         // nothing (Core looks on the local network, and the board asks for an address if that finds none).
         let mut servers: Vec<String> = std::env::var("SWITCHBOARD_URL")
             .ok()
@@ -427,11 +428,17 @@ impl AppState {
             })
             .unwrap_or_default();
         if servers.is_empty() {
-            servers = settings.servers.clone();
-        }
-        if servers.is_empty() {
+            // An upgrade from a build that had the address built in saved no list: seed it from the server that
+            // answered last time and the addresses it listed, so this start connects at once, at home or away.
             let dir = cache_dir.as_deref().map(PathBuf::from).or_else(cache::default_dir);
-            servers.extend(dir.as_deref().and_then(cache::last_server));
+            if let Some(dir) = dir
+                && settings.saved.migrate_from_cache(&dir, Self::now())
+                && let Some(p) = &settings_path
+                && let Err(e) = cache::save_json(p, &settings)
+            {
+                log::warn!("could not save settings: {e}");
+            }
+            servers = settings.saved.connect_order();
         }
         let core = Arc::new(Core::new(CoreConfig { servers, cache_dir, user_agent: None }));
         let (snap, synced) = match core.cached_snapshot() {
@@ -656,15 +663,49 @@ impl AppState {
         cx.notify();
     }
 
-    /// A server found on the network (or from the last run's cache) that answered: saved, so the next start goes
-    /// straight to it.
+    /// After a good refresh: the addresses the server listed join the saved list, the one in use is noted as working
+    /// (one found on the local network is saved, so the next start goes straight to it), and probes that got no
+    /// answer are noted as failing (sb_core::servers). With SWITCHBOARD_URL set the run names its own server: the
+    /// list then only learns when the run has its own settings file too (SB_SETTINGS), and is not used.
     fn keep_server(&mut self) {
-        if !self.settings.servers.is_empty() || std::env::var_os("SWITCHBOARD_URL").is_some() {
+        let env = std::env::var_os("SWITCHBOARD_URL").is_some();
+        if env && std::env::var_os("SB_SETTINGS").is_none() {
             return;
         }
-        if let Some(base) = self.core.server() {
-            self.settings.servers = vec![base];
+        let now = Self::now();
+        let saved = &mut self.settings.saved;
+        let mut changed = saved.learn(&self.snap.addresses, now);
+        for (url, ok) in self.core.take_probe_outcomes() {
+            changed |= if ok { saved.answered(&url) } else { saved.failed(&url, now) };
+        }
+        if !env && let Some(base) = self.core.server() {
+            changed |= saved.worked(&base, now);
+        }
+        changed |= saved.prune(now);
+        if changed {
             self.save_settings();
+            self.use_saved_order();
+        }
+    }
+
+    /// Hands the saved list to Core in the order to try it (the last one that worked first). The server in use stays
+    /// in use while it is still on the list.
+    fn use_saved_order(&self) {
+        if std::env::var_os("SWITCHBOARD_URL").is_some() {
+            return;
+        }
+        let order = self.settings.saved.connect_order();
+        if order != self.core.servers() {
+            self.core.set_servers(order);
+        }
+    }
+
+    /// Settings > Machines: the user's Remove on a saved address.
+    pub fn remove_server(&mut self, url: &str, cx: &mut Context<Self>) {
+        if self.settings.saved.remove(url) {
+            self.save_settings();
+            self.use_saved_order();
+            cx.notify();
         }
     }
 
@@ -674,9 +715,9 @@ impl AppState {
         let Some(base) = sb_core::net::normalize_base(typed) else {
             return Err("That is not an address. Try something like 192.0.2.10:8130 or studio.local.".into());
         };
-        self.settings.servers = vec![base.clone()];
+        self.settings.saved.add_typed(&base);
         self.save_settings();
-        self.core.set_servers(vec![base]);
+        self.core.set_servers(self.settings.saved.connect_order());
         self.error = None;
         self.refresh(cx);
         cx.notify();

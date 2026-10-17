@@ -170,8 +170,10 @@ Without them every build is signed ad hoc. `build-dmg.sh` signs both apps and th
 `SB_SIGN_IDENTITY` is set (the name of a certificate in the build Mac's keychain), and notarizes and staples the
 image when it also has a way to reach Apple: `SB_NOTARY_PROFILE`, the name of a profile saved on that Mac with
 `xcrun notarytool store-credentials` (nothing else to keep track of), or `SB_NOTARY_KEY_ID`, `SB_NOTARY_ISSUER` and
-`SB_NOTARY_KEY_PATH` (an App Store Connect API key file on that Mac). Both need the build Mac's login keychain
-unlocked, which an ssh session is not by default.
+`SB_NOTARY_KEY_PATH` (an App Store Connect API key file on that Mac). An ssh session can't use the build Mac's login
+keychain, so with `SB_SIGN_IDENTITY` set the script starts the build in the session of whoever is logged in there
+and waits for it. The first time, macOS may ask on that Mac's screen to let codesign use the key; "Always Allow"
+answers it for later builds.
 
 Windows builds are unsigned unless `SB_WIN_SIGN_CERT` is set to a `.pfx` file on the Windows build host;
 `SB_WIN_SIGN_PASSWORD`, `SB_WIN_SIGN_TIMESTAMP` (an RFC 3161 server URL) and `SB_WIN_SIGNTOOL` (signtool's path) are

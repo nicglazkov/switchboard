@@ -1,7 +1,7 @@
 Third-party notices for Switchboard
 
 Switchboard is built from the open source software listed below. Their licenses ask that these notices ship
-with it. Switchboard's own code is under the MIT license.
+with it. Switchboard's own code is under the GNU AGPL-3.0.
 
 Rust crates
 ===========

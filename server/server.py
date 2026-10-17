@@ -13,6 +13,7 @@ import features as features_mod  # noqa: E402
 import flags as flags_mod  # noqa: E402
 import notes as notes_mod  # noqa: E402
 import options as options_mod  # noqa: E402
+import addresses as addresses_mod  # noqa: E402
 from guard import GuardTimer  # noqa: E402
 
 PORT = 8130
@@ -258,6 +259,8 @@ class App:
         had_state = self._had_state()  # before anything below writes a file
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self.server_cfg = server_cfg  # None in tests: only localhost is its own
+        # the addresses the apps are told to remember (only for a real server: tests have no network of their own)
+        self.addresses = addresses_mod.Addresses(PORT, allowed=server_cfg.host_ok, bind=server_cfg.bind) if server_cfg else None
         self.live_pusher = None  # Live Activity pushes (main wires it to APNs)
         self.push_ready = False  # main sets it when <config>/apns.json and its key load
         self.fleet_cfg = fleet_mod.FleetConfig(self.cfg_dir / 'fleet.json')
@@ -383,6 +386,8 @@ class App:
         self._apply_overlay(snap)
         snap['summary'] = self.fleet.summary()
         snap['summary']['note'] = self.note(snap['machines'], snap['summary'])
+        if self.addresses:
+            snap['summary']['addresses'] = self.addresses.get()
         snap['v'] = self.version
         prefs = self.prefs()
         snap['prefs'] = dict({'chrome_machine': prefs.get('chrome_machine'), 'appearance': prefs['appearance'],
@@ -402,6 +407,8 @@ class App:
         self._apply_overlay(snap)
         sm = self.fleet.summary()
         sm['note'] = self.note(snap['machines'], sm)
+        if self.addresses:
+            sm['addresses'] = self.addresses.get()
         return sm
 
     # ---- flags of a running session, and relaunching it with others
@@ -1842,6 +1849,7 @@ def main():
         app.live_pusher = live_pusher
     import bonjour  # noqa: E402  the iPhone app finds the server on the network
     bonjour.announce(PORT, server_cfg, log)
+    app.addresses.get()  # start working out the addresses, so the first app to connect gets them
 
     def poller():
         while True:

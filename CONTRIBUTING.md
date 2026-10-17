@@ -58,4 +58,4 @@ addresses, `example.com` and `/Users/you` in examples and tests. The leak scan i
 - Keep each commit to one change, with a message that says what changed and why.
 - Note any judgment call as one dated line in `docs/decisions.md`, and update `docs/architecture.md` in the same
   change when you change how the pieces fit together.
-- By sending a pull request you agree that your change is released under the MIT license.
+- By sending a pull request you agree that your change is released under the GNU AGPL-3.0, the same license as the rest of the project.

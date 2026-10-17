@@ -92,6 +92,15 @@ pub fn last_server(dir: &Path) -> Option<String> {
     f.base.filter(|b| !b.is_empty())
 }
 
+/// What the last saved reply says about where the server is, however old it is: the server that answered, when, and
+/// the addresses it listed (none from an older server). Seeds the saved list after an upgrade (servers.rs).
+pub fn last_seen(dir: &Path) -> Option<(Option<String>, f64, Vec<crate::api::ApiAddress>)> {
+    let bytes = fs::read(dir.join("sessions.json")).ok()?;
+    let f: SessionsFile = serde_json::from_slice(&bytes).ok()?;
+    let listed = f.data.summary.addresses.map(|a| a.list).unwrap_or_default();
+    Some((f.base.filter(|b| !b.is_empty()), f.fetched_at, listed))
+}
+
 /// Folder data for one machine: its Claude folder, the recents and every tree level seen so far.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MachineFolders {

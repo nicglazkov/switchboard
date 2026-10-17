@@ -22,7 +22,7 @@ Python, standard library only, one process. It runs on the computer that stays o
 Module map: `server.py` (HTTP routes, the poller), `fleet.py` (calls to the computers), `nodes.py` (computers linked
 through the hub), `term.py` (terminal tickets), `features.py` (cleanup, threads, picking a computer, dispatch),
 `budget.py` (the usage budget), `library.py` (tools shared between computers), `flags.py`, `notes.py`,
-`bonjour.py` (finding the server on the local network).
+`bonjour.py` (finding the server on the local network), `addresses.py` (the addresses it tells the apps to keep).
 
 ## The helper: `agent/sb.py`
 
@@ -51,6 +51,41 @@ has no UI and most of the tests. `sb-desktop` is the app, built with GPUI.
 
 The app never waits on the network to draw: it shows the last snapshot it saved, then replaces it when the
 service answers, and refreshes in the background.
+
+### How the app finds its server
+
+Nothing is built in. In order, the app uses:
+
+1. `SWITCHBOARD_URL`, when set (for one run; the saved list is left alone unless `SB_SETTINGS` names a settings
+   file of its own);
+2. the saved addresses (`servers` in the app's settings.json), the one that worked last first;
+3. a Bonjour search for `_switchboard._tcp` on the local network (`sb-core/src/discover.rs`; the server announces
+   itself in `server/bonjour.py`);
+4. an address the user types on the empty board.
+
+All candidates are probed at once with `GET /api/summary` and the earliest in the list that answers wins; a later
+one only gets a short wait, so a LAN address hanging away from home costs nothing (`sb-core/src/net.rs`).
+
+**Remembering.** The server lists its own addresses in its summary (`server/addresses.py`): its LAN IPv4 addresses,
+`<host>.local`, and its Tailscale IPv4 and MagicDNS name when Tailscale is up, each with its kind and the port.
+Loopback, link-local, container and bridge interfaces and anything its allow list (`server.json`'s `allow`) would
+refuse are left out. The list is worked out on a thread and kept for five minutes, so a slow `tailscale` never holds
+up a request. After every good refresh the app merges it into the saved list (`sb-core/src/servers.rs`):
+
+- duplicates are dropped; addresses the user typed are never moved or dropped by the app;
+- learned ones are added at the end and marked as learned in `server_notes`, beside `servers` (which stays a plain
+  list, so an older build still reads it);
+- the list holds 12 at most, dropping learned ones first (failing longest, then used longest ago);
+- a learned address that has failed for three weeks while another one worked, and that the server stopped listing,
+  is dropped;
+- a learned address the user removes in Settings is not learned again unless they type it.
+
+The address in use is noted as the last one that worked, and probes that got no answer are noted as failing.
+Times are written at most once an hour, so a poll does not rewrite the settings file.
+
+**Upgrading.** Builds that had the server's address built in saved no list. On the first start without one, the
+app seeds it from the snapshot cache: the server that answered last, and the addresses that reply listed if the
+server was already updated. So the app connects at once after the update, at home or away.
 
 ## Updates
 

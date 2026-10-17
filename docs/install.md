@@ -106,6 +106,11 @@ Open the desktop app. If the computer that stays on is on the same network, the 
 on a Linux server, install `avahi-utils` or `python3-zeroconf`). Otherwise it asks for the address you picked in
 setup, such as `192.0.2.10` or a Tailscale name. Change it later in Settings.
 
+Once the app has reached the server, the server tells it every address it has: its network addresses, its `.local`
+name and, when Tailscale is running on the server, its Tailscale address and name. The app keeps them. So if you
+connect once at home, the app also works away from home over Tailscale, with nothing to type. Settings > Machines >
+Server addresses lists what it keeps, marks the learned ones, and lets you remove any of them.
+
 To point the app somewhere for one run, set `SWITCHBOARD_URL=http://<address>:8130` before starting it.
 
 ## Adding a machine later

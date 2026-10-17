@@ -183,7 +183,13 @@ pub struct Resolver {
     probe: Probe,
     discover: Option<Discover>,
     cached: Mutex<Option<(String, Instant)>>,
+    /// What each probe found (address, answered), newest last, until `take_outcomes`. Probes still running when the
+    /// race is decided add theirs when they finish.
+    outcomes: Arc<Mutex<Vec<(String, bool)>>>,
 }
+
+/// How many probe outcomes are kept between two looks.
+const OUTCOMES_MAX: usize = 64;
 
 impl Resolver {
     pub fn new(candidates: Vec<String>, ttl: Duration, probe: Probe) -> Resolver {
@@ -194,6 +200,7 @@ impl Resolver {
             probe,
             discover: None,
             cached: Mutex::new(None),
+            outcomes: Arc::new(Mutex::new(Vec::new())),
         }
     }
 
@@ -207,12 +214,21 @@ impl Resolver {
         self.candidates.lock().map(|c| c.clone()).unwrap_or_default()
     }
 
-    /// New saved addresses (the user typed one): the next call looks again.
+    /// New saved addresses, or the same ones in a new order. The next call looks again, unless the server in use is
+    /// still one of them (a reorder after a connect, or a learned address added, keeps the connection).
     pub fn set_candidates(&self, candidates: Vec<String>) {
+        let keep = self.current().is_some_and(|u| candidates.contains(&u));
         if let Ok(mut c) = self.candidates.lock() {
             *c = candidates;
         }
-        self.invalidate();
+        if !keep {
+            self.invalidate();
+        }
+    }
+
+    /// What the probes found since the last call: (address, answered), oldest first.
+    pub fn take_outcomes(&self) -> Vec<(String, bool)> {
+        self.outcomes.lock().map(|mut o| std::mem::take(&mut *o)).unwrap_or_default()
     }
 
     pub fn resolve(&self) -> Option<String> {
@@ -227,7 +243,17 @@ impl Resolver {
         {
             candidates = d();
         }
-        let found = first_preferred(&candidates, self.grace, self.probe.clone());
+        let (probe, seen) = (self.probe.clone(), self.outcomes.clone());
+        let noted: Probe = Arc::new(move |c: &str| {
+            let ok = probe(c);
+            if let Ok(mut s) = seen.lock() {
+                s.push((c.to_string(), ok));
+                let over = s.len().saturating_sub(OUTCOMES_MAX);
+                s.drain(..over);
+            }
+            ok
+        });
+        let found = first_preferred(&candidates, self.grace, noted);
         if let Ok(mut c) = self.cached.lock() {
             *c = found.clone().map(|u| (u, Instant::now()));
         }
@@ -1111,6 +1137,36 @@ mod tests {
         assert_eq!(looked.load(Ordering::SeqCst), 1, "a saved address is used as is");
         let none = Resolver::new(vec![], Duration::from_secs(60), Arc::new(|_: &str| true));
         assert_eq!(none.resolve(), None, "no address and no search: nothing is tried");
+    }
+
+    #[test]
+    fn resolver_reports_what_each_probe_found() {
+        let p: Probe = Arc::new(|b: &str| b == "ts");
+        let r = Resolver::new(c(&["lan", "ts"]), Duration::from_secs(60), p);
+        assert_eq!(r.resolve().as_deref(), Some("ts"));
+        let mut seen = r.take_outcomes();
+        seen.sort();
+        assert_eq!(seen, vec![("lan".to_string(), false), ("ts".to_string(), true)]);
+        assert!(r.take_outcomes().is_empty(), "each outcome is handed over once");
+    }
+
+    #[test]
+    fn a_reorder_keeps_the_server_in_use() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let k = calls.clone();
+        let p: Probe = Arc::new(move |b: &str| {
+            k.fetch_add(1, Ordering::SeqCst);
+            b == "ts"
+        });
+        let r = Resolver::new(c(&["lan", "ts"]), Duration::from_secs(60), p);
+        r.resolve();
+        let n = calls.load(Ordering::SeqCst);
+        r.set_candidates(c(&["ts", "lan", "learned"]));
+        assert_eq!(r.current().as_deref(), Some("ts"));
+        r.resolve();
+        assert_eq!(calls.load(Ordering::SeqCst), n, "still in the list: no new look");
+        r.set_candidates(c(&["other"]));
+        assert_eq!(r.current(), None, "gone from the list: it looks again");
     }
 
     #[test]

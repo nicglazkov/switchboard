@@ -941,6 +941,31 @@ pub struct ApiSummary {
     /// v2: the one status line every client shows (server/notes.py), or null when there is nothing to say.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub note: Option<ApiNote>,
+    /// Every address the server can be reached at (server/addresses.py), for the app to remember. Missing on older
+    /// servers.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub addresses: Option<ApiAddresses>,
+}
+
+/// The server's own addresses: `{"port": 8130, "list": [{"kind": "lan", "host": "192.0.2.10", "url": ...}]}`.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAddresses {
+    #[serde(default)]
+    pub port: Option<u16>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub list: Vec<ApiAddress>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAddress {
+    /// lan | bonjour | tailscale | magicdns
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub host: String,
+    /// "http://192.0.2.10:8130"
+    #[serde(default)]
+    pub url: String,
 }
 
 /// The server's status note: the thing most worth knowing right now (server/notes.py).

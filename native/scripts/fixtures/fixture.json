@@ -797,6 +797,15 @@
   "cold": 27,
   "week_projected": 74,
   "online": 3,
-  "machines": 3
+  "machines": 3,
+  "addresses": {
+   "port": 8130,
+   "list": [
+    {"kind": "lan", "host": "192.0.2.10", "url": "http://192.0.2.10:8130"},
+    {"kind": "bonjour", "host": "studio.local", "url": "http://studio.local:8130"},
+    {"kind": "tailscale", "host": "100.64.0.10", "url": "http://100.64.0.10:8130"},
+    {"kind": "magicdns", "host": "studio.tail0000.example.ts.net", "url": "http://studio.tail0000.example.ts.net:8130"}
+   ]
+  }
  }
 }

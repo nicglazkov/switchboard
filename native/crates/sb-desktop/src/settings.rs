@@ -936,7 +936,68 @@ impl SettingsView {
                     ),
             );
         }
-        body.into_any_element()
+        body.child(self.server_group(t, cx)).into_any_element()
+    }
+
+    /// Where this app finds the server: the saved addresses, typed and learned, each with Remove.
+    fn server_group(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
+        use gpui::AnimationExt;
+        let sub = "Where this app finds the computer that runs Switchboard. Learned addresses came from the server once it connected, so the app also finds it away from home. The one that worked last is tried first.";
+        let app = self.app.read(cx);
+        let saved = &app.settings.saved;
+        let in_use = app.core.server().map(|u| sb_core::servers::key(&u));
+        let now = crate::state::AppState::now();
+        if saved.servers.is_empty() {
+            let row = ui::wrap("No address is saved yet. The app looks for the server on the local network and keeps the addresses it learns once it connects.")
+                .text_size(px(13.))
+                .text_color(t.faint)
+                .into_any_element();
+            return Self::group(t, "Server addresses", Some(sub), vec![row]);
+        }
+        let rows = saved
+            .servers
+            .iter()
+            .enumerate()
+            .map(|(i, url)| {
+                let note = saved.note(url);
+                let learned = note.is_some_and(|n| n.learned);
+                let mut words = vec![if learned {
+                    match note.and_then(|n| n.kind.as_deref()) {
+                        Some("lan") => "Learned: local network".to_string(),
+                        Some("bonjour") => "Learned: local network name".to_string(),
+                        Some("tailscale") => "Learned: Tailscale".to_string(),
+                        Some("magicdns") => "Learned: Tailscale name".to_string(),
+                        _ => "Learned".to_string(),
+                    }
+                } else {
+                    "Typed by you".to_string()
+                }];
+                if in_use.as_deref() == Some(sb_core::servers::key(url).as_str()) {
+                    words.push("in use now".into());
+                } else if let Some(f) = note.and_then(|n| n.failing_since) {
+                    words.push(format!("not answering since {}", sb_core::fmt::ago(f, now)));
+                } else if let Some(ok) = note.and_then(|n| n.last_ok) {
+                    words.push(format!("last worked {}", sb_core::fmt::ago(ok, now)));
+                }
+                let shown = url.strip_prefix("http://").unwrap_or(url).to_string();
+                let gone = url.clone();
+                let ctl = ui::icon_btn(t, SharedString::from(format!("st-srv-x-{i}")), "x", 26.)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let u = gone.clone();
+                        this.app.update(cx, |s, cx| s.remove_server(&u, cx));
+                    }))
+                    .into_any_element();
+                div()
+                    .child(ui::setting_row(t, shown, Some(SharedString::from(words.join(", "))), Some(ctl)))
+                    .with_animation(
+                        SharedString::from(format!("st-srv-in-{url}")),
+                        gpui::Animation::new(ui::FADE).with_easing(gpui::ease_out_quint()),
+                        |d, k| d.opacity(k),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+        Self::group(t, "Server addresses", Some(sub), rows)
     }
 
     /// One machine: about it, its Claude folder, what Auto may count on it for, its MCP servers, and Remove.
@@ -2169,10 +2230,12 @@ impl SettingsView {
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = Theme::get(cx);
         let hover = t.hover;
-        // Screenshots: SB_SHOT_SCROLL=<px> shows a page further down (a machine's Capabilities and MCP servers).
+        // Screenshots: SB_SHOT_SCROLL=<px> shows a page further down (a machine's Capabilities and MCP servers, or the
+        // Machines list's server addresses).
         #[cfg(feature = "shots")]
         if let Some(y) = std::env::var("SB_SHOT_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
-            if self.machine.as_ref().is_some_and(|m| self.caps.contains_key(m) && self.mcp.contains_key(m)) {
+            let list = self.section == Section::Machines && self.machine.is_none() && self.machines.is_some();
+            if list || self.machine.as_ref().is_some_and(|m| self.caps.contains_key(m) && self.mcp.contains_key(m)) {
                 self.scroll.set_offset(gpui::point(px(0.), px(-y)));
             }
         }

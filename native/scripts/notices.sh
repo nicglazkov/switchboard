@@ -19,7 +19,7 @@ NAME=${NAME:-Switchboard}
   echo "Third-party notices for $NAME"
   echo
   echo "$NAME is built from the open source software listed below. Their licenses ask that these notices ship"
-  echo "with it. $NAME's own code is under the MIT license."
+  echo "with it. $NAME's own code is under the GNU AGPL-3.0."
   echo
 } >"$TMP"
 

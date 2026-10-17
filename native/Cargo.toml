@@ -6,7 +6,7 @@ members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-in
 version = "0.8.4"
 edition = "2024"
 rust-version = "1.90"
-license = "MIT"
+license = "AGPL-3.0-only"
 publish = false
 
 [workspace.dependencies]

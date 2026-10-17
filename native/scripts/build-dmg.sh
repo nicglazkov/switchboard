@@ -27,7 +27,22 @@ for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE SB_NOTARY_KEY_ID SB_NOTARY_ISSUER SB
   SB_UPDATE_PUBKEY SB_UPDATE_FEED; do
   [ -n "${!v:-}" ] && pass+=("$v=$(printf '%q' "${!v}")")
 done
-ssh -q $H "${pass[*]:-} bash $REMOTE/native/scripts/remote/mac-dmg.sh"
+if [ -z "${SB_SIGN_IDENTITY:-}" ]; then
+  ssh -q $H "${pass[*]:-} bash $REMOTE/native/scripts/remote/mac-dmg.sh"
+else
+  # An ssh session can't use the login keychain, so the signed build runs in the session of whoever is logged in on
+  # the build Mac, started with `open`. The first signing there may show a dialog asking to let codesign use the
+  # key; "Always Allow" answers it for later builds.
+  LOG=$REMOTE/sign.log
+  { printf '#!/bin/bash\ncd ~\n'
+    for kv in "${pass[@]}"; do printf 'export %s\n' "$kv"; done
+    printf '{ bash %s/native/scripts/remote/mac-dmg.sh; echo "SB_EXIT=$?"; } > %s 2>&1\n' "$REMOTE" "$LOG"
+  } | ssh -q $H "umask 077; rm -f $LOG; cat > $REMOTE/sign.command; chmod +x $REMOTE/sign.command; open -g $REMOTE/sign.command"
+  echo "signing: running in the logged-in session on $H (answer any keychain dialog there)"
+  until ssh -q $H "grep -q '^SB_EXIT=' $LOG 2>/dev/null"; do sleep 15; done
+  ssh -q $H "cat $LOG; rm -f $REMOTE/sign.command"
+  ssh -q $H "grep -q '^SB_EXIT=0' $LOG" || { echo "build-dmg: the signed build failed (log above)" >&2; exit 1; }
+fi
 VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 mkdir -p dist
 scp -q "$H:$REMOTE/native/dist/Switchboard-$VER.dmg" dist/

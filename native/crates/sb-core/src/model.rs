@@ -1027,6 +1027,9 @@ pub struct Snapshot {
     /// The usage budget (None on older servers).
     #[serde(default)]
     pub budget: Option<crate::api::ApiBudget>,
+    /// The server's own addresses, for the saved list (empty from older servers).
+    #[serde(default)]
+    pub addresses: Vec<crate::api::ApiAddress>,
 }
 
 fn root_label(root: &str) -> String {
@@ -1342,6 +1345,7 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
         cleanup: raw.cleanup.clone().filter(|c| !c.items.is_empty() || !c.stopped.is_empty()),
         groups: crate::groups::from_api(&raw.groups),
         budget: raw.budget.clone(),
+        addresses: s.addresses.as_ref().map(|a| a.list.clone()).unwrap_or_default(),
     }
 }
 
@@ -1357,6 +1361,7 @@ impl Snapshot {
             cleanup: None,
             groups: Vec::new(),
             budget: None,
+            addresses: Vec::new(),
         }
     }
     /// The group a chat is in, by its thread (its own sid when it has none), from `groups`.

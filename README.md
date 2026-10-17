@@ -91,4 +91,5 @@ Switchboard is not made by or affiliated with Anthropic. Claude and Claude Code 
 
 ## License
 
-[MIT](LICENSE)
+[GNU AGPL-3.0](LICENSE). You can use, change and share Switchboard, including for work. If you share a
+changed copy, or run one for other people over a network, you have to share its source under the same license.

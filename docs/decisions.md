@@ -4,7 +4,7 @@ One line per judgment call, newest last. Older history lives with the private wo
 
 - 2026-10-16: The public repository starts with a fresh history; the private working copy is never pushed to it.
 - 2026-10-16: Every export to the public repository passes `scripts/public/leakscan.py` with a private term list kept outside the repo, and CI runs the scan on files and history.
-- 2026-10-16: License is MIT, held by "Switchboard contributors" so no personal name is in the file.
+- 2026-10-16: License is MIT, held by "Switchboard contributors" so no personal name is in the file. (Replaced on 2026-10-17, see below.)
 - 2026-10-16: Bundle ids keep their existing prefix so installed apps, caches and keychain items carry over; it lives only in `branding.toml`.
 - 2026-10-16: User-facing text calls `agent/sb.py` "the helper" and the server "the server", introduced as "one computer that stays on"; code names stay as they are.
 - 2026-10-16: macOS and Windows CI jobs run only by hand while the repository is private, to save runner minutes, and on every push once it is public.
@@ -79,3 +79,16 @@ One line per judgment call, newest last. Older history lives with the private wo
 - 2026-10-17: Uninstalling deletes first-run.json even when settings are kept, because the login item, Dock icon and shortcuts it recorded are removed; a later install asks the choices again, still once.
 - 2026-10-17: Public commits carry no Co-Authored-By line from now on; the two earlier ones keep theirs (history is not rewritten).
 - 2026-10-17: Mac notarizing can use a saved notarytool profile (SB_NOTARY_PROFILE) instead of an API key's ids and path, so the build host's settings hold only a profile name; the signing identity is given by certificate hash so the right one of two same-named Developer IDs is used.
+- 2026-10-17: The license is GNU AGPL-3.0-only instead of MIT, so no one can sell or host a closed copy; every dependency (MIT, Apache-2.0, MPL-2.0, BSD, Zlib, OFL) can be used in an AGPL program.
+- 2026-10-17: Signed Mac builds run in the build Mac's logged-in session (started with `open`), because an ssh session can't use the login keychain; this needs no extra keychain or a stored password.
+- 2026-10-17: The server's addresses ride in the existing `/api/summary` reply (and the summary inside `/api/sessions`) as `addresses`, so the app learns them from the probe and the poll it already makes, with no new request.
+- 2026-10-17: The saved list stays `servers` as plain strings, with what the app knows about each address in a separate `server_notes` map, so a settings file from this build still opens in an older one.
+- 2026-10-17: The server lists only addresses its own Host check would accept, and only those it listens on when `bind` names specific ones, so the app is never told an address that would refuse it.
+- 2026-10-17: The `.local` name is listed whenever the server has a LAN address, whether or not Bonjour announcing works there; a name that does not resolve just fails its probe.
+- 2026-10-17: The app keeps 12 addresses at most; typed ones never count against being dropped, so a user who typed more keeps them all.
+- 2026-10-17: A learned address is dropped only after failing for 21 days while another address worked and the server stopped listing it, so a laptop that was off for weeks, or a LAN address the server still has, is never dropped.
+- 2026-10-17: Removing a learned address hides it from learning until the user types it, or it would come back on the next poll.
+- 2026-10-17: The address that worked last is tried first, even when a LAN one also answers; the race already gives the LAN only a short wait, and the order flips as soon as another one is used.
+- 2026-10-17: A probe that answered but lost the race clears that address's failure but is not marked as used, so two working addresses do not trade places every poll.
+- 2026-10-17: With `SWITCHBOARD_URL` set the app does not touch the saved list unless `SB_SETTINGS` gives the run its own settings file, so pointing a dev build at a test server never adds its addresses to the user's settings.
+- 2026-10-17: The upgrade seed marks the last server as learned (it was not typed) with the cache's fetch time as when it last worked, so it is tried first and can still go stale later.

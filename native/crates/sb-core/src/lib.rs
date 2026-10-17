@@ -28,6 +28,7 @@ pub mod model;
 pub mod names;
 pub mod net;
 pub mod search;
+pub mod servers;
 pub mod term;
 pub mod update;
 pub mod usage;
@@ -154,6 +155,12 @@ impl Core {
     /// Replaces the saved addresses (the user typed one); the next call looks again.
     pub fn set_servers(&self, servers: Vec<String>) {
         self.client.resolver().set_candidates(servers);
+    }
+
+    /// What the probes found since the last call, (address, answered): how the saved list learns which addresses fail
+    /// (servers.rs).
+    pub fn take_probe_outcomes(&self) -> Vec<(String, bool)> {
+        self.client.resolver().take_outcomes()
     }
 
     /// No address is saved and none was found on the local network: the app has to ask for one.
