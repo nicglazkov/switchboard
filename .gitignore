@@ -1,0 +1,6 @@
+.superpowers/
+.claude/worktrees/
+native/target/
+native/dist/
+__pycache__/
+*.pyc

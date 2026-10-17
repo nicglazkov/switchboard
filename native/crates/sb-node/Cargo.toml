@@ -1,0 +1,21 @@
+[package]
+name = "sb-node"
+description = "Switchboard node: links a machine to the hub with one outgoing WebSocket, so the hub needs no SSH into it."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "switchboard-node"
+path = "src/main.rs"
+
+[dependencies]
+# The link messages and the PTY code are the hub's own (link_proto.rs, pty.rs), so the two sides never drift.
+sb-hub = { path = "../sb-hub" }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
+tokio-tungstenite = "=0.29.0"
+futures-util = "=0.3.34"
+serde.workspace = true
+serde_json.workspace = true

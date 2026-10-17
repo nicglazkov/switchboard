@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: Leak scan and Python tests
+    # The private working copy this repository is exported from has its own history; skip it there.
+    if: ${{ github.event.repository.name == 'switchboard' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+      - name: Leak scan (files and history)
+        run: python3 scripts/public/leakscan.py --history .
+      - name: Python tests
+        run: python3 -m unittest discover -s tests -t .
+
+  rust:
+    name: Rust on ${{ matrix.os }}
+    # macOS and Windows runners cost ten and two times as much on a private repository, so they run there only
+    # when started by hand. Once the repository is public they run on every push and pull request.
+    if: ${{ github.event.repository.name == 'switchboard' && (!github.event.repository.private || github.event_name == 'workflow_dispatch') }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: native
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked

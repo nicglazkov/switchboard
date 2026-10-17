@@ -1,0 +1,31 @@
+# Everything that names or colors the app lives here. Builds, installers and installer art read this file,
+# so a fork that renames the app changes it here and nowhere else.
+
+[app]
+name = "Switchboard"
+# Reverse-DNS prefix for every bundle id, launchd label and app data folder. Change it in a fork.
+id = "com.glazkov.switchboard"  # leakscan: allow
+desktop_id = "com.glazkov.switchboard.desktop"  # leakscan: allow
+launcher_id = "com.glazkov.switchboard.launcher"  # leakscan: allow
+publisher = "Switchboard contributors"
+homepage = "https://github.com/nicglazkov/switchboard"
+category = "public.app-category.developer-tools"
+min_macos = "11.0"
+
+[colors]
+# Installer and DMG art. The app's own theme tokens are in native/crates/sb-desktop/src/theme.rs.
+accent_light = "#0C7480"
+accent_dark = "#3CC7C2"
+background_light = "#F4F5F5"
+background_dark = "#121416"
+text_light = "#1B1C1F"
+text_dark = "#ECECEE"
+
+[dmg]
+window_width = 660
+window_height = 420
+icon_size = 128
+app_x = 180
+app_y = 210
+applications_x = 480
+applications_y = 210

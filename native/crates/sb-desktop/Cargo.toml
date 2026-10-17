@@ -1,0 +1,43 @@
+[package]
+name = "sb-desktop"
+description = "Switchboard desktop app (GPUI) for macOS, Windows and Linux."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "Switchboard"
+path = "src/main.rs"
+
+[dependencies]
+sb-core = { path = "../sb-core", features = ["grid"] }
+gpui.workspace = true
+gpui_platform.workspace = true
+gpui-base.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+log.workspace = true
+alacritty_terminal.workspace = true
+smol.workspace = true
+# Only for the `shots` build (scripts/mac-shots.sh): saves the real rendered frame as a PNG.
+image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
+
+[features]
+# Verification builds: SB_SHOT_OUT=<file.png> renders the frame through the GPU renderer, saves it and quits.
+shots = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
+
+# Windows: icon + version info embedded by build.rs (needs rc.exe from the Windows SDK).
+# Mac: nudges the window's layer when it comes back on screen (src/wake.rs). Same versions GPUI uses.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc = "=0.2.7"
+raw-window-handle = "=0.6.2"
+
+[target.'cfg(windows)'.dependencies]
+# Reads HKCR\claude: is the Claude desktop app installed (see src/claude_app.rs).
+windows-registry = "=0.6.1"
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "=0.1.34", default-features = false }

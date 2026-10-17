@@ -1,0 +1,1098 @@
+{
+ "about": "Live state display cases shared by the Mac (sb-core live.rs) and iPhone (LiveStateTests.swift) tests. Times: server_now is the server clock in the reply, received and now are the client clock (its offset is received - server_now), out_ago is how long ago the terminal last showed output (null: none). Written by scripts/live-state-fixture.py: edit the cases there, not the numbers here.",
+ "cases": [
+  {
+   "name": "quiet and warm",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791782434.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "cache good for 2:03",
+    "pill": "warm",
+    "left": 123,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "warm, its last minute",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791782349.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "cache good for 0:38",
+    "pill": "warm",
+    "left": 38,
+    "urgent": true,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "warm flips to cold when cold_at passes on this clock",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791782310.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "cold",
+    "word": "Cold",
+    "detail": "next message re-reads 41k",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "quiet and cold, small",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "cold",
+    "cold_at": 1791781709.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "cold",
+    "word": "Cold",
+    "detail": "next message re-reads 41k",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "quiet, cold and heavy",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 312000,
+    "activity": "quiet",
+    "cache": "cold",
+    "cold_at": 1791781709.0,
+    "heavy": true
+   },
+   "expect": {
+    "kind": "cold",
+    "word": "Cold",
+    "detail": "next message re-reads 312k",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": "re-reads 312k",
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "quiet, warm and heavy",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 200000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791785309.0,
+    "heavy": true
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "cache good for 49:58",
+    "pill": "warm",
+    "left": 2998,
+    "urgent": false,
+    "expensive": "expensive",
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "quiet, cache not known",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "idle",
+    "word": "Quiet",
+    "detail": "cache ?",
+    "pill": "cache ?",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "quiet, no replies yet",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 0,
+    "activity": "quiet",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "idle",
+    "word": "Quiet",
+    "detail": "",
+    "pill": null,
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "working",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "busy",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "working",
+    "cache": "warm",
+    "cold_at": 1791785809.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "working",
+    "word": "Working",
+    "detail": "",
+    "pill": "working",
+    "left": 3498,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "working and heavy",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "busy",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 180000,
+    "activity": "working",
+    "cache": "cold",
+    "cold_at": 1791782299.0,
+    "heavy": true
+   },
+   "expect": {
+    "kind": "working",
+    "word": "Working",
+    "detail": "",
+    "pill": "working",
+    "left": 0,
+    "urgent": false,
+    "expensive": "expensive",
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "stalled",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "busy",
+    "active": 1791757109.0,
+    "mtime": 1791757109.0,
+    "ctx": 41000,
+    "activity": "stalled",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "stalled",
+    "word": "Stalled",
+    "detail": "no word for 7h",
+    "pill": "stalled",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "needs you, with an ask",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "waiting",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "needs",
+    "cache": "warm",
+    "cold_at": 1791782909.0,
+    "heavy": false,
+    "ask": {
+     "kind": "choice",
+     "summary": "Pick the port: 8080 or 9090"
+    }
+   },
+   "expect": {
+    "kind": "needs",
+    "word": "Needs you",
+    "detail": "Pick the port: 8080 or 9090",
+    "pill": "warm",
+    "left": 598,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "needs you, its need only",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "waiting",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "needs",
+    "cache": "cold",
+    "cold_at": 1791782249.0,
+    "heavy": false,
+    "needs": "confirm option 1 or 2"
+   },
+   "expect": {
+    "kind": "needs",
+    "word": "Needs you",
+    "detail": "confirm option 1 or 2",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "needs you, nothing said",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "needs",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false,
+    "state": "blocked"
+   },
+   "expect": {
+    "kind": "needs",
+    "word": "Needs you",
+    "detail": "waiting for your answer",
+    "pill": "cache ?",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "parked",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "waiting",
+    "active": 1791602309.0,
+    "mtime": 1791602309.0,
+    "ctx": 41000,
+    "activity": "parked",
+    "cache": "cold",
+    "cold_at": 1791605909.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "parked",
+    "word": "Parked",
+    "detail": "waiting 2d",
+    "pill": "parked",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "held",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 200000,
+    "activity": "held",
+    "cache": "cold",
+    "cold_at": 1791775109.0,
+    "heavy": true,
+    "held": true
+   },
+   "expect": {
+    "kind": "held",
+    "word": "Held",
+    "detail": "your message waits to send",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": "re-reads 200k",
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "old data greys out",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782189.0,
+    "updated": 1791782189.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791783509.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "as of 2m ago",
+    "pill": "warm",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": "as of 2m ago",
+    "hint": false
+   }
+  },
+  {
+   "name": "just inside the 45 s",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782267.0,
+    "updated": 1791782267.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791783509.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "cache good for 19:58",
+    "pill": "warm",
+    "left": 1198,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "the link is down",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": false,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "busy",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "working",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "working",
+    "word": "Working",
+    "detail": "as of 7s ago",
+    "pill": "working",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": "as of 7s ago",
+    "hint": false
+   }
+  },
+  {
+   "name": "an hour old",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791775109.0,
+    "updated": 1791775109.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "waiting",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "needs",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "needs",
+    "word": "Needs you",
+    "detail": "as of 2h ago",
+    "pill": "cache ?",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": "as of 2h ago",
+    "hint": false
+   }
+  },
+  {
+   "name": "terminal output hints working when quiet",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": 1.0,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791782434.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Working",
+    "detail": "cache good for 2:03",
+    "pill": "warm",
+    "left": 123,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": true
+   }
+  },
+  {
+   "name": "the hint never covers a need",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": 1.0,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "waiting",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "needs",
+    "cache": "unknown",
+    "cold_at": null,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "needs",
+    "word": "Needs you",
+    "detail": "waiting for your answer",
+    "pill": "cache ?",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "the hint never covers cold",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": 1.0,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 200000,
+    "activity": "quiet",
+    "cache": "cold",
+    "cold_at": 1791782249.0,
+    "heavy": true
+   },
+   "expect": {
+    "kind": "cold",
+    "word": "Working",
+    "detail": "next message re-reads 200k",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": "re-reads 200k",
+    "stale": null,
+    "hint": true
+   }
+  },
+  {
+   "name": "output 4 s old is no hint",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": 4.0,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "cold",
+    "cold_at": 1791782249.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "cold",
+    "word": "Cold",
+    "detail": "next message re-reads 41k",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "a slow client clock",
+   "server_now": 1791782309.0,
+   "received": 1791782259.0,
+   "now": 1791782264.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": 1791782304.0,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Fix the lights",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "activity": "quiet",
+    "cache": "warm",
+    "cold_at": 1791782609.0,
+    "heavy": false
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "cache good for 4:55",
+    "pill": "warm",
+    "left": 295,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "older server, warm",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": null,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Old",
+    "kind": "background",
+    "status": "idle",
+    "active": 1791782009.0,
+    "mtime": 1791782009.0,
+    "ctx": 41000,
+    "cache_left": 300
+   },
+   "expect": {
+    "kind": "warm",
+    "word": "Warm",
+    "detail": "cache good for 4:53",
+    "pill": "warm",
+    "left": 293,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "older server, busy",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": null,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Old",
+    "kind": "background",
+    "status": "busy",
+    "active": 1791782279.0,
+    "mtime": 1791782279.0,
+    "ctx": 41000,
+    "cache_left": 0,
+    "cold": true
+   },
+   "expect": {
+    "kind": "working",
+    "word": "Working",
+    "detail": "",
+    "pill": "working",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  },
+  {
+   "name": "older server, blocked",
+   "server_now": 1791782309.0,
+   "received": 1791782319.0,
+   "now": 1791782321.0,
+   "link": true,
+   "out_ago": null,
+   "machine": {
+    "name": "studio",
+    "label": "Studio",
+    "online": true,
+    "as_of": null,
+    "updated": 1791782304.0
+   },
+   "session": {
+    "sid": "11111111-2222-3333-4444-555555555555",
+    "title": "Old",
+    "kind": "background",
+    "status": "idle",
+    "state": "blocked",
+    "active": 1791782279.0,
+    "mtime": 1791782279.0,
+    "ctx": 41000,
+    "cache_left": 0,
+    "cold": true
+   },
+   "expect": {
+    "kind": "needs",
+    "word": "Needs you",
+    "detail": "waiting for your answer",
+    "pill": "cold",
+    "left": 0,
+    "urgent": false,
+    "expensive": null,
+    "stale": null,
+    "hint": false
+   }
+  }
+ ]
+}

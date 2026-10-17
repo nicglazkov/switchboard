@@ -1,0 +1,116 @@
+#!/usr/bin/env bash
+# switchboard: start, stop and check the Switchboard server on this machine (macOS or Linux).
+# install-server.sh puts this in ~/.local/bin. It works the same whichever way the server runs:
+# systemd user services (Linux), LaunchAgents (macOS), or plain background processes (a machine with neither).
+set -uo pipefail
+
+SHARE="$HOME/.local/share/switchboard"
+APP="$SHARE/app"
+RUN="$SHARE/run"
+LOGS="$SHARE/logs"
+PARTS="server hub downloads"
+PY="$(command -v python3 || true)"
+
+mode() {
+  if [ "$(uname -s)" = Darwin ] && [ -f "$HOME/Library/LaunchAgents/com.switchboard.server.plist" ]; then
+    echo launchd
+  elif [ -f "$HOME/.config/systemd/user/switchboard.service" ] && systemctl --user show-environment >/dev/null 2>&1; then
+    echo systemd
+  else
+    echo plain
+  fi
+}
+
+unit() { [ "$1" = server ] && echo switchboard || echo "switchboard-$1"; }
+label() { echo "com.switchboard.$1"; }
+
+# What each part runs, for plain mode. Kept in step with the units install-server.sh writes.
+cmd_of() {
+  case "$1" in
+    server) echo "$PY -u $APP/server/server.py" ;;
+    hub) [ -x "$HOME/.local/bin/switchboard-hub" ] && echo "$HOME/.local/bin/switchboard-hub" ;;
+    downloads) echo "$PY -m http.server 8131 --directory $SHARE/downloads" ;;
+  esac
+}
+
+plain_pid() {
+  local f="$RUN/$1.pid"
+  [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && cat "$f"
+}
+
+start() {
+  case "$(mode)" in
+    systemd) for p in $PARTS; do
+               [ -f "$HOME/.config/systemd/user/$(unit "$p").service" ] && systemctl --user restart "$(unit "$p")"
+             done ;;
+    launchd) local uid; uid=$(id -u)
+             for p in $PARTS; do
+               local f="$HOME/Library/LaunchAgents/$(label "$p").plist"
+               [ -f "$f" ] || continue
+               launchctl bootout "gui/$uid/$(label "$p")" 2>/dev/null
+               launchctl bootstrap "gui/$uid" "$f"
+             done ;;
+    plain)   mkdir -p "$RUN" "$LOGS"
+             [ -f "$SHARE/env" ] && . "$SHARE/env"
+             for p in $PARTS; do
+               local c; c=$(cmd_of "$p")
+               [ -n "$c" ] || continue
+               if plain_pid "$p" >/dev/null; then continue; fi
+               ( cd "$APP" && exec nohup $c >>"$LOGS/$p.log" 2>&1 ) &
+               echo $! >"$RUN/$p.pid"
+             done ;;
+  esac
+}
+
+stop() {
+  case "$(mode)" in
+    systemd) for p in $PARTS; do systemctl --user stop "$(unit "$p")" 2>/dev/null; done ;;
+    launchd) for p in $PARTS; do launchctl bootout "gui/$(id -u)/$(label "$p")" 2>/dev/null; done ;;
+    plain)   for p in $PARTS; do
+               local pid; pid=$(plain_pid "$p") || { rm -f "$RUN/$p.pid"; continue; }
+               kill "$pid" 2>/dev/null
+               for _ in 1 2 3 4 5 6 7 8 9 10; do kill -0 "$pid" 2>/dev/null || break; sleep 0.5; done
+               kill -9 "$pid" 2>/dev/null
+               rm -f "$RUN/$p.pid"
+             done ;;
+  esac
+}
+
+up() {  # $1 = url; prints "running" or "not answering"
+  "$PY" - "$1" <<'PY'
+import sys, urllib.request
+try:
+    urllib.request.urlopen(sys.argv[1], timeout=3).close()
+    print('running')
+except Exception:
+    print('not answering')
+PY
+}
+
+status() {
+  echo "Switchboard on this machine ($(mode))"
+  echo "  server     http://127.0.0.1:8130  $(up http://127.0.0.1:8130/api/summary)"
+  if [ -x "$HOME/.local/bin/switchboard-hub" ]; then
+    echo "  hub        http://127.0.0.1:8132  $(up http://127.0.0.1:8132/healthz)"
+  else
+    echo "  hub        not installed (terminals and linked machines are off)"
+  fi
+  echo "  downloads  http://127.0.0.1:8131  $(up http://127.0.0.1:8131/node/SHA256SUMS)"
+}
+
+logs() {
+  case "$(mode)" in
+    systemd) journalctl --user -u switchboard -u switchboard-hub -u switchboard-downloads -n "${1:-60}" --no-pager ;;
+    *)       for p in $PARTS; do [ -f "$LOGS/$p.log" ] && { echo "== $p"; tail -n "${1:-20}" "$LOGS/$p.log"; }; done ;;
+  esac
+}
+
+case "${1:-status}" in
+  start) start; sleep 2; status ;;
+  stop) stop; echo "Stopped." ;;
+  restart) stop; start; sleep 2; status ;;
+  status) status ;;
+  logs) logs "${2:-}" ;;
+  setup) shift; exec "$PY" "$APP/install/setup.py" "$@" ;;
+  *) echo "usage: switchboard start|stop|restart|status|logs [lines]|setup" >&2; exit 2 ;;
+esac

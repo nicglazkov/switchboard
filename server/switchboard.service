@@ -1,0 +1,17 @@
+[Unit]
+Description=Switchboard (Claude Code sessions across your machines)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/switchboard
+ExecStart=/usr/bin/python3 -u %h/switchboard/server/server.py
+Restart=always
+RestartSec=3
+# Machine-specific settings, one KEY=value per line, kept outside the repo. When the server runs in UTC but your
+# week starts in another zone, put SWITCHBOARD_TZ=<IANA zone> (America/New_York, say) there.
+EnvironmentFile=-%h/.config/switchboard/server.env
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

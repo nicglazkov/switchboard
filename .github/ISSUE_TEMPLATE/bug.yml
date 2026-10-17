@@ -1,0 +1,38 @@
+name: Bug report
+description: Something doesn't work the way it should.
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open the board
+        2. Click Start fresh on a chat
+        3. ...
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: From Settings, About in the app, or `switchboard status`.
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Where
+      multiple: true
+      options: [macOS app, Windows app, Linux app, Service on macOS, Service on Linux, Service on Windows, Helper on a computer]
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The app's log is in Settings, About, Show log. `switchboard logs` prints the service's. Remove anything private first.
+      render: text

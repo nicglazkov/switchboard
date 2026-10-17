@@ -1,0 +1,15 @@
+[Unit]
+Description=Switchboard hub (terminals: ssh to each machine, relayed to the web page and the apps)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=%h/.local/bin/switchboard-hub
+Environment=SWITCHBOARD_HUB_LISTEN=0.0.0.0:8132
+# Extra web origins (a test server on another port): add a drop-in with Environment=SWITCHBOARD_ORIGINS=...
+Restart=always
+RestartSec=3
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=default.target

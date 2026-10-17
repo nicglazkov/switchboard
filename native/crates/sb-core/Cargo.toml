@@ -1,0 +1,30 @@
+[package]
+name = "sb-core"
+description = "Switchboard core: models, rules, HTTP client with LAN/Tailscale fallback, snapshot cache. No UI."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+ureq.workspace = true
+dirs.workspace = true
+chrono.workspace = true
+log.workspace = true
+async-tungstenite.workspace = true
+smol.workspace = true
+futures-util.workspace = true
+# Checks a downloaded update against the download page's SHA-256 before it is installed.
+sha2 = "=0.10.9"
+# The terminal's screen as bytes (term/screen.rs): the hub and the desktop app share it.
+alacritty_terminal = { workspace = true, optional = true }
+
+[features]
+grid = ["dep:alacritty_terminal"]
+
+[[example]]
+name = "term_replay"
+required-features = ["grid"]

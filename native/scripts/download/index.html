@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>Get Switchboard</title>
+<meta name="description" content="Install the Switchboard desktop app on a Mac, Windows PC or Linux machine.">
+<link rel="icon" href="favicon.svg" type="image/svg+xml">
+<link rel="preload" href="manrope.woff2" as="font" type="font/woff2" crossorigin>
+<style>
+/* Manrope (SIL Open Font License 1.1, see Manrope-OFL.txt), subset to Latin, weights 500 to 800. */
+@font-face {
+  font-family: "Manrope";
+  src: url("manrope.woff2") format("woff2");
+  font-weight: 500 800;
+  font-display: swap;
+}
+
+/* Converge tokens. Light is the default, dark follows the system. */
+:root {
+  --bg: #F2F3FA;
+  --surface: #FFFFFF;
+  --ink: #0E1024;
+  --ink-2: #454A68;
+  --ink-3: #6C7190;
+  --line: rgba(14, 16, 36, .09);
+  --line-2: rgba(14, 16, 36, .16);
+  --accent: #1E63C9;
+  --accent-ink: #1A56AF;
+  --accent-wash: rgba(30, 99, 201, .10);
+  --halo: rgba(30, 99, 201, .16);
+  --node: #7E8AD2;
+  --code-bg: #F6F7FC;
+  --ok: #137A3E;
+  --card-shadow: 0 1px 2px rgba(14, 16, 36, .05), 0 12px 32px -18px rgba(14, 16, 36, .28);
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --display: "Manrope", var(--sans);
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, Consolas, "DejaVu Sans Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #090B1A;
+    --surface: #111428;
+    --ink: #ECEEFA;
+    --ink-2: #ADB2D0;
+    --ink-3: #7D82A6;
+    --line: rgba(236, 238, 250, .08);
+    --line-2: rgba(236, 238, 250, .15);
+    --accent: #6CB6FF;
+    --accent-ink: #8CC6FF;
+    --accent-wash: rgba(108, 182, 255, .12);
+    --halo: rgba(108, 182, 255, .22);
+    --node: #7E8AD2;
+    --code-bg: #0B0D1F;
+    --ok: #4FDB8C;
+    --card-shadow: 0 0 0 1px rgba(108, 182, 255, .04), 0 18px 40px -22px rgba(0, 0, 0, .8);
+  }
+}
+
+* { box-sizing: border-box; }
+html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  overflow-x: hidden; /* the hub glow below may reach past a phone's edge */
+}
+@supports (overflow-x: clip) { body { overflow-x: clip; } }
+a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 3px; }
+a:hover { color: var(--accent); }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 6px; }
+
+.page {
+  position: relative;
+  max-width: 760px;
+  margin: 0 auto;
+  padding: 72px 24px 56px;
+}
+
+/* The hub's glow spills out of the icon into the page: the one loud thing. */
+.page::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  top: -140px;
+  left: -60px;
+  width: 520px;
+  height: 420px;
+  background: radial-gradient(closest-side, var(--halo), transparent);
+  pointer-events: none;
+}
+
+.head { display: flex; align-items: center; gap: 18px; }
+.head .icon {
+  width: 92px;
+  height: 92px;
+  flex: none;
+  margin: -9px -2px -9px -9px; /* the macOS icon has an 8.8% inset; line its body up with the text */
+}
+h1 {
+  margin: 0;
+  font: 700 34px/1.1 var(--display);
+  letter-spacing: -0.022em;
+}
+.ver { margin: 6px 0 0; color: var(--ink-3); font-size: 13.5px; font-variant-numeric: tabular-nums; }
+.lede { margin: 28px 0 40px; max-width: 34em; color: var(--ink-2); font-size: 16.5px; line-height: 1.55; }
+
+/* Platforms. Every section shares the same padding so the text column lines up;
+   only the one for this computer is raised into a card. */
+.plat {
+  position: relative;
+  padding: 22px 24px 20px;
+  border-top: 1px solid var(--line);
+}
+.plat.is-here {
+  background: var(--surface);
+  border: 1px solid var(--line-2);
+  border-radius: 16px;
+  box-shadow: var(--card-shadow);
+  margin-bottom: 22px;
+}
+.plat.is-here + .others { border-top: 0; }
+.others {
+  margin: 0;
+  padding: 18px 24px 8px;
+  font: 600 13px/1.3 var(--sans);
+  color: var(--ink-3);
+}
+.others[hidden] { display: none; }
+
+.plat-head { display: flex; align-items: center; gap: 12px; }
+.node {
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border-radius: 50%;
+  border: 2.5px solid var(--node);
+  background: var(--bg);
+}
+.is-here .node {
+  border-color: var(--accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 4px var(--accent-wash), 0 0 18px 2px var(--halo);
+}
+h2 { margin: 0; font: 700 19px/1.25 var(--display); letter-spacing: -0.012em; }
+.here {
+  display: none;
+  margin-left: auto;
+  padding: 3px 10px;
+  border-radius: 999px;
+  background: var(--accent-wash);
+  color: var(--accent-ink);
+  font-size: 12.5px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.is-here .here { display: inline-block; }
+.req { margin: 6px 0 14px 24px; color: var(--ink-2); font-size: 14.5px; }
+
+.cmd {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+  gap: 4px 10px;
+  margin-left: 24px;
+  padding: 11px 10px 11px 14px;
+  background: var(--code-bg);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+}
+.cmd .prompt { color: var(--accent); font: 13px/22px var(--mono); user-select: none; -webkit-user-select: none; }
+.cmd code {
+  min-width: 0;
+  font: 12.75px/22px var(--mono);
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  user-select: all;
+  -webkit-user-select: all;
+}
+.cmd code .tok { white-space: nowrap; }
+.copy {
+  appearance: none;
+  height: 30px;
+  min-width: 70px;
+  padding: 0 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--surface);
+  color: var(--ink);
+  font: 600 13px/1 var(--sans);
+  cursor: pointer;
+  margin-top: -4px;
+}
+.copy:hover { border-color: var(--accent); color: var(--accent-ink); }
+.copy.done { color: var(--ok); border-color: currentColor; }
+.note { margin: 12px 0 0 24px; color: var(--ink-3); font-size: 13.5px; max-width: 38em; }
+.note code, .footer code { font: 12.5px var(--mono); color: var(--ink-2); }
+
+.meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 6px 18px;
+  margin: 14px 0 0 24px;
+  color: var(--ink-3);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+.meta a { font-weight: 600; }
+.sha { display: inline-flex; align-items: baseline; gap: 11px; min-width: 0; max-width: 100%; }
+.sha code {
+  display: inline-block;
+  max-width: calc(12ch + 10px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+  font: 12px/1.5 var(--mono);
+  color: var(--ink-2);
+  cursor: text;
+  padding: 1px 5px;
+  margin: -1px -5px;
+  border-radius: 6px;
+}
+.sha code:hover, .sha code:focus {
+  max-width: calc(100% + 10px);
+  white-space: normal;
+  overflow-wrap: anywhere;
+  background: var(--code-bg);
+  color: var(--ink);
+}
+.sha code:focus-visible { outline-offset: 1px; }
+
+.missing { display: none; margin: 4px 0 0 24px; color: var(--ink-3); font-size: 14px; }
+.plat[data-state="missing"] .cmd,
+.plat[data-state="missing"] .note,
+.plat[data-state="missing"] .meta { display: none; }
+.plat[data-state="missing"] .missing { display: block; }
+
+.footer {
+  margin-top: 40px;
+  padding: 20px 24px 0;
+  border-top: 1px solid var(--line);
+  color: var(--ink-3);
+  font-size: 13px;
+}
+.footer p { margin: 0 0 6px; }
+
+@media (max-width: 560px) {
+  .page { padding: 40px 16px 40px; }
+  .page::before { left: -110px; top: -150px; width: 420px; height: 360px; }
+  .head { gap: 14px; }
+  .head .icon { width: 76px; height: 76px; margin: -7px -2px -7px -7px; }
+  h1 { font-size: 29px; }
+  .lede { margin: 22px 0 28px; font-size: 15.5px; }
+  .plat { padding: 18px 14px 16px; }
+  .plat.is-here { border-radius: 14px; }
+  .others { padding: 16px 14px 6px; }
+  .req, .note, .meta, .missing { margin-left: 0; }
+  /* On a phone the command stays on one line and scrolls inside its box. */
+  .cmd { margin-left: 0; align-items: center; padding: 8px 8px 8px 12px; }
+  .cmd code {
+    white-space: pre;
+    overflow-x: auto;
+    padding-right: 28px;
+    scrollbar-width: none;
+    -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+    mask-image: linear-gradient(to right, #000 calc(100% - 28px), transparent);
+  }
+  .cmd code::-webkit-scrollbar { display: none; }
+  .copy { margin-top: 0; min-width: 64px; }
+  .footer { padding: 18px 14px 0; }
+}
+@media (prefers-reduced-motion: no-preference) {
+  .copy { transition: color .15s, border-color .15s; }
+}
+</style>
+</head>
+<body>
+<div class="page">
+  <header class="head">
+    <img class="icon" src="icon-macos.svg" width="92" height="92" alt="">
+    <div>
+      <h1>Switchboard</h1>
+      <p class="ver">Version {{VERSION}}, built {{BUILT}}</p>
+    </div>
+  </header>
+
+  <p class="lede">The desktop board for your Claude Code sessions on every machine you link. Paste one line on the computer you are using and it installs and opens.</p>
+
+  <main id="platforms">
+    <section class="plat" id="mac" data-os="mac" data-state="{{MAC_STATE}}" aria-labelledby="mac-title">
+      <div class="plat-head">
+        <span class="node" aria-hidden="true"></span>
+        <h2 id="mac-title">macOS</h2>
+        <span class="here">This computer</span>
+      </div>
+      <p class="req">One app for Apple silicon and Intel Macs. Paste into Terminal.</p>
+      <div class="cmd">
+        <span class="prompt" aria-hidden="true">&#9656;</span>
+        <code id="cmd-mac">curl -fsSL {{BASE}}/{{MAC_FILE}} -o /tmp/sb.zip &amp;&amp; rm -rf ~/Applications/Switchboard.app &amp;&amp; ditto -x -k /tmp/sb.zip ~/Applications &amp;&amp; open ~/Applications/Switchboard.app</code>
+        <button class="copy" type="button" data-for="cmd-mac">Copy</button>
+      </div>
+      <p class="note">Installs to <code>~/Applications</code> and needs nothing else. Files fetched with curl are not quarantined, so macOS opens it without the Gatekeeper prompt.</p>
+      <p class="meta">
+        <a href="{{MAC_FILE}}" download>{{MAC_FILE}}</a>
+        <span>{{MAC_SIZE}}</span>
+        <span class="sha">sha256 <code tabindex="0" title="{{MAC_SHA}}">{{MAC_SHA}}</code></span>
+      </p>
+      <p class="missing">The Mac build is not published yet.</p>
+    </section>
+
+    <section class="plat" id="windows" data-os="windows" data-state="{{WIN_STATE}}" aria-labelledby="windows-title">
+      <div class="plat-head">
+        <span class="node" aria-hidden="true"></span>
+        <h2 id="windows-title">Windows</h2>
+        <span class="here">This computer</span>
+      </div>
+      <p class="req">64-bit Windows 10 or 11. Paste into PowerShell; no admin needed.</p>
+      <div class="cmd">
+        <span class="prompt" aria-hidden="true">&#9656;</span>
+        <code id="cmd-windows">$d="$env:LOCALAPPDATA\Programs\Switchboard"; $ProgressPreference='SilentlyContinue'; Stop-Process -Name Switchboard -ErrorAction Ignore; Invoke-WebRequest {{BASE}}/{{WIN_FILE}} -OutFile "$env:TEMP\sb.zip" -UseBasicParsing; Expand-Archive "$env:TEMP\sb.zip" $d -Force; $s=(New-Object -ComObject WScript.Shell).CreateShortcut("$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Switchboard.lnk"); $s.TargetPath="$d\Switchboard.exe"; $s.Save(); Start-Process "$d\Switchboard.exe"</code>
+        <button class="copy" type="button" data-for="cmd-windows">Copy</button>
+      </div>
+      <p class="note">Installs for your account in <code>%LOCALAPPDATA%\Programs\Switchboard</code>, adds Switchboard to the Start menu and opens it. Run it again to update.</p>
+      <p class="meta">
+        <a href="{{WIN_FILE}}" download>{{WIN_FILE}}</a>
+        <span>{{WIN_SIZE}}</span>
+        <span class="sha">sha256 <code tabindex="0" title="{{WIN_SHA}}">{{WIN_SHA}}</code></span>
+      </p>
+      <p class="missing">The Windows build is not published yet.</p>
+    </section>
+
+    <section class="plat" id="linux" data-os="linux" data-state="{{LINUX_STATE}}" aria-labelledby="linux-title">
+      <div class="plat-head">
+        <span class="node" aria-hidden="true"></span>
+        <h2 id="linux-title">Linux</h2>
+        <span class="here">This computer</span>
+      </div>
+      <p class="req">x86_64 with Vulkan, on X11 or Wayland. Paste into a terminal.</p>
+      <div class="cmd">
+        <span class="prompt" aria-hidden="true">&#9656;</span>
+        <code id="cmd-linux">mkdir -p ~/.local/bin &amp;&amp; curl -fsSL {{BASE}}/{{LINUX_FILE}} -o ~/.local/bin/sb.new &amp;&amp; chmod +x ~/.local/bin/sb.new &amp;&amp; mv -f ~/.local/bin/sb.new ~/.local/bin/switchboard &amp;&amp; setsid -f ~/.local/bin/switchboard &gt;/dev/null 2&gt;&amp;1</code>
+        <button class="copy" type="button" data-for="cmd-linux">Copy</button>
+      </div>
+      <p class="note">One file, saved as <code>~/.local/bin/switchboard</code>. Run it again to update.</p>
+      <p class="meta">
+        <a href="{{LINUX_FILE}}" download>{{LINUX_FILE}}</a>
+        <span>{{LINUX_SIZE}}</span>
+        <span class="sha">sha256 <code tabindex="0" title="{{LINUX_SHA}}">{{LINUX_SHA}}</code></span>
+        {{LINUX_TGZ_LINK}}
+      </p>
+      <p class="missing">The Linux build is not published yet.</p>
+    </section>
+
+    <section class="plat" id="android" data-os="android" data-state="{{ANDROID_STATE}}" aria-labelledby="android-title">
+      <div class="plat-head">
+        <span class="node" aria-hidden="true"></span>
+        <h2 id="android-title">Android</h2>
+        <span class="here">This phone</span>
+      </div>
+      <p class="req">Android 8 or later. Open this page on the phone and tap the file.</p>
+      <p class="note">Android asks once to allow installs from your browser. The home screen widgets come with it.</p>
+      <p class="meta">
+        <a href="{{ANDROID_FILE}}" download>{{ANDROID_FILE}}</a>
+        <span>{{ANDROID_SIZE}}</span>
+        <span class="sha">sha256 <code tabindex="0" title="{{ANDROID_SHA}}">{{ANDROID_SHA}}</code></span>
+      </p>
+      <p class="missing">The Android build is not published yet.</p>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <p>Checksums for every file are in <a href="SHA256SUMS">SHA256SUMS</a>.</p>
+    <p>Set in Manrope, under the <a href="Manrope-OFL.txt">SIL Open Font License</a>.</p>
+  </footer>
+</div>
+
+<script>
+(function () {
+  // Commands name the address the page was published for. Opened at another one (a VPN name, say), point them
+  // at the folder this page came from instead.
+  var BASE = '{{BASE}}';
+  var from = location.origin + location.pathname.replace(/\/[^\/]*$/, '');
+  if (/^https?:$/.test(location.protocol) && from !== BASE) {
+    document.querySelectorAll('.cmd code').forEach(function (el) {
+      el.textContent = el.textContent.split(BASE).join(from);
+    });
+  }
+
+  // Wrap commands only between words: each short token becomes an unbreakable span, so
+  // "-k" or "Start Menu" never splits mid-word. The text, and so what gets copied, is unchanged.
+  document.querySelectorAll('.cmd code').forEach(function (el) {
+    var parts = el.textContent.split(' ');
+    el.textContent = '';
+    parts.forEach(function (tok, i) {
+      if (i) el.appendChild(document.createTextNode(' '));
+      if (tok.length > 48) { el.appendChild(document.createTextNode(tok)); return; }
+      var span = document.createElement('span');
+      span.className = 'tok';
+      span.textContent = tok;
+      el.appendChild(span);
+    });
+  });
+
+  // Raise the card for this computer (or Android phone) and put it first. iPhones and iPads get no highlight.
+  var ua = navigator.userAgent || '';
+  var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+  var s = plat + ' ' + ua;
+  var os = null;
+  if (/Android/i.test(ua)) os = 'android';
+  else if (/iPhone|iPad|iPod/i.test(ua) || (/Mac/.test(s) && navigator.maxTouchPoints > 1)) os = null;
+  else if (/Win/i.test(s)) os = 'windows';
+  else if (/Mac/i.test(s)) os = 'mac';
+  else if (/Linux|X11|CrOS/i.test(s)) os = 'linux';
+  var here = os && document.getElementById(os);
+  if (here) {
+    var list = document.getElementById('platforms');
+    here.classList.add('is-here');
+    list.insertBefore(here, list.firstChild);
+    var others = document.createElement('h3');
+    others.className = 'others';
+    others.textContent = 'Other platforms';
+    list.insertBefore(others, here.nextSibling);
+  }
+
+  // Copy buttons. http on the LAN is not a secure context, so navigator.clipboard is
+  // usually missing: fall back to a selected textarea and execCommand.
+  function copyText(text) {
+    if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+    return new Promise(function (resolve, reject) {
+      var ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.position = 'fixed';
+      ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select();
+      var ok = false;
+      try { ok = document.execCommand('copy'); } catch (e) { ok = false; }
+      document.body.removeChild(ta);
+      ok ? resolve() : reject(new Error('copy failed'));
+    });
+  }
+  document.querySelectorAll('.copy').forEach(function (btn) {
+    var timer = 0;
+    btn.addEventListener('click', function () {
+      var code = document.getElementById(btn.getAttribute('data-for'));
+      copyText(code.textContent).then(function () {
+        btn.textContent = 'Copied';
+        btn.classList.add('done');
+      }, function () {
+        var r = document.createRange();
+        r.selectNodeContents(code);
+        var sel = window.getSelection();
+        sel.removeAllRanges();
+        sel.addRange(r);
+        btn.textContent = 'Press ' + (os === 'mac' ? '⌘C' : 'Ctrl+C');
+      });
+      clearTimeout(timer);
+      timer = setTimeout(function () { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 1800);
+    });
+  });
+})();
+</script>
+</body>
+</html>

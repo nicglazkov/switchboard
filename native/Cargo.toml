@@ -1,0 +1,56 @@
+[workspace]
+resolver = "3"
+members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-node"]
+
+[workspace.package]
+version = "0.8.4"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+# UI. GPUI is pinned to one weekly snapshot of the Zed repo, published as gpui-pre.
+# 0.3.8 is zed@279fe070bb389b79652e52065b2f001edcc0b11b (2026-10-05). gpui-base 0.7.2
+# (Longbridge, unstyled behaviors: the text input engine) is built against exactly this
+# snapshot. Bump all three together. See STACK.md.
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+# font-kit is the macOS text system (CoreText). Without it GPUI swaps in a no-op one and the Mac app draws no text.
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland"] }
+gpui-base = { version = "=0.7.2" }
+
+# Core.
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+ureq = { version = "3.4.2", default-features = false, features = ["json"] }
+dirs = "5.0.1"
+chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
+log = "0.4.34"
+
+# Terminals (spec v2 section 1). alacritty_terminal keeps the VT state (grid, scrollback, modes, selection); GPUI
+# draws it. The WebSocket to the hub runs on its own thread under smol, so typing never waits on a poll.
+alacritty_terminal = { version = "=0.26.0", default-features = false }
+async-tungstenite = { version = "=0.35.0", default-features = false, features = ["handshake", "futures-03-sink"] }
+smol = "=2.0.2"
+futures-util = { version = "=0.3.34", default-features = false, features = ["sink", "std"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"         # slower builds, a smaller and faster app; builds are rare
+codegen-units = 1
+strip = true
+debug = false
+
+# Verification builds (scripts/mac-shots.sh and friends): release speed without the long full-LTO link.
+[profile.shots]
+inherits = "release"
+lto = false
+codegen-units = 256
+incremental = true
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+# GPUI is very slow unoptimized; build dependencies optimized even in dev.
+opt-level = 2

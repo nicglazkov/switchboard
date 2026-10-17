@@ -1,0 +1,74 @@
+{
+  "machines": [
+    {
+      "name": "studio", "label": "Studio", "target": null, "os": "mac", "online": true, "error": null,
+      "updated": 1791782300.0, "root": "/Users/you/Desktop/Claude",
+      "limits": {"five_hour": 62, "seven_day": 64, "five_hour_reset": 1791798600, "seven_day_reset": 1791925200, "updated": 1791781381.1},
+      "launcher": {"alive": true, "beat": 1791782298.4},
+      "sessions": [
+        {"sid": "11111111-1111-4111-8111-111111111111", "title": "Oct 11 3:40p Garden planner (fresh)", "cwd": "/Users/you/Desktop/Claude/garden", "folder": "garden",
+         "mtime": 1791782000.0, "active": 1791782000.0, "ctx": 210000, "model": "claude-opus-5-5", "cold": true, "cache_left": 0,
+         "kind": "interactive", "status": "idle", "state": null, "bg_id": null, "url": "https://claude.ai/code/session_held",
+         "handoff": false, "handoff_fresh": false, "stale": false, "stalled": false, "held": true, "repeats": 0,
+         "flags": {"effort": "medium", "remote": true}},
+        {"sid": "22222222-2222-4222-8222-222222222222", "title": "Folder audit", "cwd": "/Users/you/Desktop/Claude", "folder": "",
+         "mtime": 1791782100.0, "active": 1791782100.0, "ctx": 40000, "model": "claude-opus-5-5", "cold": false, "cache_left": 1800,
+         "kind": "background", "status": "idle", "state": "blocked", "bg_id": "abcd1234", "url": null,
+         "handoff": false, "handoff_fresh": false, "stale": false, "stalled": false, "held": false, "repeats": 0, "flags": null},
+        {"sid": "33333333-3333-4333-8333-333333333333", "title": "Switchboard native app (UltraCode, web)", "cwd": "/Users/you/Desktop/Claude/switchboard/.claude/worktrees/names-fresh-designs",
+         "folder": "switchboard/.claude/worktrees/names-fresh-designs",
+         "mtime": 1791782290.0, "active": 1791782280.0, "ctx": 180353, "model": "claude-opus-5-5", "cold": false, "cache_left": 3588,
+         "kind": "background", "status": "busy", "state": "working", "bg_id": "c03ef0d9", "url": "https://claude.ai/code/session_run",
+         "handoff": false, "handoff_fresh": false, "stale": false, "stalled": false, "held": false, "repeats": 2,
+         "flags": {"effort": "ultracode", "chrome": true}},
+        {"sid": "44444444-4444-4444-8444-444444444444", "title": "labv2", "cwd": "/Users/you/Developer/labv2", "folder": "Developer/labv2",
+         "mtime": 1791781460.0, "active": 1791781460.0, "ctx": 90000, "model": "claude-sonnet-4-5-20250929", "cold": false, "cache_left": 2760,
+         "kind": "interactive", "status": "idle", "state": null, "bg_id": null, "url": "https://claude.ai/code/session_warm",
+         "handoff": false, "handoff_fresh": false, "stale": false, "stalled": false, "held": false, "repeats": "0",
+         "flags": {"model": "sonnet", "perm": "plan"}},
+        {"sid": "55555555-5555-4555-8555-555555555555", "title": "Kitchen remodel (from Laptop)", "cwd": "/Users/you/Desktop/Claude/m2-tracker", "folder": "m2-tracker",
+         "mtime": 1791771500.0, "active": 1791771500.0, "ctx": 250000, "model": "claude-opus-5-5", "cold": true, "cache_left": 0,
+         "kind": null, "status": null, "state": null, "bg_id": null, "url": null,
+         "handoff": true, "handoff_fresh": true, "stale": false, "stalled": false, "held": false, "repeats": 0, "flags": {}},
+        {"sid": "66666666-6666-4666-8666-666666666666", "title": "Notes", "cwd": "/Users/you", "mtime": 1791764300.0, "active": 1791764300.0,
+         "ctx": 20000, "model": "<synthetic>", "cold": false, "cache_left": 0, "kind": null, "status": null, "state": null,
+         "handoff": false, "stale": false, "stalled": false, "held": false, "flags": {"perm": "bypassPermissions"}},
+        {"sid": "77777777-7777-4777-8777-777777777777", "title": "Old thing", "folder": "old", "mtime": 1791523100.0, "active": 1791523100.0,
+         "ctx": 50000, "model": "claude-opus-5-5", "cache_left": 0, "kind": null, "status": null, "stale": true, "stalled": false, "held": false},
+        {"sid": "88888888-8888-4888-8888-888888888888", "title": "Long job", "folder": "jobs", "mtime": 1791757100.0, "active": 1791757100.0,
+         "ctx": 120000, "model": "claude-opus-5-5", "cache_left": 0, "kind": "background", "status": "busy", "state": "working",
+         "bg_id": "deadbeef", "stale": false, "stalled": true, "held": false}
+      ],
+      "replaced": [
+        {"sid": "99999999-9999-4999-8999-999999999999", "title": "Garden planner", "folder": "garden", "active": 1791700000.0, "how": "fresh",
+         "by": {"sid": "11111111-1111-4111-8111-111111111111", "machine": "studio"}, "kind": null, "status": null, "url": "https://claude.ai/code/session_old"}
+      ]
+    },
+    {
+      "name": "laptop", "label": "Laptop", "os": "mac", "online": true, "error": null, "updated": 1791782290.0, "root": "/Users/you",
+      "sessions": [
+        {"sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", "title": "Thesis outline", "folder": "", "mtime": 1791780000.0, "active": 1791780000.0,
+         "ctx": 60000, "model": "claude-opus-5-5", "cache_left": 2000, "kind": "interactive", "status": "idle", "flags": {"chrome": true, "effort": "medium", "remote": true}},
+        {"sid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb", "title": "Quick fix", "folder": "code/app", "mtime": 1791781000.0, "active": 1791781000.0,
+         "ctx": 30000, "model": "claude-haiku-4-5", "cache_left": 600, "kind": "interactive", "status": "idle", "flags": {"model": "haiku"}},
+        {"sid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc", "title": "Big refactor", "folder": "code/big", "mtime": 1791760000.0, "active": 1791760000.0,
+         "ctx": 320000, "model": "claude-opus-5-5", "cache_left": 0, "kind": null, "status": null}
+      ],
+      "replaced": "not a list"
+    },
+    {
+      "name": "tower", "label": "Tower", "os": "windows", "online": false, "error": "timed out", "updated": 1791700000.0, "root": "C:/Users/you/Claude",
+      "sessions": [
+        {"sid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "title": "Render farm", "cwd": "C:\\Users\\you\\Claude\\render", "mtime": 1791690000.0, "active": 1791690000.0,
+         "ctx": 10000, "model": "claude-opus-5-5", "cache_left": 0, "kind": null, "status": null}
+      ],
+      "replaced": []
+    }
+  ],
+  "now": 1791782309.5,
+  "summary": {"five_hour": 62, "seven_day": 64, "five_hour_reset": 1791798600, "seven_day_reset": 1791925200, "sessions": 12, "running": 1,
+              "cold": 3, "week_projected": 84, "online": 2, "machines": 3, "week_daily": [null, 12.0], "week_trace": [[1791769664, 64.0]],
+              "machine_list": [{"name": "studio", "label": "Studio", "online": true}],
+              "note": {"kind": "need", "tone": "need", "text": "Garden planner is waiting for you on Studio.", "machine": "studio", "sid": "11111111-1111-4111-8111-111111111111"}},
+  "web": "b7bab23a5a7d"
+}

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Switchboard
+Comment=Your Claude Code sessions across every machine
+Exec=Switchboard
+Icon=switchboard
+Terminal=false
+Categories=Development;Utility;
+StartupWMClass=switchboard

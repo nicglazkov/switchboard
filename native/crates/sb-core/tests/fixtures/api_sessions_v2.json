@@ -1,0 +1,151 @@
+{
+ "now": 1791782309.5,
+ "summary": {
+  "five_hour": 7,
+  "seven_day": 70
+ },
+ "machines": [
+  {
+   "name": "studio",
+   "label": "Studio",
+   "os": "mac",
+   "online": true,
+   "updated": 1791782304.5,
+   "root": "/Users/you/Desktop/Claude",
+   "mem": {
+    "claude_mb": 3120,
+    "procs": 7,
+    "orphans": [
+     {
+      "pid": 48121,
+      "mb": 410,
+      "age_h": 30.2
+     },
+     "junk"
+    ]
+   },
+   "caps": {
+    "os": "mac",
+    "tools": {
+     "xcode": "26.3",
+     "iphone": "connected",
+     "docker": "29"
+    },
+    "repos": [
+     "switchboard"
+    ]
+   },
+   "can": "iOS + iPhone, Docker",
+   "sessions": [
+    {
+     "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+     "title": "Reaper design notes",
+     "cwd": "/Users/you/Desktop/Claude/switchboard",
+     "folder": "switchboard",
+     "mtime": 1791681509.5,
+     "active": 1791681509.5,
+     "ctx": 40000,
+     "model": "claude-opus-5-5",
+     "kind": "background",
+     "status": "stopped",
+     "bg_id": "a1b2c3d4",
+     "reaped": {
+      "at": 1791775109.5,
+      "reason": "idle",
+      "idle_h": 26
+     },
+     "thread": "99999999-9999-4999-8999-999999999999",
+     "history": 3
+    },
+    {
+     "sid": "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb",
+     "title": "Odd reaped value",
+     "cwd": "/Users/you/Desktop/Claude/switchboard",
+     "folder": "switchboard",
+     "mtime": 1791778709.5,
+     "active": 1791778709.5,
+     "ctx": 40000,
+     "model": "claude-opus-5-5",
+     "reaped": "yesterday"
+    },
+    {
+     "sid": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+     "title": "Long build",
+     "cwd": "/Users/you/Desktop/Claude/switchboard",
+     "folder": "switchboard",
+     "mtime": 1791778709.5,
+     "active": 1791778709.5,
+     "ctx": 40000,
+     "model": "claude-opus-5-5",
+     "kind": "background",
+     "status": "idle",
+     "bg_id": "c0ffee00",
+     "keep": true,
+     "thread": "cccccccc-cccc-4ccc-8ccc-cccccccccccc",
+     "history": 0
+    }
+   ],
+   "replaced": [
+    {
+     "sid": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+     "title": "Reaper design notes",
+     "how": "same-topic",
+     "kind": "background",
+     "status": "stopped",
+     "by": {
+      "machine": "studio",
+      "sid": "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+     },
+     "active": 1791602309.5,
+     "reaped": {
+      "at": 1791638309.5,
+      "reason": "replaced",
+      "idle_h": 1
+     },
+     "thread": "99999999-9999-4999-8999-999999999999"
+    }
+   ]
+  },
+  {
+   "name": "laptop",
+   "label": "Laptop",
+   "os": "mac",
+   "online": true,
+   "updated": 1791782304.5,
+   "root": "/Users/you",
+   "mem": 5,
+   "caps": null,
+   "can": null,
+   "sessions": []
+  },
+  {
+   "name": "tower",
+   "label": "Tower",
+   "os": "windows",
+   "online": true,
+   "updated": 1791782304.5,
+   "root": "C:/Users/you/Claude",
+   "mem": {
+    "claude_mb": 893,
+    "procs": 2,
+    "orphans": []
+   },
+   "caps": null,
+   "sessions": [
+    {
+     "sid": "dddddddd-dddd-4ddd-8ddd-dddddddddddd",
+     "title": "Build the Android app (for Studio)",
+     "cwd": "/Users/you/Desktop/Claude/switchboard",
+     "folder": "switchboard",
+     "mtime": 1791778709.5,
+     "active": 1791778709.5,
+     "ctx": 40000,
+     "model": "claude-opus-5-5",
+     "kind": "background",
+     "status": "busy",
+     "bg_id": "d00dd00d"
+    }
+   ]
+  }
+ ]
+}
