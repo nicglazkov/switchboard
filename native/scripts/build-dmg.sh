@@ -6,12 +6,15 @@
 # Output: native/dist/Switchboard-<version>.dmg
 #
 # Signing: ad hoc unless SB_SIGN_IDENTITY is set. With it, both apps and the image are signed with that Developer ID,
-# and with SB_NOTARY_KEY_ID, SB_NOTARY_ISSUER and SB_NOTARY_KEY_PATH (an App Store Connect API key on the build host)
-# the image is also notarized and stapled. See scripts/remote/mac-dmg.sh, "Signing and notarizing".
+# and with SB_NOTARY_PROFILE (a notarytool profile saved on the build host) or SB_NOTARY_KEY_ID, SB_NOTARY_ISSUER and
+# SB_NOTARY_KEY_PATH (an App Store Connect API key there) the image is also notarized and stapled. See scripts/remote/mac-dmg.sh, "Signing and notarizing".
 set -euo pipefail
 cd "$(dirname "$0")/.."
 . scripts/hosts.sh
 sb_hosts SB_MAC_BUILD_HOST
+sb_update_env
+# Signing settings may also live in the hosts file; the environment still wins.
+for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE; do sb_host_opt $v || true; done
 H=$SB_MAC_BUILD_HOST
 REMOTE=${SB_REMOTE:-src/switchboard-dmg}  # SB_REMOTE: a separate build dir per worktree
 
@@ -20,7 +23,8 @@ ssh -q $H "mkdir -p $REMOTE/native"
 rsync -a --delete --exclude target --exclude dist ./ $H:$REMOTE/native/
 rsync -a ../branding.toml $H:$REMOTE/
 pass=()
-for v in SB_SIGN_IDENTITY SB_NOTARY_KEY_ID SB_NOTARY_ISSUER SB_NOTARY_KEY_PATH SHADERS SB_BUILD; do
+for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE SB_NOTARY_KEY_ID SB_NOTARY_ISSUER SB_NOTARY_KEY_PATH SHADERS SB_BUILD \
+  SB_UPDATE_PUBKEY SB_UPDATE_FEED; do
   [ -n "${!v:-}" ] && pass+=("$v=$(printf '%q' "${!v}")")
 done
 ssh -q $H "${pass[*]:-} bash $REMOTE/native/scripts/remote/mac-dmg.sh"

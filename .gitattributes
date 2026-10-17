@@ -1,0 +1,4 @@
+# LF everywhere, also in Windows checkouts: some tests read their own source, and the scripts run on Unix hosts.
+* text=auto eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf

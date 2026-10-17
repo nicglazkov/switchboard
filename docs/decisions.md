@@ -77,3 +77,5 @@ One line per judgment call, newest last. Older history lives with the private wo
 - 2026-10-17: The installer's Windows icon is the app icon with an accent download badge, drawn by `installer_art.py` from `branding.toml`, with a heavier arrow at 16 to 32 px.
 - 2026-10-17: Uninstall labels changed for both systems: shortcuts and the Settings > Apps entry are their own lines, and "Caches and saved window state" became "Caches, logs and saved window state", since logs were already removed.
 - 2026-10-17: Uninstalling deletes first-run.json even when settings are kept, because the login item, Dock icon and shortcuts it recorded are removed; a later install asks the choices again, still once.
+- 2026-10-17: Public commits carry no Co-Authored-By line from now on; the two earlier ones keep theirs (history is not rewritten).
+- 2026-10-17: Mac notarizing can use a saved notarytool profile (SB_NOTARY_PROFILE) instead of an API key's ids and path, so the build host's settings hold only a profile name; the signing identity is given by certificate hash so the right one of two same-named Developer IDs is used.

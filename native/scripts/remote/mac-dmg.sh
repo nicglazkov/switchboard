@@ -137,18 +137,33 @@ rm -f "$OUT"
 hdiutil convert -quiet "$W/rw.dmg" -format UDZO -imagekey zlib-level=9 -o "$OUT"
 
 # ---------------------------------------------------------------------------------------------------------------
-# Signing and notarizing (image). Skipped unless SB_SIGN_IDENTITY is set; notarizing also needs SB_NOTARY_KEY_ID,
-# SB_NOTARY_ISSUER and SB_NOTARY_KEY_PATH (an App Store Connect API key file on this Mac).
+# Signing and notarizing (image). Skipped unless SB_SIGN_IDENTITY is set. Notarizing also needs either
+# SB_NOTARY_PROFILE (a profile saved on this Mac with `xcrun notarytool store-credentials`, so no key or id is in any
+# file) or SB_NOTARY_KEY_ID, SB_NOTARY_ISSUER and SB_NOTARY_KEY_PATH (an App Store Connect API key file on this Mac).
 # ---------------------------------------------------------------------------------------------------------------
 if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
   codesign --force --timestamp -s "$SB_SIGN_IDENTITY" "$OUT"
-  if [ -n "${SB_NOTARY_KEY_ID:-}" ] && [ -n "${SB_NOTARY_ISSUER:-}" ] && [ -n "${SB_NOTARY_KEY_PATH:-}" ]; then
+  auth=()
+  if [ -n "${SB_NOTARY_PROFILE:-}" ]; then
+    auth=(--keychain-profile "$SB_NOTARY_PROFILE")
+  elif [ -n "${SB_NOTARY_KEY_ID:-}" ] && [ -n "${SB_NOTARY_ISSUER:-}" ] && [ -n "${SB_NOTARY_KEY_PATH:-}" ]; then
+    auth=(--key "$SB_NOTARY_KEY_PATH" --key-id "$SB_NOTARY_KEY_ID" --issuer "$SB_NOTARY_ISSUER")
+  fi
+  if [ ${#auth[@]} -gt 0 ]; then
     echo "notarizing: $OUT"
-    xcrun notarytool submit "$OUT" --key "$SB_NOTARY_KEY_PATH" --key-id "$SB_NOTARY_KEY_ID" \
-      --issuer "$SB_NOTARY_ISSUER" --wait
+    log=$(xcrun notarytool submit "$OUT" "${auth[@]}" --wait 2>&1) || true
+    echo "$log"
+    # notarytool can exit 0 for a rejected image, so read its answer.
+    if ! grep -q "status: Accepted" <<<"$log"; then
+      id=$(sed -n 's/^ *id: //p' <<<"$log" | head -1)
+      [ -n "$id" ] && xcrun notarytool log "$id" "${auth[@]}" >&2 || true
+      echo "notarizing: not accepted" >&2
+      exit 1
+    fi
     xcrun stapler staple "$OUT"
+    xcrun stapler validate "$OUT"
   else
-    echo "notarizing: skipped (SB_NOTARY_KEY_ID, SB_NOTARY_ISSUER or SB_NOTARY_KEY_PATH is not set)"
+    echo "notarizing: skipped (set SB_NOTARY_PROFILE, or SB_NOTARY_KEY_ID, SB_NOTARY_ISSUER and SB_NOTARY_KEY_PATH)"
   fi
 fi
 hdiutil verify -quiet "$OUT"

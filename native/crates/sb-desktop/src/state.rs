@@ -2451,7 +2451,7 @@ mod tests {
     /// such callback now runs deferred, after AppState is released.
     #[test]
     fn callbacks_run_after_app_state_is_released() {
-        let src = include_str!("state.rs");
+        let src = include_str!("state.rs").replace("\r\n", "\n");
         let body = &src[..src.find("#[cfg(test)]\nmod tests").unwrap()];
         let lines: Vec<&str> = body.lines().map(str::trim).collect();
         // A call rustfmt wrapped onto its own line counts when the line before opens the deferred closure.
