@@ -98,7 +98,25 @@ pub struct Installer {
     pub theme_override: Option<bool>,
 }
 
+/// The platform the window is using, so whatever happens it gets its cleanup once the window is gone.
+static PLATFORM: std::sync::OnceLock<Arc<dyn Platform>> = std::sync::OnceLock::new();
+
+/// Says why the window cannot open: a message box on Windows (there is no console there), stderr elsewhere.
+fn cannot_open(why: &str) {
+    eprintln!("switchboard-install: {why}");
+    #[cfg(windows)]
+    platform::windows::alert(&format!("{} installer", crate::brand::NAME), why);
+}
+
 pub fn run(args: Args) {
+    // GPUI draws with DirectX 11 on Windows and stops before any window when there is none: say so plainly instead.
+    #[cfg(windows)]
+    if std::env::var_os("SB_SHOT").is_none() && platform::windows::graphics() == platform::windows::Graphics::None {
+        let why = platform::windows::Graphics::None.warning().unwrap_or_default();
+        cannot_open(&format!("{why}\n\nThe installer needs it too. To install without a window, run it with --quiet."));
+        std::process::exit(1);
+    }
+    let uninstall = args.uninstall;
     gpui_platform::application().with_assets(assets::Assets).run(move |cx: &mut App| {
         assets::load_fonts(cx);
         cx.on_action(|_: &Quit, cx| cx.quit());
@@ -110,7 +128,7 @@ pub fn run(args: Args) {
         let opts = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
-                title: Some(format!("Install {name}").into()),
+                title: Some(if uninstall { format!("Uninstall {name}") } else { format!("Install {name}") }.into()),
                 appears_transparent: MAC,
                 traffic_light_position: MAC.then(|| point(px(16.), px(16.))),
             }),
@@ -127,12 +145,15 @@ pub fn run(args: Args) {
                 cx.on_window_closed(|cx, _| cx.quit()).detach();
             }
             Err(e) => {
-                eprintln!("switchboard-install: could not open a window ({e:#}); try --quiet");
+                cannot_open(&format!("Could not open the installer's window ({e:#}). Run it with --quiet instead."));
                 cx.quit();
             }
         }
         cx.activate(true);
     });
+    if let Some(p) = PLATFORM.get() {
+        p.cleanup();
+    }
 }
 
 impl Installer {
@@ -146,6 +167,7 @@ impl Installer {
             return v;
         }
         let p: Arc<dyn Platform> = Arc::from(platform::native());
+        let _ = PLATFORM.set(p.clone());
         let setup = flow::prepare(p.as_ref(), &args.opts);
         let installed = flow::find_installed(p.as_ref(), args.opts.dest.as_deref()).map(|(d, app)| {
             let v = p.bundle_version(&app);
@@ -215,6 +237,9 @@ impl Installer {
             rows.push(Task::Quit);
         }
         rows.extend([Task::Copy, Task::Verify, Task::Swap]);
+        if self.p.registers() {
+            rows.push(Task::Register);
+        }
         if !setup.chosen_before() {
             rows.push(Task::Choices);
         }
@@ -253,14 +278,16 @@ impl Installer {
                 rows.push(t);
             }
         }
-        // The flow removes the login item and the Dock icon before the app; list them in that order too.
+        // The flow removes the login item, the Dock icon and the shortcuts before the app; list them in that order too.
         rows.sort_by_key(|t| match t {
             Task::Quit => 0,
             Task::Remove(uninstall::What::LoginItem) => 1,
             Task::Remove(uninstall::What::Dock) => 2,
-            Task::Remove(uninstall::What::App) => 3,
-            Task::Remove(uninstall::What::Caches) => 4,
-            _ => 5,
+            Task::Remove(uninstall::What::Shortcuts) => 3,
+            Task::Remove(uninstall::What::App) => 4,
+            Task::Remove(uninstall::What::Registry) => 5,
+            Task::Remove(uninstall::What::Caches) => 6,
+            _ => 7,
         });
         self.rows =
             rows.into_iter().map(|task| Row { task, state: RowState::Waiting, detail: String::new() }).collect();
@@ -375,6 +402,7 @@ impl Installer {
                 log::warn!("could not eject {}: {e}", img.mount.display());
             }
         }
+        self.p.cleanup();
         cx.quit();
     }
 }
@@ -385,21 +413,36 @@ impl Installer {
     fn sample(shot: &str, theme_override: Option<bool>) -> Installer {
         use crate::version::{Kind, Version};
         let v = |s: &str| Version::parse(s).unwrap();
-        let dir = Dir { path: "/Applications".into(), label: "Applications".into() };
+        // "-win" shots answer like Windows: the per-user Programs folder, the Start menu, Settings > Apps.
+        let win = shot.contains("win");
+        let dir = if win {
+            Dir { path: r"C:\Users\you\AppData\Local\Programs".into(), label: "Programs in your user folder".into() }
+        } else {
+            Dir { path: "/Applications".into(), label: "Applications".into() }
+        };
         let mut setup = Setup {
             payload: "/Volumes/Switchboard/Switchboard.app".into(),
             version: v("0.9.0"),
             dir: dir.clone(),
-            dest: "/Applications/Switchboard.app".into(),
+            dest: if win {
+                r"C:\Users\you\AppData\Local\Programs\Switchboard".into()
+            } else {
+                "/Applications/Switchboard.app".into()
+            },
             installed: None,
             kind: Kind::Fresh,
             record: None,
-            disk_image: Some(platform::DiskImage {
+            disk_image: (!win).then(|| platform::DiskImage {
                 mount: "/Volumes/Switchboard".into(),
                 image: Some("/Users/you/Downloads/Switchboard-0.9.0.dmg".into()),
             }),
             running: false,
             why_dir: None,
+            warnings: if shot.contains("slowgpu") {
+                platform::windows::Graphics::SoftwareOnly.warning().into_iter().collect()
+            } else {
+                vec![]
+            },
         };
         let update = shot.contains("update");
         if update || shot.contains("downgrade") || shot.starts_with("uninstall") {
@@ -421,7 +464,7 @@ impl Installer {
         }
         let installed = setup.installed.is_some().then(|| (dir, setup.dest.clone(), Some("0.8.4".to_string())));
         let mut i = Installer {
-            p: Arc::new(Sample),
+            p: Arc::new(Sample { win }),
             setup: Ok(setup),
             installed,
             screen: Screen::Welcome,
@@ -451,6 +494,9 @@ impl Installer {
                     row(Task::Swap, RowState::Active, ""),
                     row(Task::Choices, RowState::Waiting, ""),
                 ];
+                if win {
+                    i.rows.insert(3, row(Task::Register, RowState::Waiting, ""));
+                }
                 if shot.contains("stuck") {
                     i.rows.insert(0, row(Task::Quit, RowState::Active, ""));
                     for r in i.rows.iter_mut().skip(1) {
@@ -514,14 +560,33 @@ impl Installer {
     }
 }
 
-/// The screenshots' platform: answers like a Mac with Switchboard in /Applications, and changes nothing.
+/// The screenshots' platform: answers like a Mac with Switchboard in /Applications (or like Windows, for the "-win"
+/// shots), and changes nothing.
 #[cfg(feature = "shots")]
-struct Sample;
+struct Sample {
+    win: bool,
+}
 
 #[cfg(feature = "shots")]
 impl Platform for Sample {
     fn install_dirs(&self) -> Vec<Dir> {
         vec![Dir { path: "/Applications".into(), label: "Applications".into() }]
+    }
+    fn choices(&self) -> &'static [crate::record::Choice] {
+        use crate::record::Choice;
+        if self.win { &[Choice::OpenAtLogin, Choice::DesktopShortcut] } else { &[Choice::OpenAtLogin, Choice::Dock] }
+    }
+    fn choice_text(&self, c: crate::record::Choice) -> (String, String) {
+        if self.win { platform::windows::choice_text(c) } else { platform::mac_choice_text(c) }
+    }
+    fn also_adds(&self) -> Option<String> {
+        self.win.then(platform::windows::also_adds)
+    }
+    fn settings_app(&self) -> &'static str {
+        if self.win { "Settings" } else { "System Settings" }
+    }
+    fn registers(&self) -> bool {
+        self.win
     }
     fn set_login_item(&self, _: &std::path::Path, _: bool) -> std::io::Result<platform::Applied> {
         Ok(platform::Applied::Done)
@@ -533,6 +598,21 @@ impl Platform for Sample {
         Ok(())
     }
     fn layout(&self, app: &std::path::Path) -> uninstall::Layout {
+        use uninstall::{Item, What};
+        if self.win {
+            let user = PathBuf::from(r"C:\Users\you\AppData");
+            return uninstall::Layout {
+                app: app.into(),
+                shortcuts: vec![user.join(r"Roaming\Microsoft\Windows\Start Menu\Programs\Switchboard.lnk")],
+                entries: vec![
+                    Item { what: What::LoginItem, path: r"HKCU\Run\Switchboard".into() },
+                    Item { what: What::Registry, path: r"HKCU\Uninstall\app".into() },
+                ],
+                caches: vec![user.join(r"Local\Switchboard\cache")],
+                data: vec![user.join(r"Roaming\Switchboard")],
+                ..Default::default()
+            };
+        }
         let lib = PathBuf::from("/Users/you/Library");
         uninstall::Layout {
             app: app.into(),
@@ -540,6 +620,7 @@ impl Platform for Sample {
             in_dock: true,
             caches: vec![lib.join("Caches/app")],
             data: vec![lib.join("Application Support/app")],
+            ..Default::default()
         }
     }
 }

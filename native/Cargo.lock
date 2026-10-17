@@ -5607,6 +5607,7 @@ name = "sb-install"
 version = "0.8.4"
 dependencies = [
  "dirs",
+ "flate2",
  "gpui-pre",
  "gpui-pre-platform",
  "image",
@@ -5617,6 +5618,9 @@ dependencies = [
  "sb-core",
  "serde",
  "serde_json",
+ "windows 0.62.2",
+ "windows-registry",
+ "winresource",
 ]
 
 [[package]]

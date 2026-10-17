@@ -12,6 +12,8 @@ use gpui::{
 use super::theme::{BRAND, NUM, R_CARD, R_CTRL, Theme, UI, mix};
 use super::{Installer, RowState, Screen};
 use crate::brand::NAME;
+use crate::flow::lowercase_first;
+use crate::record::Choice;
 use crate::version::Kind;
 
 const TALL: f32 = 168.;
@@ -567,16 +569,32 @@ impl Installer {
         more.push(s.dest.display().to_string());
         let mut facts = vec![
             fact(t, "folder", t.accent, place, more),
-            fact(t, "lock", t.warm, "No admin password, and nothing else is installed".into(), vec![]),
+            fact(
+                t,
+                "lock",
+                t.warm,
+                "No admin password, and nothing else is installed".into(),
+                self.p.also_adds().into_iter().collect(),
+            ),
         ];
-        if !update {
+        // A warning needs the room, and the options screen asks about the choices anyway.
+        if !update && s.warnings.is_empty() {
+            let names: Vec<&str> = self.p.choices().iter().map(|c| c.phrase()).collect();
             facts.push(fact(
                 t,
                 "user",
                 t.ink2,
-                "Opening at login and the Dock icon start off".into(),
+                format!("{} start off", names.join(" and ")),
                 vec!["You choose after the tour.".into()],
             ));
+        }
+        for w in &s.warnings {
+            // The first sentence says what is wrong, the rest what fixes it.
+            let (line, more) = match w.split_once(". ") {
+                Some((a, b)) => (a.to_string(), vec![b.to_string()]),
+                None => (w.clone(), vec![]),
+            };
+            facts.push(fact(t, "warn", t.cold, line, more));
         }
         if s.running {
             facts.push(fact(t, "warn", t.cold, format!("{NAME} is open. It will be asked to quit first."), vec![]));
@@ -635,37 +653,30 @@ impl Installer {
     fn options(&self, t: &Theme, cx: &mut Context<Self>) -> AnyElement {
         let Ok(s) = &self.setup else { return div().into_any_element() };
         let c = self.choices;
-        let rows = card(t)
-            .overflow_hidden()
-            .child(
-                setting(
-                    t,
-                    "opt-login",
-                    "user",
-                    &format!("Open {NAME} when you log in"),
-                    "Adds a login item that opens the app. Nothing else runs in the background.",
-                    switch(t, c.open_at_login),
-                )
-                .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                    v.choices.open_at_login = !v.choices.open_at_login;
+        let offered = self.p.choices();
+        let mut rows = card(t).overflow_hidden();
+        for (i, &choice) in offered.iter().enumerate() {
+            if i > 0 {
+                rows = rows.child(div().h(px(1.)).mx(px(16.)).bg(t.line));
+            }
+            let (id, ic) = match choice {
+                Choice::OpenAtLogin => ("opt-login", "user"),
+                Choice::Dock => ("opt-dock", "window"),
+                Choice::DesktopShortcut => ("opt-desktop", "pin"),
+            };
+            let (label, explain) = self.p.choice_text(choice);
+            rows = rows.child(setting(t, id, ic, &label, &explain, switch(t, c.get(choice))).on_click(cx.listener(
+                move |v, _: &ClickEvent, _, cx| {
+                    v.choices.toggle(choice);
                     cx.notify();
-                })),
-            )
-            .child(div().h(px(1.)).mx(px(16.)).bg(t.line))
-            .child(
-                setting(
-                    t,
-                    "opt-dock",
-                    "window",
-                    &format!("Add {NAME} to the Dock"),
-                    "Puts its icon at the end of the Dock.",
-                    switch(t, c.add_to_dock),
-                )
-                .on_click(cx.listener(|v, _: &ClickEvent, _, cx| {
-                    v.choices.add_to_dock = !v.choices.add_to_dock;
-                    cx.notify();
-                })),
-            );
+                },
+            )));
+        }
+        let count = match offered.len() {
+            1 => "One choice, off unless you turn it on".to_string(),
+            2 => "Two choices, both off unless you turn them on".to_string(),
+            n => format!("{n} choices, all off unless you turn them on"),
+        };
         let place = match &s.why_dir {
             Some(why) => format!("It goes in {}, since {}.", s.dir.label, lowercase_first(why)),
             None => format!("It goes in {}.", s.dir.label),
@@ -674,8 +685,14 @@ impl Installer {
             .flex()
             .flex_col()
             .gap(px(8.))
-            .child(title(t, "Two choices, both off unless you turn them on"))
-            .child(sub(t, "These are asked once. Later updates leave them as you set them, and you can change them any time in System Settings."))
+            .child(title(t, count))
+            .child(sub(
+                t,
+                format!(
+                    "These are asked once. Later updates leave them as you set them, and you can change them any time in {}.",
+                    self.p.settings_app()
+                ),
+            ))
             .child(div().mt(px(12.)).child(rows))
             .child(
                 div()
@@ -995,11 +1012,3 @@ impl Installer {
 
 /// On a Mac the header sits under the transparent title bar, so its content moves down past the traffic lights.
 const MAC_TITLEBAR: bool = super::MAC;
-
-fn lowercase_first(s: &str) -> String {
-    let mut c = s.chars();
-    match c.next() {
-        Some(f) => f.to_lowercase().chain(c).collect(),
-        None => String::new(),
-    }
-}

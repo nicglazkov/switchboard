@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
 # Screenshots of the installer's screens: builds sb-install with the `shots` feature on the Linux host (SB_LINUX_HOST) and
 # runs each screen on a private Xvfb display the size of the window, with lavapipe (software Vulkan), so nothing shows on
-# any screen and nothing is installed. The sample platform answers like a Mac and changes nothing.
+# any screen and nothing is installed. The sample platform answers like a Mac (like Windows for the "-win" screens) and
+# changes nothing.
 #   native/scripts/installer-shots.sh <out-dir> [screen ...]      default: every screen, light and dark
 # Screens: welcome, welcome-update, welcome-update-running, welcome-downgrade, welcome-home, tour-1..4, options,
-# options-home, progress, progress-stuck, done, done-update, done-notes, uninstall, uninstall-data, uninstall-done, error.
+# options-home, progress, progress-stuck, done, done-update, done-notes, uninstall, uninstall-data, uninstall-done, error,
+# and for Windows: welcome-win, welcome-win-update, welcome-win-slowgpu, options-win, progress-win, done-win,
+# uninstall-win, uninstall-win-done.
 # SB_REMOTE names the folder on the host (default switchboard-installer-shots); SB_TARGET sets its CARGO_TARGET_DIR.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -16,7 +19,8 @@ OUT=${1:?out dir}; shift
 SCREENS=("$@")
 [ ${#SCREENS[@]} -gt 0 ] || SCREENS=(welcome welcome-update welcome-update-running welcome-downgrade welcome-home
   tour-1 tour-2 tour-3 tour-4 options options-home progress progress-stuck done done-update done-notes
-  uninstall uninstall-data uninstall-done error)
+  uninstall uninstall-data uninstall-done error
+  welcome-win welcome-win-update welcome-win-slowgpu options-win progress-win done-win uninstall-win uninstall-win-done)
 mkdir -p "$OUT"
 # The repo root's branding.toml sits next to native/ there too, where build.rs looks for it.
 ssh -q $H "mkdir -p $REMOTE/native"

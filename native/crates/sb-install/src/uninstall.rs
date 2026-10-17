@@ -5,12 +5,17 @@
 use std::path::{Path, PathBuf};
 
 /// Where the app keeps things on this computer (from the platform backend).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Layout {
     pub app: PathBuf,
     pub login_item: Option<PathBuf>,
     /// The app has an icon in the Dock (it would be left pointing at nothing).
     pub in_dock: bool,
+    /// Shortcut files that open the app (Windows: the Start menu and the desktop).
+    pub shortcuts: Vec<PathBuf>,
+    /// Things that are not files and that the backend found present, such as registry keys and values (shown by
+    /// their registry path). Always removed.
+    pub entries: Vec<Item>,
     /// Rebuilt by the app as needed: snapshot cache, saved window state, logs.
     pub caches: Vec<PathBuf>,
     /// The user's: settings, saved places and the first-run record.
@@ -22,6 +27,9 @@ pub enum What {
     App,
     LoginItem,
     Dock,
+    Shortcuts,
+    /// Windows: the Settings > Apps entry and the name notifications show.
+    Registry,
     Caches,
     Data,
 }
@@ -30,9 +38,11 @@ impl What {
     pub fn label(self) -> &'static str {
         match self {
             What::App => "The app",
-            What::LoginItem => "Its login item",
+            What::LoginItem => "Opening it when you sign in",
             What::Dock => "Its icon in the Dock",
-            What::Caches => "Caches and saved window state",
+            What::Shortcuts => "Its shortcuts",
+            What::Registry => "Its entry in Settings > Apps",
+            What::Caches => "Caches, logs and saved window state",
             What::Data => "Your settings and saved layout",
         }
     }
@@ -61,6 +71,11 @@ pub fn plan(layout: &Layout, remove_data: bool, exists: impl Fn(&Path) -> bool) 
     if layout.in_dock {
         p.remove.push(Item { what: What::Dock, path: layout.app.clone() });
     }
+    p.remove.extend(layout.entries.iter().filter(|i| i.what == What::LoginItem).cloned());
+    for s in layout.shortcuts.iter().filter(|s| exists(s)) {
+        p.remove.push(Item { what: What::Shortcuts, path: s.clone() });
+    }
+    p.remove.extend(layout.entries.iter().filter(|i| i.what != What::LoginItem).cloned());
     let mut add = |what: What, path: &PathBuf, remove: bool| {
         if exists(path) {
             let item = Item { what, path: path.clone() };
@@ -106,6 +121,7 @@ mod tests {
                 "/Users/you/Library/Application Support/app".into(),
                 "/Users/you/Library/Preferences/app.plist".into(),
             ],
+            ..Default::default()
         }
     }
 
@@ -120,7 +136,7 @@ mod tests {
         assert_eq!(whats(&p.keep), [What::Data, What::Data]);
         assert_eq!(
             Plan::labels(&p.remove),
-            ["The app", "Its login item", "Its icon in the Dock", "Caches and saved window state"],
+            ["The app", "Opening it when you sign in", "Its icon in the Dock", "Caches, logs and saved window state"],
             "one line per kind"
         );
         assert_eq!(Plan::labels(&p.keep), ["Your settings and saved layout"]);
@@ -147,5 +163,26 @@ mod tests {
         let p = plan(&l, true, |_| false);
         assert_eq!(whats(&p.remove), [What::App]);
         assert!(p.keep.is_empty());
+    }
+
+    #[test]
+    fn windows_shortcuts_and_registry_entries() {
+        let reg = |what, p: &str| Item { what, path: p.into() };
+        let l = Layout {
+            app: r"C:\Users\you\AppData\Local\Programs\Switchboard".into(),
+            shortcuts: vec!["start/Switchboard.lnk".into(), "desktop/Switchboard.lnk".into()],
+            entries: vec![reg(What::Registry, r"HKCU\Uninstall\app"), reg(What::LoginItem, r"HKCU\Run\Switchboard")],
+            caches: vec!["logs".into()],
+            data: vec!["settings".into()],
+            ..Default::default()
+        };
+        // The desktop shortcut was never made; registry entries are listed as the backend found them.
+        let p = plan(&l, false, |p| !p.starts_with("desktop"));
+        assert_eq!(whats(&p.remove), [What::App, What::LoginItem, What::Shortcuts, What::Registry, What::Caches]);
+        assert_eq!(p.remove[2].path, PathBuf::from("start/Switchboard.lnk"));
+        assert_eq!(
+            Plan::labels(&p.remove)[1..4],
+            ["Opening it when you sign in", "Its shortcuts", "Its entry in Settings > Apps"]
+        );
     }
 }

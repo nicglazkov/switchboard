@@ -237,6 +237,16 @@ async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
             _ = link.closing.notified() => {
                 let (code, reason) = link.close_reason();
                 let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+                // Wait a moment for the node's answering close before dropping the socket. Dropping it at once can
+                // reset the connection on Windows, and the node then never reads why it was closed.
+                let _ = tokio::time::timeout(Duration::from_secs(2), async {
+                    while let Some(Ok(m)) = ws.recv().await {
+                        if matches!(m, Message::Close(_)) {
+                            break;
+                        }
+                    }
+                })
+                .await;
                 break "closed by the hub";
             }
         }

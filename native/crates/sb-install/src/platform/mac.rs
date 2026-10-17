@@ -162,18 +162,17 @@ impl Platform for Mac {
         caches.push(lib.join(format!("HTTPStorages/{DESKTOP_ID}")));
         // Only the app's own logs (sb-desktop/src/logs.rs and panics.rs): the server's LaunchAgents write to the same
         // folder, and those stay.
-        let logs = lib.join(format!("Logs/{NAME}"));
-        caches.push(logs.join("panic.log"));
-        caches.push(logs.join(format!("{NAME}.log")));
-        caches.extend((1..=5).map(|n| logs.join(format!("{NAME}.log.{n}"))));
-        if let Ok(rd) = std::fs::read_dir(&logs) {
-            caches.extend(rd.flatten().map(|e| e.path()).filter(|p| {
-                p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("crash-") && n.ends_with(".txt"))
-            }));
-        }
+        caches.extend(super::app_log_files(&lib.join(format!("Logs/{NAME}"))));
         let mut data: Vec<PathBuf> = self.settings_dir().into_iter().collect();
         data.push(lib.join(format!("Preferences/{DESKTOP_ID}.plist")));
-        Layout { app: app.to_path_buf(), login_item: Some(login_item_path()), in_dock: in_dock(app), caches, data }
+        Layout {
+            app: app.to_path_buf(),
+            login_item: Some(login_item_path()),
+            in_dock: in_dock(app),
+            caches,
+            data,
+            ..Default::default()
+        }
     }
 }
 

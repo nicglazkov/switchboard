@@ -9,6 +9,12 @@ use crate::platform;
 
 pub fn run(args: &Args) -> i32 {
     let p = platform::native();
+    let code = flows(p.as_ref(), args);
+    p.cleanup();
+    code
+}
+
+fn flows(p: &dyn platform::Platform, args: &Args) -> i32 {
     let opts = &args.opts;
     let mut print = |e: Event| match e {
         Event::Start(t) => println!("{}: {}", t.tag(), t.label()),
@@ -26,16 +32,16 @@ pub fn run(args: &Args) -> i32 {
     let mut ask_force = move || force;
 
     if args.uninstall {
-        let Some((_, app)) = flow::find_installed(p.as_ref(), opts.dest.as_deref()) else {
+        let Some((_, app)) = flow::find_installed(p, opts.dest.as_deref()) else {
             eprintln!("uninstall: {NAME} is not installed here");
             return 1;
         };
-        let plan = flow::uninstall_plan(p.as_ref(), &app, opts.remove_data);
+        let plan = flow::uninstall_plan(p, &app, opts.remove_data);
         println!("uninstall: {NAME} at {}", app.display());
         for i in &plan.keep {
             println!("keep: {}", i.path.display());
         }
-        return match flow::uninstall(p.as_ref(), &plan, &mut ask_force, &mut print) {
+        return match flow::uninstall(p, &plan, &mut ask_force, &mut print) {
             Ok(out) => {
                 out.notes.iter().for_each(|n| println!("note: {n}"));
                 println!("done: {NAME} is uninstalled");
@@ -48,7 +54,7 @@ pub fn run(args: &Args) -> i32 {
         };
     }
 
-    let setup = match flow::prepare(p.as_ref(), opts) {
+    let setup = match flow::prepare(p, opts) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
@@ -56,6 +62,9 @@ pub fn run(args: &Args) -> i32 {
         }
     };
     println!("{}", setup.title());
+    for w in &setup.warnings {
+        println!("note: {w}");
+    }
     if let Some(no) = setup.refusal() {
         eprintln!("refused: {no}");
         return 3;
@@ -68,7 +77,7 @@ pub fn run(args: &Args) -> i32 {
     if setup.chosen_before() {
         println!("first-run: chosen at an earlier install, left as they are");
     }
-    match flow::install(p.as_ref(), &setup, opts.choices, &mut ask_force, &mut print) {
+    match flow::install(p, &setup, opts.choices, &mut ask_force, &mut print) {
         Ok(out) => {
             out.notes.iter().for_each(|n| println!("note: {n}"));
             if opts.open {

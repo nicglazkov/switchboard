@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use crate::brand::{NAME, bundle};
 use crate::platform::{Applied, Dir, DiskImage, Platform, writable};
-use crate::record::{self, Choices, Decision, Record};
+use crate::record::{self, Choice, Choices, Decision, Record};
 use crate::swap;
 use crate::uninstall;
 use crate::version::{Kind, Version, kind};
@@ -45,6 +45,8 @@ pub struct Setup {
     pub running: bool,
     /// Why `dir` was picked over the first choice ("Applications needs an admin password"), if it was.
     pub why_dir: Option<String>,
+    /// Problems that do not stop the install (Platform::warnings).
+    pub warnings: Vec<String>,
 }
 
 impl Setup {
@@ -113,7 +115,8 @@ fn payload_near(exe: &Path) -> Vec<PathBuf> {
 
 /// The installed copy, if any: in `dest` when given, else in the usual folders, first found.
 pub fn find_installed(p: &dyn Platform, dest: Option<&Path>) -> Option<(Dir, PathBuf)> {
-    dirs_for(p, dest).into_iter().map(|d| (d.path.join(bundle()), d)).find(|(app, _)| app.exists()).map(|(a, d)| (d, a))
+    let name = p.bundle_name();
+    dirs_for(p, dest).into_iter().map(|d| (d.path.join(&name), d)).find(|(app, _)| app.exists()).map(|(a, d)| (d, a))
 }
 
 fn dirs_for(p: &dyn Platform, dest: Option<&Path>) -> Vec<Dir> {
@@ -125,7 +128,7 @@ fn dirs_for(p: &dyn Platform, dest: Option<&Path>) -> Vec<Dir> {
 
 /// Picks the folder and works out what this install means. Changes nothing.
 pub fn prepare(p: &dyn Platform, opts: &Opts) -> Result<Setup, String> {
-    let payload = find_payload(opts.app.as_deref())?;
+    let payload = p.find_payload(opts.app.as_deref())?;
     let version = p
         .bundle_version(&payload)
         .and_then(|v| Version::parse(&v))
@@ -134,12 +137,25 @@ pub fn prepare(p: &dyn Platform, opts: &Opts) -> Result<Setup, String> {
         Some((dir, _)) => (dir, None),
         None => pick_dir(&dirs_for(p, opts.dest.as_deref()))?,
     };
-    let dest = dir.path.join(bundle());
+    let dest = dir.path.join(p.bundle_name());
     let installed = dest.exists().then(|| p.bundle_version(&dest).and_then(|v| Version::parse(&v)));
     let kind = kind(installed.as_ref().map(|v| v.as_ref()), &version);
     let record = p.settings_dir().and_then(|d| record::read(&d));
     let running = installed.is_some() && !p.running(&dest).is_empty();
-    Ok(Setup { payload, version, dir, dest, installed, kind, record, disk_image: p.disk_image(), running, why_dir })
+    let warnings = p.warnings();
+    Ok(Setup {
+        payload,
+        version,
+        dir,
+        dest,
+        installed,
+        kind,
+        record,
+        disk_image: p.disk_image(),
+        running,
+        why_dir,
+        warnings,
+    })
 }
 
 /// The first folder this account can write to, creating a missing one in the home folder. The reason the first
@@ -170,6 +186,8 @@ pub enum Task {
     Copy,
     Verify,
     Swap,
+    /// Windows: the Start menu shortcut and the Settings > Apps entry.
+    Register,
     Choices,
     Remove(uninstall::What),
 }
@@ -181,8 +199,13 @@ impl Task {
             Task::Copy => format!("Copying {NAME}"),
             Task::Verify => "Checking the copy".into(),
             Task::Swap => "Putting it in place".into(),
+            Task::Register => "Adding it to the Start menu and Settings > Apps".into(),
             Task::Choices => "Saving your choices".into(),
-            Task::Remove(w) => format!("Removing {}", w.label().to_lowercase().replace("its ", "the ")),
+            Task::Remove(w) => {
+                let l = w.label();
+                let l = l.strip_prefix("Its ").map(|r| format!("the {r}")).unwrap_or_else(|| lowercase_first(l));
+                format!("Removing {l}")
+            }
         }
     }
     /// One word for --quiet's lines.
@@ -192,6 +215,7 @@ impl Task {
             Task::Copy => "copy",
             Task::Verify => "verify",
             Task::Swap => "swap",
+            Task::Register => "register",
             Task::Choices => "first-run",
             Task::Remove(_) => "remove",
         }
@@ -262,7 +286,7 @@ impl swap::Fs for PlatformFs<'_> {
         self.0.copy_app(from, to)
     }
     fn rename(&self, from: &Path, to: &Path) -> std::io::Result<()> {
-        std::fs::rename(from, to)
+        self.0.rename(from, to)
     }
     fn remove_tree(&self, p: &Path) -> std::io::Result<()> {
         swap::remove_tree(p)
@@ -306,6 +330,17 @@ pub fn install(
     if let Some(l) = left {
         out.notes.push(format!("The old copy could not be removed. It is at {}; you can delete it.", l.display()));
     }
+    if p.registers() {
+        // The app is in place by now, so a failure here is said, not undone.
+        ev(Event::Start(Task::Register));
+        match p.register(&s.dest, &s.version.to_string()) {
+            Ok(d) => ev(Event::Done(Task::Register, d)),
+            Err(e) => {
+                out.notes.push(format!("Could not add the Start menu shortcut or the Settings > Apps entry: {e}."));
+                ev(Event::Done(Task::Register, "failed".into()));
+            }
+        }
+    }
 
     let Some(settings) = p.settings_dir() else { return Ok(out) };
     let Decision::Apply(c) = record::decide(record::read(&settings), choices) else {
@@ -313,12 +348,21 @@ pub fn install(
     };
     ev(Event::Start(Task::Choices));
     let mut said = vec![];
-    for (on, what, login) in [(c.open_at_login, "open at login", true), (c.add_to_dock, "Dock", false)] {
+    let offered = p.choices();
+    for choice in Choice::ALL {
+        let (on, what) = (c.get(choice), choice.name());
+        // A choice this system does not offer is only mentioned when it was asked for (a --quiet flag).
         if !on {
-            said.push(format!("{what} off"));
+            if offered.contains(&choice) {
+                said.push(format!("{what} off"));
+            }
             continue;
         }
-        let res = if login { p.set_login_item(&s.dest, true) } else { p.set_in_dock(&s.dest, true) };
+        let res = match choice {
+            Choice::OpenAtLogin => p.set_login_item(&s.dest, true),
+            Choice::Dock => p.set_in_dock(&s.dest, true),
+            Choice::DesktopShortcut => p.set_desktop_shortcut(&s.dest, true),
+        };
         match res {
             Ok(Applied::Done) => said.push(format!("{what} on")),
             Ok(Applied::Skipped(why)) => {
@@ -355,8 +399,9 @@ pub fn uninstall(
     let app = plan.remove.iter().find(|i| i.what == What::App).map(|i| i.path.clone()).unwrap_or_default();
     quit_running(p, &app, ask_force, ev)?;
     let mut out = Outcome::default();
-    // The login item and the Dock icon first, so nothing points at a missing app if a later step fails.
-    let order = [What::LoginItem, What::Dock, What::App, What::Caches, What::Data];
+    // The login item, the Dock icon and the shortcuts first, so nothing points at a missing app if a later step fails;
+    // the Settings > Apps entry after the app, so a failed removal can still be retried from there.
+    let order = [What::LoginItem, What::Dock, What::Shortcuts, What::App, What::Registry, What::Caches, What::Data];
     for what in order {
         let items: Vec<_> = plan.remove.iter().filter(|i| i.what == what).collect();
         if items.is_empty() {
@@ -368,18 +413,32 @@ pub fn uninstall(
             let res = match what {
                 What::LoginItem => p.set_login_item(&app, false),
                 What::Dock => p.set_in_dock(&app, false),
+                What::Registry => p.unregister(&app),
+                What::App => p.remove_app(&i.path).map(|_| Applied::Done),
                 _ => swap::remove_tree(&i.path).map(|_| Applied::Done),
             };
             match res {
                 Ok(Applied::Done) => {}
-                Ok(Applied::Skipped(why)) => out.notes.push(format!("Left {}: {why}.", what.label().to_lowercase())),
+                Ok(Applied::Skipped(why)) => out.notes.push(format!("Left {}: {why}.", lowercase_first(what.label()))),
                 Err(e) => return Err(format!("Could not remove {}: {e}.", i.path.display())),
             }
         }
         let detail = items.iter().map(|i| i.path.display().to_string()).collect::<Vec<_>>().join(", ");
         ev(Event::Done(t, detail));
     }
+    // The login item, Dock icon and shortcuts the record noted are gone now, so a later install asks again.
+    if let Some(d) = p.settings_dir() {
+        let _ = std::fs::remove_file(record::path(&d));
+    }
     Ok(out)
+}
+
+pub fn lowercase_first(s: &str) -> String {
+    let mut c = s.chars();
+    match c.next() {
+        Some(f) => f.to_lowercase().chain(c).collect(),
+        None => String::new(),
+    }
 }
 
 #[cfg(test)]
@@ -416,10 +475,9 @@ mod tests {
         fn layout(&self, app: &Path) -> Layout {
             Layout {
                 app: app.into(),
-                login_item: None,
-                in_dock: false,
                 caches: vec![self.root.join("home/cache")],
                 data: vec![self.root.join("home/settings")],
+                ..Default::default()
             }
         }
     }
@@ -451,11 +509,16 @@ mod tests {
 
     impl Drop for Test {
         fn drop(&mut self) {
-            #[cfg(unix)]
+            // Read on every system (Windows has no mode bits to put back), so the field is never unused there.
             if self.locked_system {
-                use std::os::unix::fs::PermissionsExt;
-                let _ =
-                    std::fs::set_permissions(self.root.join("Applications"), std::fs::Permissions::from_mode(0o755));
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        self.root.join("Applications"),
+                        std::fs::Permissions::from_mode(0o755),
+                    );
+                }
             }
             let _ = std::fs::remove_dir_all(&self.root);
         }
@@ -474,7 +537,7 @@ mod tests {
         assert_eq!(s.kind, Kind::Fresh);
         assert_eq!(s.dir.label, "Applications");
         assert_eq!(s.title(), "Install Switchboard 0.8.3");
-        let asked = Choices { open_at_login: true, add_to_dock: true };
+        let asked = Choices { open_at_login: true, add_to_dock: true, ..Default::default() };
         let mut events = vec![];
         let out = install(&t, &s, asked, &mut || false, &mut |e| events.push(e)).unwrap();
         assert!(events.contains(&Event::Done(Task::Choices, "open at login on, Dock skipped".into())), "{events:?}");
@@ -518,12 +581,21 @@ mod tests {
         let plan = uninstall_plan(&t, &s.dest, false);
         uninstall(&t, &plan, &mut || false, &mut |_| {}).unwrap();
         assert!(!s.dest.exists() && !t.root.join("home/cache").exists());
-        assert!(t.root.join("home/settings/first-run.json").exists(), "data kept");
+        assert!(t.root.join("home/settings").exists(), "data kept");
+        assert!(!t.root.join("home/settings/first-run.json").exists(), "choices are asked again next time");
 
         app(&s.dest, "1.0.0");
         let plan = uninstall_plan(&t, &s.dest, true);
         uninstall(&t, &plan, &mut || false, &mut |_| {}).unwrap();
         assert!(!t.root.join("home/settings").exists());
+    }
+
+    #[test]
+    fn task_labels() {
+        assert_eq!(Task::Remove(uninstall::What::Dock).label(), "Removing the icon in the Dock");
+        assert_eq!(Task::Remove(uninstall::What::Registry).label(), "Removing the entry in Settings > Apps");
+        assert_eq!(Task::Remove(uninstall::What::Caches).label(), "Removing caches, logs and saved window state");
+        assert_eq!(Task::Remove(uninstall::What::App).label(), "Removing the app");
     }
 
     #[test]
@@ -537,5 +609,83 @@ mod tests {
     fn missing_payload_says_where_to_open_from() {
         let e = find_payload(Some(Path::new("/nowhere/Switchboard.app"))).unwrap_err();
         assert!(e.contains("not an app bundle"));
+    }
+
+    /// Answers like Windows: registers every install, offers a desktop shortcut instead of the Dock, and keeps a
+    /// registry entry the uninstaller removes after the app.
+    struct Registering {
+        t: Test,
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl Registering {
+        fn said(&self, s: String) {
+            self.calls.lock().unwrap().push(s);
+        }
+    }
+
+    impl Platform for Registering {
+        fn install_dirs(&self) -> Vec<Dir> {
+            self.t.install_dirs()
+        }
+        fn choices(&self) -> &'static [Choice] {
+            &[Choice::OpenAtLogin, Choice::DesktopShortcut]
+        }
+        fn set_login_item(&self, _: &Path, on: bool) -> io::Result<Applied> {
+            self.said(format!("login {on}"));
+            Ok(Applied::Done)
+        }
+        fn set_in_dock(&self, _: &Path, _: bool) -> io::Result<Applied> {
+            panic!("Windows has no Dock")
+        }
+        fn set_desktop_shortcut(&self, _: &Path, on: bool) -> io::Result<Applied> {
+            self.said(format!("desktop {on}"));
+            Ok(Applied::Done)
+        }
+        fn registers(&self) -> bool {
+            true
+        }
+        fn register(&self, _: &Path, version: &str) -> io::Result<String> {
+            self.said(format!("register {version}"));
+            Ok("start menu".into())
+        }
+        fn unregister(&self, app: &Path) -> io::Result<Applied> {
+            assert!(!app.exists(), "the entry goes after the app");
+            self.said("unregister".into());
+            Ok(Applied::Done)
+        }
+        fn open_app(&self, _: &Path) -> io::Result<()> {
+            Ok(())
+        }
+        fn settings_dir(&self) -> Option<PathBuf> {
+            self.t.settings_dir()
+        }
+        fn layout(&self, app: &Path) -> Layout {
+            Layout {
+                entries: vec![uninstall::Item { what: uninstall::What::Registry, path: "HKCU\\entry".into() }],
+                ..self.t.layout(app)
+            }
+        }
+    }
+
+    #[test]
+    fn a_registering_system_registers_every_install_and_applies_choices_once() {
+        let r = Registering { t: setup("registering", false), calls: Default::default() };
+        let s = prepare(&r, &opts(&r.t, "0.8.3")).unwrap();
+        let asked = Choices { desktop_shortcut: true, ..Default::default() };
+        let mut events = vec![];
+        install(&r, &s, asked, &mut || false, &mut |e| events.push(e)).unwrap();
+        assert!(events.contains(&Event::Done(Task::Register, "start menu".into())), "{events:?}");
+        assert!(
+            events.contains(&Event::Done(Task::Choices, "open at login off, desktop shortcut on".into())),
+            "the Dock is not offered, so not mentioned: {events:?}"
+        );
+        let s = prepare(&r, &opts(&r.t, "0.9.0")).unwrap();
+        install(&r, &s, Choices { open_at_login: true, ..Default::default() }, &mut || false, &mut |_| {}).unwrap();
+        assert_eq!(*r.calls.lock().unwrap(), ["register 0.8.3", "desktop true", "register 0.9.0"]);
+
+        let plan = uninstall_plan(&r, &s.dest, false);
+        uninstall(&r, &plan, &mut || false, &mut |_| {}).unwrap();
+        assert_eq!(r.calls.lock().unwrap().last().unwrap(), "unregister");
     }
 }

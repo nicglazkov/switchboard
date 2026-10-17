@@ -21,6 +21,8 @@ dirs.workspace = true
 log.workspace = true
 # Reads Info.plist files and the Dock's settings (both may be binary plists).
 plist = "=1.7.4"
+# The app's files attached to Setup.exe (src/pack.rs).
+flate2 = "=1.1.10"
 # Only for the `shots` build: saves the rendered frame as a PNG.
 image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
 
@@ -32,3 +34,28 @@ shots = ["gpui/test-support", "gpui_platform/test-support", "dep:image"]
 [target.'cfg(target_os = "macos")'.dependencies]
 objc = "=0.2.7"
 libc = "0.2.190"
+
+# Windows: shortcuts, the HKCU entries, finding and closing a running copy, the version resource and the DirectX check.
+[target.'cfg(windows)'.dependencies]
+windows-registry = "=0.6.1"
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Storage_EnhancedStorage",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_Shell",
+    "Win32_UI_Shell_PropertiesSystem",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(windows)'.build-dependencies]
+winresource = { version = "=0.1.34", default-features = false }

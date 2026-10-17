@@ -336,7 +336,9 @@ mod tests {
         let e = run(&update_plan(), &fs, &mut |_| {}).unwrap_err();
         let Error::Stranded { backup, .. } = &e else { panic!("{e:?}") };
         assert_eq!(fs.at(&backup.display().to_string()).as_deref(), Some("old"));
-        assert!(e.to_string().contains("/Applications/.Switchboard.app.old"));
+        // Path::join writes a backslash on Windows, so compare by parts.
+        assert_eq!(backup, &Path::new("/Applications").join(".Switchboard.app.old"));
+        assert!(e.to_string().contains(&backup.display().to_string()));
     }
 
     #[test]

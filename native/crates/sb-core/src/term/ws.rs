@@ -413,8 +413,12 @@ mod tests {
                 while ws.read().is_ok() {}
                 return seen;
             }
-            ws.send(Message::text(r#"{"type":"status","state":"connecting"}"#)).unwrap();
-            ws.send(Message::text(r#"{"type":"status","state":"open"}"#)).unwrap();
+            // A client that detaches at once may already be gone here.
+            for state in ["connecting", "open"] {
+                if ws.send(Message::text(format!(r#"{{"type":"status","state":"{state}"}}"#))).is_err() {
+                    return seen;
+                }
+            }
             loop {
                 match ws.read() {
                     Ok(Message::Binary(b)) => {

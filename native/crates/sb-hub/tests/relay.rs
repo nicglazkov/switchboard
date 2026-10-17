@@ -1,4 +1,6 @@
 //! The hub end to end on this machine, with a fake ssh (tests/fake-ssh.sh) standing in for the real one.
+//! The fake is a shell script, which Windows cannot start as a program, so these run on Unix only.
+#![cfg(unix)]
 
 use futures_util::{SinkExt, StreamExt};
 use sb_hub::config::Config;
@@ -231,9 +233,11 @@ async fn at_most_max_terminals() {
     assert!(s3.out.contains("PID"), "{s3:?}");
 }
 
+/// Running and not a zombie. `ps` rather than /proc, so the test also runs on macOS.
 fn alive(pid: &str) -> bool {
-    std::path::Path::new(&format!("/proc/{pid}")).exists()
-        && !std::fs::read_to_string(format!("/proc/{pid}/stat")).unwrap_or_default().contains(") Z ")
+    let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output();
+    let stat = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string()).unwrap_or_default();
+    !stat.is_empty() && !stat.starts_with('Z')
 }
 
 #[tokio::test(flavor = "multi_thread")]

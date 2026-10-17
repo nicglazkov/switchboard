@@ -95,12 +95,24 @@ it out. The log folder is `~/Library/Logs/Switchboard` on macOS, `%LOCALAPPDATA%
 - `switchboard-hub` and `switchboard-node` print to stderr and keep no log files of their own; whatever runs them
   (launchd, systemd) decides where that goes.
 
-## The Mac installer: `native/crates/sb-install`
+## The installer: `native/crates/sb-install`
 
 `switchboard-install` installs, updates and uninstalls the app. It is one binary with a GPUI window and a
-`--quiet` mode. Everything that differs by system (where apps go, login items, the Dock, asking a running app to
-quit, disk images) is behind the `Platform` trait in `src/platform/`. The Mac has a real backend; other systems
-get a plain one that only copies files, and a Windows backend would be another implementation.
+`--quiet` mode. Everything that differs by system (where apps go, login items, the Dock, shortcuts, the Settings >
+Apps entry, asking a running app to quit, disk images) is behind the `Platform` trait in `src/platform/`. The Mac
+(`mac.rs`) and Windows (`windows.rs`) have real backends; other systems get a plain one that only copies files.
+
+On Windows the app is a folder, `%LOCALAPPDATA%\Programs\Switchboard`, holding `Switchboard.exe`, the license
+notices and `Uninstall Switchboard.exe`. The download is the installer exe with those files attached (`pack.rs`:
+zlib-compressed entries and an end marker, found again after Authenticode signing); it unpacks them to the temp
+folder and installs from there with the same flow as the Mac. After the swap, `register` writes the Start menu
+shortcut (carrying the app's AppUserModelID, which `sb-desktop` also sets so its notifications show) and the
+`HKCU` Uninstall entry; the choices add a desktop shortcut or an `HKCU\...\Run` value. A running copy is found by
+the path of its exe, asked to close its windows (WM_CLOSE), and stopped only when the user agrees. The version is
+read from the exe's version resource, never by running it. `Places` holds every folder and key the backend
+touches, and `SB_INSTALL_TEST_ROOT` with `SB_INSTALL_TEST_REG` moves them all into a throwaway folder and a
+`HKCU\Software\SwitchboardTest-*` key for tests. The Win32 calls are only built on Windows; the paths, registry
+values and messages are plain code, tested on every system.
 
 The parts that decide what happens have no UI and are unit tested: version comparison (`version.rs`), the staged
 copy, swap and roll back (`swap.rs`), the first-run record (`record.rs`) and the uninstaller's keep and remove

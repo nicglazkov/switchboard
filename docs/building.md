@@ -33,7 +33,7 @@ its own build folder on the remote host, so two builds don't overwrite each othe
 |---|---|---|
 | `native/scripts/build-mac.sh` | `dist/Switchboard-mac.zip`, universal (Apple silicon and Intel) | a Mac with Rust and the Xcode command line tools |
 | `native/scripts/build-dmg.sh` | `dist/Switchboard-<version>.dmg`: the app, the installer and an Applications shortcut | the same Mac, plus Python 3 and access to PyPI |
-| `native/scripts/build-windows.sh` | `dist/Switchboard-windows.zip` | Windows with MSVC and OpenSSH |
+| `native/scripts/build-windows.sh` | `dist/Switchboard-Setup-<version>.exe` and `dist/Switchboard-windows.zip` | Windows with MSVC and OpenSSH |
 | `native/scripts/build-linux.sh` | `dist/Switchboard-linux-x86_64` | Linux with Rust and the GPUI packages |
 | `native/scripts/linux-shots.sh` | screenshots from a headless Linux build | the same Linux host |
 | `native/scripts/installer-shots.sh` | screenshots of every installer screen, light and dark | the same Linux host |
@@ -65,6 +65,54 @@ of the app against `native/scripts/fixture-server.py` (the board, the inspector,
 dark), scaled to 1120 by 700; redo them when those screens change. The image's Finder layout is written
 straight into its `.DS_Store` with the `ds_store` and `mac_alias` Python packages, installed in a throwaway venv
 for each build, so the build needs no Finder, AppleScript or logged-in user.
+
+## The Windows installer
+
+`build-windows.sh` makes `dist/Switchboard-Setup-<version>.exe`, the one file people download. It is the same
+`sb-install` program with `Switchboard.exe` and `THIRD-PARTY-NOTICES.txt` attached to its end
+(`switchboard-install --make-setup <out.exe> <files>`, see `src/pack.rs`), plus a copy of the plain installer that
+stays in the app's folder as `Uninstall Switchboard.exe`. The plain zip is still made for the in-app updater.
+
+```sh
+native/scripts/build-windows.sh      # needs SB_WINDOWS_BUILD_HOST in build-hosts.env
+```
+
+The script builds `sb-desktop` and `sb-install` on the build host, checks that both are window (GUI subsystem)
+programs with an icon, version info (product name, publisher from `branding.toml`, file version) and GPUI's
+manifest, and that neither imports `vcruntime140.dll` or `msvcp140.dll`: `native/.cargo/config.toml` links the C
+runtime in, so nothing else has to be installed first. It then makes the Setup file and checks that it answers
+`--version`. Neither the app nor the installer's window is ever opened on the build host.
+
+What the installer does on a PC:
+
+- It installs per user with no admin rights: the app goes in `%LOCALAPPDATA%\Programs\Switchboard`, everything
+  else is under `HKCU` or in the user's own folders.
+- A Start menu shortcut is always added. A desktop shortcut and "Open at login" (an `HKCU\...\Run` value) are
+  choices that start off and are applied once, on the first install for that account.
+- It adds an entry to Settings > Apps (`HKCU\Software\Microsoft\Windows\CurrentVersion\Uninstall\<desktop_id>`)
+  with the name, version, publisher, icon, folder, size and the uninstall commands, and no Modify or Repair.
+- Updates follow the Mac rules: no downgrades (exit code 3 with `--quiet`), "Update Switchboard, from X to Y", the
+  new copy is checked before an atomic swap that rolls back on failure, and a running copy is asked to close its
+  windows before the user is asked whether to stop it. Settings and `first-run.json` are never touched.
+- It checks for a Direct3D 11 graphics driver, which the app needs to draw, and says so when there is only
+  Windows' basic driver or none.
+- `Uninstall Switchboard.exe` (also what Settings > Apps runs, with `--uninstall`) removes the shortcuts, the
+  registry entries, the app and its caches and own logs, asks whether to keep settings, and deletes itself a few
+  seconds after it exits, with no console window.
+
+**Testing without touching the PC.** Two variables point every place the installer writes at a throwaway folder
+and registry key, and they must be set together:
+
+```powershell
+$env:SB_INSTALL_TEST_ROOT = "$env:TEMP\sb-install-test"          # Programs, Start menu, Desktop, settings, caches
+$env:SB_INSTALL_TEST_REG  = 'Software\SwitchboardTest-1234'      # HKCU key for the Uninstall, Run and app id keys
+.\Switchboard-Setup-0.8.4.exe --quiet | Out-Host; $LASTEXITCODE
+```
+
+The key must start with `Software\SwitchboardTest-`, or the installer refuses to run (exit code 2). Delete the
+folder and `reg delete HKCU\Software\SwitchboardTest-1234 /f` afterwards. The installer is a window program, so
+PowerShell only waits for it and sets `$LASTEXITCODE` when its output is piped or captured, as above, or with
+`Start-Process -Wait -PassThru`.
 
 ## Debug symbols and crash reports
 
@@ -122,6 +170,12 @@ Without them every build is signed ad hoc. `build-dmg.sh` signs both apps and th
 `SB_SIGN_IDENTITY` is set (the name of a certificate in the build Mac's keychain), and notarizes and staples the
 image when `SB_NOTARY_KEY_ID`, `SB_NOTARY_ISSUER` and `SB_NOTARY_KEY_PATH` (an App Store Connect API key file on that
 Mac) are set too.
+
+Windows builds are unsigned unless `SB_WIN_SIGN_CERT` is set to a `.pfx` file on the Windows build host;
+`SB_WIN_SIGN_PASSWORD`, `SB_WIN_SIGN_TIMESTAMP` (an RFC 3161 server URL) and `SB_WIN_SIGNTOOL` (signtool's path) are
+optional. The marked block in `windows-build.ps1` then signs `Switchboard.exe` and the installer before the Setup
+file is made, and the Setup file after. Its attached files are still found after signing, because the reader looks
+where the PE header says the signature starts.
 
 ## Versions and releases
 

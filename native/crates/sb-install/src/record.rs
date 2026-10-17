@@ -16,6 +16,58 @@ pub struct Choices {
     pub open_at_login: bool,
     #[serde(default)]
     pub add_to_dock: bool,
+    /// Windows: a shortcut on the desktop (the Start menu one is always made).
+    #[serde(default)]
+    pub desktop_shortcut: bool,
+}
+
+/// One of the choices. Each system offers some of them (Platform::choices).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Choice {
+    OpenAtLogin,
+    Dock,
+    DesktopShortcut,
+}
+
+impl Choice {
+    pub const ALL: [Choice; 3] = [Choice::OpenAtLogin, Choice::Dock, Choice::DesktopShortcut];
+
+    /// How the welcome screen names it in "... start off".
+    pub fn phrase(self) -> &'static str {
+        match self {
+            Choice::OpenAtLogin => "Opening at login",
+            Choice::Dock => "the Dock icon",
+            Choice::DesktopShortcut => "a desktop shortcut",
+        }
+    }
+
+    /// How --quiet and the progress list name it.
+    pub fn name(self) -> &'static str {
+        match self {
+            Choice::OpenAtLogin => "open at login",
+            Choice::Dock => "Dock",
+            Choice::DesktopShortcut => "desktop shortcut",
+        }
+    }
+}
+
+impl Choices {
+    pub fn get(&self, c: Choice) -> bool {
+        match c {
+            Choice::OpenAtLogin => self.open_at_login,
+            Choice::Dock => self.add_to_dock,
+            Choice::DesktopShortcut => self.desktop_shortcut,
+        }
+    }
+
+    pub fn toggle(&mut self, c: Choice) {
+        let v = match c {
+            Choice::OpenAtLogin => &mut self.open_at_login,
+            Choice::Dock => &mut self.add_to_dock,
+            Choice::DesktopShortcut => &mut self.desktop_shortcut,
+        };
+        *v = !*v;
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,22 +144,37 @@ mod tests {
 
     #[test]
     fn choices_start_off() {
-        assert_eq!(Choices::default(), Choices { open_at_login: false, add_to_dock: false });
+        assert_eq!(Choices::default(), Choices { open_at_login: false, add_to_dock: false, desktop_shortcut: false });
+        assert!(Choice::ALL.iter().all(|&c| !Choices::default().get(c)));
     }
 
     #[test]
     fn first_install_applies_then_later_ones_keep() {
         let d = dir("once");
-        let asked = Choices { open_at_login: true, add_to_dock: false };
+        let asked = Choices { open_at_login: true, ..Default::default() };
         assert_eq!(decide(read(&d), asked), Decision::Apply(asked));
         assert!(save(&d, asked, "0.8.4", 100).unwrap());
 
         // An update that asks for something else changes nothing and keeps the first record.
-        let later = Choices { open_at_login: false, add_to_dock: true };
+        let later = Choices { add_to_dock: true, desktop_shortcut: true, ..Default::default() };
         let Decision::Keep(r) = decide(read(&d), later) else { panic!("applied twice") };
         assert_eq!(r, Record { choices: asked, version: "0.8.4".into(), at: 100 });
         assert!(!save(&d, later, "0.9.0", 200).unwrap(), "never overwritten");
         assert_eq!(read(&d).unwrap().version, "0.8.4");
+        std::fs::remove_dir_all(&d).unwrap();
+    }
+
+    #[test]
+    fn a_record_from_before_desktop_shortcuts_reads() {
+        let d = dir("older");
+        std::fs::create_dir_all(&d).unwrap();
+        std::fs::write(path(&d), r#"{"choices":{"open_at_login":true,"add_to_dock":false},"version":"0.8.4","at":1}"#)
+            .unwrap();
+        let r = read(&d).unwrap();
+        assert!(r.choices.open_at_login && !r.choices.desktop_shortcut);
+        let mut c = r.choices;
+        c.toggle(Choice::DesktopShortcut);
+        assert!(c.get(Choice::DesktopShortcut));
         std::fs::remove_dir_all(&d).unwrap();
     }
 

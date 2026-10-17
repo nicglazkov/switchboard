@@ -1,0 +1,7 @@
+# Windows: link the C runtime into the exes, so Switchboard.exe and its installer need no Visual C++
+# Redistributable on the PC (docs/decisions.md). The build script checks the exes import no vcruntime or msvcp DLL.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
+
+[target.aarch64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]

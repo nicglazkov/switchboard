@@ -7,6 +7,7 @@ Nothing here is hand-drawn, so renaming or recoloring the app is an edit to bran
 Writes SVGs and renders them with rsvg-convert (librsvg), using the app's own fonts from sb-desktop/assets/fonts:
     dmg-background.png, dmg-background@2x.png   [dmg] window size, light (Finder draws its labels dark on it)
     header-light.png, header-dark.png           1600x300, the installer's header band at 2x
+    setup.ico                                   the Windows installer's icon: the app icon with a download badge
 native/scripts/make-installer-art.sh runs this on the Linux host and copies the PNGs to native/packaging/installer/.
 """
 import os
@@ -22,6 +23,8 @@ if not BRANDING.exists():
     BRANDING = NATIVE / 'branding.toml'  # a build host's copy, synced next to native/'s contents
 FONTS = NATIVE / 'crates' / 'sb-desktop' / 'assets' / 'fonts'
 ICONS = NATIVE / 'crates' / 'sb-desktop' / 'assets' / 'icons'
+APP_ICON = NATIVE / 'packaging' / 'brand' / 'icon-square.svg'
+SETUP_SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
 def branding():
@@ -131,6 +134,41 @@ def dmg(b, scale):
 </svg>'''
 
 
+def inner_icon():
+    """The app icon's drawing, inlined (librsvg will not load a file:// image)."""
+    src = APP_ICON.read_text()
+    body = src[src.index('>', src.index('<svg')) + 1:src.rindex('</svg>')]
+    return f'<svg width="1024" height="1024" viewBox="0 0 1024 1024">{body}</svg>'
+
+
+def setup_icon(b, size):
+    """The app's square icon with an accent badge and a down arrow in its corner, so Setup.exe reads as "installs
+    the app". Small sizes get a larger badge and a heavier arrow, so they still read at 16 px."""
+    accent, bg = b['colors']['accent_dark'], b['colors']['background_dark']
+    small = size <= 32
+    r = 290 if small else 200
+    cx = cy = 1024 - r - (8 if small else 24)
+    sw = 110 if small else 76
+    arm = r * 0.42
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 1024 1024">
+{inner_icon()}
+<circle cx="{cx}" cy="{cy}" r="{r + 26}" fill="{bg}"/>
+<circle cx="{cx}" cy="{cy}" r="{r}" fill="{accent}"/>
+<path d="M{cx},{cy - arm * 1.15:.0f} V{cy + arm * 0.95:.0f} M{cx - arm:.0f},{cy:.0f} L{cx},{cy + arm:.0f} L{cx + arm:.0f},{cy:.0f}"
+ fill="none" stroke="{bg}" stroke-width="{sw}" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>'''
+
+
+def setup_ico(b, out, tmp):
+    from PIL import Image
+    pngs = []
+    for size in SETUP_SIZES:
+        png = Path(tmp) / f'setup-{size}.png'
+        render(setup_icon(b, size), png, tmp)
+        pngs.append(Image.open(png).convert('RGBA'))
+    pngs[-1].save(out, format='ICO', sizes=[(i.width, i.height) for i in pngs], append_images=pngs[:-1])
+
+
 def render(svg, out, tmp):
     src = Path(tmp) / (out.stem + '.svg')
     src.write_text(svg)
@@ -151,7 +189,8 @@ def main():
         render(dmg(b, 2), out / 'dmg-background@2x.png', tmp)
         render(header(b, False), out / 'header-light.png', tmp)
         render(header(b, True), out / 'header-dark.png', tmp)
-    for f in sorted(out.glob('*.png')):
+        setup_ico(b, out / 'setup.ico', tmp)
+    for f in sorted([*out.glob('*.png'), *out.glob('*.ico')]):
         print(f'{f.name} {f.stat().st_size} bytes')
 
 

@@ -10,6 +10,9 @@ pub const DESKTOP_ID: &str = env!("SB_DESKTOP_ID");
 pub const LAUNCHER_ID: &str = env!("SB_LAUNCHER_ID");
 /// Where the project lives (`[app] homepage`).
 pub const HOMEPAGE: &str = env!("SB_HOMEPAGE");
+/// Who publishes it (`[app] publisher`): Settings > Apps shows it on Windows.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub const PUBLISHER: &str = env!("SB_PUBLISHER");
 
 /// The app bundle's folder name.
 pub fn bundle() -> String {

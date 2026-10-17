@@ -90,6 +90,18 @@ switchboard setup --root tower=~/Code         # set a machine's Claude folder
 
 ## 3. Open Switchboard
 
+Install the desktop app on the computers you look at the board from:
+
+- **Mac.** Open `Switchboard-<version>.dmg` and either drag Switchboard to Applications or open Install Switchboard
+  for a guided setup.
+- **Windows.** Run `Switchboard-Setup-<version>.exe`. It installs for your account only, with no admin password,
+  into `%LOCALAPPDATA%\Programs\Switchboard`, adds a Start menu shortcut and an entry in Settings > Apps, and asks
+  once whether to add a desktop shortcut and open Switchboard when you sign in (both start off). Windows may warn
+  about a download from an unknown publisher when the build is unsigned; choose More info, then Run anyway. To
+  update, run a newer Setup file; your settings stay. To uninstall, use Settings > Apps, or
+  `Uninstall Switchboard.exe` in the app's folder; it asks whether to keep your settings. For scripts,
+  `Switchboard-Setup-<version>.exe --quiet` installs with no window (`--help` lists the options).
+
 Open the desktop app. If the computer that stays on is on the same network, the app finds it by itself (Bonjour;
 on a Linux server, install `avahi-utils` or `python3-zeroconf`). Otherwise it asks for the address you picked in
 setup, such as `192.0.2.10` or a Tailscale name. Change it later in Settings.

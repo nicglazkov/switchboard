@@ -286,7 +286,11 @@ fn stage(file: &Path, dir: &Path, o: &Offer) -> Result<Staged, String> {
 /// Runs `bin --version` and expects "Switchboard <version>" back within a few seconds.
 fn starts(bin: &Path, version: &str) -> Result<(), String> {
     let bad = |why: &str| format!("The new version would not start on this computer ({why}), so it was not installed.");
-    let mut child = std::process::Command::new(bin)
+    let mut cmd = std::process::Command::new(bin);
+    // CREATE_NO_WINDOW, in case the new build is a console program.
+    #[cfg(target_os = "windows")]
+    std::os::windows::process::CommandExt::creation_flags(&mut cmd, 0x0800_0000);
+    let mut child = cmd
         .arg("--version")
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::null())
@@ -358,7 +362,12 @@ pub fn sweep_old() {
 }
 
 fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
-    match std::process::Command::new(cmd).args(args).status() {
+    let mut c = std::process::Command::new(cmd);
+    c.args(args);
+    // No console window flashing up for tar.exe.
+    #[cfg(target_os = "windows")]
+    std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+    match c.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!("{cmd} failed ({s}).")),
         Err(e) => Err(format!("Could not run {cmd}: {e}")),

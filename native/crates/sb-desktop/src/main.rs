@@ -68,6 +68,10 @@ fn main() {
     #[cfg(target_os = "windows")]
     update::sweep_old();
     gpui_platform::application().with_assets(assets::Assets).run(|cx: &mut App| {
+        // Windows shows notifications only for an app with an AppUserModelID (the Start menu shortcut carries the
+        // same one, so the taskbar groups the window with it).
+        #[cfg(target_os = "windows")]
+        cx.set_app_identity(sb_core::brand::DESKTOP_ID, "Switchboard");
         assets::load_fonts(cx);
         gpui_base::init(cx);
 

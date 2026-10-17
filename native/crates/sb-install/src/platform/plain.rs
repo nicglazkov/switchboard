@@ -34,6 +34,7 @@ impl Platform for Plain {
             in_dock: false,
             caches: sb_core::cache::default_dir().into_iter().collect(),
             data: self.settings_dir().into_iter().collect(),
+            ..Default::default()
         }
     }
 }
