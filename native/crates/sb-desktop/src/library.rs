@@ -109,7 +109,7 @@ fn keychain_set(tool: &str, name: &str, value: String) -> Result<(), String> {
         q(&value)
     );
     drop(value);
-    let run = |e: std::io::Error| format!("Could not run security: {e}");
+    let run = |e: std::io::Error| format!("Couldn't run security: {e}");
     let mut child = Command::new("security")
         .arg("-i")
         .stdin(Stdio::piped())
@@ -131,7 +131,7 @@ fn keychain_set(tool: &str, name: &str, value: String) -> Result<(), String> {
     if wrote.is_err() || !out.status.success() || !has {
         let why: String = String::from_utf8_lossy(&out.stderr).trim().chars().take(160).collect();
         return Err(format!(
-            "The keychain would not save it: {}",
+            "The keychain wouldn't save it: {}",
             if why.is_empty() { "no reason given" } else { &why }
         ));
     }
@@ -151,12 +151,16 @@ impl AppState {
 
     /// Reads the library again. A failure keeps what is already shown.
     pub fn load_library(&mut self, cx: &mut Context<Self>) {
+        self.lib_seq += 1;
+        let seq = self.lib_seq;
         self.call(
             cx,
             |core| core.library(),
-            |st, res, cx| {
+            move |st, res, cx| {
                 match res {
+                    Ok(_) if !newer_read(seq, st.lib_shown) => {}
                     Ok(l) => {
+                        st.lib_shown = seq;
                         // Keys saved on this Mac are forgotten once the server no longer lists them as missing here.
                         if let Some(mine) = this_mac().and_then(|h| l.machines.get(h)) {
                             st.lib_keys_here.retain(|k| {
@@ -337,7 +341,7 @@ impl AppState {
                         st.start_job(&jid, JobKind::Start, None, &label, &label, None, Some(name.clone()), cx);
                         st.toast(
                             format!("Building {name} on {label}"),
-                            Some("It publishes to the library when it is done.".into()),
+                            Some("It goes into the library when it's done.".into()),
                             false,
                             cx,
                         );
@@ -436,9 +440,22 @@ impl AppState {
     }
 }
 
+/// Read `seq` of the library is newer than the one shown (`shown`), so it is shown. A read that failed shows nothing,
+/// so an older one that worked still counts.
+fn newer_read(seq: u64, shown: u64) -> bool {
+    seq > shown
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_read_of_the_library_that_comes_back_late_is_dropped() {
+        assert!(newer_read(2, 0));
+        assert!(!newer_read(1, 2), "read 1 after read 2 was shown");
+        assert!(newer_read(1, 0), "read 2 failed: read 1 is still news");
+    }
 
     #[test]
     fn tool_names() {

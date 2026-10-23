@@ -68,6 +68,10 @@ pub struct ApiBudgetStatus {
     /// Percent of the week used today.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub today: Option<f64>,
+    /// Today's budget as it stands: the setting, or more near the reset when the week has room left. None from an
+    /// older server (then the setting stands).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub daily: Option<f64>,
     #[serde(default, deserialize_with = "lenient_opt")]
     pub over_daily: Option<bool>,
     #[serde(default, deserialize_with = "lenient_opt")]
@@ -287,6 +291,10 @@ pub struct ApiPrefs {
     /// Whether iPhone notifications are set up on the server, and what that means.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub push: Option<ApiPush>,
+    /// The kinds of iPhone push the server sends, each with its own switch (held, jobs, cleanup, budget). The view
+    /// lists them with their words; a plain `{kind: bool}` (the stored prefs) is read too. Empty from an older server.
+    #[serde(default, deserialize_with = "notify_kinds")]
+    pub notify: Vec<ApiNotify>,
 }
 
 impl ApiPrefs {
@@ -306,6 +314,85 @@ impl ApiPrefs {
             o.on = on;
         }
     }
+
+    /// Flips one kind of iPhone notification here; `notify_body` is the POST that saves it.
+    pub fn set_notify(&mut self, key: &str, on: bool) {
+        if let Some(n) = self.notify.iter_mut().find(|n| n.key == key) {
+            n.on = on;
+        }
+    }
+}
+
+/// The POST /api/prefs body that turns one kind of iPhone notification on or off; the others stay as they are.
+pub fn notify_body(key: &str, on: bool) -> serde_json::Value {
+    serde_json::json!({ "notify": option_body(key, on) })
+}
+
+/// One kind of iPhone push: its key, label and what it is for, and whether it is on.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiNotify {
+    pub key: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub explain: String,
+    #[serde(default = "yes")]
+    pub on: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// The four kinds in the server's order, with its words, for a reply that only has `{kind: bool}`.
+const NOTIFY_KINDS: [(&str, &str, &str); 4] = [
+    (
+        "held",
+        "Held messages",
+        "When the guard holds a message you typed into a big chat that went cold. One per held message.",
+    ),
+    (
+        "jobs",
+        "Finished tasks",
+        "When something you started from an app finishes or fails while the app isn't showing it.",
+    ),
+    ("cleanup", "Chats not in use", "At most once a day, when idle chats are using up memory."),
+    ("budget", "Hard limit", "When the daily usage budget stops new chats."),
+];
+
+fn notify_kinds<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ApiNotify>, D::Error> {
+    Ok(match serde_json::Value::deserialize(d)? {
+        serde_json::Value::Array(items) => items
+            .into_iter()
+            .filter_map(|x| serde_json::from_value::<ApiNotify>(x).ok())
+            .filter(|n| !n.key.is_empty())
+            .collect(),
+        serde_json::Value::Object(m) => {
+            let word = |k: &str| NOTIFY_KINDS.iter().find(|n| n.0 == k);
+            let mut out: Vec<ApiNotify> = NOTIFY_KINDS
+                .iter()
+                .filter(|n| m.contains_key(n.0))
+                .map(|(k, label, explain)| ApiNotify {
+                    key: k.to_string(),
+                    label: label.to_string(),
+                    explain: explain.to_string(),
+                    on: m.get(*k).and_then(|v| v.as_bool()) != Some(false),
+                })
+                .collect();
+            for (k, v) in &m {
+                if word(k).is_none() {
+                    out.push(ApiNotify {
+                        key: k.clone(),
+                        label: k.clone(),
+                        explain: String::new(),
+                        on: v.as_bool() != Some(false),
+                    });
+                }
+            }
+            out
+        }
+        _ => Vec::new(),
+    })
 }
 
 /// The POST /api/prefs body that turns one opt-in switch on or off: `{"<key>": true|false}`.
@@ -342,6 +429,23 @@ pub struct ApiPush {
     pub explain: String,
     #[serde(default)]
     pub setup: Option<String>,
+}
+
+/// One model the picker offers (GET /api/models): `id` goes to --model ("opus", or a full id for a family no alias
+/// covers), `detail` is the newest version of it the chats ran on ("Opus 5.5"), or empty.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiModel {
+    pub id: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default)]
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiModels {
+    #[serde(default)]
+    pub models: Vec<ApiModel>,
 }
 
 /// A New sheet setup: the last one used, or a preset.
@@ -429,21 +533,133 @@ pub struct ApiFacetMachine {
     pub label: Option<String>,
 }
 
-/// v2: GET /api/files/<machine>: one folder under the machine's Claude folder, or one file (`file`).
+/// v2: GET /api/files/<machine>?folder=<address>: one folder, or one file (`file`). The address is one of the
+/// three a client may name (see `places`): `site/app` under the Claude folder, `~/Documents/site`, `@Data/work`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ApiFiles {
     #[serde(default)]
     pub root: String,
+    /// The folder's address, as the machine writes it ("" for the Claude folder).
     #[serde(default)]
     pub folder: String,
+    /// The folder as people read it: "~/Documents/site", or a full path for a place outside home.
     #[serde(default)]
+    pub shown: String,
+    /// May Claude work here: "yes", "ask" (never answered) or "no" (once said no in Claude's own prompt). None from
+    /// an older agent, which only ever listed the Claude folder (always yes).
+    #[serde(default)]
+    pub trust: Option<String>,
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub dirs: Vec<ApiFileDir>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub files: Vec<ApiFileEntry>,
     #[serde(default)]
     pub more: bool,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_opt")]
     pub file: Option<ApiFile>,
+    /// "privacy": macOS keeps the helper out of this folder (Files and Folders), so it is not empty, only closed.
+    #[serde(default)]
+    pub blocked: Option<String>,
+    /// What to do about `blocked`, in words.
+    #[serde(default)]
+    pub hint: Option<String>,
+}
+
+impl ApiFiles {
+    /// macOS keeps the helper out of this folder: show the switch, not an empty list.
+    pub fn privacy_blocked(&self) -> bool {
+        self.blocked.as_deref() == Some("privacy")
+    }
+}
+
+/// v2: GET /api/places/<machine>: where the file browser and New can go on a machine. An older agent answers
+/// `{old: true, roam: false, places: [claude]}`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiPlaces {
+    /// Chats may start anywhere in the machine's home folder ("Anywhere in home" in Settings).
+    #[serde(default)]
+    pub roam: bool,
+    /// The machine's agent predates places: only its Claude folder can be browsed.
+    #[serde(default)]
+    pub old: bool,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub places: Vec<ApiPlace>,
+    #[serde(default)]
+    pub os: Option<String>,
+}
+
+/// One place in the sidebar. `kind`: claude, home, desktop, documents, downloads, code, icloud, or place (one added
+/// at the machine). `state`: ok, privacy (macOS keeps the helper out) or missing.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiPlace {
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default)]
+    pub shown: String,
+    #[serde(default = "ok_state")]
+    pub state: String,
+}
+
+fn ok_state() -> String {
+    "ok".into()
+}
+
+impl ApiPlace {
+    pub fn is_ok(&self) -> bool {
+        self.state == "ok"
+    }
+    pub fn privacy(&self) -> bool {
+        self.state == "privacy"
+    }
+    pub fn missing(&self) -> bool {
+        self.state == "missing"
+    }
+}
+
+impl ApiPlaces {
+    /// The place an address is in: the one whose folder is the longest that contains it. The Claude folder ("")
+    /// holds only plain addresses, never `~` or `@` ones.
+    pub fn place_of(&self, addr: &str) -> Option<&ApiPlace> {
+        let addr = addr.trim_end_matches('/');
+        self.places.iter().filter(|p| crate::places::contains(&p.folder, addr)).max_by_key(|p| p.folder.len())
+    }
+
+    /// The places added at the machine (`@` ones), after the usual folders.
+    pub fn added(&self) -> impl Iterator<Item = &ApiPlace> {
+        self.places.iter().filter(|p| p.kind == "place")
+    }
+
+    /// The Claude folder, home and the usual folders under it, iCloud Drive.
+    pub fn usual(&self) -> impl Iterator<Item = &ApiPlace> {
+        self.places.iter().filter(|p| p.kind != "place")
+    }
+}
+
+/// v2: GET /api/folder_check/<machine>?folder=: may Claude work there, before New sends it.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiFolderCheck {
+    #[serde(default)]
+    pub folder: String,
+    #[serde(default)]
+    pub shown: String,
+    /// "yes", "ask" or "no".
+    #[serde(default)]
+    pub trust: String,
+}
+
+impl ApiFolderCheck {
+    /// Starting there needs the user's yes first.
+    pub fn needs_yes(&self) -> bool {
+        self.trust != "yes"
+    }
+    /// The user once said no to this folder in Claude's own prompt.
+    pub fn declined(&self) -> bool {
+        self.trust == "no"
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -1351,6 +1567,10 @@ pub struct ApiMachineRow {
     /// What Auto sees it can do, in one line.
     #[serde(default)]
     pub can: Option<String>,
+    /// "Anywhere in home": chats and the file browser may go anywhere in its home folder, not only its Claude
+    /// folder. None from an older server.
+    #[serde(default)]
+    pub roam: Option<bool>,
 }
 
 impl ApiMachineRow {
@@ -1920,5 +2140,121 @@ mod options_tests {
         let r: ApiRoute =
             serde_json::from_str(r#"{"ok": true, "machine": "studio", "by": "claude", "ms": 900}"#).unwrap();
         assert!(!r.ai_off());
+    }
+}
+
+#[cfg(test)]
+mod places_tests {
+    use super::*;
+
+    #[test]
+    fn places_read() {
+        let raw = r#"{"ok": true, "roam": true, "os": "mac", "places": [
+            {"kind": "claude", "name": "Claude folder", "folder": "", "shown": "~/Desktop/Claude", "state": "ok"},
+            {"kind": "home", "name": "Home", "folder": "~", "shown": "~", "state": "ok"},
+            {"kind": "documents", "name": "Documents", "folder": "~/Documents", "shown": "~/Documents", "state": "ok"},
+            {"kind": "downloads", "name": "Downloads", "folder": "~/Downloads", "shown": "~/Downloads", "state": "privacy"},
+            {"kind": "code", "name": "Developer", "folder": "~/Developer", "shown": "~/Developer", "state": "missing"},
+            {"kind": "place", "name": "Data", "folder": "@Data", "shown": "/Volumes/Data", "state": "ok"},
+            "odd"]}"#;
+        let p: ApiPlaces = serde_json::from_str(raw).unwrap();
+        assert!(p.roam && !p.old);
+        assert_eq!(p.places.len(), 6, "a row that is not an object is dropped");
+        assert!(p.places[3].privacy() && p.places[4].missing() && p.places[2].is_ok());
+        assert_eq!(p.place_of("~/Documents/site").unwrap().name, "Documents");
+        assert_eq!(p.place_of("~/Music").unwrap().name, "Home");
+        assert_eq!(p.place_of("notes").unwrap().kind, "claude");
+        assert_eq!(p.place_of("@Data/work").unwrap().name, "Data");
+        assert!(p.place_of("@Other").is_none());
+        assert_eq!(p.added().count(), 1);
+        assert_eq!(p.usual().count(), 5);
+    }
+
+    #[test]
+    fn an_old_agent_has_only_its_claude_folder() {
+        let raw = r#"{"ok": true, "roam": false, "old": true, "places": [{"kind": "claude", "name": "Claude folder", "folder": ""}]}"#;
+        let p: ApiPlaces = serde_json::from_str(raw).unwrap();
+        assert!(p.old && !p.roam);
+        assert!(p.places[0].is_ok(), "no state reads as ok");
+        assert!(p.place_of("~/Documents").is_none());
+    }
+
+    #[test]
+    fn files_carry_the_address_trust_and_privacy() {
+        let raw = r#"{"ok": true, "root": "Claude", "folder": "~/Documents/site", "shown": "~/Documents/site", "trust": "ask",
+            "dirs": [{"folder": "~/Documents/site/app", "name": "app"}, {"name": "no folder"}],
+            "files": [{"name": "a.md", "size": 10, "mtime": 1.5, "open": true}], "more": false}"#;
+        let f: ApiFiles = serde_json::from_str(raw).unwrap();
+        assert_eq!(f.folder, "~/Documents/site");
+        assert_eq!(f.shown, "~/Documents/site");
+        assert_eq!(f.trust.as_deref(), Some("ask"));
+        assert_eq!(f.dirs.len(), 1, "a dir with no address is dropped");
+        assert_eq!(f.dirs[0].folder, "~/Documents/site/app");
+        assert!(!f.privacy_blocked());
+
+        let blocked = r#"{"ok": true, "root": "Claude", "folder": "~/Downloads", "shown": "~/Downloads", "trust": "ask",
+            "dirs": [], "files": [], "more": false, "blocked": "privacy",
+            "hint": "macOS permission not granted for ~/Downloads."}"#;
+        let f: ApiFiles = serde_json::from_str(blocked).unwrap();
+        assert!(f.privacy_blocked());
+        assert!(f.hint.unwrap().starts_with("macOS"));
+
+        // An older agent: no shown, no trust.
+        let old: ApiFiles =
+            serde_json::from_str(r#"{"root": "/Users/you/Claude", "folder": "", "dirs": [], "files": []}"#).unwrap();
+        assert!(old.trust.is_none() && old.shown.is_empty() && old.blocked.is_none());
+    }
+
+    #[test]
+    fn folder_check_reads() {
+        let c: ApiFolderCheck = serde_json::from_str(
+            r#"{"ok": true, "folder": "~/Documents/site", "shown": "~/Documents/site", "trust": "ask"}"#,
+        )
+        .unwrap();
+        assert!(c.needs_yes() && !c.declined());
+        let c: ApiFolderCheck =
+            serde_json::from_str(r#"{"ok": true, "folder": "x", "shown": "~/Claude/x", "trust": "yes"}"#).unwrap();
+        assert!(!c.needs_yes());
+        let c: ApiFolderCheck = serde_json::from_str(r#"{"ok": true, "folder": "~/a", "trust": "no"}"#).unwrap();
+        assert!(c.needs_yes() && c.declined());
+    }
+
+    #[test]
+    fn machines_say_whether_they_roam() {
+        let raw = r#"{"ok": true, "machines": [{"name": "studio", "label": "Studio", "roam": false, "features": ["places"]},
+            {"name": "old", "label": "Old"}]}"#;
+        let m: ApiMachines = serde_json::from_str(raw).unwrap();
+        assert_eq!(m.machines[0].roam, Some(false));
+        assert!(m.machines[0].has("places"));
+        assert_eq!(m.machines[1].roam, None, "an older server says nothing");
+    }
+
+    #[test]
+    fn notify_kinds_read_as_the_view_lists_them() {
+        let raw = r#"{"ok": true, "notify": [
+            {"key": "held", "label": "Held messages", "explain": "When the guard holds a message.", "on": true},
+            {"key": "jobs", "label": "Finished tasks", "explain": "When something finishes.", "on": false},
+            {"label": "no key"}, 7]}"#;
+        let mut p: ApiPrefs = serde_json::from_str(raw).unwrap();
+        assert_eq!(p.notify.len(), 2);
+        assert_eq!(p.notify[1].label, "Finished tasks");
+        assert!(!p.notify[1].on);
+        p.set_notify("jobs", true);
+        assert!(p.notify[1].on);
+        assert_eq!(notify_body("held", false), serde_json::json!({"notify": {"held": false}}));
+    }
+
+    #[test]
+    fn notify_kinds_read_from_the_stored_prefs_too() {
+        let raw = r#"{"ok": true, "notify": {"held": false, "jobs": true, "cleanup": true, "budget": true}}"#;
+        let p: ApiPrefs = serde_json::from_str(raw).unwrap();
+        let keys: Vec<&str> = p.notify.iter().map(|n| n.key.as_str()).collect();
+        assert_eq!(keys, ["held", "jobs", "cleanup", "budget"], "in the server's order, with its words");
+        assert!(!p.notify[0].on && p.notify[1].on);
+        assert_eq!(p.notify[3].label, "Hard limit");
+        let none: ApiPrefs = serde_json::from_str(r#"{"ok": true}"#).unwrap();
+        assert!(none.notify.is_empty());
+        let odd: ApiPrefs = serde_json::from_str(r#"{"notify": "x"}"#).unwrap();
+        assert!(odd.notify.is_empty());
     }
 }

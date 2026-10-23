@@ -162,7 +162,7 @@ class CapsRulesTest(unittest.TestCase):
         desk = features.apply_setting(DESK, st)
         self.assertEqual(desk['tools']['iphone'], 'none')
         name, _, why = features.rules_pick([('desk', 'Desk', desk), ('tower', 'Tower', PC)], 'Fix the iOS app')
-        self.assertEqual(why, 'No online machine has Xcode; this one has the most free memory.')
+        self.assertEqual(why, 'No online machine has Xcode. This one has the most free memory.')
 
     def test_the_users_own_line_decides_when_a_task_names_it(self):
         lab = features.apply_setting(LAB, features.cap_setting({'on': True, 'extra': ['Can print labels on the Zebra printer']}))

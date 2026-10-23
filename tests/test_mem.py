@@ -92,6 +92,18 @@ class OrphanRulesTest(unittest.TestCase):
         r = self.sb.reap_orphans([], dry_run=True, kill=lambda o: self.fail('dry run killed'))
         self.assertEqual([o['pid'] for o in r['killed']], [501])
 
+    def test_claude_memory_is_every_claude_process_summed(self):
+        # The Claude Code command line and its background helpers count; the desktop app and anything else don't.
+        procs = {
+            10: P(1, 'login', mb=50, tty='ttys001'), 11: P(10, 'claude', mb=1200.4, tty='ttys001'),
+            12: P(11, 'claude bg-pty-host', mb=900.7, tty='ttys001'), 13: P(12, '/Users/you/.local/bin/claude', mb=1000.2, tty='ttys001'),
+            14: P(1, 'Claude', mb=3000), 15: P(11, 'node', mb=500, tty='ttys001'),
+        }
+        self.sb.find_orphans = lambda agents, procs: []
+        m = self.sb.claude_mem([{'pid': 11}], procs)
+        self.assertEqual(m, {'claude_mb': 3101, 'procs': 3, 'orphans': []})
+        self.assertEqual(self.sb.claude_mem([], {}), {'claude_mb': 0, 'procs': 0, 'orphans': []})
+
     def test_list_reports_memory(self):
         self.sb.claude_mem = lambda ags, procs=None: {'claude_mb': 3120, 'procs': 7, 'orphans': []}
         self.sb.claude_procs = lambda: []

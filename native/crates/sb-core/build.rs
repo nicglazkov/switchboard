@@ -1,5 +1,5 @@
-// Reads the app's desktop id and home page from /branding.toml at the repo root (src/brand.rs), so a fork that
-// renames the app changes them there. Only two `[app]` keys are needed, so a few lines of parsing do.
+// Reads the app's desktop id, home page and documentation site from /branding.toml at the repo root (src/brand.rs), so a fork that
+// renames the app changes them there. Only three `[app]` keys are needed, so a few lines of parsing do.
 
 use std::path::Path;
 
@@ -13,7 +13,7 @@ fn main() {
         .unwrap_or_else(|| Path::new(&manifest).join("../../../branding.toml"));
     println!("cargo:rerun-if-changed={}", path.display());
     let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    for (key, env) in [("desktop_id", "SB_DESKTOP_ID"), ("homepage", "SB_HOMEPAGE")] {
+    for (key, env) in [("desktop_id", "SB_DESKTOP_ID"), ("homepage", "SB_HOMEPAGE"), ("docs", "SB_DOCS")] {
         let v = value(&text, "app", key).unwrap_or_else(|| panic!("{} has no [app] {key}", path.display()));
         println!("cargo:rustc-env={env}={v}");
     }

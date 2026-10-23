@@ -1,6 +1,6 @@
 """Server pieces the native iPhone app relies on (2026-10-12): addresses a phone may be given, relaunch in the app's
 form, attachments as JSON, the end of the terminal for waiting chats, Bonjour, and Live Activity pushes."""
-import base64, json, sys, tempfile, threading, time, unittest, urllib.error, urllib.request
+import base64, json, os, sys, tempfile, threading, time, unittest, urllib.error, urllib.request
 from pathlib import Path
 from tempfile import mkdtemp
 from unittest import mock
@@ -258,6 +258,34 @@ class BonjourTest(unittest.TestCase):
         with mock.patch.dict(sys.modules, {'zeroconf': None}):
             self.assertIsNone(bonjour.announce(8130, mock.Mock(origins=[]), logs.append, which=lambda t: None, popen=None))
         self.assertIn('not announced', logs[-1])
+
+    def test_the_announced_address_is_one_on_the_local_network(self):
+        cfg = mock.Mock(origins=['http://100.64.0.10:8130', 'http://10.0.0.5:8130/', 'http://studio:8130'])
+        self.assertEqual(bonjour._url(8130, cfg), 'http://10.0.0.5:8130')
+        cfg = mock.Mock(origins=['http://100.64.0.10:8130', 'http://studio:8130'])
+        self.assertEqual(bonjour._url(8130, cfg), 'http://100.64.0.10:8130')
+
+    def test_the_kits_zeroconf_is_used_when_the_machine_has_none(self):
+        try:
+            import zeroconf  # noqa: F401
+            self.skipTest('zeroconf is installed here')
+        except ImportError:
+            pass
+        with tempfile.TemporaryDirectory() as vendor:
+            os.makedirs(os.path.join(vendor, 'zeroconf'))
+            with open(os.path.join(vendor, 'zeroconf', '__init__.py'), 'w') as f:
+                f.write('class ServiceInfo: pass\nclass Zeroconf: pass\nKIT = True\n')
+            path = list(sys.path)
+            with mock.patch.dict(sys.modules):
+                sys.modules.pop('zeroconf', None)
+                try:
+                    info, zc = bonjour._zeroconf(vendor)
+                    self.assertTrue(sys.modules['zeroconf'].KIT)
+                    self.assertEqual((info.__name__, zc.__name__), ('ServiceInfo', 'Zeroconf'))
+                    self.assertEqual(sys.path[-1], vendor)  # after the machine's own packages
+                finally:
+                    sys.path[:] = path
+        self.assertEqual(bonjour._zeroconf(os.path.join(vendor, 'gone')), (None, None))
 
 
 if __name__ == '__main__':

@@ -93,3 +93,84 @@ One line per judgment call, newest last. Older history lives with the private wo
 - 2026-10-17: With `SWITCHBOARD_URL` set the app does not touch the saved list unless `SB_SETTINGS` gives the run its own settings file, so pointing a dev build at a test server never adds its addresses to the user's settings.
 - 2026-10-17: The upgrade seed marks the last server as learned (it was not typed) with the cache's fetch time as when it last worked, so it is tried first and can still go stale later.
 - 2026-10-17: Every terminal tab is one fixed width (240 px) whatever its title, hover buttons or the number of tabs; a tab that grew under the pointer could slide out from under it and flicker. The title shortens with an ellipsis, the machine name never does, and many tabs scroll sideways.
+- 2026-10-19: Before a chat starts in a folder, the helper gives that folder its own trust entry when the nearest folder above it with an answer was trusted (a worktree inside a trusted project), because a background launch does not go by a parent's answer; a folder or parent that said no is never changed.
+- 2026-10-19: A local terminal reuses the chat terminal's tab and view, with the PTY behind the same channels the hub's WebSocket uses, instead of a second terminal view; the parts that only mean something for a chat (flags, Continue on, claude attach, uploads, typing "exit" to leave) are off for it.
+- 2026-10-19: Cmd+T (Ctrl+Shift+T on Windows and Linux) now opens a shell on this computer, and finding a chat to open in a terminal moved to Cmd+O (Ctrl+Shift+O), which nothing used and reads as "open"; the menus, the palette and the "+" menu show the new keys.
+- 2026-10-19: "+" keeps opening the chat menu it always did, since the app is about Claude chats; the chevron joined to it opens the same menu with the shells on this computer first, so a terminal is one click further, not in the way.
+- 2026-10-19: Local terminals are not saved with the tabs for the next launch: a shell's state (its folder, what ran in it) cannot come back, and an empty shell reopening by itself would be noise.
+- 2026-10-19: A shell that exits with code 0 closes its tab, as in any terminal; another code keeps the tab with the last output and Restart.
+- 2026-10-19: Closing a local terminal asks first only when the PTY's foreground process is not the shell (an editor, a build); on Windows ConPTY cannot tell, so it closes without asking there.
+- 2026-10-19: On Windows and Linux, Ctrl+O and Ctrl+B in a terminal go to the program (readline uses both); the app takes them with Shift there, and Ctrl+Shift+B now opens History too.
+- 2026-10-19: The tab row's arrows move it one tab width (245 px) per click with a short ease, repeat every 170 ms after a 400 ms hold, are dimmed at their end and hidden when nothing overflows; clicking a tab, even the one showing, brings it fully into sight again.
+- 2026-10-19: On the iPhone the open chat fills the screen and the board is a sidebar from the left edge, as in Claude's app; a tap on a chat opens it at once, and its details moved to the row's swipe and long press.
+- 2026-10-19: iPhone tabs: at most 8 (opening a ninth closes the one used longest ago), and the 4 used last stay connected while the app is in front; the rest hang up and keep their screen.
+- 2026-10-19: The iPhone's tab strip shows only with two or more tabs, so one chat gets the whole height.
+- 2026-10-19: A sideways swipe on the chat's title switches tabs; the terminal itself takes no sideways swipe, because it scrolls, selects and sends wheel events.
+- 2026-10-19: The sidebar closes by a tap or a swipe on the strip of chat beside it, or its button, not by a swipe on the list, because rows keep their swipe actions.
+- 2026-10-19: The edge swipe does nothing while a sheet is up; the sheet's own swipe wins.
+- 2026-10-19: A notification or link to a chat (route `.session`) opens it as a tab; its details sheet only when the list no longer has it.
+- 2026-10-19: The phone keeps each tab's last screen (the visible rows, not scrollback) in Caches, at most 40 chats and 512 KB each, so a tab shows it at once while it connects.
+- 2026-10-19: The phone fetches terminal tickets ahead for the 3 chats most likely to be opened (starred, needs you, working, warm) when it connects and when the sidebar opens; a ticket is used within 40 s or dropped.
+- 2026-10-19: With no tab open at launch, the sidebar opens by itself.
+- 2026-10-19: Opening a chat from a sheet no longer waits 420 ms for the sheet to go: tabs sit under sheets, so the sheet closes and the tab is already there.
+- 2026-10-19: A tab kept connected behind the front one never takes focus, so it never resizes the chat on another screen; only the tab in front does.
+- 2026-10-19: A message typed before the tab is live waits on the tab and goes in when it connects, with Edit to take it back.
+- 2026-10-19: The terminal stays at the bottom unless a finger moved it, so a reset or a new size from the hub no longer shows "1 line up".
+- 2026-10-19: The iPhone status bar follows what is behind it: while a chat fills the screen the window takes the terminal's light or dark (only the status bar, menus and keyboard follow it), with the sidebar or no chat it is the app's own, and sheets always ask for the app's own look.
+- 2026-10-19: The key row scrolls with an 18 pt fade on the side that has more keys, and the compose and key rows share a 10 pt side margin.
+- 2026-10-19: An empty terminal (connecting, not running, cannot connect) shows no cursor until something is drawn.
+- 2026-10-19: Notarizing names the keychain that holds the notarytool profile (login, or SB_NOTARY_KEYCHAIN), because notarytool otherwise reads only the default keychain, which other build tools on the same Mac can change.
+- 2026-10-19: On the iPhone, opening a chat that is not running brings it back in place behind its tab (the plain resume of the same chat), followed in the tab instead of a job sheet, with no Resume button or progress screen; the title says "starting" and a message typed meanwhile waits. The desktop app still asks first with Resume and open.
+- 2026-10-19: The phone tells a home-folder chat ("/Users/you", "/home/you", "/root", "C:\Users\you") from the list and offers Start fresh instead of trying a resume the machine would refuse; any other refusal comes back as one inline line with Try Again and Start Fresh.
+- 2026-10-19: Resume from a chat's details or row with "Open in a Terminal When Ready" on now opens its tab the same way instead of the job sheet; a resume that stays in the list (Stopped today) still follows the job.
+- 2026-10-19: The server asks the machine about a job every second for its first 20 s, then every 3 s as before, so an app waiting to open a resumed chat does not also wait out the slower poll.
+- 2026-10-19: The tab in front when the iPhone app launches or comes back to the foreground counts as opened, so its stopped chat comes back by itself with no Resume button (a plain resume with no message costs no tokens); tabs behind it still wait until switched to, a failed one keeps Try Again instead of retrying on every return, and closing the front tab counts as switching to the one that takes its place.
+- 2026-10-19: Chats and the file browser reach the whole home folder, not just the Claude folder, unless Settings turns "Anywhere in home" off for a computer. The server could already move the Claude folder anywhere in home, so an app gains nothing it could not do before.
+- 2026-10-19: Folders outside home (another drive, /Volumes, D:\) are added only at the computer itself (`sb.py places add`). The server's poll can turn roaming off but can never add a place, so a phone can never widen what a computer shares.
+- 2026-10-19: Apps name folders as `~/...` or `@place/...`, never as full paths, so the helper checks every folder the same way and an old app that only knows root-relative folders keeps working.
+- 2026-10-19: Dot folders, ~/Library and AppData stay private even with roaming on (keys, tokens, mail, browser data); iCloud Drive is the one folder let out of ~/Library.
+- 2026-10-19: Outside the Claude folder Claude starts only in a folder it was already let into, or after the user says yes in the app (409 need: trust, then trust: true). Inside the Claude folder nothing changes and no question is asked. A no from before is asked again, never overridden silently.
+- 2026-10-19: A folder macOS keeps the helper out of (Files and Folders) shows as blocked with the steps to allow it, instead of as an empty folder.
+- 2026-10-19: Names of existing files and folders may use any characters (Résumé & notes, com~apple~CloudDocs) in the browser; a folder made from an app still takes the plain-name rule.
+
+## 2026-10-19: one push per held message, and a setting for each kind
+
+"Old session held" pushes kept arriving with no clear source. The server log showed most came on Oct 11 and 12, from task
+notifications held before injected prompts were let through; since then, every hold was a real typed message, but
+a held chat could push again every two minutes as more messages went in, and the server never forgot a hold. Now
+a held chat pushes once until it is answered, then not again for 30 minutes; a hold lapses when the chat moves on
+or after six hours; agent messages with a plain line before the tag and subagent prompts are never held; pushes
+carry a collapse id per chat and a thread per kind; and each kind can be turned off. Quiet hours were left out:
+iOS Focus already does that, per device and better.
+
+## 2026-10-19: the daily budget gives way near the reset
+
+Chats were told the user was over a 14% daily budget with 45% of the week left and the reset under a day away,
+usage that could never be spent in time. The daily budget and the hard daily limit now count as reached only past
+the larger of the setting and the room left (what was left at the start of today, shared over the days left). The
+5-hour cap is unchanged: it guards a different limit. The hard limit gives way too, since stopping chats to save
+usage that will expire unused protects nothing.
+
+
+## 2026-10-19: files, history and first run, as built
+
+- Trust is asked up front (a folder check when a folder is picked) and again if the server answers 409 at start.
+  The words: "Let Claude work in <folder>?", what yes allows, and a note when it was refused before.
+- On the Mac a blocked place reads "Locked", an unplugged one "Missing"; `~` reads "Home". Roam off and a missing
+  place are told apart from the helper's own error text.
+- `/api/prefs` keeps `notify` as the stored `{kind: bool}` and lists the kinds with their words as `notify_kinds`,
+  so the list never hides the stored values.
+- The iPhone keeps its existing Title Case labels; new text is sentence case.
+- First run on the Mac searches for 3 seconds, connects by itself when exactly one server answers, and lets the
+  user pick among several. The resolver's own silent Bonjour pick is off in the desktop app.
+- "Run the server on this computer": a laptop is a warning that needs "Use this laptop anyway", never a stop;
+  another server on the network is a warning; one already running here is a stop with "Connect to it". Power
+  settings are never changed; the Energy pane is opened instead. Python counts only when it is already usable, so
+  Apple's command line tools prompt never appears by surprise.
+- The terminal installer keeps its piped output byte for byte (the Mac app reads its `== ` lines) and only dresses
+  up a real terminal. The one-line install needs a published server kit; no address is made up until there is one.
+- No machine addresses, user names or home paths live in the repo. Scripts read them from the hosts file
+  (`native/scripts/hosts.sh`): `SB_HELPER_HOSTS` lists the machines that run the helper, `SB_LAB_BIND` the lab's
+  addresses, and `SB_SERVER_TS_URL` the server on Tailscale. The Android app gets its server addresses at build
+  time and generates its cleartext network config from them. The design lab works out the live app from its own
+  address. Fixtures use documentation addresses (192.0.2.x, 100.64.0.x).

@@ -15,11 +15,12 @@ use gpui::{
     StatefulInteractiveElement, Styled, Subscription, Window, canvas, div, prelude::*, px, relative,
 };
 use gpui_base::input::{InputEvent, InputState, TextareaState};
-use sb_core::actions::{MODELS, MODES, ULTRA_NOTE, ultra_warn, valid_folder_name};
-use sb_core::api::{ApiFolder, ApiPrefs, ApiSetup};
+use sb_core::actions::{MODES, ULTRA_NOTE, ultra_warn, valid_folder_name};
+use sb_core::api::{ApiFolder, ApiFolderCheck, ApiPrefs, ApiSetup};
 use sb_core::flags::{self, DIRS_MAX, EFFORTS, Opts, PERMS};
-use sb_core::{NewRequest, fmt, names};
+use sb_core::{CoreError, NewRequest, fmt, names, places};
 
+use crate::nav::{Closed, Nav};
 use crate::state::AppState;
 use crate::theme::{NUM, Theme};
 use crate::ui;
@@ -134,7 +135,7 @@ pub struct NewSheet {
     drop: ui::Drop,
     machine: String,
     mode: &'static str,
-    model: &'static str,
+    model: String,
     /// The folder picked ("" is the machine's Claude folder).
     folder: String,
     msg: Entity<TextareaState>,
@@ -194,6 +195,17 @@ pub struct NewSheet {
     tools: Vec<String>,
     /// Pick (the checklist) instead of Auto, on a server that knows Auto.
     tools_pick: bool,
+    /// The machine's places, and going through them (home, Documents, iCloud Drive, added places). None for Auto
+    /// or a machine whose Switchboard is too old for places.
+    nav: Option<Entity<Nav>>,
+    nav_sub: Option<Subscription>,
+    /// The picker shows the browser (a place's folders) instead of the Claude folder's tree.
+    browsing: bool,
+    /// Whether Claude may work in the picked folder yet, asked once it is picked (outside the Claude folder only).
+    check: Option<ApiFolderCheck>,
+    check_seq: u64,
+    /// The trust question over the sheet: the folder as shown, and whether it was once declined.
+    trust_ask: Option<(String, bool)>,
     _subs: Vec<Subscription>,
 }
 
@@ -244,10 +256,17 @@ impl NewSheet {
         let online = |n: &str| snap.machine(n).is_some_and(|m| !m.is_offline());
         let draft_path = app.read(cx).draft_path();
         let draft = draft_path.as_deref().and_then(|p| Draft::load(p, AppState::now()));
-        let asked = machine.is_some();
         let machine = machine
             .filter(|m| online(m))
-            .or_else(|| draft.as_ref().map(|d| d.machine.clone()).filter(|m| m == AUTO_MACHINE || online(m)))
+            // A draft being written keeps its machine; a fresh sheet starts on Auto when Auto can pick.
+            .or_else(|| {
+                draft
+                    .as_ref()
+                    .filter(|d| !d.msg.trim().is_empty())
+                    .map(|d| d.machine.clone())
+                    .filter(|m| m == AUTO_MACHINE || online(m))
+            })
+            .or_else(|| snap.auto_ready().then(|| AUTO_MACHINE.to_string()))
             .or_else(|| snap.machines.iter().find(|m| !m.is_offline()).map(|m| m.name.clone()))
             .or_else(|| snap.machines.first().map(|m| m.name.clone()))
             .unwrap_or_default();
@@ -256,7 +275,7 @@ impl NewSheet {
             drop: ui::Drop::default(),
             machine: String::new(),
             mode: "normal",
-            model: "",
+            model: String::new(),
             folder: String::new(),
             msg,
             msg_len: 0,
@@ -296,6 +315,12 @@ impl NewSheet {
             scroll: ScrollHandle::new(),
             tools: Vec::new(),
             tools_pick: false,
+            nav: None,
+            nav_sub: None,
+            browsing: false,
+            check: None,
+            check_seq: 0,
+            trust_ask: None,
             _subs: subs,
         };
         s.set_machine(machine, cx);
@@ -314,8 +339,8 @@ impl NewSheet {
             s.msg.update(cx, |m, cx| m.set_value(d.msg.clone(), window, cx));
             s.msg_len = d.msg.chars().count();
             s.apply_setup(&d.setup, cx);
-            if !asked || d.machine == s.machine {
-                s.folder = d.folder.clone();
+            if d.machine == s.machine {
+                s.pick_folder(d.folder.clone(), cx);
             }
             s.draft_saved = d;
         }
@@ -354,7 +379,7 @@ impl NewSheet {
             self.mode = m.0;
         }
         let model = s.model.as_deref().unwrap_or("");
-        self.model = MODELS.iter().find(|m| m.0 == model).map(|m| m.0).unwrap_or("");
+        self.model = model.to_string();
         self.opt = Opts::from_setup(s);
         self.pending_other = Some(self.opt.other.clone());
         self.touched = true;
@@ -363,7 +388,7 @@ impl NewSheet {
     }
 
     fn current_setup(&self, name: Option<String>) -> ApiSetup {
-        flags::setup(&self.opt, self.model, self.mode, name)
+        flags::setup(&self.opt, &self.model, self.mode, name)
     }
 
     fn save_preset(&mut self, cx: &mut Context<Self>) {
@@ -408,7 +433,7 @@ impl NewSheet {
             Some(p) => (p.takes.clone(), p.aliases.clone()),
             None => Default::default(),
         };
-        flags::check_other(&self.opt, self.model, self.mode, &takes, &aliases)
+        flags::check_other(&self.opt, &self.model, self.mode, &takes, &aliases)
     }
 
     pub fn focus_message(&self, window: &mut Window, cx: &mut App) {
@@ -565,8 +590,65 @@ impl NewSheet {
 
     /// From Files: start in that folder.
     pub fn preset_folder(&mut self, folder: String, cx: &mut Context<Self>) {
-        self.folder = folder;
+        // A folder outside the Claude folder opens the browser there, so its neighbours are one click away.
+        if places::is_outside(&folder)
+            && let Some(nav) = &self.nav
+        {
+            self.browsing = true;
+            nav.update(cx, |n, cx| n.go(folder.clone(), cx));
+        }
+        self.pick_folder(folder, cx);
         self.preview(cx);
+        cx.notify();
+    }
+
+    /// The folder to start in. One outside the Claude folder is checked at once: whether Claude may work there
+    /// yet, so the sheet can say so before Start.
+    fn pick_folder(&mut self, folder: String, cx: &mut Context<Self>) {
+        if folder == self.folder && (self.check.is_some() || !places::is_outside(&folder)) {
+            return;
+        }
+        self.folder = folder.clone();
+        self.check = None;
+        self.check_seq += 1;
+        cx.notify();
+        if !places::is_outside(&folder) || self.is_auto() {
+            return;
+        }
+        let (core, m, seq) = (self.app.read(cx).core.clone(), self.machine.clone(), self.check_seq);
+        cx.spawn(async move |this, cx| {
+            let f = folder.clone();
+            let res = cx.background_executor().spawn(async move { core.folder_check(&m, &f) }).await;
+            let _ = this.update(cx, |s, cx| {
+                if s.check_seq != seq {
+                    return;
+                }
+                match res {
+                    Ok(c) => s.check = Some(c),
+                    Err(e) => log::info!("folder check for {folder}: {e}"),
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Opens the browser at a place (or the folder it was on).
+    fn browse(&mut self, folder: Option<String>, cx: &mut Context<Self>) {
+        let Some(nav) = self.nav.clone() else { return };
+        self.browsing = true;
+        let to = folder.unwrap_or_else(|| nav.read(cx).folder.clone());
+        nav.update(cx, |n, cx| n.go(to.clone(), cx));
+        self.pick_folder(to, cx);
+        cx.notify();
+    }
+
+    /// Back to the Claude folder's tree.
+    fn stop_browsing(&mut self, cx: &mut Context<Self>) {
+        self.browsing = false;
+        if places::is_outside(&self.folder) {
+            self.pick_folder(String::new(), cx);
+        }
         cx.notify();
     }
 
@@ -576,9 +658,24 @@ impl NewSheet {
         }
         self.machine = machine.clone();
         self.folder.clear();
+        self.check = None;
+        self.check_seq += 1;
+        self.browsing = false;
+        self.trust_ask = None;
         self.open.clear();
         self.failed.clear();
         self.tree.clear();
+        let places_ok =
+            self.app.read(cx).snap.machine(&machine).is_some_and(|m| m.features.iter().any(|f| f == "places"));
+        if self.is_auto() || !places_ok {
+            self.nav = None;
+            self.nav_sub = None;
+        } else {
+            let (app, m) = (self.app.clone(), machine.clone());
+            let nav = cx.new(|cx| Nav::new(app, m, String::new(), cx));
+            self.nav_sub = Some(cx.observe(&nav, |_, _, cx| cx.notify()));
+            self.nav = Some(nav);
+        }
         if self.is_auto() {
             self.root = None;
             self.recent.clear();
@@ -723,6 +820,7 @@ impl NewSheet {
             return if self.is_auto() { "Check the folder name" } else { "Check the new folder name" }.into();
         };
         let auto_place = if folder.is_empty() { String::new() } else { format!(", in {folder}") };
+        let folder = places::shown(&folder, "Claude folder");
         let place = if create {
             format!("a new folder, {folder}")
         } else if folder.is_empty() {
@@ -736,7 +834,7 @@ impl NewSheet {
             _ => "",
         };
         let model = if !self.locked() && !self.model.is_empty() {
-            MODELS.iter().find(|m| m.0 == self.model).map(|m| format!(", {}", m.1)).unwrap_or_default()
+            format!(", {}", sb_core::actions::model_word(&self.model))
         } else {
             String::new()
         };
@@ -758,16 +856,40 @@ impl NewSheet {
     }
 
     pub fn start(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // A folder Claude was never let into: ask here first (the server would ask too, with a 409).
+        if let Some(c) = self.check.as_ref().filter(|c| c.needs_yes() && c.folder == self.folder)
+            && self.can_start(cx)
+            && self.new_name(cx).is_none()
+        {
+            self.trust_ask = Some((c.shown.clone(), c.declined()));
+            cx.notify();
+            return;
+        }
+        self.start_with(false, cx);
+    }
+
+    /// The trust question's answer: yes starts it with `trust: true`, no leaves the sheet as it was.
+    pub fn trust_open(&self) -> bool {
+        self.trust_ask.is_some()
+    }
+
+    pub fn answer_trust(&mut self, yes: bool, cx: &mut Context<Self>) {
+        self.trust_ask = None;
+        cx.notify();
+        if yes {
+            self.start_with(true, cx);
+        }
+    }
+
+    fn start_with(&mut self, trust: bool, cx: &mut Context<Self>) {
         if !self.can_start(cx) {
             return;
         }
         let Some((folder, create)) = self.target(cx) else { return };
+        let asked_folder = folder.clone();
         let prompt = self.msg.read(cx).value().trim().to_string();
-        let model = if self.locked() {
-            Some("opus".to_string())
-        } else {
-            (!self.model.is_empty()).then(|| self.model.to_string())
-        };
+        let model =
+            if self.locked() { Some("opus".to_string()) } else { (!self.model.is_empty()).then(|| self.model.clone()) };
         let effort = (!flags::effort_locked(self.mode) && !self.opt.effort.is_empty()).then(|| self.opt.effort.clone());
         let req = NewRequest {
             machine: self.machine.clone(),
@@ -781,6 +903,7 @@ impl NewSheet {
             other: self.opt.other.trim().to_string(),
             chrome_machine: if self.opt.chrome { self.chrome_machine.clone() } else { None },
             tools: self.tools_to_send(cx),
+            trust,
         };
         let label = self.label(cx);
         let name = self.name(cx);
@@ -791,12 +914,13 @@ impl NewSheet {
         let app = self.app.clone();
         let (open_term, machine) = (self.open_term, self.machine.clone());
         let (l2, n2) = (label.clone(), name.clone());
+        let draft_path = self.draft_path.clone();
         self.app.update(cx, |s, cx| {
             s.start_new(
                 req,
                 label,
                 name,
-                move |res: Result<Option<String>, String>, cx: &mut App| {
+                move |res: Result<Option<String>, CoreError>, cx: &mut App| {
                     let shown = me.update(cx, |s, cx| {
                         s.sending = false;
                         match &res {
@@ -809,13 +933,29 @@ impl NewSheet {
                                 }
                                 cx.emit(SheetEvent::Close)
                             }
-                            Err(e) => s.error = Some(e.clone()),
+                            // Claude was never let into the folder: ask, then send it again with the answer.
+                            Err(CoreError::Trust { folder_shown, declined, .. }) => {
+                                let shown = if folder_shown.is_empty() {
+                                    places::shown(&asked_folder, "Claude folder")
+                                } else {
+                                    folder_shown.clone()
+                                };
+                                s.trust_ask = Some((shown, *declined));
+                            }
+                            Err(e) => s.error = Some(e.to_string()),
                         }
                         cx.notify();
                     });
-                    // Closed before the answer came back: say it in the corner instead.
-                    if let (Err(_), Err(e)) = (shown, res) {
-                        app.update(cx, |s, cx| s.toast(e, None, true, cx));
+                    // Closed before the answer came back: say it in the corner instead, and a draft that started
+                    // does not come back next time.
+                    match (shown, res) {
+                        (Err(_), Err(e)) => app.update(cx, |s, cx| s.toast(e.to_string(), None, true, cx)),
+                        (Err(_), Ok(_)) => {
+                            if let Some(p) = &draft_path {
+                                Draft::default().save(p);
+                            }
+                        }
+                        _ => {}
                     }
                 },
                 cx,
@@ -1222,9 +1362,9 @@ impl NewSheet {
             match &m.chrome {
                 Some(c) if !c.connector => {
                     text = format!(
-                        "{} does not have Claude in Chrome{}.",
+                        "{} doesn't have Claude in Chrome{}.",
                         m.label,
-                        if c.installed { " (Chrome is there, the extension is not)" } else { "" }
+                        if c.installed { " (Chrome is there, but not the extension)" } else { "" }
                     );
                     match alt {
                         Some(a) => use_to = Some((a.name.clone(), a.label.clone())),
@@ -1437,7 +1577,7 @@ impl NewSheet {
             .text_size(px(12.))
             .text_color(t.ink)
             .child(gpui_base::Input::new(&self.other));
-        let cmd = flags::cmd_text(&self.opt, if self.locked() { "opus" } else { self.model }, self.mode);
+        let cmd = flags::cmd_text(&self.opt, if self.locked() { "opus" } else { &self.model }, self.mode);
         div()
             .flex_none()
             .px(px(22.))
@@ -1555,8 +1695,7 @@ impl NewSheet {
                     if this.adding {
                         return this.toggle_dir(pick.clone(), cx);
                     }
-                    this.folder = pick.clone();
-                    cx.notify();
+                    this.pick_folder(pick.clone(), cx);
                 })),
         )
         .into_any_element()
@@ -1642,7 +1781,7 @@ impl NewSheet {
                 &[
                     TextRun { text: "Picked with the machine.".into(), bold: true },
                     TextRun {
-                        text: " A repo the message names, when that machine has it; otherwise its Claude folder. Type a folder below to choose it yourself."
+                        text: " A repo the message names, if that machine has it, or else its Claude folder. Type a folder below to pick it yourself."
                             .into(),
                         bold: false,
                     },
@@ -1674,14 +1813,282 @@ impl NewSheet {
                 }
             }
             None if self.failed.contains(parent) => {
-                out.push(note("Could not load the folders. It tries again next time.", depth))
+                out.push(note("Couldn't load the folders. It'll try again next time.", depth))
             }
             None => {}
         }
     }
 
+    /// The places beyond the Claude folder, under the recent folders: home and its usual folders while
+    /// "Anywhere in home" is on, and the places added at the machine.
+    fn places_rows(&self, t: &Theme, label: &str, rows: &mut Vec<AnyElement>, cx: &Context<Self>) {
+        let Some(nav) = &self.nav else { return };
+        let Some(p) = nav.read(cx).places() else { return };
+        if p.old {
+            return;
+        }
+        let list: Vec<_> = p.places.iter().filter(|x| x.kind != "claude" && (p.roam || x.kind == "place")).collect();
+        if list.is_empty() && p.roam {
+            return;
+        }
+        rows.push(
+            div()
+                .mt(px(12.))
+                .mb(px(4.))
+                .ml(px(26.))
+                .child(ui::lbl(&format!("Elsewhere on {label}"), t.faint))
+                .into_any_element(),
+        );
+        for (i, pl) in list.into_iter().enumerate() {
+            let to = pl.folder.clone();
+            rows.push(
+                div()
+                    .pl(px(16.))
+                    .child(
+                        crate::files::place_row(t, SharedString::from(format!("nw-pl-{i}")), pl, false).on_click(
+                            cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(Some(to.clone()), cx)),
+                        ),
+                    )
+                    .into_any_element(),
+            );
+        }
+        if !p.roam {
+            let m = self.machine.clone();
+            rows.push(
+                div()
+                    .ml(px(26.))
+                    .mr(px(8.))
+                    .mt(px(4.))
+                    .flex()
+                    .flex_wrap()
+                    .gap_x(px(4.))
+                    .text_size(px(12.))
+                    .text_color(t.faint)
+                    .child("Anywhere in home is off here.")
+                    .child(Self::link(t, "nw-roam", "Settings").on_click(
+                        cx.listener(move |_, _: &ClickEvent, _, cx| crate::settings::open_machine(m.clone(), cx)),
+                    ))
+                    .into_any_element(),
+            );
+        }
+    }
+
+    /// The browser in the picker: a place's folders one level at a time. The folder on screen is the one picked.
+    fn browser(&self, t: &Theme, nav: &Entity<Nav>, cx: &Context<Self>) -> AnyElement {
+        let n = nav.read(cx);
+        let hover = t.hover;
+        let place = n.places().and_then(|p| p.place_of(&n.folder)).cloned();
+        let crumbs = places::crumbs(&n.folder, place.as_ref(), &n.claude_name());
+        let last = crumbs.len().saturating_sub(1);
+        let mut bar = div().flex().flex_wrap().items_center().gap(px(1.)).px(px(8.)).pb(px(4.));
+        for (i, c) in crumbs.into_iter().enumerate() {
+            if i > 0 {
+                bar = bar.child(ui::icon("chev", 9., t.faint));
+            }
+            let to = c.folder.clone();
+            bar = bar.child(
+                div()
+                    .id(SharedString::from(format!("nw-cr-{i}")))
+                    .px(px(5.))
+                    .h(px(22.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(ui::R_ITEM))
+                    .text_size(px(12.))
+                    .text_color(if i == last { t.ink } else { t.dim })
+                    .when(i == last, |d| d.font_weight(FontWeight::SEMIBOLD))
+                    .when(i != last, |d| {
+                        d.cursor_pointer()
+                            .hover(move |s| s.bg(hover))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(Some(to.clone()), cx)))
+                    })
+                    .child(c.label),
+            );
+        }
+        let mut col = div()
+            .flex()
+            .flex_col()
+            .gap(px(1.))
+            .child(
+                div().px(px(4.)).pb(px(6.)).child(
+                    Self::link(t, "nw-br-back", "Back to the Claude folder")
+                        .text_size(px(12.))
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop_browsing(cx))),
+                ),
+            )
+            .child(bar);
+        let note = |text: String| {
+            ui::wrap(text).px(px(10.)).py(px(8.)).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.faint)
+        };
+        if let Some(c) = n.closed() {
+            let opened = n.privacy_opened.as_deref() == Some(n.folder.as_str());
+            let w = crate::files::closed_words(&c, &n.name(), &n.machine_label(cx), opened);
+            let m = self.machine.clone();
+            let btn = w.button.map(|b| {
+                let btn = ui::line_btn(t, "nw-br-fix", 28.).px(px(10.)).text_size(px(12.)).child(b);
+                match c {
+                    Closed::Privacy { .. } if !opened => btn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if let Some(nav) = &this.nav {
+                            nav.update(cx, |n, cx| n.open_privacy(cx))
+                        }
+                    })),
+                    Closed::Missing => btn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.stop_browsing(cx))),
+                    Closed::RoamOff => btn.on_click(
+                        cx.listener(move |_, _: &ClickEvent, _, cx| crate::settings::open_machine(m.clone(), cx)),
+                    ),
+                    _ => btn.on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        if let Some(nav) = &this.nav {
+                            nav.update(cx, |n, cx| n.reload(cx))
+                        }
+                    })),
+                }
+            });
+            return col
+                .child(
+                    div()
+                        .mx(px(4.))
+                        .mt(px(4.))
+                        .p(px(12.))
+                        .rounded(px(ui::R_CARD))
+                        .bg(if w.warm { t.cold.alpha(if t.dark { 0.12 } else { 0.08 }) } else { t.panel2 })
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .child(
+                            div()
+                                .flex()
+                                .items_start()
+                                .gap(px(8.))
+                                .child(div().pt(px(1.)).child(ui::icon(
+                                    w.icon,
+                                    13.,
+                                    if w.warm { t.cold } else { t.dim },
+                                )))
+                                .child(
+                                    ui::wrap(w.title)
+                                        .flex_1()
+                                        .text_size(px(12.5))
+                                        .font_weight(FontWeight::SEMIBOLD)
+                                        .line_height(relative(1.35))
+                                        .text_color(t.ink),
+                                ),
+                        )
+                        .child(
+                            ui::wrap(w.body)
+                                .pl(px(21.))
+                                .text_size(px(12.))
+                                .line_height(relative(1.45))
+                                .text_color(t.dim),
+                        )
+                        .children(btn.map(|b| div().pl(px(21.)).pt(px(2.)).child(b))),
+                )
+                .into_any_element();
+        }
+        let Some(l) = n.shown_listing() else {
+            return col
+                .child(ui::loading(t, "nw-br-load", "Reading the folder").px(px(10.)).py(px(8.)))
+                .into_any_element();
+        };
+        if l.dirs.is_empty() {
+            col = col.child(note("No folders inside. The chat can start right here.".into()));
+        }
+        for d in &l.dirs {
+            let to = d.folder.clone();
+            col = col.child(
+                div()
+                    .id(SharedString::from(format!("nw-br-{}", d.folder)))
+                    .h(px(30.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(10.))
+                    .rounded(px(ui::R_CTRL))
+                    .cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .text_size(px(13.))
+                    .text_color(t.ink2)
+                    .child(ui::icon("folder", 14., t.accent))
+                    .child(ui::line(d.name.clone()).flex_1())
+                    .child(ui::icon("chev", 11., t.faint))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(Some(to.clone()), cx))),
+            );
+        }
+        if l.more {
+            col = col.child(note("Showing the first 400 folders.".into()));
+        }
+        col.into_any_element()
+    }
+
+    /// Under the picker: whether Claude may work in the picked folder yet (outside the Claude folder only).
+    fn check_line(&self, t: &Theme) -> Option<AnyElement> {
+        let c = self.check.as_ref().filter(|c| c.folder == self.folder && c.needs_yes())?;
+        let (ic, color, text) = if c.declined() {
+            ("warn", t.cold, "You said no to Claude here before. Start asks again.")
+        } else {
+            ("info", t.dim, "Claude hasn't worked here yet. Start asks you first.")
+        };
+        Some(
+            div()
+                .flex_none()
+                .px(px(12.))
+                .py(px(7.))
+                .flex()
+                .items_start()
+                .gap(px(8.))
+                .border_t_1()
+                .border_color(t.rule)
+                .child(div().pt(px(1.)).child(ui::icon(ic, 12., color)))
+                .child(ui::wrap(text).flex_1().text_size(px(11.5)).line_height(relative(1.4)).text_color(t.dim))
+                .into_any_element(),
+        )
+    }
+
+    /// The trust question, over the whole sheet.
+    fn trust_overlay(&self, t: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let (shown, declined) = self.trust_ask.clone()?;
+        let w = crate::trust::words(&shown, declined, &self.label(cx), "start the chat");
+        let me = cx.entity().downgrade();
+        let me2 = me.clone();
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(ui::R_SHEET))
+                .bg(t.scrim)
+                .occlude()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child(crate::trust::card(
+                    t,
+                    "nw-trust",
+                    &shown,
+                    w,
+                    move |_, _, cx| {
+                        let _ = me.update(cx, |s, cx| s.answer_trust(true, cx));
+                    },
+                    move |_, _, cx| {
+                        let _ = me2.update(cx, |s, cx| s.answer_trust(false, cx));
+                    },
+                ))
+                .into_any_element(),
+        )
+    }
+
     fn picker(&self, t: &Theme, cx: &Context<Self>) -> impl IntoElement {
         let label = self.label(cx);
+        if let (true, false, Some(nav)) = (self.browsing, self.adding, &self.nav) {
+            return div()
+                .id("fpick")
+                .flex_1()
+                .min_h_0()
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll)
+                .px(px(6.))
+                .pt(px(8.))
+                .pb(px(8.))
+                .child(self.browser(t, nav, cx));
+        }
         let hover = t.hover;
         let on = self.folder.is_empty() && !self.adding;
         let group =
@@ -1737,8 +2144,7 @@ impl NewSheet {
                             if this.adding {
                                 return;
                             }
-                            this.folder.clear();
-                            cx.notify();
+                            this.pick_folder(String::new(), cx);
                         })),
                 )
                 .into_any_element(),
@@ -1753,7 +2159,10 @@ impl NewSheet {
                 rows.push(self.folder_row(t, &f, 0, false, cx));
             }
         }
-        rows.push(group("All folders"));
+        if !self.adding {
+            self.places_rows(t, &label, &mut rows, cx);
+        }
+        rows.push(group(if self.nav.is_some() && !self.adding { "In the Claude folder" } else { "All folders" }));
         self.tree_rows(t, "", 0, &mut rows, cx);
         div()
             .id("fpick")
@@ -1831,7 +2240,7 @@ impl Render for NewSheet {
         let mode_hint = MODES.iter().find(|m| m.0 == self.mode).map(|m| m.2).unwrap_or("");
         // Model
         let mut models = ui::seg_box(&t);
-        for (v, label) in MODELS {
+        for (v, label) in self.app.read(cx).model_choices() {
             let on = if locked { v == "opus" } else { self.model == v };
             let dis = locked && v != "opus";
             let b = ui::seg_btn(&t, SharedString::from(format!("model-{v}")), on, dis)
@@ -1841,7 +2250,7 @@ impl Render for NewSheet {
                 b.into_any_element()
             } else {
                 b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.model = v;
+                    this.model = v.clone();
                     cx.notify();
                 }))
                 .into_any_element()
@@ -1880,6 +2289,7 @@ impl Render for NewSheet {
                 _ => "Picked with the machine".to_string(),
             },
             Some((f, _)) if f.is_empty() => self.root_text(),
+            Some((f, _)) if places::is_outside(&f) => places::shown(&f, "Claude folder"),
             Some((f, _)) => match &self.root {
                 Some(r) => format!("{r}/{f}"),
                 None => f,
@@ -1982,7 +2392,8 @@ impl Render for NewSheet {
                         self.auto_note(&t).into_any_element()
                     } else {
                         self.picker(&t, cx).into_any_element()
-                    }),
+                    })
+                    .when(!auto, |d| d.children(self.check_line(&t))),
             )
             .child(
                 div()
@@ -2033,8 +2444,10 @@ impl Render for NewSheet {
             .when(!can, |d| d.opacity(0.5).cursor_default())
             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.start(window, cx)));
 
+        let trust = self.trust_overlay(&t, cx);
         div()
             .key_context("NewSheet")
+            .relative()
             .on_action(cx.listener(|this, _: &crate::view::SwapField, window, cx| this.swap_field(window, cx)))
             .max_h(px(sheet_max))
             .flex()
@@ -2085,7 +2498,7 @@ impl Render for NewSheet {
                                     .text_size(px(15.))
                                     .font_weight(FontWeight::BOLD)
                                     .text_color(t.ink)
-                                    .child("New session"),
+                                    .child("New chat"),
                             )
                             .child(
                                 div()
@@ -2160,9 +2573,7 @@ impl Render for NewSheet {
                                     .gap(px(6.))
                                     .min_w_0()
                                     .child(ui::icon("x", 13., t.bad))
-                                    .child(
-                                        ui::wrap(format!("Did not start. {e}")).text_size(px(12.)).text_color(t.bad),
-                                    ),
+                                    .child(ui::wrap(format!("Didn't start. {e}")).text_size(px(12.)).text_color(t.bad)),
                                 None => ui::wrap(where_text).text_size(px(12.)).text_color(if bad_name {
                                     t.bad
                                 } else {
@@ -2176,10 +2587,15 @@ impl Render for NewSheet {
                             .px(px(12.))
                             .text_size(px(13.))
                             .child("Cancel")
-                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SheetEvent::Close))),
+                            // Cancel throws the draft away; the X, Esc or a click outside keep it for next time.
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.drop_draft();
+                                cx.emit(SheetEvent::Close)
+                            })),
                     )
                     .child(start),
             )
+            .children(trust)
     }
 }
 
@@ -2208,7 +2624,10 @@ mod tests {
         // nothing typed: nothing kept
         Draft { msg: "  ".into(), ..d.clone() }.save(&p);
         assert!(!p.exists());
+        // Cancel: what was typed is not offered again
+        d.save(&p);
         Draft::default().save(&p);
+        assert!(!p.exists());
         assert_eq!(thousands(52340), "52,340");
         assert_eq!(thousands(999), "999");
         let _ = std::fs::remove_dir_all(&dir);

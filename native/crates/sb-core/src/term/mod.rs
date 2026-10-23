@@ -6,6 +6,7 @@
 //! - `keys`: a key plus modifiers to the bytes xterm sends, aware of application cursor mode.
 //! - `reconnect`: when a dropped terminal comes back by itself, and how long it waits between tries.
 //! - `rec`: the recorder (SB_TERM_REC=1) and its capture format.
+//! - `shells`: the local shells this computer has (profiles for a terminal tab that is not a chat).
 //! - `screen` (feature `grid`): a screen as bytes, the snapshot the hub sends and the desktop app replays.
 
 pub mod keys;
@@ -14,6 +15,7 @@ pub mod reconnect;
 pub mod scheme;
 #[cfg(feature = "grid")]
 pub mod screen;
+pub mod shells;
 pub mod ws;
 
 use serde::{Deserialize, Serialize};
@@ -116,7 +118,7 @@ impl From<CoreError> for TermError {
     }
 }
 
-pub const NO_TERMINALS: &str = "This Switchboard server does not have terminals yet.";
+pub const NO_TERMINALS: &str = "This Switchboard server doesn't have terminals yet.";
 
 /// Reads a /api/term reply. `base` is the server that answered ("http://192.0.2.10:8130"); a relative `ws`
 /// is completed with its host and the hub port.
@@ -154,8 +156,8 @@ pub fn parse_ticket(status: u16, body: &[u8], base: &str, req: &TermRequest) -> 
 
 fn default_need_message(need: Need) -> &'static str {
     match need {
-        Need::Resume => "This chat is not running.",
-        Need::Terminal => "This chat is open in a terminal on its machine, so it can't be opened here.",
+        Need::Resume => "This chat isn't running.",
+        Need::Terminal => "This chat is open in a terminal on its machine, so you can't open it here.",
         Need::Offline => "That machine is offline.",
     }
 }

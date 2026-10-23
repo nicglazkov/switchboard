@@ -14,12 +14,14 @@ mod link;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HUB_PORT: u16 = 8132;
+/// How often `run` looks at node.json again while it has no token the hub takes.
+const RECHECK: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeConfig {
@@ -62,8 +64,11 @@ impl NodeConfig {
 }
 
 fn load() -> Result<NodeConfig, String> {
-    let p = config_path();
-    let text = std::fs::read_to_string(&p).map_err(|_| "This machine is not paired yet.".to_string())?;
+    load_from(&config_path())
+}
+
+fn load_from(p: &Path) -> Result<NodeConfig, String> {
+    let text = std::fs::read_to_string(p).map_err(|_| "This machine is not paired yet.".to_string())?;
     serde_json::from_str(&text).map_err(|e| format!("{} is not readable ({e}). Pair again.", p.display()))
 }
 
@@ -287,6 +292,30 @@ fn service_text(exe: &str, home: &str) -> String {
 
 const LABEL: &str = "com.switchboard.node";
 
+/// The Windows logon task: this user's logon only, no window, never stopped for running long or on battery.
+fn task_xml(user: &str, vbs: &str) -> String {
+    let x = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;");
+    let (user, vbs) = (x(user), x(vbs));
+    format!(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo><Description>Switchboard: links this machine to the hub</Description></RegistrationInfo>
+  <Triggers><LogonTrigger><Enabled>true</Enabled><UserId>{user}</UserId></LogonTrigger></Triggers>
+  <Principals><Principal id="Author"><UserId>{user}</UserId><LogonType>InteractiveToken</LogonType><RunLevel>LeastPrivilege</RunLevel></Principal></Principals>
+  <Settings><MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy><DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries><ExecutionTimeLimit>PT0S</ExecutionTimeLimit><Enabled>true</Enabled>
+    <AllowStartOnDemand>true</AllowStartOnDemand></Settings>
+  <Actions Context="Author"><Exec><Command>wscript.exe</Command><Arguments>"{vbs}"</Arguments></Exec></Actions>
+</Task>
+"#
+    )
+}
+
+/// UTF-16 with a byte order mark, as schtasks /XML reads it.
+fn utf16(s: &str) -> Vec<u8> {
+    [0xFF, 0xFE].into_iter().chain(s.encode_utf16().flat_map(|u| u.to_le_bytes())).collect()
+}
+
 /// `install`: copy this binary to a fixed place, run it at login as a user service, and start it now.
 fn install() -> i32 {
     if load().is_err() {
@@ -309,6 +338,16 @@ fn install() -> i32 {
                 use std::os::unix::fs::PermissionsExt;
                 std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
             }
+            // A node that is running can't be replaced on Windows, but it can be renamed: move it aside first.
+            // Old ones still running stay until they exit; the next install clears them.
+            if cfg!(windows) && dest.exists() {
+                for e in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                    if e.file_name().to_string_lossy().ends_with(".old") {
+                        let _ = std::fs::remove_file(e.path());
+                    }
+                }
+                let _ = std::fs::rename(&dest, dest.with_extension(format!("{}.old", std::process::id())));
+            }
             std::fs::rename(&tmp, &dest).map_err(|e| format!("could not put the node in {} ({e})", dest.display()))?;
         }
         let exe = dest.display().to_string();
@@ -324,11 +363,15 @@ fn install() -> i32 {
         } else if cfg!(windows) {
             let vbs = dest.with_file_name("switchboard-node.vbs");
             std::fs::write(&vbs, text).map_err(|e| e.to_string())?;
-            let run = format!("wscript.exe \"{}\"", vbs.display());
-            sh(
-                "schtasks",
-                &["/Create", "/F", "/SC", "ONLOGON", "/TN", "SwitchboardNode", "/TR", &run, "/RL", "LIMITED"],
-            )?;
+            // "/SC ONLOGON" means any user's logon, which only an administrator may set: from a plain PowerShell
+            // window it is "Access is denied". A task whose logon trigger names this user needs no rights.
+            let user = sh("whoami", &[])?;
+            let xml = dest.with_file_name("switchboard-node-task.xml");
+            std::fs::write(&xml, utf16(&task_xml(&user, &vbs.display().to_string())))
+                .map_err(|e| format!("could not write {} ({e})", xml.display()))?;
+            let made = sh("schtasks", &["/Create", "/F", "/TN", "SwitchboardNode", "/XML", &xml.display().to_string()]);
+            let _ = std::fs::remove_file(&xml);
+            made?;
             sh("schtasks", &["/Run", "/TN", "SwitchboardNode"])?;
             Ok("Runs at logon (task SwitchboardNode), with no window.".into())
         } else {
@@ -351,6 +394,36 @@ fn install() -> i32 {
     }
 }
 
+/// `run`: link with the token in node.json. With no token, one the hub turned down, or one another node took the
+/// link with, it waits for `pair` to write a new one (or a restart) instead of exiting, since the user service
+/// (KeepAlive, Restart=always) would only start it again at once, over and over. A node that was replaced does not
+/// link again by itself: two with one token would take the link from each other for good.
+async fn run(path: &Path, every: Duration) -> i32 {
+    let mut tried = None::<String>;
+    let mut said = false;
+    loop {
+        match load_from(path) {
+            Ok(c) if tried.as_deref() != Some(c.token.as_str()) => {
+                said = false;
+                match link::run(c.clone()).await {
+                    link::UNPAIRED | link::REPLACED => tried = Some(c.token),
+                    code => return code,
+                }
+            }
+            Ok(_) => {} // still the token the hub turned down, or another node uses
+            Err(e) if !said => {
+                fail(&format!("{e} Get a code from Add a machine, then run: switchboard-node pair <hub> <code>"), 2);
+                said = true;
+            }
+            Err(_) => {}
+        }
+        tokio::select! {
+            _ = tokio::time::sleep(every) => {}
+            _ = link::shutdown() => return 0,
+        }
+    }
+}
+
 fn usage() -> i32 {
     eprintln!("usage: switchboard-node pair <hub> <code> [--name NAME] [--label LABEL]");
     eprintln!("       switchboard-node install");
@@ -364,12 +437,7 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("pair") => pair(&args[1..]).await,
-        Some("run") => match load() {
-            Ok(c) => link::run(c).await,
-            Err(e) => {
-                fail(&format!("{e} Get a code from Add a machine, then run: switchboard-node pair <hub> <code>"), 2)
-            }
-        },
+        Some("run") => run(&config_path(), RECHECK).await,
         Some("status") => status(),
         Some("install") => install(),
         Some("--version" | "version") => {
@@ -384,6 +452,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
     #[test]
     fn hub_addresses() {
@@ -403,6 +473,106 @@ mod tests {
         assert!(t.contains("switchboard-node"));
         assert!(t.contains("run"));
         assert!(install_path().ends_with(if cfg!(windows) { "switchboard-node.exe" } else { "switchboard-node" }));
+    }
+
+    #[test]
+    fn the_logon_task_is_this_users_alone() {
+        let t = task_xml(r"DESKTOP-1\Pat & Co", r"C:\Users\you\AppData\Local\Switchboard\switchboard-node.vbs");
+        assert!(
+            t.contains(r"<LogonTrigger><Enabled>true</Enabled><UserId>DESKTOP-1\Pat &amp; Co</UserId></LogonTrigger>")
+        );
+        assert!(t.contains("<RunLevel>LeastPrivilege</RunLevel>"));
+        assert!(t.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
+        assert!(t.contains(r#"<Arguments>"C:\Users\you\AppData\Local\Switchboard\switchboard-node.vbs"</Arguments>"#));
+        assert_eq!(&utf16("<T")[..], &[0xFF, 0xFE, b'<', 0, b'T', 0]);
+    }
+
+    fn scratch(tag: &str) -> PathBuf {
+        let d = std::env::temp_dir().join(format!("sbnode-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    #[tokio::test]
+    async fn run_waits_instead_of_exiting_when_not_paired() {
+        let d = scratch("unpaired");
+        let path = d.join("node.json");
+        let gone = tokio::time::timeout(Duration::from_millis(300), run(&path, Duration::from_millis(10)));
+        assert!(gone.await.is_err(), "still running, so the service does not start it again and again");
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_turned_down_token_is_not_tried_again_until_it_changes() {
+        // a hub that answers 401 to every link: the token is unknown there
+        let hub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = hub.local_addr().unwrap().to_string();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let n = tries.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = hub.accept().await {
+                n.fetch_add(1, SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").await;
+            }
+        });
+        let d = scratch("rejected");
+        let path = d.join("node.json");
+        let write = |token: &str| {
+            let c =
+                NodeConfig { hub: addr.clone(), machine: "lab".into(), token: token.into(), sb: None, python: None };
+            std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        };
+        write("old");
+        let node = tokio::spawn({
+            let path = path.clone();
+            async move { run(&path, Duration::from_millis(10)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(tries.load(SeqCst), 1, "once, then it waits");
+        assert!(!node.is_finished());
+        write("new");
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        assert_eq!(tries.load(SeqCst), 2, "a new pairing is picked up without a restart");
+        node.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_node_does_not_take_the_link_back() {
+        use futures_util::StreamExt;
+        use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
+        // a hub where another node with this token already took over: it closes the link as replaced
+        let hub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = hub.local_addr().unwrap().to_string();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let n = tries.clone();
+        tokio::spawn(async move {
+            while let Ok((s, _)) = hub.accept().await {
+                n.fetch_add(1, SeqCst);
+                tokio::spawn(async move {
+                    let Ok(mut ws) = tokio_tungstenite::accept_async(s).await else { return };
+                    let code = CloseCode::from(sb_hub::link_proto::CLOSE_REPLACED);
+                    let _ = ws.close(Some(CloseFrame { code, reason: "".into() })).await;
+                    while let Some(Ok(_)) = ws.next().await {}
+                });
+            }
+        });
+        let d = scratch("replaced");
+        let path = d.join("node.json");
+        let c = NodeConfig { hub: addr, machine: "lab".into(), token: "same".into(), sb: None, python: None };
+        std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        let node = tokio::spawn({
+            let path = path.clone();
+            async move { run(&path, Duration::from_millis(10)).await }
+        });
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert_eq!(tries.load(SeqCst), 1, "it links once and then leaves the link to the other node");
+        assert!(!node.is_finished());
+        node.abort();
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

@@ -43,11 +43,10 @@ pub fn find(cells: &[char], col: usize) -> Option<Found> {
 
     // A web address may follow other text in the same word ("see:https://..."): start at its scheme.
     let lower = word.to_ascii_lowercase();
-    let at = SCHEMES
-        .iter()
-        .filter_map(|s| lower.find(s))
-        .min()
-        .or_else(|| lower.find("www.").filter(|&i| i == 0 || !chars[i - 1].is_alphanumeric()));
+    let at =
+        SCHEMES.iter().filter_map(|s| lower.find(s)).min().or_else(|| {
+            lower.find("www.").filter(|&i| !lower[..i].chars().next_back().is_some_and(char::is_alphanumeric))
+        });
     let (mut s, mut e) = (0usize, chars.len());
     let url = if let Some(i) = at {
         s = lower[..i].chars().count();
@@ -169,6 +168,15 @@ mod tests {
         assert!(at("https:// nothing", "https").is_none());
         // the word in front of the address is not part of it
         assert!(at("url:http://x.io/p", "url").is_none());
+    }
+
+    #[test]
+    fn www_after_wide_characters() {
+        // "find" gives a byte offset, so the char before "www." must be read from the text, not the cells
+        assert_eq!(url("Привет www.example.com", "example").as_deref(), Some("https://www.example.com"));
+        assert_eq!(url("ab→www.example.com", "example").as_deref(), Some("https://www.example.com"));
+        assert!(at("日本語www.example.com", "example").is_none());
+        assert!(at("xwww.example.com", "example").is_none());
     }
 
     #[test]

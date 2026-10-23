@@ -27,11 +27,11 @@ impl JobKind {
     pub fn label(self) -> &'static str {
         match self {
             JobKind::Fresh => "Start fresh",
-            JobKind::Start => "New session",
+            JobKind::Start => "New chat",
             JobKind::Resume => "Resume",
             JobKind::Continue => "Continue elsewhere",
             JobKind::Handoff => "Write a handoff",
-            JobKind::Auto => "New session",
+            JobKind::Auto => "New chat",
             JobKind::Relaunch => "Relaunch",
             JobKind::Compact => "Compact the thread",
             JobKind::Stop => "Stop",
@@ -76,8 +76,8 @@ impl JobKind {
         match self {
             JobKind::Fresh => "The new chat is ready.",
             JobKind::Start => "The session is ready.",
-            JobKind::Resume => "It is open again.",
-            JobKind::Continue => "It is running there.",
+            JobKind::Resume => "It's open again.",
+            JobKind::Continue => "It's running there.",
             JobKind::Handoff => "The handoff is saved.",
             JobKind::Auto => "The session is ready.",
             JobKind::Relaunch => "Relaunched with the new flags. The chat picked up where it left off.",
@@ -95,7 +95,7 @@ impl JobKind {
                 "Ready".into(),
             ],
             JobKind::Start => vec![format!("Sent to {label}"), "Naming and starting it".into(), "Ready".into()],
-            JobKind::Resume => vec![format!("Sent to {label}"), "Opening the session".into(), "Ready".into()],
+            JobKind::Resume => vec![format!("Sent to {label}"), "Opening the chat".into(), "Ready".into()],
             JobKind::Continue => {
                 vec!["Writing the handoff (about a minute)".into(), format!("Starting on {label}"), "Ready".into()]
             }
@@ -302,6 +302,15 @@ impl Job {
         self.waiting = None;
     }
 
+    /// A stop of chat `key` that has not started yet (it waits for the chat's reply to end): opening the chat again
+    /// calls it off.
+    pub fn stop_waits_for(&self, key: &str) -> bool {
+        self.kind == JobKind::Stop
+            && self.key.as_deref() == Some(key)
+            && self.state == JobState::Queued
+            && !self.cancelled
+    }
+
     /// The topic of the chat it came from.
     fn source_topic(&self) -> Option<String> {
         self.from.as_deref().map(|f| names::split(f).0.to_string()).filter(|t| !t.is_empty())
@@ -382,7 +391,7 @@ impl Job {
             JobState::Error if self.cancelled && self.kind == JobKind::Stop => "Kept running".into(),
             JobState::Error if self.cancelled => format!("{} called off", self.kind.label()),
             JobState::Done => self.kind.ready().trim_end_matches('.').to_string(),
-            JobState::Error => format!("{} did not finish", self.kind.label()),
+            JobState::Error => format!("{} didn't finish", self.kind.label()),
             _ if self.waiting.is_some() => self.kind.queued().to_string(),
             _ => self.kind.doing().to_string(),
         }
@@ -417,7 +426,7 @@ impl Job {
                 }
                 if self.step.as_deref() == Some("retrying") {
                     let who = if self.kind == JobKind::Continue { &self.src } else { &self.label };
-                    return format!("{who} is not answering yet. Still trying.");
+                    return format!("{who} isn't answering yet. Still trying.");
                 }
                 let steps = self.kind.steps(&self.label);
                 steps[self.at(now).min(steps.len() - 1)].clone()
@@ -429,6 +438,21 @@ impl Job {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_a_waiting_stop_of_that_chat_is_called_off_on_reopen() {
+        let stop = |key: &str| Job::new("s-1", JobKind::Stop, Some(key.into()), "Studio", "Studio", None, None, 1000.0);
+        assert!(stop("studio:a").stop_waits_for("studio:a"));
+        assert!(!stop("studio:a").stop_waits_for("studio:b"), "another chat's stop stays");
+        let mut running = stop("studio:a");
+        running.update(&ApiJob { state: Some("running".into()), ..Default::default() }, 1001.0);
+        assert!(!running.stop_waits_for("studio:a"), "a stop under way cannot be called off");
+        let mut off = stop("studio:a");
+        off.call_off(1001.0);
+        assert!(!off.stop_waits_for("studio:a"));
+        let fresh = Job::new("s-2", JobKind::Fresh, Some("studio:a".into()), "Studio", "Studio", None, None, 1000.0);
+        assert!(!fresh.stop_waits_for("studio:a"), "only stops");
+    }
 
     #[test]
     fn compact_job_follows_the_servers_steps() {
@@ -563,12 +587,12 @@ mod tests {
         j.update(&ApiJob { state: Some("running".into()), step: Some("start".into()), ..Default::default() }, 2.0);
         assert_eq!(j.detail(2.0), "Starting on Laptop");
         j.update(&ApiJob { state: Some("running".into()), step: Some("retrying".into()), ..Default::default() }, 3.0);
-        assert_eq!(j.detail(3.0), "Studio is not answering yet. Still trying.");
+        assert_eq!(j.detail(3.0), "Studio isn't answering yet. Still trying.");
         j.update(
             &ApiJob { state: Some("error".into()), error: Some("Laptop is offline".into()), ..Default::default() },
             4.0,
         );
-        assert_eq!(j.headline(), "Continue elsewhere did not finish");
+        assert_eq!(j.headline(), "Continue elsewhere didn't finish");
         assert_eq!(j.detail(4.0), "Laptop is offline");
     }
 

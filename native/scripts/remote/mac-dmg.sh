@@ -62,6 +62,10 @@ echo "installer mac: v$VER [$(lipo -archs "$I/Contents/MacOS/switchboard-install
 # ---------------------------------------------------------------------------------------------------------------
 if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
   echo "signing: apps with $SB_SIGN_IDENTITY"
+  # The server kit's programs are signed on their own first: --deep leaves files in Resources alone.
+  for b in dist/Switchboard.app/Contents/Resources/server-kit/native/dist/switchboard-*; do
+    if [ -f "$b" ]; then codesign --force --options runtime --timestamp -s "$SB_SIGN_IDENTITY" "$b"; fi
+  done
   for app in dist/Switchboard.app "$I"; do
     codesign --force --deep --options runtime --timestamp -s "$SB_SIGN_IDENTITY" "$app"
     codesign --verify --deep --strict "$app"
@@ -145,7 +149,11 @@ if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
   codesign --force --timestamp -s "$SB_SIGN_IDENTITY" "$OUT"
   auth=()
   if [ -n "${SB_NOTARY_PROFILE:-}" ]; then
+    # store-credentials saves the profile where notarytool looks by default, which need not be the login keychain
+    # file: naming that file hides the profile. SB_NOTARY_KEYCHAIN names a keychain only when the profile was saved
+    # in a specific one (store-credentials --keychain).
     auth=(--keychain-profile "$SB_NOTARY_PROFILE")
+    [ -z "${SB_NOTARY_KEYCHAIN:-}" ] || auth+=(--keychain "$SB_NOTARY_KEYCHAIN")
   elif [ -n "${SB_NOTARY_KEY_ID:-}" ] && [ -n "${SB_NOTARY_ISSUER:-}" ] && [ -n "${SB_NOTARY_KEY_PATH:-}" ]; then
     auth=(--key "$SB_NOTARY_KEY_PATH" --key-id "$SB_NOTARY_KEY_ID" --issuer "$SB_NOTARY_ISSUER")
   fi

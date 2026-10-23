@@ -143,7 +143,7 @@ class NodesTest(unittest.TestCase):
         with self.assertRaises(server.HttpError) as e:
             app.post('/api/pair', {}, host='10.0.0.5:8130')
         self.assertEqual(e.exception.code, 502)
-        self.assertIn('The hub could not make a code', str(e.exception))
+        self.assertIn("The hub couldn't make a code", str(e.exception))
 
 
 class AgentNameTest(unittest.TestCase):

@@ -155,7 +155,9 @@ def shifted():
     # Memory per machine, and the cleanup card: open chats nobody used for an hour, and one stopped today.
     items, stopped = [], []
     for m in d['machines']:
-        m['features'] = ['files', 'upload', 'flags', 'summary', 'rename', 'browse']
+        m['features'] = ['files', 'upload', 'flags', 'summary', 'rename', 'browse'] + (['places'] if PLACES and m['name'] in ROAM else [])
+        if PLACES and m['name'] == 'studio' and len(m['sessions']) > 2:
+            m['sessions'][1]['folder'], m['sessions'][2]['folder'] = '~/Documents/site', ICLOUD + '/Notes'
         alive = [s for s in m['sessions'] if s.get('status') == 'idle']
         m.setdefault('mem', {'claude_mb': 380.0 * max(1, len(alive)) + 410, 'procs': len(alive) + 1, 'orphans': []})
         for s in alive:
@@ -347,6 +349,93 @@ DIRS = {'': ['Applications', 'Desktop', 'Documents', 'Downloads', 'Library', 'Mo
         'Documents': ['code', 'Taxes']}
 
 
+# SB_FIXTURE_PLACES=1: places beyond the Claude folder (docs: Places). Studio roams its home (Desktop closed by
+# macOS privacy, a missing added place, a folder said no to), Laptop keeps Anywhere in home off with one added place,
+# Tower's agent is too old for places. New and Continue answer 409 need "trust" for a folder Claude was never let into.
+PLACES = bool(os.environ.get('SB_FIXTURE_PLACES'))
+ROAM = {'studio': True, 'laptop': False}
+ICLOUD = '~/Library/Mobile Documents/com~apple~CloudDocs'
+TRUST = {'~/Documents/site': 'yes', '@Data/work': 'no', '~/Documents/Papers': 'no'}
+H_ = 3600
+
+
+def _f(name, size, ago, open_=True):
+    return {'name': name, 'size': size, 'mtime': time.time() - ago, 'open': open_}
+
+
+FS = {
+    'studio': {
+        '~': (['Applications', 'Desktop', 'Developer', 'Documents', 'Downloads', 'Movies', 'Music', 'Pictures'],
+              [_f('todo.txt', 812, 2 * H_)]),
+        '~/Documents': (['Papers', 'Recipes', 'site', 'Taxes 2026'],
+                        [_f('budget.xlsx', 48_200, 30 * H_), _f('notes.md', 3_900, 3 * H_), _f('resume.pdf', 182_000, 400 * H_)]),
+        '~/Documents/site': (['public', 'src'], [_f('README.md', 2_400, 1.5 * H_), _f('index.html', 6_100, 20 * H_),
+                                                 _f('logo.png', 38_000, 300 * H_), _f('package.json', 1_100, 20 * H_)]),
+        '~/Documents/Papers': (['drafts'], [_f('review.md', 9_800, 50 * H_)]),
+        '~/Downloads': ([], [_f('build.tar.gz', 48_000_000, 5 * H_), _f('invoice-0921.pdf', 92_000, 70 * H_),
+                             _f('photo.heic', 2_800_000, 26 * H_), _f('talk.mov', 1_240_000_000, 300 * H_)]),
+        '~/Developer': (['atlas', 'maps-api', 'parser'], []),
+        ICLOUD: (['Notes', 'Shared'], [_f('packing list.md', 1_300, 100 * H_)]),
+        ICLOUD + '/Notes': ([], [_f('garden.md', 2_200, 9 * H_), _f('ideas.md', 4_400, 50 * H_)]),
+        '@Data': (['exports', 'work'], [_f('dump.csv', 12_400_000, 8 * H_)]),
+        '@Data/work': ([], [_f('q3.sqlite', 220_000_000, 4 * H_), _f('schema.sql', 6_000, 4 * H_)]),
+    },
+    'laptop': {
+        '@Courses': (['Physics 101', 'Music 210'], [_f('syllabus.pdf', 220_000, 900 * H_)]),
+    },
+}
+
+
+def places_view(name):
+    if name == 'tower' or name not in ROAM:
+        return {'ok': True, 'roam': False, 'old': True, 'places': [{'kind': 'claude', 'name': 'Claude folder', 'folder': '',
+                                                                    'shown': '~/Claude', 'state': 'ok'}]}
+    pl = lambda kind, n, folder, state='ok': {'kind': kind, 'name': n, 'folder': folder, 'shown': folder, 'state': state}
+    out = [pl('claude', 'Claude folder', '')]
+    out[0]['shown'] = '~/Desktop/Claude'
+    if ROAM[name] and name == 'studio':
+        out += [pl('home', 'Home', '~'), pl('desktop', 'Desktop', '~/Desktop', 'privacy'), pl('documents', 'Documents', '~/Documents'),
+                pl('downloads', 'Downloads', '~/Downloads'), pl('code', 'Developer', '~/Developer'), pl('icloud', 'iCloud Drive', ICLOUD)]
+    elif ROAM[name]:
+        out += [pl('home', 'Home', '~'), pl('documents', 'Documents', '~/Documents'), pl('downloads', 'Downloads', '~/Downloads')]
+    if name == 'studio':
+        out += [pl('place', 'Data', '@Data'), pl('place', 'Archive', '@Archive', 'missing')]
+    else:
+        out += [pl('place', 'Courses', '@Courses')]
+    return {'ok': True, 'roam': ROAM[name], 'places': out, 'os': 'mac'}
+
+
+def outside(folder):
+    return folder == '~' or folder.startswith('~/') or folder.startswith('@')
+
+
+def trust_of(folder):
+    return TRUST.get(folder, 'ask') if outside(folder) else 'yes'
+
+
+def shown_of(folder):
+    return folder or '~/Desktop/Claude'
+
+
+def files_view(name, folder, file=None):
+    """GET /api/files with places: the listing, or (code, error) the way the agent words it."""
+    if outside(folder) and folder[0] == '~' and not ROAM.get(name):
+        return 400, 'This machine keeps chats in its Claude folder. Settings can let them start anywhere in home.'
+    if folder.startswith('@Archive'):
+        return 400, 'folder does not exist'
+    base = {'ok': True, 'root': '/Users/you/Desktop/Claude', 'folder': folder, 'shown': shown_of(folder), 'trust': trust_of(folder), 'more': False}
+    if folder == '~/Desktop':
+        return dict(base, dirs=[], files=[], blocked='privacy',
+                    hint='macOS permission not granted for ~/Desktop. On this Mac, open System Settings, Privacy & Security, Files and Folders, and turn it on for the app that runs Claude Code.')
+    if file:
+        return dict(base, dirs=[], files=[], file={'name': file, 'size': 2048, 'mtime': time.time() - 600,
+                                                   'text': '# ' + file + '\n\nThe header and the footer share one grid.\n',
+                                                   'binary': False, 'secret': False, 'cut': False})
+    dirs, files = FS.get(name, {}).get(folder, ([], [_f('README.md', 1_200, 6 * H_)]))
+    rel = lambda d: f'{folder}/{d}' if folder else d
+    return dict(base, dirs=[{'folder': rel(d), 'name': d} for d in dirs], files=files)
+
+
 def caps_view(m):
     st = EDITS['caps'].get(m['name']) or {'on': m['name'] != 'laptop', 'off': [], 'extra': ['Can print shipping labels'] if m.get('os') == 'windows' else []}
     tools = [{'key': k, 'name': n, 'detail': d, 'on': k not in st['off']} for k, n, d in TOOLS.get(m.get('os'), TOOLS['mac'])]
@@ -367,7 +456,10 @@ def machines():
                     'root_shown': root or ('C:\\Users\\you' if win else '/Users/you'), 'needs_root': not root,
                     'root_suggest': '~/Desktop/Claude' if m.get('os') == 'mac' else '~', 'updated': time.time() - 20,
                     'versions': {'agent': '4e73c65'[:7], 'claude': '2.1.296' if name != 'tower' else '2.1.290'},
-                    'features': ['mcp', 'root_dirs', 'files'], 'auto': caps_view(m)['on'], 'can': caps_view(m)['can']})
+                    'features': ['mcp', 'root_dirs', 'files'] + (['places'] if PLACES and name in ROAM else []),
+                    'auto': caps_view(m)['on'], 'can': caps_view(m)['can']})
+        if PLACES and name in ROAM:
+            out[-1]['roam'] = ROAM[name]
     return {'ok': True, 'machines': out, 'max': 12}
 
 
@@ -377,6 +469,8 @@ def machines_post(body):
         EDITS['labels'][name] = body.get('label')
     elif op == 'root':
         EDITS['roots'][name] = body.get('root')
+    elif op == 'roam':
+        ROAM[name] = bool(body.get('roam'))
     elif op == 'order':
         EDITS['order'] = body.get('names')
     elif op == 'caps':
@@ -424,7 +518,17 @@ class H(BaseHTTPRequestHandler):
         if p == '/api/summary':
             return self._json(shifted()['summary'])
         if p == '/api/prefs':
-            return self._json(dict(PREFS, ok=True, **options_mod.view(OPTIONS, PUSH_READY)))
+            return self._json(dict(PREFS, ok=True, **options_mod.view(OPTIONS, PUSH_READY, PREFS.get('notify'))))
+        if PLACES and p.startswith('/api/places/'):
+            return self._json(places_view(p.split('/')[3]))
+        if PLACES and p.startswith('/api/folder_check/'):
+            f = (q.get('folder') or [''])[0]
+            return self._json({'ok': True, 'folder': f, 'shown': shown_of(f), 'trust': trust_of(f)})
+        if PLACES and p.startswith('/api/files/'):
+            r = files_view(p.split('/')[3], (q.get('folder') or [''])[0], (q.get('name') or [None])[0])
+            if isinstance(r, tuple):
+                return self._json({'ok': False, 'error': r[1]}, r[0])
+            return self._json(r)
         if p == '/api/machines':
             return self._json(machines())
         if p.startswith('/api/machines/'):
@@ -492,6 +596,8 @@ class H(BaseHTTPRequestHandler):
                     PREFS['appearance']['term'].update(v.get('term') or {})
                 elif k in options_mod.KEYS:
                     OPTIONS[k] = v is True
+                elif k == 'notify' and isinstance(v, dict):
+                    PREFS['notify'] = dict(PREFS.get('notify') or {}, **{a: b is not False for a, b in v.items()})
                 else:
                     PREFS[k] = v
             return self._json(dict(PREFS, ok=True))
@@ -518,6 +624,13 @@ class H(BaseHTTPRequestHandler):
                 return self._json({'ok': False, 'error': e.msg}, e.code)
         if p == '/api/machines':
             return self._json(machines_post(body))
+        if PLACES and p == '/api/privacy_settings':
+            return self._json({'ok': True, 'opened': True})
+        if PLACES and p in ('/api/new', '/api/continue'):
+            f = body.get('folder') or ''
+            if outside(f) and trust_of(f) != 'yes' and not body.get('trust'):
+                return self._json({'ok': False, 'error': f'Claude has not worked in {f} on this machine yet.', 'need': 'trust',
+                                   'folder_shown': shown_of(f), 'declined': trust_of(f) == 'no'}, 409)
         if p == '/api/flags':
             return self._json(flags_plan(body))
         if p == '/api/compact':

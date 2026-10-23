@@ -153,7 +153,7 @@ impl Band {
         match Band::of(ctx) {
             Band::Small => format!("{k}, small, so going back is cheap"),
             Band::Medium => {
-                format!("{k}, resuming re-reads {k}; Start fresh is cheaper if you do not need the history")
+                format!("{k}, resuming re-reads {k}, so Start fresh is cheaper if you don't need the history")
             }
             Band::Big => format!("{k}, big: resuming re-reads all {k} at full price"),
         }
@@ -247,8 +247,12 @@ pub struct Session {
     pub topic: String,
     pub tag: Option<String>,
     pub tag_kind: Option<TagKind>,
-    /// Folder relative to the machine's Claude folder, or a label for it.
+    /// Folder relative to the machine's Claude folder, or a label for it, as people read it ("~/Documents/site",
+    /// "iCloud Drive/Notes", "Home folder").
     pub folder: String,
+    /// The folder's address as the server sent it ("" is the Claude folder, `~/...` and `@...` outside it), for
+    /// matching and for sending back. Empty from an older server that sent no folder.
+    pub folder_addr: String,
     pub folder_short: String,
     pub project: String,
     pub active: f64,
@@ -552,7 +556,7 @@ impl Session {
             r.t(if l == Lamp::Run {
                 "Starting. Claude is working on the first reply."
             } else {
-                "No replies yet, so there is nothing to re-read."
+                "No replies yet, so there's nothing to re-read."
             });
         } else if self.held {
             r.t("Your last message is held because going back would re-read ")
@@ -573,7 +577,7 @@ impl Session {
             let quiet = fmt::ago(self.active, now);
             let quiet = quiet.strip_suffix(" ago").unwrap_or(&quiet).to_string();
             r.t(&format!(
-                "It says it is working, but nothing has happened for {quiet}. It may be stuck: open it to check{}.",
+                "It says it's working, but nothing's happened for {quiet}. It might be stuck, so open it to check{}.",
                 if self.background() && self.alive { ", or stop it" } else { "" }
             ));
         } else if l == Lamp::Cold {
@@ -593,27 +597,25 @@ impl Session {
                 .b(&fmt::mins(self.cache_left(now)))
                 .t(". After that, resuming re-reads all ")
                 .b(&kk)
-                .t("; Start fresh is cheaper if you do not need the history.");
+                .t(", so Start fresh is cheaper if you don't need the history.");
         } else if l == Lamp::Warm {
             r.t("Replies stay cheap for ")
                 .b(&fmt::mins(self.cache_left(now)))
                 .t(&format!(", and at {kk} it stays cheap to come back to later."));
         } else if self.cache_now(now) == Cache::Unknown && self.band() == Band::Medium {
-            r.t("How long its cache stays warm is not known yet. Once it is cold, resuming re-reads all ")
-                .b(&kk)
-                .t(".");
+            r.t("Not sure yet how long its cache stays warm. Once it's cold, resuming re-reads all ").b(&kk).t(".");
         } else if self.cache_now(now) == Cache::Unknown && self.band() == Band::Big {
-            r.t("How long its cache stays warm is not known yet. Once it is cold, going back re-reads all ")
+            r.t("Not sure yet how long its cache stays warm. Once it's cold, going back re-reads all ")
                 .b(&kk)
                 .t(" at full price.");
         } else if self.cache_now(now) == Cache::Unknown {
-            r.t(&format!("How long its cache stays warm is not known yet, but at {kk} going back is cheap."));
+            r.t(&format!("Not sure yet how long its cache stays warm, but at {kk} going back is cheap."));
         } else if self.band() == Band::Medium {
             r.t("The cache expired, so resuming re-reads all ")
                 .b(&kk)
                 .t(". ")
                 .b("Start fresh")
-                .t(" is cheaper if you do not need the history.");
+                .t(" is cheaper if you don't need the history.");
         } else {
             r.t(&format!("The cache expired, but at {kk} going back is cheap."));
         }
@@ -1077,7 +1079,8 @@ fn text_field(v: Option<&str>, max: usize) -> Option<String> {
 fn folder_of(folder: Option<&str>, cwd: Option<&str>, root_lbl: &str) -> String {
     match folder {
         Some("") => root_lbl.to_string(),
-        Some(f) => f.to_string(),
+        Some("~") | Some("~/") => "Home folder".into(),
+        Some(f) => crate::places::shown(f, root_lbl),
         None => {
             let cwd = cwd.unwrap_or("").replace('\\', "/");
             let cwd = cwd.trim_end_matches('/');
@@ -1094,6 +1097,17 @@ fn folder_of(folder: Option<&str>, cwd: Option<&str>, root_lbl: &str) -> String 
 /// "switchboard/.claude/worktrees/x" is "switchboard" and "Developer/notebook-cli" is "notebook-cli".
 pub fn project_of(folder: &str) -> String {
     let mut f = folder.replace('\\', "/");
+    // Outside the Claude folder: "~/Documents/site" is in home, "@Data/work" in a place, "iCloud Drive/x" in iCloud.
+    for top in ["~/", "iCloud Drive/"] {
+        if let Some(rest) = f.strip_prefix(top) {
+            f = rest.to_string();
+        }
+    }
+    if f.starts_with('@')
+        && let Some((_, rest)) = f.split_once('/')
+    {
+        f = rest.to_string();
+    }
     if let Some(i) = f.find("/.claude/worktrees/") {
         f.truncate(i);
     }
@@ -1222,7 +1236,12 @@ pub fn session_at(
         tag_kind: names::tag_kind(tag.as_deref()),
         topic,
         tag,
-        folder_short: fmt::last_seg(&folder),
+        folder_short: if folder.starts_with("iCloud Drive") && !folder.contains('/') {
+            folder.clone()
+        } else {
+            fmt::last_seg(&folder)
+        },
+        folder_addr: s.folder.clone().unwrap_or_default(),
         folder,
         project,
         active,
@@ -1523,6 +1542,31 @@ mod tests {
         };
         let m = ApiMachine { name: "studio".into(), ..Default::default() };
         session(&a, &m, "Studio", "Claude", NOW)
+    }
+
+    #[test]
+    fn folders_outside_the_claude_folder_read_nicely() {
+        let at = |folder: &str| {
+            let a = ApiSession { sid: "s1".into(), folder: Some(folder.into()), ..Default::default() };
+            let m = ApiMachine { name: "studio".into(), ..Default::default() };
+            session(&a, &m, "Studio", "Claude", NOW)
+        };
+        let s = at("~/Documents/site");
+        assert_eq!((s.folder.as_str(), s.folder_addr.as_str()), ("~/Documents/site", "~/Documents/site"));
+        assert_eq!((s.folder_short.as_str(), s.project.as_str()), ("site", "site"));
+        let s = at("~/Library/Mobile Documents/com~apple~CloudDocs/Notes/week");
+        assert_eq!(s.folder, "iCloud Drive/Notes/week");
+        assert_eq!((s.folder_short.as_str(), s.project.as_str()), ("week", "Notes"));
+        let s = at("~/Library/Mobile Documents/com~apple~CloudDocs");
+        assert_eq!((s.folder.as_str(), s.folder_short.as_str()), ("iCloud Drive", "iCloud Drive"));
+        let s = at("~");
+        assert_eq!((s.folder.as_str(), s.folder_addr.as_str()), ("Home folder", "~"));
+        let s = at("@Data/work/api");
+        assert_eq!((s.folder.as_str(), s.project.as_str()), ("@Data/work/api", "work"));
+        let s = at("");
+        assert_eq!((s.folder.as_str(), s.folder_addr.as_str()), ("Claude", ""));
+        let s = at("switchboard/.claude/worktrees/x");
+        assert_eq!(s.project, "switchboard", "Claude folder addresses as before");
     }
 
     #[test]

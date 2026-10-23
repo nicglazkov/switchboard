@@ -19,6 +19,47 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.9",
+        &[
+            "Updates come from Switchboard's GitHub releases, through your server. The app still checks every build's signature and SHA-256 before it installs it.",
+            "A check for updates that fails says why, instead of saying this is the newest version. The update panel has What's new.",
+            "The setup guides open the new documentation site.",
+            "Ctrl+Shift+Q quits on Windows and Linux, where a terminal keeps Ctrl+Q for itself.",
+            "Settings, Notifications says On this computer on Windows and Linux.",
+            "switchboard logs shows the server's logs on a Mac, and removing the helper from a Windows PC also removes its logon task.",
+        ],
+    ),
+    (
+        "0.8.8",
+        &[
+            "Adding a Windows PC works from an ordinary PowerShell window: the node starts at logon without administrator rights.",
+            "Adding a Windows PC again replaces a node that is still running instead of stopping at Access is denied.",
+            "Add a machine downloads the node and agent of this release, not an old one that could not link.",
+        ],
+    ),
+    (
+        "0.8.7",
+        &[
+            "Windows finds the server on the network again: on a PC with several network adapters it asked the wrong one.",
+        ],
+    ),
+    (
+        "0.8.6",
+        &[
+            "The installer's \"Eject the disk image\" works on the signed download: it used to stop before ejecting.",
+            "The disk image's window has room for Finder's tab bar, so Install Switchboard no longer drops out of sight.",
+            "The Switchboard name shows in its own typeface again; the bundled font was missing most letters.",
+            "The kit keeps the terminal schemes, and its port check ignores connections that are closing.",
+        ],
+    ),
+    (
+        "0.8.5",
+        &[
+            "New chat starts on Auto, and its model list is the models your machines' Claude Code takes, from the server.",
+            "Plainer wording across the app, the setup screens and the messages from the server and the helper. A folder or the local network that macOS hasn't allowed says \"macOS permission not granted\".",
+        ],
+    ),
+    (
         "0.8.4",
         &[
             "A chat open in a tab is never offered for stopping, even while Switchboard is closed or the Mac is asleep. The app tells the server its tabs; closing the tab is what makes a chat eligible again.",

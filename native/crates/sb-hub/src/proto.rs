@@ -75,10 +75,10 @@ pub fn snapshot_end() -> String {
 /// What a finished `ssh ... term <id>` means for the person. The session itself keeps running in every case.
 pub fn exit_note(code: Option<i64>, label: &str) -> String {
     match code {
-        Some(0) => "Detached. The session keeps running.".into(),
-        Some(255) => format!("Could not reach {label}, or the connection dropped. The session keeps running there."),
-        Some(c) => format!("The terminal on {label} ended (code {c}). The session keeps running."),
-        None => "The terminal ended. The session keeps running.".into(),
+        Some(0) => "Detached. The chat keeps running.".into(),
+        Some(255) => format!("Couldn't reach {label}, or the connection dropped. The chat keeps running there."),
+        Some(c) => format!("The terminal on {label} ended (code {c}). The chat keeps running."),
+        None => "The terminal ended. The chat keeps running.".into(),
     }
 }
 
@@ -114,9 +114,8 @@ mod tests {
     fn outgoing_frames_match_the_spec() {
         let v: serde_json::Value = serde_json::from_str(&status("connecting")).unwrap();
         assert_eq!(v, json!({"type": "status", "state": "connecting"}));
-        let v: serde_json::Value =
-            serde_json::from_str(&exit(Some(0), "Detached. The session keeps running.")).unwrap();
-        assert_eq!(v, json!({"type": "exit", "code": 0, "note": "Detached. The session keeps running."}));
+        let v: serde_json::Value = serde_json::from_str(&exit(Some(0), "Detached. The chat keeps running.")).unwrap();
+        assert_eq!(v, json!({"type": "exit", "code": 0, "note": "Detached. The chat keeps running."}));
         let v: serde_json::Value = serde_json::from_str(&error("x")).unwrap();
         assert_eq!(v, json!({"type": "error", "error": "x"}));
         let v: serde_json::Value = serde_json::from_str(&pong()).unwrap();
@@ -131,8 +130,8 @@ mod tests {
 
     #[test]
     fn exit_notes() {
-        assert_eq!(exit_note(Some(0), "Desk"), "Detached. The session keeps running.");
-        assert!(exit_note(Some(255), "Desk").starts_with("Could not reach Desk"));
+        assert_eq!(exit_note(Some(0), "Desk"), "Detached. The chat keeps running.");
+        assert!(exit_note(Some(255), "Desk").starts_with("Couldn't reach Desk"));
         assert!(exit_note(Some(1), "Tower").contains("code 1"));
     }
 }

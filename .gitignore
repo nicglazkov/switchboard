@@ -4,3 +4,6 @@ native/target/
 native/dist/
 __pycache__/
 *.pyc
+/dist/
+/_site/
+/.venv/

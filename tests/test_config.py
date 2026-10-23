@@ -51,7 +51,7 @@ class FleetConfigTest(unittest.TestCase):
         f = fleet.Fleet([{'name': 'studio', 'label': 'Studio', 'target': 'me@x', 'os': 'mac', 'root': '~/code'}])
         f.servers = ['http://10.0.0.5:8130']
         self.assertEqual(f._list_req(f.machines['studio']),
-                         {'verb': 'list', 'as': 'studio', 'root': '~/code', 'servers': ['http://10.0.0.5:8130']})
+                         {'verb': 'list', 'as': 'studio', 'root': '~/code', 'roam': True, 'servers': ['http://10.0.0.5:8130']})
 
     def test_what_a_machine_says_about_itself_is_kept(self):
         saved = []
@@ -130,13 +130,64 @@ class SettingsApiTest(unittest.TestCase):
                          ['http://10.0.0.5:8131/app/latest.json', 'http://10.0.0.5:8131/app/latest.json.sig'])
         # The list goes to the app as the exact text that was signed, so the app can check the signature itself.
         self.assertEqual(got, {'ok': True, 'latest': page, 'base': 'http://10.0.0.5:8131/app', 'set_up': True,
-                               'feed': {'manifest': text, 'sig': 'c2lnbmF0dXJl'}})
+                               'feed': {'manifest': text, 'sig': 'c2lnbmF0dXJl'}, 'page': 'http://10.0.0.5:8131/app/',
+                               'source': 'page'})
 
         # A page without a signature still answers; the app offers nothing from it.
         del files['latest.json.sig']
         self.app._latest = None
         with mock.patch.object(server, 'urlopen', side_effect=fetch):
             self.assertEqual(self.app.get('/api/app')['feed'], {'manifest': text, 'sig': None})
+
+    def test_without_a_page_the_newest_build_comes_from_github(self):
+        page = {'version': '0.9.0', 'files': {'mac': {'file': 'Switchboard-mac.zip', 'build': '20261101120000', 'sha256': 'ab' * 32},
+                                              'windows': {'file': '../evil.exe', 'build': '1', 'sha256': 'cd' * 32}}}
+        text = json.dumps(page, indent=1)
+        files = {'latest.json': text.encode(), 'latest.json.sig': b'c2lnbmF0dXJl\n', 'Switchboard-mac.zip': b'0123456789'}
+        asked = []
+
+        class R:
+            def __init__(self, b, req):
+                self.b, self.status = b, 206 if req.get_header('Range') else 200
+                self.headers = {'Content-Length': str(len(b))}
+            def read(self, n=-1):
+                b, self.b = self.b, b''
+                return b
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        def fetch(req, timeout=None):
+            asked.append((req.full_url, req.get_header('Range')))
+            name = req.full_url.rsplit('/', 1)[1]
+            if name not in files:
+                raise OSError('404')
+            return R(files[name][int((req.get_header('Range') or 'bytes=0-')[6:].split('-')[0]):], req)
+        with mock.patch.dict(os.environ, {'SWITCHBOARD_RELEASES': 'acme/board'}), \
+                mock.patch.object(server.releases_mod, '_open', side_effect=lambda req, t, o: fetch(req)):
+            got = self.app.get('/api/app', host='10.0.0.20:8130')
+            self.assertEqual(self.app.get('/api/app', host='studio.tail1234.ts.net:8130')['base'],
+                             'http://studio.tail1234.ts.net:8130/api/app/files')  # each app downloads from the address it uses
+            self.assertEqual(self.app.app_file('Switchboard-mac.zip'), ('acme/board', '0.9.0'))
+            self.assertIsNone(self.app.app_file('../evil.exe'))  # never a file outside the release
+            self.assertIsNone(self.app.app_file('other.zip'))
+            st, headers, resp = server.releases_mod.open_file('acme/board', '0.9.0', 'Switchboard-mac.zip', 'bytes=4-')
+        self.assertEqual(got, {'ok': True, 'latest': page, 'set_up': True, 'source': 'github',
+                               'base': 'http://10.0.0.20:8130/api/app/files',
+                               'feed': {'manifest': text, 'sig': 'c2lnbmF0dXJl'},
+                               'page': 'https://github.com/acme/board/releases/tag/v0.9.0'})
+        self.assertEqual(asked[:2], [('https://github.com/acme/board/releases/latest/download/latest.json', None),
+                                     ('https://github.com/acme/board/releases/latest/download/latest.json.sig', None)])
+        self.assertEqual(asked[-1], ('https://github.com/acme/board/releases/download/v0.9.0/Switchboard-mac.zip', 'bytes=4-'))
+        self.assertEqual((st, resp.read()), (206, b'456789'))  # a stopped download resumes
+
+        # GitHub down: the app is told why, and nothing is offered.
+        self.app._latest = None
+        with mock.patch.dict(os.environ, {'SWITCHBOARD_RELEASES': 'acme/board'}), \
+                mock.patch.object(server.releases_mod, '_open', side_effect=OSError('no route')):
+            down = self.app.get('/api/app', host='10.0.0.20:8130')
+        self.assertNotIn('feed', down)
+        self.assertIn("GitHub didn't answer", down['error'])
+        self.assertIsNone(server.releases_mod.base_for('evil.com/x?'))
 
     def test_machines_can_be_renamed_reordered_added_and_removed(self):
         v = self.app.get('/api/machines')
@@ -196,8 +247,8 @@ class NotesTest(unittest.TestCase):
 
     def test_a_big_warm_chat_about_to_go_cold(self):
         n = notes.pick([self.m(self.s(ctx=300_000, cache_left=240))], {'seven_day': 10, 'week_projected': 30}, NOW)
-        self.assertEqual((n['kind'], n['text']), ('cooling', 'Fix the lights goes cold in 4 min. Reply before then to keep it cheap: '
-                                                  'after that, the next reply re-reads all 300k.'))
+        self.assertEqual((n['kind'], n['text']), ('cooling', 'Fix the lights goes cold in 4 min. Reply soon to keep it cheap. '
+                                                  'After that, the next reply re-reads all 300k.'))
         small = notes.pick([self.m(self.s(ctx=20_000, cache_left=240))], {'seven_day': 10, 'week_projected': 30}, NOW)
         self.assertEqual(small['kind'], 'pace')
 
@@ -206,15 +257,15 @@ class NotesTest(unittest.TestCase):
         sm = {'seven_day': 40, 'week_projected': 70, 'seven_day_reset': reset, 'week_trace': [[NOW - 7200, 30], [NOW - 3700, 32]]}
         n = notes.pick([], sm, NOW)
         self.assertEqual(n['kind'], 'burn')
-        self.assertTrue(n['text'].startswith('8% of the week went in the last hour'), n['text'])
+        self.assertTrue(n['text'].startswith('You used 8% of the week in the last hour'), n['text'])
 
     def test_plan_pace_and_quiet(self):
         n = notes.pick([], {'seven_day': 70, 'week_projected': 130, 'seven_day_reset': NOW + 2 * 86400}, NOW)
         self.assertEqual((n['kind'], n['tone']), ('week', 'bad'))
         n = notes.pick([], {'seven_day': 20, 'five_hour': 88, 'five_hour_reset': NOW + 5400, 'week_projected': 50}, NOW)
-        self.assertEqual(n['text'], 'The 5-hour window is at 88%. It resets in 1.5 h.')
+        self.assertEqual(n['text'], 'Your 5-hour window is at 88%. It frees up in 1.5 h.')
         self.assertEqual(notes.pick([], {'seven_day': 20, 'week_projected': 40}, NOW)['text'],
-                         'On pace for 40% of the week by reset. Plenty of room.')
+                         "At this rate you'll end the week around 40%. Plenty of room.")
         self.assertIsNone(notes.pick([], {'seven_day': 20}, NOW))
         for text in (notes.pick([], {'seven_day': 70, 'week_projected': 130, 'seven_day_reset': NOW + 2 * 86400}, NOW)['text'],):
             self.assertNotIn('UltraCode', text)
@@ -226,19 +277,19 @@ class NotesOldNumbersTest(unittest.TestCase):
 
     def test_fresh_numbers_read_as_now(self):
         n = notes.pick([], {'seven_day': 20, 'week_projected': 40, 'limits_updated': NOW - 600}, NOW)
-        self.assertEqual(n['text'], 'On pace for 40% of the week by reset. Plenty of room.')
+        self.assertEqual(n['text'], "At this rate you'll end the week around 40%. Plenty of room.")
 
     def test_numbers_over_an_hour_old_say_so(self):
         n = notes.pick([], {'seven_day': 70, 'week_projected': 130, 'seven_day_reset': NOW + 2 * 86400, 'limits_updated': NOW - 3 * 3600}, NOW)
         self.assertEqual(n['kind'], 'week')
-        self.assertIn('(From numbers 3 h old: they update when a session replies.)', n['text'])
+        self.assertIn('(Updated 3 h ago.)', n['text'])
         n = notes.pick([], {'seven_day': 20, 'five_hour': 88, 'five_hour_reset': NOW + 5400, 'limits_updated': NOW - 7200}, NOW)
-        self.assertIn('2 h old', n['text'])
+        self.assertIn('Updated 2 h ago', n['text'])
 
     def test_a_week_that_reset_since_gives_no_pace(self):
         n = notes.pick([], {'seven_day': 95, 'week_projected': 130, 'seven_day_reset': NOW - 60, 'limits_updated': NOW - 86400}, NOW)
         self.assertEqual(n['kind'], 'pace')
-        self.assertIn('reset since the last numbers', n['text'])
+        self.assertIn('Your week has reset', n['text'])
 
 
 class RelaunchTest(unittest.TestCase):

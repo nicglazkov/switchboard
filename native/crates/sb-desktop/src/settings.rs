@@ -162,6 +162,8 @@ pub struct SettingsView {
     lib_secret: Entity<InputState>,
     lib_key_err: Option<String>,
     lib_deleting: Option<(String, f64)>,
+    /// The open dropdown (Terminal's default shell), if any.
+    drop: ui::Drop,
     _subs: Vec<Subscription>,
 }
 
@@ -176,7 +178,7 @@ impl SettingsView {
         let lib_name = cx.new(|cx| InputState::new(window, cx).placeholder("my-tool"));
         let lib_brief = cx.new(|cx| {
             TextareaState::new(window, cx)
-                .placeholder("What it does, what it needs, and how you would check it works.")
+                .placeholder("What it does, what it needs, and how you'd check it works.")
                 .auto_grow(3, 8)
         });
         let lib_secret = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste the value"));
@@ -236,6 +238,7 @@ impl SettingsView {
             lib_secret,
             lib_key_err: None,
             lib_deleting: None,
+            drop: Default::default(),
             _subs: subs,
         };
         v.load(cx);
@@ -574,10 +577,61 @@ impl SettingsView {
             ));
         }
         let blink = look.blink;
+        // The shell a new local terminal runs (Cmd+T, the "+" chevron's default).
+        let profiles = crate::state::profiles();
+        let saved = self.app.read(cx).settings.term_profile.clone();
+        let def = sb_core::term::shells::pick_default(profiles, saved.as_deref()).map(|p| p.id.clone());
+        let open = self.drop.is_open("st-shell");
+        let cur =
+            profiles.iter().find(|p| def.as_deref() == Some(p.id.as_str())).map(|p| p.name.clone()).unwrap_or_default();
+        let trigger = ui::dropdown(t, "st-shell", Some("term"), cur, open).on_click(cx.listener(
+            |this, _: &ClickEvent, _, cx| {
+                this.drop.toggle("st-shell");
+                cx.notify();
+            },
+        ));
+        let menu = open.then(|| {
+            let items = profiles
+                .iter()
+                .map(|p| {
+                    let id = p.id.clone();
+                    ui::DropItem {
+                        label: format!("{}  {}", p.name, p.program).into(),
+                        on: def.as_deref() == Some(p.id.as_str()),
+                        off: false,
+                        pick: Box::new(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.drop.close();
+                            let id = id.clone();
+                            this.app.update(cx, |s, _| {
+                                s.settings.term_profile = Some(id);
+                                s.save_settings();
+                            });
+                            cx.notify();
+                        })),
+                    }
+                })
+                .collect();
+            ui::drop_menu(
+                t,
+                "st-shell",
+                items,
+                cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
+                    this.drop.close_out();
+                    cx.notify();
+                }),
+            )
+        });
+        let shell = div().relative().flex_none().child(trigger).children(menu).into_any_element();
         div()
-            .child(Self::head(t, "Terminal", "The terminal keeps its own colors, because Claude Code paints for a dark terminal. Point at a scheme to see it in every open terminal."))
+            .child(Self::head(t, "Terminal", "Claude Code draws for a dark terminal, so the terminal keeps its own colors. Hover a scheme to preview it in every open terminal."))
             .child(grid)
             .child(div().h(px(10.)))
+            .child(Self::row(
+                t,
+                "Default terminal",
+                Some(&format!("The shell {} opens on this computer. Every shell is also in the menu beside \"+\" and in {}.", ui::term_cap("T"), ui::mod_cap("K"))),
+                shell,
+            ))
             .child(Self::row(
                 t,
                 "Text size",
@@ -714,14 +768,14 @@ impl SettingsView {
         if let Some(m) = self.machine.as_deref().and_then(|n| self.row_of(n)) {
             return self.machine_page(t, m, window, cx);
         }
-        let mut body = div().child(Self::head(t, "Machines", "Every machine Switchboard watches, in the order the board shows them. Open one to set its Claude folder, see what it can do, and its MCP servers."));
+        let mut body = div().child(Self::head(t, "Machines", "Every machine Switchboard watches, in board order. Open one to set its Claude folder, or to see what it can do and its MCP servers."));
         let list = match &self.machines {
             None => {
                 return body.child(ui::loading(t, "st-m-load", "Loading the machines")).into_any_element();
             }
             Some(Err(e)) => {
                 return body
-                    .child(ui::wrap(format!("Could not load the machines. {e}")).text_size(px(13.)).text_color(t.bad))
+                    .child(ui::wrap(format!("Couldn't load the machines. {e}")).text_size(px(13.)).text_color(t.bad))
                     .into_any_element();
             }
             Some(Ok(m)) => m.machines.clone(),
@@ -886,7 +940,7 @@ impl SettingsView {
                     .flex_col()
                     .gap(px(12.))
                     .child(div().text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child("Add a machine over SSH"))
-                    .child(ui::wrap("Switchboard reaches it the way you would: ssh to the address, with your keys already set up. Next you pick its Claude folder.").text_size(px(12.5)).text_color(t.dim))
+                    .child(ui::wrap("Switchboard connects the way you would, over ssh with your keys already set up. Then you pick its Claude folder.").text_size(px(12.5)).text_color(t.dim))
                     .child(
                         div()
                             .flex()
@@ -942,13 +996,13 @@ impl SettingsView {
     /// Where this app finds the server: the saved addresses, typed and learned, each with Remove.
     fn server_group(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
         use gpui::AnimationExt;
-        let sub = "Where this app finds the computer that runs Switchboard. Learned addresses came from the server once it connected, so the app also finds it away from home. The one that worked last is tried first.";
+        let sub = "How this app finds the computer that runs Switchboard. Learned addresses come from the server, so it still connects when you're away from home. The last one that worked gets tried first.";
         let app = self.app.read(cx);
         let saved = &app.settings.saved;
         let in_use = app.core.server().map(|u| sb_core::servers::key(&u));
         let now = crate::state::AppState::now();
         if saved.servers.is_empty() {
-            let row = ui::wrap("No address is saved yet. The app looks for the server on the local network and keeps the addresses it learns once it connects.")
+            let row = ui::wrap("No saved addresses yet. The app looks for the server on your local network and saves the addresses it learns once it connects.")
                 .text_size(px(13.))
                 .text_color(t.faint)
                 .into_any_element();
@@ -1059,9 +1113,9 @@ impl SettingsView {
         };
         let v = m.versions.clone().unwrap_or_default();
         let unknown = if m.online == Some(true) {
-            "Its agent does not say yet. Update Switchboard there."
+            "Its agent doesn't say yet. Update Switchboard there."
         } else {
-            "Shown once it is online."
+            "Shows up once it's online."
         };
         body = body.child(Self::group(
             t,
@@ -1119,6 +1173,8 @@ impl SettingsView {
 
         // Claude folder
         body = body.child(self.folder_group(t, &m, focused, cx));
+        // Beyond it: Anywhere in home
+        body = body.child(self.roam_group(t, &m, cx));
         // Capabilities
         body = body.child(self.caps_group(t, &m, window, cx));
         // MCP servers
@@ -1161,6 +1217,41 @@ impl SettingsView {
         body.child(div().h(px(20.))).into_any_element()
     }
 
+    /// "Anywhere in home": chats and Files may use any folder in the machine's home folder, not only its Claude
+    /// folder. Claude still asks before it works in a folder it was never let into.
+    fn roam_group(&self, t: &Theme, m: &ApiMachineRow, cx: &Context<Self>) -> AnyElement {
+        let knows = m.features.iter().any(|f| f == "places");
+        let row = match m.roam {
+            Some(on) if knows => {
+                let name = m.name.clone();
+                ui::option_row(
+                    t,
+                    "Anywhere in home",
+                    "Chats and Files can use any folder in its home folder, like Documents, Desktop or iCloud Drive. Claude asks you before it works in a folder for the first time.",
+                    if on {
+                        "Off keeps chats and Files in its Claude folder and the places added there."
+                    } else {
+                        "Off now: chats and Files stay in its Claude folder and the places added there."
+                    },
+                    ui::switch(t, "st-roam", on, false)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            this.send(serde_json::json!({"op": "roam", "machine": name, "roam": !on}), cx)
+                        }))
+                        .into_any_element(),
+                )
+                .into_any_element()
+            }
+            _ if m.online == Some(true) => Self::crow(
+                t,
+                "Anywhere in home",
+                Some(format!("Update Switchboard on {} to let chats and Files go beyond its Claude folder.", m.label)),
+                None,
+            ),
+            _ => Self::crow(t, "Anywhere in home", Some("Shows up once it's online.".into()), None),
+        };
+        Self::group(t, "Beyond the Claude folder", None, vec![row])
+    }
+
     fn folder_group(&self, t: &Theme, m: &ApiMachineRow, focused: bool, cx: &Context<Self>) -> AnyElement {
         let name = m.name.clone();
         let shown = m.root_shown.clone().unwrap_or_else(|| "Its home folder".into());
@@ -1187,7 +1278,7 @@ impl SettingsView {
                                     .flex_col()
                                     .gap(px(3.))
                                     .child(ui::wrap("Where does Claude work on this machine?").text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
-                                    .child(ui::wrap(format!("Nobody has picked its Claude folder yet, so sessions start in its home folder. {sug} looks right.")).text_size(px(12.5)).line_height(relative(1.4)).text_color(t.dim)),
+                                    .child(ui::wrap(format!("No Claude folder is picked yet, so chats start in its home folder. {sug} looks right.")).text_size(px(12.5)).line_height(relative(1.4)).text_color(t.dim)),
                             ),
                     )
                     .child(
@@ -1260,7 +1351,7 @@ impl SettingsView {
             t,
             "Claude folder",
             Some(
-                "Every session on this machine starts in this folder or one under it. Nothing a session is given can step outside it.",
+                "Every chat on this machine starts in this folder or one inside it. Nothing you give a chat can point outside it.",
             ),
             rows,
         )
@@ -1303,7 +1394,7 @@ impl SettingsView {
             None => list = list.child(ui::loading(t, "st-dirs-load", "Looking at its folders").py(px(10.))),
             Some(Err(e)) => {
                 list = list.child(
-                    ui::wrap(format!("Could not list its folders. {e}"))
+                    ui::wrap(format!("Couldn't list its folders. {e}"))
                         .py(px(10.))
                         .text_size(px(13.))
                         .text_color(t.bad),
@@ -1351,7 +1442,7 @@ impl SettingsView {
                     .items_center()
                     .gap(px(8.))
                     .child(
-                        ui::wrap("Open a folder to look inside, then use the one you are in.")
+                        ui::wrap("Open a folder to look inside, then use the one you're in.")
                             .flex_1()
                             .min_w(px(180.))
                             .text_size(px(12.5))
@@ -1382,7 +1473,7 @@ impl SettingsView {
 
     fn caps_group(&self, t: &Theme, m: &ApiMachineRow, window: &Window, cx: &Context<Self>) -> AnyElement {
         let name = m.name.clone();
-        let sub = "What Switchboard found on this machine. The Auto machine pick only counts what is switched on here, plus anything you add.";
+        let sub = "What Switchboard found on this machine. The Auto machine pick only counts what's switched on here, plus anything you add.";
         let c = match self.caps.get(&name) {
             None => {
                 return Self::group(
@@ -1398,7 +1489,7 @@ impl SettingsView {
                     "Capabilities",
                     Some(sub),
                     vec![
-                        ui::wrap(format!("Could not ask it. {e}"))
+                        ui::wrap(format!("Couldn't ask it. {e}"))
                             .text_size(px(13.))
                             .text_color(t.bad)
                             .into_any_element(),
@@ -1433,8 +1524,8 @@ impl SettingsView {
                 Some(
                     c.error
                         .clone()
-                        .map(|e| format!("The machine did not answer: {e}"))
-                        .unwrap_or_else(|| "Shown once the machine answers.".into()),
+                        .map(|e| format!("The machine didn't answer: {e}"))
+                        .unwrap_or_else(|| "Shows up once the machine answers.".into()),
                 ),
                 None,
             )),
@@ -1540,7 +1631,7 @@ impl SettingsView {
     }
 
     fn mcp_group(&self, t: &Theme, m: &ApiMachineRow, cx: &Context<Self>) -> AnyElement {
-        let sub = "Read from Claude Code's settings on this machine: your own, this Claude folder's, and plugins'. Only names and commands are shown; secrets never leave the machine. Add to library makes one a tool any chat can use.";
+        let sub = "Read from Claude Code's settings on this machine: your own, this Claude folder's, and plugins'. Only names and commands show here, and secrets never leave the machine. Add to library makes one a tool any chat can use.";
         let app = self.app.read(cx);
         let lib = app.lib();
         let rows: Vec<AnyElement> = match self.mcp.get(&m.name) {
@@ -1709,16 +1800,11 @@ impl SettingsView {
 
     fn notifications(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
         let on = self.app.read(cx).notify_on();
-        div()
-            .child(Self::head(
-                t,
-                "Notifications",
-                "A plain notification when a chat starts waiting for you. Nothing else.",
-            ))
-            .child(Self::row(
-                t,
-                "When a chat needs you",
-                Some("Shows the chat's name and the machine. Click it to open the board."),
+        let mac = Self::crow(
+            t,
+            "When a chat needs you",
+            Some("A plain notification with the chat's name and the machine. Click it to open the board.".into()),
+            Some(
                 ui::switch(t, "st-notify", on, false)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.app.update(cx, |s, cx| {
@@ -1728,6 +1814,66 @@ impl SettingsView {
                         })
                     }))
                     .into_any_element(),
+            ),
+        );
+        let prefs = self.app.read(cx).prefs.clone();
+        let phone: Vec<AnyElement> = match &prefs {
+            None => vec![ui::loading(t, "st-n-kinds", "Asking the server").into_any_element()],
+            Some(p) if p.notify.is_empty() => vec![Self::crow(
+                t,
+                "Which ones come",
+                Some("Update Switchboard on the server to pick the kinds of iPhone notifications.".into()),
+                None,
+            )],
+            Some(p) => p
+                .notify
+                .iter()
+                .map(|n| {
+                    let (key, on) = (n.key.clone(), n.on);
+                    Self::crow(
+                        t,
+                        n.label.clone(),
+                        (!n.explain.is_empty()).then(|| n.explain.clone()),
+                        Some(
+                            ui::switch(t, SharedString::from(format!("st-n-{}", n.key)), on, false)
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    let body = sb_core::api::notify_body(&key, !on);
+                                    let key = key.clone();
+                                    this.app.update(cx, |s, cx| {
+                                        if let Some(p) = &mut s.prefs {
+                                            p.set_notify(&key, !on);
+                                        }
+                                        s.save_prefs(body, None, cx);
+                                    });
+                                    cx.notify();
+                                }))
+                                .into_any_element(),
+                        ),
+                    )
+                })
+                .collect(),
+        };
+        div()
+            .child(Self::head(
+                t,
+                "Notifications",
+                if ui::MAC {
+                    "What reaches you, here on this Mac and on your iPhone. Each is its own switch."
+                } else {
+                    "What reaches you, here on this computer and on your iPhone. Each is its own switch."
+                },
+            ))
+            .child(Self::group(
+                t,
+                if ui::MAC { "On this Mac" } else { "On this computer" },
+                Some("Shown by this app, while it is open."),
+                vec![mac],
+            ))
+            .child(Self::group(
+                t,
+                "On your iPhone",
+                Some("Sent by the server to iPhones signed in to Switchboard, even when the app is closed."),
+                phone,
             ))
             .child(div().h(px(18.)))
             .child(self.push_block(t, "st-n-push", true, cx))
@@ -1763,18 +1909,19 @@ impl SettingsView {
                     .child(push.setup.clone().unwrap_or_default()),
             );
         let guide = SharedString::from(format!("{id}-guide"));
-        let open_guide =
-            |_: &ClickEvent, _: &mut Window, cx: &mut App| crate::state::open_link(cx, &ui::install_guide());
+        let open_guide = |_: &ClickEvent, _: &mut Window, cx: &mut App| {
+            crate::state::open_link(cx, &sb_core::brand::docs("apps/#iphone-notifications"))
+        };
         let action = div().flex().flex_col().gap(px(10.)).child(setup).child(div().flex().child(if card {
-            ui::setup_btn(t, guide, "Open the install guide").on_click(open_guide)
+            ui::setup_btn(t, guide, "Open the setup guide").on_click(open_guide)
         } else {
-            ui::link(t, guide, "Install guide").text_size(px(12.5)).on_click(open_guide)
+            ui::link(t, guide, "Setup guide").text_size(px(12.5)).on_click(open_guide)
         }));
         if card {
             return ui::setup_card(
                 t,
                 "bolt",
-                "iPhone notifications are not set up",
+                "iPhone notifications aren't set up",
                 push.explain,
                 Some(action.into_any_element()),
             )
@@ -1959,7 +2106,7 @@ impl SettingsView {
                                     .child("Lifted until midnight"),
                             )
                             .child(
-                                ui::wrap("The hard limit stops nothing more today.")
+                                ui::wrap("The hard limit won't stop anything else today.")
                                     .text_size(px(12.5))
                                     .text_color(t.faint),
                             ),
@@ -2004,7 +2151,7 @@ impl SettingsView {
                             )
                             .child(
                                 ui::wrap(format!(
-                                    "{why} New messages are blocked and working background chats were stopped."
+                                    "{why} New messages are blocked, and background chats that were working got stopped."
                                 ))
                                 .text_size(px(12.5))
                                 .line_height(relative(1.4))
@@ -2073,7 +2220,7 @@ impl SettingsView {
         let mut hard_rows = vec![Self::crow(
             t,
             "Hard limit",
-            Some("Hard limit: blocks new messages and stops running background chats; they can be resumed.".into()),
+            Some("Hard limit: blocks new messages and stops running background chats. You can resume them.".into()),
             Some(
                 ui::switch(t, "bud-hard-sw", hard_on, busy)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -2128,7 +2275,7 @@ impl SettingsView {
             let (state, ok) = match &m.chrome {
                 Some(c) if c.connected => ("Claude in Chrome is ready", true),
                 Some(c) if c.connector => ("Claude in Chrome is set up, not connected right now", true),
-                Some(c) if c.installed => ("Chrome is there, the extension is not", false),
+                Some(c) if c.installed => ("Chrome is there, but not the extension", false),
                 _ => ("No Claude in Chrome there", false),
             };
             list = list.child(
@@ -2155,11 +2302,11 @@ impl SettingsView {
             div().mb(px(14.)).child(ui::setup_card(
                 t,
                 "globe",
-                "Claude in Chrome is not set up",
+                "Claude in Chrome isn't set up",
                 "None of your machines has the Claude in Chrome extension. Install it in Chrome on a machine, and that machine shows up here.",
                 Some(
-                    ui::setup_btn(t, "st-chrome-guide", "Open the install guide")
-                        .on_click(|_, _, cx| crate::state::open_link(cx, &ui::install_guide()))
+                    ui::setup_btn(t, "st-chrome-guide", "Open the guide")
+                        .on_click(|_, _, cx| crate::state::open_link(cx, &sb_core::brand::docs("settings/#chrome-machine")))
                         .into_any_element(),
                 ),
             ))
@@ -2184,11 +2331,7 @@ impl SettingsView {
                 .px(px(10.))
                 .text_size(px(13.))
                 .on_click(|_, _, cx| {
-                    let url = format!(
-                        "{}/blob/main/docs/building.md#updates",
-                        sb_core::brand::HOMEPAGE.trim_end_matches('/')
-                    );
-                    crate::state::open_link(cx, &url)
+                    crate::state::open_link(cx, &sb_core::brand::docs("updates/#builds-without-updates"))
                 })
                 .into_any_element()
         } else {

@@ -207,8 +207,17 @@ async fn term(
     ws.max_message_size(1 << 20).max_frame_size(1 << 20).on_upgrade(move |socket| session(hub, socket, origin, q))
 }
 
+/// How long one message to a viewer may take. A viewer that stopped reading (it slept, or its network went away)
+/// fills the socket, and without this the send would wait until the system gives up on it, minutes later.
+const SEND_PATIENCE: Duration = Duration::from_secs(10);
+
+/// Sends one message to the viewer. False if it left, or took nothing for `SEND_PATIENCE`.
+async fn send(ws: &mut WebSocket, m: Message) -> bool {
+    matches!(tokio::time::timeout(SEND_PATIENCE, ws.send(m)).await, Ok(Ok(())))
+}
+
 async fn send_text(ws: &mut WebSocket, text: String) -> bool {
-    ws.send(Message::Text(text.into())).await.is_ok()
+    send(ws, Message::Text(text.into())).await
 }
 
 async fn close(ws: &mut WebSocket, code: u16, reason: &str) {
@@ -216,7 +225,9 @@ async fn close(ws: &mut WebSocket, code: u16, reason: &str) {
     while r.len() > 120 {
         r.pop();
     }
-    let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: r.into() }))).await;
+    if !send(ws, Message::Close(Some(CloseFrame { code, reason: r.into() }))).await {
+        return;
+    }
     // let the client's close come back, so the code reaches it cleanly
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
         while let Some(Ok(m)) = ws.recv().await {
@@ -357,7 +368,7 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         End::Exited(code) => Some((*code, proto::exit_note(*code, &shared.label), format!("exit {code:?}"))),
         End::Idle => Some((
             None,
-            format!("Closed after {} with nothing typed or shown. The session keeps running.", hours(hub.cfg.idle)),
+            format!("Closed after {} with nothing typed or shown. The chat keeps running.", hours(hub.cfg.idle)),
             "idle".into(),
         )),
         End::ClientLeft => None,
@@ -465,7 +476,7 @@ async fn send_out(ws: &mut WebSocket, o: Out, sent_open: &mut bool) -> bool {
             *sent_open = true;
             send_text(ws, proto::status("open")).await
         }
-        Out::Bytes(b) => ws.send(Message::Binary(b)).await.is_ok(),
+        Out::Bytes(b) => send(ws, Message::Binary(b)).await,
         Out::Size(c, r) => send_text(ws, proto::size(c, r)).await,
         Out::Owner(o) => send_text(ws, proto::owner(o)).await,
         Out::Snapshot(bytes) => {
@@ -473,7 +484,7 @@ async fn send_out(ws: &mut WebSocket, o: Out, sent_open: &mut bool) -> bool {
                 return false;
             }
             for piece in bytes.chunks(SNAPSHOT_FRAME) {
-                if ws.send(Message::Binary(piece.to_vec().into())).await.is_err() {
+                if !send(ws, Message::Binary(piece.to_vec().into())).await {
                     return false;
                 }
             }
@@ -486,6 +497,10 @@ async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) 
     let Seat { id, mut rx, behind } = seat;
     let mut sent_open = false;
     let mut last = tokio::time::Instant::now();
+    // pings at the WebSocket level, which every client answers by itself, so a viewer that went away is noticed
+    let mut ping = tokio::time::interval(hub.cfg.silence / 3);
+    ping.tick().await;
+    let mut heard = tokio::time::Instant::now();
     let end = loop {
         tokio::select! {
             out = rx.recv() => match out {
@@ -510,27 +525,35 @@ async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) 
                 // the program ended and this viewer has read everything it wrote
                 None => break End::Exited(shared.exit_code().flatten()),
             },
-            msg = ws.recv() => match msg {
-                Some(Ok(Message::Binary(b))) => {
-                    last = tokio::time::Instant::now();
-                    // waits while the machine is slow to read (a big paste); if the terminal is gone, its output
-                    // ends too and the exit follows
-                    shared.input(id, &b).await;
-                }
-                Some(Ok(Message::Text(t))) => match proto::parse_control(t.as_str()) {
-                    Some(Control::Resize { cols, rows }) => {
-                        let (c, r) = proto::clamp_size(cols, rows);
-                        shared.want(id, c, r);
+            msg = ws.recv() => {
+                heard = tokio::time::Instant::now();
+                match msg {
+                    Some(Ok(Message::Binary(b))) => {
+                        last = tokio::time::Instant::now();
+                        // waits while the machine is slow to read (a big paste); if the terminal is gone, its output
+                        // ends too and the exit follows
+                        shared.input(id, &b).await;
                     }
-                    Some(Control::Focus) => shared.focus(id),
-                    Some(Control::Redraw) => shared.redraw(id),
-                    Some(Control::Ping) if !send_text(ws, proto::pong()).await => break End::ClientLeft,
-                    Some(Control::Ping) => {}
-                    None => {}
-                },
-                Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-                Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break End::ClientLeft,
-            },
+                    Some(Ok(Message::Text(t))) => match proto::parse_control(t.as_str()) {
+                        Some(Control::Resize { cols, rows }) => {
+                            let (c, r) = proto::clamp_size(cols, rows);
+                            shared.want(id, c, r);
+                        }
+                        Some(Control::Focus) => shared.focus(id),
+                        Some(Control::Redraw) => shared.redraw(id),
+                        Some(Control::Ping) if !send_text(ws, proto::pong()).await => break End::ClientLeft,
+                        Some(Control::Ping) => {}
+                        None => {}
+                    },
+                    Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break End::ClientLeft,
+                }
+            }
+            _ = ping.tick() => {
+                if heard.elapsed() > hub.cfg.silence || !send(ws, Message::Ping(Vec::new().into())).await {
+                    break End::ClientLeft;
+                }
+            }
             _ = tokio::time::sleep_until(last + hub.cfg.idle) => break End::Idle,
         }
     };

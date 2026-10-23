@@ -1,95 +1,114 @@
+<div align="center">
+
+<img src="docs/assets/icon.png" alt="" width="96">
+
 # Switchboard
 
-Switchboard puts every Claude Code chat from all of your computers on one board. You can see which chats need
-you, answer them, open their terminals, start new ones on whichever computer you pick, and move a chat from one
-computer to another.
+**One board for the Claude Code chats on all your computers.**
 
-![The Switchboard board on a Mac](docs/screenshots/board-dark.png)
+See which chats need you, answer them, open their terminals and start new ones, on whichever computer you pick.
+It runs on your own machines, with no account and no cloud service.
 
-## How it works
+[![CI](https://github.com/nicglazkov/switchboard/actions/workflows/ci.yml/badge.svg)](https://github.com/nicglazkov/switchboard/actions/workflows/ci.yml)
+[![Docs](https://github.com/nicglazkov/switchboard/actions/workflows/docs.yml/badge.svg)](https://nicglazkov.github.io/switchboard/)
+[![Release](https://img.shields.io/github/v/release/nicglazkov/switchboard?label=release&color=0C7480)](https://github.com/nicglazkov/switchboard/releases/latest)
+[![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-0C7480)](LICENSE)
 
-Switchboard has three pieces. You only have to think about the first one once.
+**[Documentation](https://nicglazkov.github.io/switchboard/)** ·
+[Download](https://github.com/nicglazkov/switchboard/releases/latest) ·
+[Install](#install) ·
+[Changelog](CHANGELOG.md)
 
-```
-   the computer that stays on                 every computer you use Claude Code on
-  +----------------------------+             +--------------------------------------+
-  |  Switchboard server        | <---------> |  Switchboard helper (sb.py)          |
-  |  keeps the list of chats   |             |  reports its chats, starts and stops |
-  +----------------------------+             +--------------------------------------+
-               ^
-               |   your home network, or Tailscale when you are away
-               v
-  +----------------------------+
-  |  Switchboard app           |
-  |  Mac and Windows           |
-  +----------------------------+
-```
+<br>
 
-1. **One computer that stays on.** It keeps track of your chats and your computers, so the board is there even
-   when your laptop is closed. A Mac mini on a shelf, a desktop PC that never sleeps, or a small Linux box all
-   work. If you only have one computer, that computer can do this job too.
-2. **A small helper on each computer where you use Claude Code.** It tells the server what is running and does
-   what you ask from the board: start a chat, stop one, open its terminal.
-3. **The app.** It shows the board, on a Mac or a Windows PC. Phone apps are on the way. It talks only to your own server, never to anything on the internet.
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/board-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/board-light.png">
+  <img alt="The Switchboard board: chats from three computers sorted into Needs you, Working, Warm now, Gone cold and Quiet" src="docs/screenshots/board-light.png" width="900">
+</picture>
 
-Nothing leaves your computers. Switchboard has no account, sends no usage data, and does not need a cloud
-service.
+</div>
 
-## What you need
+## What it does
 
-- A Mac or Linux computer that can stay on. Windows works too, with fewer features (see the install guide).
-- Python 3.9 or newer on every computer.
-- Claude Code installed and signed in on the computers where you want to run chats.
+You run Claude Code on a desktop, a laptop and a box in the closet. Each chat lives in its own terminal on its own
+computer, and the one waiting for you is never the one in front of you. Switchboard puts them all on one board.
+
+- **Every chat, sorted by what it needs.** Each computer gets a row; each chat sits in **Needs you**, **Working**,
+  **Warm now**, **Gone cold** or **Quiet**. Answer a question right from its card.
+- **Know the cost before you go back.** A cold chat reads its whole history again on the next message. Switchboard
+  compares resuming it with starting fresh from a summary, suggests the cheaper one, and holds a message that would
+  re-read a big cold chat until you confirm.
+- **Terminals from anywhere.** Open any chat's terminal in a tab, a window or a floating sheet, even when its
+  computer is behind another router. Your own shells, tab groups and drag-and-drop files too.
+- **Start a chat on any computer.** Pick the computer (or let Auto pick), the folder, the model and the effort.
+- **History, files and usage.** Search every chat on every computer, browse their folders, and watch your plan's
+  5-hour and weekly usage against a daily budget.
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/screenshots/details-dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="docs/screenshots/details-light.png">
+  <img alt="A cold chat's details: start fresh or resume, with what each one costs" src="docs/screenshots/details-light.png" width="800">
+</picture>
 
 ## Install
 
-1. **On the computer that stays on**, get Switchboard and run the installer:
+Switchboard has three parts: a **server** on one computer that stays on, a small **helper** on each computer where
+you use Claude Code, and the **app** wherever you want to see the board. One computer can be all three.
 
-   ```sh
-   git clone https://github.com/nicglazkov/switchboard.git
-   cd switchboard
-   scripts/install/install-server.sh
-   ```
+**1. The server**, on a Mac or Linux computer that stays on:
 
-   On Windows, run `scripts\install\install-server.ps1` in PowerShell instead. The installer needs no admin
-   rights and changes nothing outside your own account.
+```sh
+curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash
+```
 
-2. **Answer three questions.** The installer asks for the address your other devices will use, which computers
-   to add, and the folder where new chats start on each one. Run `switchboard setup` to change them later.
+Or let the app do it: when it finds no server, the Mac and Linux apps offer **Run the server on this computer**.
 
-3. **Add your other computers.** Setup shows one line to paste on each. It installs the helper and links the
-   computer with a one-time code, so there are no passwords or ssh keys to manage.
+**2. Your computers.** Setup shows a one-time code and a line to paste on each Mac, Linux or Windows computer
+where you use Claude Code.
 
-4. **Open the app** and type the address from step 2, or let it find the server on your network.
+**3. The app.**
 
-The full guide, with troubleshooting, updating and uninstalling, is in [docs/install.md](docs/install.md).
-
-## Keep it private
-
-Switchboard has no passwords. Anyone who can reach its ports (8130 to 8132) can see and control your chats. Keep
-it on your home network or your own [Tailscale](https://tailscale.com) network, and never forward those ports to
-the internet.
-
-## What's in this repository
-
-| Folder | What |
+| | |
 |---|---|
-| `server/` | The server (Python) |
-| `agent/sb.py` | The helper that runs on each computer: Claude Code hooks, status line, and the commands the server sends |
-| `native/` | The desktop app, the terminal hub and `switchboard-node` (Rust) |
-| `scripts/install/` | Installers and first-run setup |
-| `tests/` | Tests |
-| `docs/` | Install guide, how the pieces fit, and the decision log |
-| `branding.toml` | The app's name, ids and colors, in one place |
+| **Mac** | [`Switchboard-<version>.dmg`](https://github.com/nicglazkov/switchboard/releases/latest), macOS 11 or later. Signed and notarized |
+| **Windows** | [`Switchboard-Setup-<version>.exe`](https://github.com/nicglazkov/switchboard/releases/latest), installs without administrator rights |
+| **Linux** | [`Switchboard-linux-x86_64.tar.gz`](https://github.com/nicglazkov/switchboard/releases/latest) |
 
-## Building and contributing
+On your home network the app finds the server by itself. Updates come through your server from this repository's
+releases, signed, and install only when you say so.
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) to build it, run the tests and send a change. Report security problems as
-described in [SECURITY.md](SECURITY.md).
+You need [Claude Code](https://claude.com/claude-code) on each computer that runs chats, and Python 3.9 or newer
+on the server and on those computers. **[The full install guide](https://nicglazkov.github.io/switchboard/install/)**
+covers a Windows server, other options and uninstalling.
 
-Switchboard is not made by or affiliated with Anthropic. Claude and Claude Code are trademarks of Anthropic.
+## Documentation
+
+| | |
+|---|---|
+| [Get started](https://nicglazkov.github.io/switchboard/install/) | Install, add computers, the apps |
+| [Use it](https://nicglazkov.github.io/switchboard/board/) | The board, chats and costs, terminals, history and files, usage, shortcuts, settings |
+| [Help](https://nicglazkov.github.io/switchboard/troubleshooting/) | Troubleshooting, FAQ, updates, privacy, getting help |
+| [Reference](https://nicglazkov.github.io/switchboard/commands/) | Commands, files and ports, changelog |
+| [Develop](https://nicglazkov.github.io/switchboard/architecture/) | How it works, building from source, contributing |
+
+## Privacy
+
+Your chats, files and history stay on your computers and your server. Switchboard sends no usage data anywhere.
+What does leave your network: the server's checks for updates on GitHub, iPhone notifications through Apple
+if you set them up, and the AI features you turn on, which use your own Claude plan.
+
+There is no password: anyone who can reach the server's ports can see and run your chats. Keep it on a network only
+you can reach, like your home network or a VPN such as Tailscale.
+[Privacy and security](https://nicglazkov.github.io/switchboard/privacy/) has the details, and
+[SECURITY.md](SECURITY.md) how to report a problem.
+
+## Contributing
+
+Bug reports and pull requests are welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) and
+[building from source](https://nicglazkov.github.io/switchboard/building/).
 
 ## License
 
-[GNU AGPL-3.0](LICENSE). You can use, change and share Switchboard, including for work. If you share a
-changed copy, or run one for other people over a network, you have to share its source under the same license.
+[GNU AGPL-3.0](LICENSE). Switchboard is not made by or affiliated with Anthropic. Claude and Claude Code are
+trademarks of Anthropic.

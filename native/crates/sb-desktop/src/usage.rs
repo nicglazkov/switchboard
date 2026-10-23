@@ -106,9 +106,7 @@ impl BoardView {
                     .line_height(relative(1.45))
                     .text_color(t.faint)
                     .child(div().flex_none().mt(px(1.)).child(ui::icon("info", 13., t.faint)))
-                    .child(ui::wrap(
-                        "Numbers update when a session replies, so use in the Claude apps shows up later.",
-                    )),
+                    .child(ui::wrap("Updates when a chat replies, so what you use in the Claude apps shows up later.")),
             )
     }
 
@@ -220,7 +218,7 @@ impl BoardView {
                     .map(|r| format!("Resets {}", fmt::when(r, c.now)))
                     .unwrap_or_else(|| "Reset not known yet".into()),
             ))
-            .children(pace.map(|x| small(&t, format!("On pace for {}%", x.round() as i64))))
+            .children(pace.map(|x| small(&t, format!("At this rate you'll end around {}%", x.round() as i64))))
     }
 
     /// The last 4 weeks: each one's final percent as a small bar, and their average.
@@ -310,7 +308,7 @@ impl BoardView {
         let budget = c.app.snap.budget.clone().unwrap_or_default();
         let (bs, bst) = (budget.settings(), budget.status());
         let today_used = bst.today.or_else(|| slots.iter().find(|s| s.today).and_then(|s| s.used));
-        let budget_line = match (bs.daily, today_used) {
+        let budget_line = match (bst.daily.or(bs.daily), today_used) {
             (Some(d), Some(x)) => Some(format!("Today {}% of {}% budget", usage::pts(x), usage::pts(d))),
             _ => None,
         };
@@ -375,8 +373,8 @@ impl BoardView {
                 (
                     "No history from the server",
                     match &c.app.usage_error {
-                        Some(e) => format!("It did not answer for usage: {e}"),
-                        None => "It has not sent any usage yet.".into(),
+                        Some(e) => format!("It didn't answer for usage: {e}"),
+                        None => "It hasn't sent any usage yet.".into(),
                     },
                 )
             } else {

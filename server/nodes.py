@@ -11,6 +11,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 import fleet as fleet_mod
+import releases as releases_mod
 from term import HUB_PORT, ws_host
 
 HUB = (os.environ.get('SWITCHBOARD_HUB_URL') or f'http://127.0.0.1:{HUB_PORT}').rstrip('/')
@@ -68,10 +69,17 @@ def sync(fleet, hub=None):
     return changed
 
 
-def downloads_base(cfg_dir):
-    """Where the node and the agent download from: SWITCHBOARD_DOWNLOADS, else <config>/downloads.json's "node", else
-    the "node" folder next to its "url" (publish.sh writes the app page there; publish-node.sh the node beside it).
-    None when nothing says: no server but the owner's lab serves a fixed port."""
+# The installers put the server in <base>/app/server and what other machines download in <base>/downloads/node, served
+# on DOWNLOADS_PORT (install-server.sh). That folder always holds this server's own version of the node and agent.
+DOWNLOADS_PORT = 8131
+KIT_NODE = Path(__file__).resolve().parents[2] / 'downloads' / 'node'
+
+
+def downloads_base(cfg_dir, host=None, kit_node=KIT_NODE):
+    """Where the node and the agent download from, first that says: SWITCHBOARD_DOWNLOADS; <config>/downloads.json's
+    "node"; this server's own downloads on `host`:8131, when the installer set them up; the "node" folder next to
+    downloads.json's "url" (publish.sh writes the app page there, publish-node.sh the node beside it); the newest
+    GitHub release (releases.py). None when nothing does."""
     if os.environ.get('SWITCHBOARD_DOWNLOADS'):
         return os.environ['SWITCHBOARD_DOWNLOADS'].rstrip('/')
     try:
@@ -80,9 +88,16 @@ def downloads_base(cfg_dir):
         d = {}
     d = d if isinstance(d, dict) else {}
     node, url = d.get('node'), d.get('url')
+    if not isinstance(node, str) and host and all((Path(kit_node) / f).is_file() for f in KIT_FILES):
+        node = f'http://{host}:{DOWNLOADS_PORT}/node'
     if not isinstance(node, str) and isinstance(url, str) and url.rstrip('/').endswith('/app'):
         node = url.rstrip('/')[:-len('/app')] + '/node'
+    if not isinstance(node, str) and releases_mod.repo():
+        node = f'https://github.com/{releases_mod.repo()}/releases/latest/download'
     return node.rstrip('/') if isinstance(node, str) and re.fullmatch(r'https?://[A-Za-z0-9.:\[\]-]+(?:/[A-Za-z0-9._/-]*)?', node) else None
+
+
+KIT_FILES = ('sb.py', 'switchboard-node-mac', 'switchboard-node-linux', 'switchboard-node.exe')
 
 
 def install_lines(addr, code, base):
@@ -106,7 +121,7 @@ def _loopback(h):
         return False
 
 
-def pair(host, hub=None, cfg_dir=None, origins=()):
+def pair(host, hub=None, cfg_dir=None, origins=(), kit_node=KIT_NODE):
     """POST /api/pair (Add a machine): a code good for 10 minutes and one machine, and the line that links it."""
     r = hub_call('POST', '/internal/pair', {}, hub=hub)
     h = ws_host(host)
@@ -114,7 +129,7 @@ def pair(host, hub=None, cfg_dir=None, origins=()):
         own = [urlsplit(o).hostname for o in origins if urlsplit(o).hostname and not _loopback(urlsplit(o).hostname)]
         h = (f'[{own[0]}]' if ':' in own[0] else own[0]) if own else h
     addr = f'{h}:{HUB_PORT}'
-    base, line = downloads_base(cfg_dir), f'switchboard-node pair {addr} {r["code"]}'
+    base, line = downloads_base(cfg_dir, h, kit_node), f'switchboard-node pair {addr} {r["code"]}'
     out = {'ok': True, 'code': r['code'], 'expires': r['expires'], 'hub': addr, 'pair': line}
     if base:
         return dict(out, install=install_lines(addr, r['code'], base))

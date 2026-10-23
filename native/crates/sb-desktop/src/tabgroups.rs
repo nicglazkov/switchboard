@@ -108,6 +108,48 @@ pub fn slots(infos: &[TabInfo], groups: &[Group], folded: &[String]) -> Vec<Slot
     out
 }
 
+/// The note beside "Close group", from whether closing each of its tabs stops that tab's chat.
+pub fn close_group_note(stops: &[bool]) -> &'static str {
+    match (stops.iter().any(|s| *s), stops.iter().all(|s| *s)) {
+        (false, _) => "chats keep running",
+        (true, true) => "stops its chats",
+        (true, false) => "stops some chats",
+    }
+}
+
+/// Where a dragged group chip would move, counted among the other groups (see BoardView::group_drag_over). `over`
+/// was drawn from an earlier frame: a group gone since (ungrouped elsewhere, or by the server) marks no place.
+pub fn group_drop_index(infos: &[TabInfo], groups: &[Group], gid: &str, over: Slot, right: bool) -> Option<usize> {
+    let others: Vec<&Group> = groups.iter().filter(|g| g.id != gid).collect();
+    let at = |g: usize, after: bool| {
+        let id = &groups.get(g)?.id;
+        others.iter().position(|o| o.id == *id).map(|p| p + after as usize)
+    };
+    let own = || groups.iter().position(|x| x.id == gid);
+    match over {
+        Slot::Chip(g) if groups.get(g).is_some_and(|x| x.id == gid) => own(),
+        Slot::Chip(g) => at(g, right),
+        Slot::Tab(i) => match infos.get(i) {
+            Some(x) if x.star => Some(0),
+            Some(TabInfo { group: Some(g), .. }) if groups.get(*g).is_some_and(|x| x.id == gid) => own(),
+            Some(TabInfo { group: Some(g), .. }) => at(*g, true),
+            _ => Some(others.len()),
+        },
+    }
+}
+
+/// Where tab `from` (chat `thread`) goes among the members of group `g` (index `gi`) when dropped at gap `to`: after
+/// the group's tab before the gap, or else before its tab after it. `to` was drawn from an earlier frame, so it may lie
+/// past tabs closed since.
+pub fn group_add_index(infos: &[TabInfo], g: &Group, gi: usize, thread: &str, from: usize, to: usize) -> usize {
+    let to = to.min(infos.len());
+    let members: Vec<&String> = g.members.iter().filter(|m| *m != thread).collect();
+    let pos = |j: usize| infos[j].thread.as_ref().and_then(|t| members.iter().position(|m| *m == t));
+    let prev = (0..to).rev().find(|j| *j != from).filter(|j| infos[*j].group == Some(gi));
+    let next = (to..infos.len()).find(|j| *j != from).filter(|j| infos[*j].group == Some(gi));
+    prev.and_then(pos).map(|p| p + 1).or_else(|| next.and_then(pos)).unwrap_or(0)
+}
+
 /// About how wide a chip draws (for the room the tabs get).
 pub fn chip_width(g: &Group, folded: bool, max: f32, editing: bool) -> f32 {
     // The name field while it is being named (group_chip: 168 px plus the chip's padding).
@@ -310,7 +352,8 @@ impl BoardView {
         cx.notify();
     }
 
-    /// "Close group": its tabs close here; the chats keep running and the group stays (other Macs keep theirs).
+    /// "Close group": its tabs close here, each as its own Close would (a running chat stops unless kept running), and
+    /// the group stays (other Macs keep theirs).
     pub fn close_group(&mut self, gid: &str, cx: &mut gpui::Context<Self>) {
         self.group_menu = None;
         let (infos, groups) = self.tab_infos(cx);
@@ -379,11 +422,7 @@ impl BoardView {
         match (target, f.thread) {
             (Some(gid), Some(thread)) => {
                 let Some(gi) = groups.iter().position(|g| g.id == gid) else { return };
-                let members: Vec<&String> = groups[gi].members.iter().filter(|m| **m != thread).collect();
-                let pos = |j: usize| infos[j].thread.as_ref().and_then(|t| members.iter().position(|m| *m == t));
-                let prev = (0..to).rev().find(|j| *j != from).filter(|j| infos[*j].group == Some(gi));
-                let next = (to..infos.len()).find(|j| *j != from).filter(|j| infos[*j].group == Some(gi));
-                let index = prev.and_then(pos).map(|p| p + 1).or_else(|| next.and_then(pos)).unwrap_or(0);
+                let index = group_add_index(&infos, &groups[gi], gi, &thread, from, to);
                 self.reorder_tab(from, to, cx);
                 self.app.update(cx, |s, cx| {
                     s.group_op(Op::Add { id: gid, thread, index: Some(index) }, cx);
@@ -405,19 +444,7 @@ impl BoardView {
     /// over the starred tabs, first).
     pub fn group_drag_over(&mut self, gid: &str, over: Slot, right: bool, cx: &mut gpui::Context<Self>) {
         let (infos, groups) = self.tab_infos(cx);
-        let others: Vec<&Group> = groups.iter().filter(|g| g.id != gid).collect();
-        let at = |g: usize, after: bool| others.iter().position(|o| o.id == groups[g].id).map(|p| p + after as usize);
-        let index = match over {
-            Slot::Chip(g) if groups[g].id == gid => groups.iter().position(|x| x.id == gid),
-            Slot::Chip(g) => at(g, right),
-            Slot::Tab(i) => match infos.get(i) {
-                Some(x) if x.star => Some(0),
-                Some(TabInfo { group: Some(g), .. }) if groups[*g].id == gid => groups.iter().position(|x| x.id == gid),
-                Some(TabInfo { group: Some(g), .. }) => at(*g, true),
-                _ => Some(others.len()),
-            },
-        };
-        let d = index.map(|i| (gid.to_string(), i));
+        let d = group_drop_index(&infos, &groups, gid, over, right).map(|i| (gid.to_string(), i));
         if self.group_drop != d {
             self.group_drop = d;
             cx.notify();
@@ -571,8 +598,9 @@ impl BoardView {
             .on_drag_move::<crate::chrome::TabDrag>(cx.listener(
                 move |this, ev: &gpui::DragMoveEvent<crate::chrome::TabDrag>, _, cx| {
                     let (b, p) = (ev.bounds, ev.event.position);
-                    if b.contains(&p) {
-                        let from = ev.drag(cx).0;
+                    if b.contains(&p)
+                        && let Some(from) = this.tab_index(ev.drag(cx).0)
+                    {
                         this.tab_drag_over_chip(from, gi, cx);
                     }
                 },
@@ -655,6 +683,16 @@ impl BoardView {
             },
         );
         let (id1, id2, id3, id4, id5) = (g.id.clone(), g.id.clone(), g.id.clone(), g.id.clone(), g.id.clone());
+        // What closing the group does to its chats, as each tab's own Close says it.
+        let (infos, _) = self.tab_infos(cx);
+        let stops: Vec<bool> = (0..infos.len())
+            .filter(|i| infos[*i].group == Some(gi))
+            .map(|i| {
+                let t = &self.tabs[i];
+                t.read(cx).key.as_deref().is_some_and(|k| self.close_stops(k, t.entity_id(), cx))
+            })
+            .collect();
+        let close_note = close_group_note(&stops);
         let n = groups.len();
         let title = if g.name.is_empty() { "Unnamed group".to_string() } else { g.name.clone() };
         Some(
@@ -713,7 +751,7 @@ impl BoardView {
                         .child(row("grp-ungroup", "ungroup", "Ungroup", None).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.group_do(Op::Delete { id: id4.clone() }, cx)
                         })))
-                        .child(row("grp-close", "x", "Close group", Some("chats keep running")).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        .child(row("grp-close", "x", "Close group", Some(close_note)).on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             this.close_group(&id5, cx)
                         })))
                         .child(
@@ -731,11 +769,12 @@ impl BoardView {
         )
     }
 
-    /// The tab menu's "Add to group" list, beside the menu (left of it when the window has no room on the right).
+    /// The tab menu's "Add to group" list, beside the menu (left of it when the window has no room on the right), for
+    /// the tab with this id.
     pub fn group_submenu(
         &self,
         c: &Ctx,
-        i: usize,
+        tab: gpui::EntityId,
         menu_x: f32,
         top: f32,
         w: f32,
@@ -788,7 +827,11 @@ impl BoardView {
                     .text_color(t.ink)
                     .child(div().flex_none().w(px(15.)).flex().justify_center().child(group_dot(&t, g.color, 10.)))
                     .child(ui::line(name).flex_1())
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.add_tab_to_group(i, id.clone(), cx))),
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        if let Some(i) = this.tab_index(tab) {
+                            this.add_tab_to_group(i, id.clone(), cx)
+                        }
+                    })),
             );
         }
         Some(list.into_any_element())
@@ -845,6 +888,33 @@ mod tests {
             slots(&infos, &groups, &["a".into()]),
             vec![Slot::Tab(0), Slot::Chip(0), Slot::Chip(1), Slot::Tab(3), Slot::Tab(4)]
         );
+    }
+
+    #[test]
+    fn a_group_gone_during_a_drag_marks_no_place() {
+        let groups = vec![g("a", &["t1"]), g("b", &["t2"])];
+        let infos = vec![info(false, "t1", Some(0)), info(false, "t2", Some(1)), info(false, "t9", Some(5))];
+        assert_eq!(group_drop_index(&infos, &groups, "a", Slot::Chip(1), true), Some(1));
+        assert_eq!(group_drop_index(&infos, &groups, "a", Slot::Chip(0), false), Some(0), "over itself: stays");
+        assert_eq!(group_drop_index(&infos, &groups, "a", Slot::Chip(7), true), None, "a chip from before");
+        assert_eq!(group_drop_index(&infos, &groups, "a", Slot::Tab(2), true), None, "a tab of a group gone");
+        assert_eq!(group_drop_index(&infos, &groups, "a", Slot::Tab(9), true), Some(1), "past the tabs: last");
+    }
+
+    #[test]
+    fn a_drop_past_tabs_closed_during_the_drag_lands_last() {
+        let grp = g("a", &["t1", "t2"]);
+        let infos = vec![info(false, "t9", None), info(false, "t1", Some(0)), info(false, "t2", Some(0))];
+        assert_eq!(group_add_index(&infos, &grp, 0, "t9", 0, 2), 1, "between t1 and t2");
+        assert_eq!(group_add_index(&infos, &grp, 0, "t9", 0, 5), 2, "a gap from before two tabs closed");
+    }
+
+    #[test]
+    fn close_group_says_what_happens_to_its_chats() {
+        assert_eq!(close_group_note(&[]), "chats keep running");
+        assert_eq!(close_group_note(&[false, false]), "chats keep running");
+        assert_eq!(close_group_note(&[true, true]), "stops its chats");
+        assert_eq!(close_group_note(&[true, false]), "stops some chats");
     }
 
     #[test]

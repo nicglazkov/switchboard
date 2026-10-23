@@ -98,10 +98,16 @@ status() {
   echo "  downloads  http://127.0.0.1:8131  $(up http://127.0.0.1:8131/node/SHA256SUMS)"
 }
 
+tail_logs() {  # $1 = folder, $2 = lines
+  for p in $PARTS; do [ -f "$1/$p.log" ] && { echo "== $p"; tail -n "$2" "$1/$p.log"; }; done
+  return 0
+}
+
 logs() {
   case "$(mode)" in
     systemd) journalctl --user -u switchboard -u switchboard-hub -u switchboard-downloads -n "${1:-60}" --no-pager ;;
-    *)       for p in $PARTS; do [ -f "$LOGS/$p.log" ] && { echo "== $p"; tail -n "${1:-20}" "$LOGS/$p.log"; }; done ;;
+    launchd) tail_logs "$HOME/Library/Logs/Switchboard" "${1:-20}" ;;  # where install-server.sh's LaunchAgents write
+    *)       tail_logs "$LOGS" "${1:-20}" ;;
   esac
 }
 

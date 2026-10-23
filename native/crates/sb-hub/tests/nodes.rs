@@ -251,10 +251,7 @@ async fn rpcs_and_terminals_over_the_link() {
     assert_eq!(m, ToNode::TermResize { ch, cols: 70, rows: 20 });
     node.send(Message::Text(link_proto::encode(&FromNode::TermExit { ch, code: Some(0) }).into())).await.unwrap();
     let (texts, _, close) = viewer(&mut term, |t, _| t.iter().any(|t| t["type"] == "exit")).await;
-    assert_eq!(
-        texts.last().unwrap(),
-        &json!({"type": "exit", "code": 0, "note": "Detached. The session keeps running."})
-    );
+    assert_eq!(texts.last().unwrap(), &json!({"type": "exit", "code": 0, "note": "Detached. The chat keeps running."}));
     let (_, _, close) =
         if close.is_none() { viewer(&mut term, |_, _| false).await } else { (vec![], String::new(), close) };
     assert_eq!(close, Some(1000));
@@ -274,7 +271,7 @@ async fn rpcs_and_terminals_over_the_link() {
     drop(node);
     let (texts, _, _) = viewer(&mut term, |t, _| t.iter().any(|t| t["type"] == "exit")).await;
     let note = texts.last().unwrap()["note"].as_str().unwrap().to_string();
-    assert!(note.starts_with("Could not reach Lab box"), "{note}");
+    assert!(note.starts_with("Couldn't reach Lab box"), "{note}");
 
     // no link: terminals and RPCs say so plainly
     tokio::time::sleep(Duration::from_millis(300)).await;

@@ -70,6 +70,8 @@ def clean_machine(m):
         out['form'] = m['form']
     if isinstance(m.get('root'), str) and 0 < len(m['root']) <= 400 and '\x00' not in m['root']:
         out['root'] = m['root']
+    if m.get('roam') is False:  # chats stay in the Claude folder; otherwise they may start anywhere in home
+        out['roam'] = False
     return out
 
 
@@ -81,16 +83,16 @@ def check_root(text, windows=False):
     t = text.strip()
     parts = re.split(r'[\\/]+', t)
     if '..' in parts:
-        raise FleetError('The Claude folder cannot use "..".')
+        raise FleetError('The Claude folder can\'t use "..".')
     if t == '~' or t.startswith(('~/', '~\\')):
         rest = [p for p in parts[1:] if p not in ('', '.')]
         return '~' + ('/' + '/'.join(rest) if rest else '')
     if windows:
         if not re.match(r'^[A-Za-z]:[\\/]', t) and not t.startswith('\\\\'):
-            raise FleetError('The Claude folder is a full path, like C:\\Users\\you\\Claude or ~/Claude.')
+            raise FleetError('The Claude folder has to be a full path, like C:\\Users\\you\\Claude or ~/Claude.')
         return str(PureWindowsPath(t))
     if not t.startswith('/'):
-        raise FleetError('The Claude folder is a full path, like ~/Claude or /Users/you/Claude.')
+        raise FleetError('The Claude folder has to be a full path, like ~/Claude or /Users/you/Claude.')
     return str(PurePosixPath(t))
 
 
@@ -277,7 +279,7 @@ class Fleet:
     @staticmethod
     def _blank():
         return {'online': None, 'error': None, 'sessions': [], 'replaced': [], 'limits': None, 'updated': None, 'as_of': None, 'skew': 0.0, 'root': None,
-                'launcher': None, 'mem': None, 'features': [], 'versions': None, 'setup': [], 'root_set': None, 'root_suggest': None}
+                'launcher': None, 'mem': None, 'features': [], 'versions': None, 'models': None, 'setup': [], 'root_set': None, 'root_suggest': None}
 
     def config(self):
         """The machine list as saved: in order, without what the machines report."""
@@ -301,7 +303,7 @@ class Fleet:
             if m['name'] in self.machines:
                 return False
             if len(self.order) >= MACHINES_MAX:
-                raise FleetError(f'Switchboard keeps up to {MACHINES_MAX} machines.')
+                raise FleetError(f'Switchboard can keep up to {MACHINES_MAX} machines.')
             self.state[m['name']] = self._blank()
             self.machines = dict(self.machines, **{m['name']: m})
             self.order = self.order + [m['name']]
@@ -325,7 +327,7 @@ class Fleet:
     def rename(self, name, label):
         label = label.strip() if isinstance(label, str) else ''
         if not LABEL_RE.fullmatch(label or '\x00'):
-            raise FleetError('A name is 1 to 40 characters.')
+            raise FleetError('A name has to be 1 to 40 characters.')
         return self._edit(name, label=label)
 
     def set_root(self, name, root):
@@ -334,6 +336,23 @@ class Fleet:
         with self.lock:
             os_ = (self.machines.get(name) or {}).get('os')
         return self._edit(name, root=check_root(root, windows=os_ == 'windows'))
+
+    def set_roam(self, name, on):
+        """Whether chats on the machine may start anywhere in its home folder, or only in its Claude folder."""
+        if not isinstance(on, bool):
+            raise FleetError('roam is true or false')
+        with self.lock:
+            old = self.machines.get(name)
+            if old is None:
+                return False
+            new = {k: v for k, v in old.items() if k != 'roam'}
+            if not on:
+                new['roam'] = False
+            if new == old:
+                return False
+            self.machines = dict(self.machines, **{name: new})
+        self._saved()
+        return True
 
     def _edit(self, name, **kw):
         with self.lock:
@@ -387,6 +406,7 @@ class Fleet:
         req = {'verb': 'list', 'as': m['name']}
         if m.get('root'):
             req['root'] = m['root']
+        req['roam'] = m.get('roam') is not False
         if self.servers:
             req['servers'] = list(self.servers)
         if getattr(self, 'summary_model', None):
@@ -419,6 +439,7 @@ class Fleet:
                    'updated': time.time(), 'as_of': got, 'skew': round(got - sent, 3) if sent else 0.0, 'root': r.get('root'), 'launcher': r.get('launcher'), 'mem': r.get('mem'),
                    'features': r.get('features') if isinstance(r.get('features'), list) else [], 'asked': asked,
                    'versions': r.get('versions') if isinstance(r.get('versions'), dict) else None,
+                   'models': r.get('models') if isinstance(r.get('models'), dict) else None,
                    'setup': [i for i in r.get('setup') or [] if isinstance(i, dict) and i.get('id')][:12],
                    'root_set': r.get('root_set') if isinstance(r.get('root_set'), bool) else None,
                    'root_suggest': r.get('root_suggest') if isinstance(r.get('root_suggest'), str) else None}

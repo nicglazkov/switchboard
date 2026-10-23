@@ -41,7 +41,7 @@ class ServerJobTest(unittest.TestCase):
         self.m = m or Machine()
         self.pushes = []
         self.state = state or Path(mkdtemp())
-        app = server.App(fleet.Fleet(MACH, self.m), state_dir=self.state, web_dir=self.state, pusher=lambda *a: self.pushes.append(a),
+        app = server.App(fleet.Fleet(MACH, self.m), state_dir=self.state, web_dir=self.state, pusher=lambda *a: self.pushes.append(a[:3]),
                          sleep=lambda s: None, poll_every=0, retry_waits=(0, 0))
         app._refresh_soon = lambda *a, **k: None
         app.fleet.poll()
@@ -74,7 +74,7 @@ class ServerJobTest(unittest.TestCase):
         self.assertEqual(j['state'], 'done')
         self.assertEqual(len(self.pushes), 1)
         title, body, url = self.pushes[0]
-        self.assertEqual(title, 'Fresh session ready')
+        self.assertEqual(title, 'Fresh chat ready')
         self.assertIn('tA (fresh) on Desk', body)
         self.assertEqual(url, '/s/desk/' + 'cc' * 4 + '-1111-2222-3333-444444444444')
         self.assertEqual(json.loads((self.state / 'jobs.json').read_text())[r['job']]['state'], 'done')
@@ -109,7 +109,7 @@ class ServerJobTest(unittest.TestCase):
         deadline = time.time() + 3  # the push goes out right after the job is marked failed
         while not self.pushes and time.time() < deadline:
             time.sleep(0.02)
-        self.assertEqual(self.pushes[0][0], 'Start fresh did not finish')
+        self.assertEqual(self.pushes[0][0], "Start fresh didn't finish")
         self.assertEqual(self.pushes[0][2], f'/s/desk/{SID}')
 
     def test_launch_error_reported(self):
@@ -159,6 +159,21 @@ class ServerJobTest(unittest.TestCase):
         self.assertEqual(self.wait(app, 's-aaaaaaaaaaaa')['state'], 'done')
         self.assertEqual(app.jobs['s-bbbbbbbbbbbb']['state'], 'error')
         self.assertIn('restarted', app.jobs['s-bbbbbbbbbbbb']['error'])
+
+    def test_a_job_is_asked_about_every_second_at_first_then_less_often(self):
+        m = Machine()
+        m.progress = ['running'] * 30 + ['done']
+        now, slept = [1000.0], []
+
+        def sleep(s):
+            slept.append(s)
+            now[0] += s
+        app = server.App(fleet.Fleet(MACH, m), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()), clock=lambda: now[0],
+                         sleep=sleep, poll_every=3, retry_waits=(0, 0))
+        app.jobs['s-0123456789ab'] = {'kind': 'resume', 'machine': 'desk', 'state': 'queued', 'created': now[0]}
+        self.assertEqual(app._watch('s-0123456789ab', 'desk', '0123456789ab')['state'], 'done')
+        self.assertEqual(slept[:server.QUICK_FOR], [1] * server.QUICK_FOR, 'a resume that is up in a few seconds opens then')
+        self.assertTrue(slept[server.QUICK_FOR:] and set(slept[server.QUICK_FOR:]) == {3}, 'a long job is not asked every second')
 
 
 OLD = 'bb' * 4 + '-1111-2222-3333-444444444444'

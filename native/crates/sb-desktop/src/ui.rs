@@ -59,6 +59,11 @@ pub fn mod_cap(key: &str) -> String {
     if MAC { format!("⌘{key}") } else { format!("Ctrl {key}") }
 }
 
+/// A key the app shares with terminals: ⌘ on a Mac, Ctrl Shift elsewhere (plain Ctrl there belongs to the shell).
+pub fn term_cap(key: &str) -> String {
+    if MAC { format!("⌘{key}") } else { format!("Ctrl Shift {key}") }
+}
+
 pub fn icon(name: &str, size: f32, color: Hsla) -> Svg {
     let name = if crate::assets::has_icon(name) { name } else { "chev" };
     svg().path(SharedString::from(format!("icons/{name}.svg"))).size(px(size)).flex_none().text_color(color)
@@ -611,9 +616,9 @@ pub fn scrollbar<H: gpui_base::ScrollbarHandle + Clone>(handle: &H) -> Div {
     div().absolute().inset_0().child(gpui_base::Scrollbar::vertical(handle))
 }
 
-/// The setup guide: the Install section of the project's README.
+/// The setup guide: the Install page of the documentation site.
 pub fn install_guide() -> String {
-    format!("{}#install", sb_core::brand::HOMEPAGE.trim_end_matches('/'))
+    sb_core::brand::docs("install/")
 }
 
 /// A text link in the accent color ("Install guide", "Open Settings").

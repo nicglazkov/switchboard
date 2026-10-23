@@ -30,6 +30,12 @@ pub struct ApiApp {
     /// latest.json as the page has it, byte for byte, and its signature.
     #[serde(default)]
     pub feed: Option<Feed>,
+    /// The release's page, for What's new (the server sends the GitHub release it read).
+    #[serde(default)]
+    pub page: Option<String>,
+    /// Why the server couldn't look (GitHub or the download page didn't answer).
+    #[serde(default)]
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -124,7 +130,7 @@ pub fn off_reason() -> Option<&'static str> {
             "Updates are off in this build. It was made without an update key, so it can't check that a new version is genuine.",
         )
     } else if this_build().is_none() {
-        Some("Updates are off in this build. It is a development build, without a build number to compare.")
+        Some("Updates are off in this build. It's a development build, with no build number to compare.")
     } else {
         None
     }
@@ -133,11 +139,11 @@ pub fn off_reason() -> Option<&'static str> {
 /// Checks `sig` (base64) against `manifest` and reads the list. Anything that does not check out is an error, so a
 /// tampered or unsigned list is never offered.
 pub fn verify(key: &VerifyingKey, manifest: &str, sig: Option<&str>) -> Result<Latest, String> {
-    let sig = sig.map(str::trim).filter(|s| !s.is_empty()).ok_or("The update list is not signed.")?;
+    let sig = sig.map(str::trim).filter(|s| !s.is_empty()).ok_or("The update list isn't signed.")?;
     let raw =
         base64::engine::general_purpose::STANDARD.decode(sig).map_err(|_| "The update signature is unreadable.")?;
     let sig = Signature::from_slice(&raw).map_err(|_| "The update signature is unreadable.")?;
-    key.verify_strict(manifest.as_bytes(), &sig).map_err(|_| "The update list's signature does not match.")?;
+    key.verify_strict(manifest.as_bytes(), &sig).map_err(|_| "The update list's signature doesn't match.")?;
     serde_json::from_str(manifest).map_err(|e| format!("The update list is unreadable: {e}"))
 }
 
@@ -255,9 +261,18 @@ pub fn offer(
     mine_build: &str,
     bad_build: Option<&str>,
 ) -> Result<Option<Offer>, CoreError> {
-    let (Some(feed), Some(base)) = (app.feed.as_ref(), app.base.as_deref()) else { return Ok(None) };
+    let (Some(feed), Some(base)) = (app.feed.as_ref(), app.base.as_deref()) else {
+        return match &app.error {
+            Some(e) => Err(CoreError::Bad(e.clone())),
+            None => Ok(None),
+        };
+    };
     let latest = verify(key, &feed.manifest, feed.sig.as_deref()).map_err(CoreError::Bad)?;
-    Ok(offer_from(&latest, base, plat, crate::version(), mine_build, bad_build))
+    let page = app.page.as_ref().filter(|p| p.starts_with("https://") && !p.contains(char::is_whitespace));
+    Ok(offer_from(&latest, base, plat, crate::version(), mine_build, bad_build).map(|o| match page {
+        Some(p) => Offer { page: p.clone(), ..o },
+        None => o,
+    }))
 }
 
 fn agent(user_agent: &str, secs: u64) -> ureq::Agent {
@@ -287,7 +302,7 @@ pub fn fetch_feed(base: &str, user_agent: &str) -> Result<ApiApp, CoreError> {
     };
     let Some(manifest) = get("latest.json")? else { return Ok(ApiApp::default()) };
     let sig = get("latest.json.sig")?;
-    Ok(ApiApp { latest: None, base: Some(base.to_string()), feed: Some(Feed { manifest, sig }) })
+    Ok(ApiApp { base: Some(base.to_string()), feed: Some(Feed { manifest, sig }), ..Default::default() })
 }
 
 /// Whether the file at `path` is the offer's: its size, then its SHA-256.
@@ -305,8 +320,14 @@ fn hex(b: &[u8]) -> String {
     b.iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The file a download of `o` collects into. Its name carries the build's SHA-256, so a stopped download of one build
+/// is never resumed with another build's bytes.
+fn partial(o: &Offer, dir: &Path) -> PathBuf {
+    dir.join(format!("{}.{}.partial", o.file, o.sha256.get(..16).unwrap_or(&o.sha256)))
+}
+
 /// Downloads the offer into `dir`, counting bytes into `got` (and the size into `total`). A download that stops
-/// part way stays in `<file>.partial` and the next try asks only for the rest (HTTP Range); a page that ignores
+/// part way stays in `<file>.<hash>.partial` and the next try asks only for the rest (HTTP Range); a page that ignores
 /// Range sends it all again. The finished file must have the signed size and SHA-256, or it is deleted.
 pub fn download(
     o: &Offer,
@@ -315,10 +336,10 @@ pub fn download(
     total: &AtomicU64,
     user_agent: &str,
 ) -> Result<PathBuf, CoreError> {
-    let save = |e: std::io::Error| CoreError::Bad(format!("Could not save the update: {e}"));
-    let unreachable = || CoreError::Bad("Could not reach the download page. Try again later.".into());
+    let save = |e: std::io::Error| CoreError::Bad(format!("Couldn't save the update: {e}"));
+    let unreachable = || CoreError::Bad("Couldn't reach the download page. Try again later.".into());
     let mismatch =
-        || CoreError::Bad("The download did not match the signed list of files, so it was not installed.".into());
+        || CoreError::Bad("The download didn't match the signed list of files, so it wasn't installed.".into());
     total.store(o.size, Ordering::Relaxed);
     std::fs::create_dir_all(dir).map_err(save)?;
     let path = dir.join(&o.file);
@@ -329,7 +350,18 @@ pub fn download(
         }
         let _ = std::fs::remove_file(&path);
     }
-    let part = dir.join(format!("{}.partial", o.file));
+    let part = partial(o, dir);
+    // What other builds left part way is of no use now.
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        let (start, own) = (format!("{}.", o.file), part.file_name());
+        for e in entries.flatten() {
+            let name = e.file_name();
+            let n = name.to_string_lossy();
+            if n.starts_with(&start) && n.ends_with(".partial") && Some(name.as_os_str()) != own {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+    }
     let mut have = std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0);
     if have > o.size {
         let _ = std::fs::remove_file(&part);
@@ -582,9 +614,32 @@ fn exchange(a: &Path, b: &Path) -> std::io::Result<()> {
     }
 }
 
-/// Puts `new` at `target` and keeps the old build at `old`, so that either both moves happen or neither does.
+/// Puts `new` at `target` and keeps the old build at `old`, so that either both moves happen or neither does. A copy
+/// an earlier update left at `old` is set aside first and deleted only once the new build is in place, so a swap
+/// that fails keeps it.
 fn put_in(kind: Kind, new: &Path, target: &Path, old: &Path) -> std::io::Result<()> {
-    remove_any(old);
+    let mut aside = old.as_os_str().to_owned();
+    aside.push(".prev");
+    let aside = PathBuf::from(aside);
+    if aside.exists() && !old.exists() {
+        // A swap that stopped half way left it there.
+        let _ = std::fs::rename(&aside, old);
+    }
+    remove_any(&aside);
+    if old.exists() && std::fs::rename(old, &aside).is_err() {
+        remove_any(old);
+    }
+    let res = move_in(kind, new, target, old);
+    if res.is_ok() {
+        remove_any(&aside);
+    } else if aside.exists() && !old.exists() {
+        let _ = std::fs::rename(&aside, old);
+    }
+    res
+}
+
+/// The moves of `put_in`, with nothing at `old` yet.
+fn move_in(kind: Kind, new: &Path, target: &Path, old: &Path) -> std::io::Result<()> {
     match kind {
         Kind::Bundle => {
             if exchange(new, target).is_ok() {
@@ -623,7 +678,7 @@ fn put_in(kind: Kind, new: &Path, target: &Path, old: &Path) -> std::io::Result<
 /// install that could not be rolled back.
 pub fn swap_in(kind: Kind, new: &Path, target: &Path, state: &Path, o: &Offer, from_build: &str) -> Result<(), String> {
     let old = old_path(kind, target);
-    put_in(kind, new, target, &old).map_err(|e| format!("Could not put the new version in place: {e}"))?;
+    put_in(kind, new, target, &old).map_err(|e| format!("Couldn't put the new version in place: {e}"))?;
     let p = Pending {
         target: target.to_path_buf(),
         old,
@@ -637,7 +692,7 @@ pub fn swap_in(kind: Kind, new: &Path, target: &Path, state: &Path, o: &Offer, f
     st.pending = Some(p.clone());
     if let Err(e) = save_state(state, &st) {
         let _ = put_back(kind, &p);
-        return Err(format!("Could not save a note about the update, so it was undone: {e}"));
+        return Err(format!("Couldn't save a note about the update, so it was undone: {e}"));
     }
     Ok(())
 }
@@ -645,9 +700,9 @@ pub fn swap_in(kind: Kind, new: &Path, target: &Path, state: &Path, o: &Offer, f
 /// Puts the old build back where the new one is. The new one is deleted, except a running Windows program, which
 /// is left as Switchboard.failed.exe for the next start to sweep.
 pub fn put_back(kind: Kind, p: &Pending) -> Result<(), String> {
-    let err = |e: std::io::Error| format!("Could not put the previous version back: {e}");
+    let err = |e: std::io::Error| format!("Couldn't put the previous version back: {e}");
     if !p.old.exists() {
-        return Err("The previous version is no longer there.".into());
+        return Err("The previous version isn't there anymore.".into());
     }
     match kind {
         Kind::Bundle => {
@@ -828,11 +883,22 @@ mod tests {
             latest: None,
             base: Some(base.into()),
             feed: Some(Feed { manifest: m.clone(), sig }),
+            ..Default::default()
         };
         let good = app(Some(b64(&k.sign(m.as_bytes()).to_bytes())));
         assert!(offer(&good, &k.verifying_key(), "mac", "20261012090000", None).unwrap().is_some());
         assert!(offer(&app(None), &k.verifying_key(), "mac", "20261012090000", None).is_err());
         assert_eq!(offer(&ApiApp::default(), &k.verifying_key(), "mac", "20261012090000", None).unwrap(), None);
+
+        // From GitHub: What's new opens the release page; a look that failed says why instead of "up to date".
+        let gh = ApiApp { page: Some("https://github.com/acme/board/releases/tag/v99.0.0".into()), ..good.clone() };
+        let o = offer(&gh, &k.verifying_key(), "mac", "20261012090000", None).unwrap().unwrap();
+        assert_eq!(o.page, "https://github.com/acme/board/releases/tag/v99.0.0");
+        let odd = ApiApp { page: Some("javascript:alert(1)".into()), ..good.clone() };
+        assert_eq!(offer(&odd, &k.verifying_key(), "mac", "20261012090000", None).unwrap().unwrap().page, base);
+        let down = ApiApp { error: Some("GitHub didn't answer (timed out).".into()), ..Default::default() };
+        let e = offer(&down, &k.verifying_key(), "mac", "20261012090000", None).unwrap_err();
+        assert_eq!(e.to_string(), "GitHub didn't answer (timed out).");
     }
 
     #[test]
@@ -963,7 +1029,7 @@ mod tests {
         let dir = tmp("resume");
         let (got, total) = (AtomicU64::new(0), AtomicU64::new(0));
         assert!(download(&o, &dir, &got, &total, "t").is_err(), "the connection dropped");
-        let part = dir.join("Switchboard-mac.zip.partial");
+        let part = partial(&o, &dir);
         assert_eq!(std::fs::metadata(&part).unwrap().len(), 100_000, "what came is kept");
         let file = download(&o, &dir, &got, &total, "t").unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b);
@@ -983,10 +1049,29 @@ mod tests {
         let o = offer_for(&b, url);
         let dir = tmp("norange");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("Switchboard-mac.zip.partial"), &b[..5000]).unwrap();
+        std::fs::write(partial(&o, &dir), &b[..5000]).unwrap();
         let file = download(&o, &dir, &AtomicU64::new(0), &AtomicU64::new(0), "t").unwrap();
         assert_eq!(std::fs::read(&file).unwrap(), b);
         assert_eq!(seen.lock().unwrap().as_slice(), &[Some("5000".into())]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_partial_file_of_another_build_is_not_resumed() {
+        let b = body();
+        let (url, seen) = page(b.clone(), true, None);
+        let o = offer_for(&b, url);
+        let dir = tmp("otherbuild");
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut older = b[..5000].to_vec();
+        older[10] ^= 1;
+        let other = partial(&offer_for(&older, String::new()), &dir);
+        std::fs::write(&other, &older).unwrap();
+        std::fs::write(dir.join("Switchboard-mac.zip.partial"), &older).unwrap();
+        let file = download(&o, &dir, &AtomicU64::new(0), &AtomicU64::new(0), "t").unwrap();
+        assert_eq!(std::fs::read(&file).unwrap(), b);
+        assert_eq!(seen.lock().unwrap().as_slice(), &[None], "started from the first byte");
+        assert!(!other.exists() && !dir.join("Switchboard-mac.zip.partial").exists(), "the old partial files are gone");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -999,15 +1084,15 @@ mod tests {
         let o = offer_for(&b, url);
         let dir = tmp("tampered");
         let err = download(&o, &dir, &AtomicU64::new(0), &AtomicU64::new(0), "t").unwrap_err();
-        assert!(err.to_string().contains("did not match"), "{err}");
-        assert!(!dir.join("Switchboard-mac.zip").exists() && !dir.join("Switchboard-mac.zip.partial").exists());
+        assert!(err.to_string().contains("didn't match"), "{err}");
+        assert!(!dir.join("Switchboard-mac.zip").exists() && !partial(&o, &dir).exists());
 
         // A partial file whose start was changed is caught at the end too.
         let (url, _) = page(b.clone(), true, None);
         let o = offer_for(&b, url);
-        std::fs::write(dir.join("Switchboard-mac.zip.partial"), vec![0u8; 1000]).unwrap();
+        std::fs::write(partial(&o, &dir), vec![0u8; 1000]).unwrap();
         assert!(download(&o, &dir, &AtomicU64::new(0), &AtomicU64::new(0), "t").is_err());
-        assert!(!dir.join("Switchboard-mac.zip.partial").exists());
+        assert!(!partial(&o, &dir).exists());
         // A longer file than the list says is refused as it comes in.
         let mut long = b.clone();
         long.extend_from_slice(b"more");
@@ -1086,6 +1171,30 @@ mod tests {
 
             // An update never touches the settings or first-run choices.
             assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"theme": "dark", "first_run": "done"}"#);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn a_swap_that_fails_keeps_the_copy_an_earlier_update_left() {
+        for kind in [Kind::Bundle, Kind::Exe, Kind::Bin] {
+            let root = tmp(&format!("swap-fails-{kind:?}"));
+            std::fs::create_dir_all(&root).unwrap();
+            let target = root.join(if kind == Kind::Bundle { "Switchboard.app" } else { "Switchboard" });
+            let old = old_path(kind, &target);
+            app_at(kind, &target, "current");
+            app_at(kind, &old, "earlier");
+            // The new build is not there, so the swap can't finish.
+            assert!(put_in(kind, &root.join("missing"), &target, &old).is_err(), "{kind:?}");
+            assert_eq!(says(kind, &target), "current", "{kind:?}: the app is untouched");
+            assert_eq!(says(kind, &old), "earlier", "{kind:?}: the earlier copy is still there");
+
+            let new = root.join("new");
+            app_at(kind, &new, "new");
+            put_in(kind, &new, &target, &old).unwrap();
+            assert_eq!(says(kind, &target), "new", "{kind:?}");
+            assert_eq!(says(kind, &old), "current", "{kind:?}: the copy kept is the build just replaced");
+            assert!(root.read_dir().unwrap().flatten().all(|e| !e.file_name().to_string_lossy().ends_with(".prev")));
             let _ = std::fs::remove_dir_all(&root);
         }
     }

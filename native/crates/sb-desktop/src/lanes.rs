@@ -94,10 +94,41 @@ impl BoardView {
         let t = c.t;
         let app = c.app;
         if app.snap.machines.is_empty() {
-            // No server to show: the first run (nothing saved, nothing on the network) or a saved address that does
-            // not answer. Both take a typed address (firstrun.rs).
+            // No server to show (firstrun.rs): the first run searches the local network; a saved address that does
+            // not answer takes a typed one or a search; a server that was just picked is being connected to.
+            if self.find_shot || app.core.needs_server() {
+                return self.server_screen(c, true, "");
+            }
             if let Some(e) = &app.error {
-                return self.server_screen(c, app.core.needs_server(), e);
+                return self.server_screen(c, false, e);
+            }
+            if !app.live
+                && let Some(f) = &self.joining
+            {
+                return self.joining_screen(c, f);
+            }
+            if app.live {
+                // Connected, and the server has no machines yet (a server just set up here).
+                let add = ui::setup_btn(&t, "board-add-machine", "Add a machine")
+                    .on_click(|_: &ClickEvent, _, cx| crate::files::open_pair(cx));
+                return div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .items_center()
+                    .justify_center()
+                    .gap(px(16.))
+                    .px(px(16.))
+                    .child(ui::mark(&t, 28.))
+                    .child(div().w_full().max_w(px(540.)).child(ui::setup_card(
+                        &t,
+                        "plus",
+                        "No machines yet",
+                        "Switchboard is running. Add the computers where Claude Code runs, this one too, and their \
+                         chats show up here.",
+                        Some(add.into_any_element()),
+                    )))
+                    .into_any_element();
             }
             let (title, sub) = (
                 "Connecting to Switchboard".to_string(),
@@ -347,7 +378,7 @@ impl BoardView {
             format!("{n} chats are open but not in use.")
         };
         let rest = format!(
-            "{}Stopping one frees its memory; you can resume it later.",
+            "{}Stopping one frees its memory, and you can resume it later.",
             if mb > 0. {
                 format!("{} {}. ", if n == 1 { "It holds" } else { "Together they hold" }, fmt::mem(mb))
             } else {
@@ -613,7 +644,7 @@ impl BoardView {
         let mem = m
             .and_then(|m| m.mem.as_ref())
             .filter(|x| x.claude_mb > 0.)
-            .map(|x| format!("{} in use", fmt::mem(x.claude_mb)));
+            .map(|x| format!("Claude {}", fmt::mem(x.claude_mb)));
         let can = m.and_then(|m| m.can.clone()).filter(|x| !x.is_empty());
         let (m1, m2, m3) = (machine.to_string(), machine.to_string(), machine.to_string());
         div()

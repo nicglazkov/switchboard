@@ -3,6 +3,7 @@
 //! a later one answers the earlier ones get only a short grace, so a LAN probe hanging away from home costs nothing.
 //! Nothing is built in: with no saved address the server is looked for on the local network (discover.rs).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -73,6 +74,10 @@ pub enum CoreError {
     /// Nothing was done: the chat still has work running that this would cut off (subagents, background commands,
     /// a reply). Ask, then send again with `when` "idle" (queued until they finish) or "now".
     Busy { message: String, busy: Vec<BusyInfo> },
+    /// Nothing was done: the chat would start in a folder Claude was never let into (the server's 409 with need
+    /// "trust"). Ask, naming the folder, then send the same request again with `trust: true`. `declined`: the user
+    /// once said no to it in Claude's own prompt.
+    Trust { message: String, folder_shown: String, declined: bool },
 }
 
 /// What is still running in one chat (the server's need "busy" answer).
@@ -106,12 +111,13 @@ impl std::fmt::Display for CoreError {
             CoreError::Unreachable => {
                 write!(
                     f,
-                    "Switchboard is not reachable. Check that the computer that runs Switchboard is on and that this one can reach it."
+                    "Can't reach Switchboard. Check that the computer running it is on and that this one can reach it."
                 )
             }
             CoreError::Server { message, .. } => write!(f, "{message}"),
             CoreError::Bad(m) => write!(f, "{m}"),
             CoreError::Busy { message, .. } => write!(f, "{message}"),
+            CoreError::Trust { message, .. } => write!(f, "{message}"),
         }
     }
 }
@@ -182,7 +188,12 @@ pub struct Resolver {
     grace: Duration,
     probe: Probe,
     discover: Option<Discover>,
+    /// Off while the desktop app runs its own search on the empty board, where the user picks among the servers.
+    discover_on: AtomicBool,
     cached: Mutex<Option<(String, Instant)>>,
+    /// Counts changes to the addresses (and forgetting the answer), so a lookup that started before one does not
+    /// cache its answer. Lookups of the same addresses may all cache theirs: each one is good.
+    generation: AtomicU64,
     /// What each probe found (address, answered), newest last, until `take_outcomes`. Probes still running when the
     /// race is decided add theirs when they finish.
     outcomes: Arc<Mutex<Vec<(String, bool)>>>,
@@ -199,7 +210,9 @@ impl Resolver {
             grace: Duration::from_millis(400),
             probe,
             discover: None,
+            discover_on: AtomicBool::new(true),
             cached: Mutex::new(None),
+            generation: AtomicU64::new(0),
             outcomes: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -207,6 +220,11 @@ impl Resolver {
     pub fn with_discovery(mut self, discover: Discover) -> Resolver {
         self.discover = Some(discover);
         self
+    }
+
+    /// Whether a lookup with no saved address searches the local network itself.
+    pub fn set_discovery(&self, on: bool) {
+        self.discover_on.store(on, Ordering::SeqCst);
     }
 
     /// The saved addresses, in order of preference.
@@ -221,6 +239,7 @@ impl Resolver {
         if let Ok(mut c) = self.candidates.lock() {
             *c = candidates;
         }
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if !keep {
             self.invalidate();
         }
@@ -237,8 +256,10 @@ impl Resolver {
         {
             return Some(url.clone());
         }
+        let generation = self.generation.load(Ordering::SeqCst);
         let mut candidates = self.candidates();
         if candidates.is_empty()
+            && self.discover_on.load(Ordering::SeqCst)
             && let Some(d) = &self.discover
         {
             candidates = d();
@@ -254,7 +275,9 @@ impl Resolver {
             ok
         });
         let found = first_preferred(&candidates, self.grace, noted);
-        if let Ok(mut c) = self.cached.lock() {
+        if let Ok(mut c) = self.cached.lock()
+            && self.generation.load(Ordering::SeqCst) == generation
+        {
             *c = found.clone().map(|u| (u, Instant::now()));
         }
         found
@@ -266,6 +289,7 @@ impl Resolver {
     }
 
     pub fn invalidate(&self) {
+        self.generation.fetch_add(1, Ordering::SeqCst);
         if let Ok(mut c) = self.cached.lock() {
             *c = None;
         }
@@ -300,6 +324,9 @@ pub struct NewRequest {
     /// sent when None, for older servers.
     #[serde(skip_serializing_if = "Tools::is_none")]
     pub tools: Tools,
+    /// The user said yes to Claude working in this folder (after a need "trust"). Sent only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub trust: bool,
 }
 
 /// The tools a new chat asks for.
@@ -340,6 +367,9 @@ pub struct ContinueRequest {
     /// "idle" or "now", once the user has answered a need "busy".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub when: Option<String>,
+    /// The user said yes to Claude working in the folder (after a need "trust"). Sent only when true.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub trust: bool,
 }
 
 #[derive(Serialize)]
@@ -394,6 +424,36 @@ pub struct Client {
 
 /// The server ends a live stream after ten minutes; past this, a silent one counts as gone.
 const STREAM_FOR: Duration = Duration::from_secs(660);
+/// The server sends a beat every 15 seconds; a live stream silent for this long is a dead link (a sleep or a network
+/// change can leave one open with nothing on the other end), so it is dropped and opened again.
+const STREAM_IDLE: Duration = Duration::from_secs(45);
+
+thread_local! {
+    /// Set when a POST failed after it may have reached the server, so `with_base` does not send it a second time.
+    static MAYBE_SENT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Whether a request failed before any of it reached the server: the name did not resolve, nothing answered the
+/// connect, or the connect timed out. Only then is a POST safe to send again (a second /api/new starts a second chat).
+fn before_send(e: &ureq::Error) -> bool {
+    use std::io::ErrorKind as K;
+    match e {
+        ureq::Error::HostNotFound | ureq::Error::ConnectionFailed => true,
+        ureq::Error::Timeout(t) => matches!(t, ureq::Timeout::Resolve | ureq::Timeout::Connect),
+        ureq::Error::Io(e) => {
+            matches!(e.kind(), K::ConnectionRefused | K::AddrNotAvailable | K::NetworkUnreachable | K::HostUnreachable)
+        }
+        _ => false,
+    }
+}
+
+/// A POST that failed: `Unreachable`, noted as maybe done unless it failed before anything was sent.
+fn post_failed(e: Option<&ureq::Error>) -> CoreError {
+    if !e.is_some_and(before_send) {
+        MAYBE_SENT.with(|m| m.set(true));
+    }
+    CoreError::Unreachable
+}
 
 fn agent(timeout: Duration, user_agent: &str) -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
@@ -416,6 +476,16 @@ pub fn http_probe(user_agent: String) -> Probe {
             _ => false,
         }
     })
+}
+
+/// The summary of the server at `base`, when a real Switchboard server answers there.
+pub fn summary_at(base: &str, user_agent: &str) -> Option<ApiSummary> {
+    let a = agent(probe_timeout(base), user_agent);
+    let mut r = a.get(&format!("{base}/api/summary")).header("X-Switchboard", "1").call().ok()?;
+    if r.status().as_u16() != 200 {
+        return None;
+    }
+    r.body_mut().read_json::<ApiSummary>().ok().filter(|s| s.looks_real())
 }
 
 impl Client {
@@ -452,12 +522,17 @@ impl Client {
         &self.resolver
     }
 
-    /// Runs `f` against the resolved server; on a dropped connection it looks for the server again once.
+    /// Runs `f` against the resolved server; on a dropped connection it looks for the server again once. A POST that
+    /// may have reached the server is not sent again, so a timeout never runs an action twice.
     fn with_base<T>(&self, f: impl Fn(&str) -> Result<T, CoreError>) -> Result<T, CoreError> {
         let base = self.resolver.resolve().ok_or(CoreError::Unreachable)?;
+        MAYBE_SENT.with(|m| m.set(false));
         match f(&base) {
             Err(CoreError::Unreachable) => {
                 self.resolver.invalidate();
+                if MAYBE_SENT.with(|m| m.replace(false)) {
+                    return Err(CoreError::Unreachable);
+                }
                 let again = self.resolver.resolve().ok_or(CoreError::Unreachable)?;
                 f(&again)
             }
@@ -488,9 +563,9 @@ impl Client {
             .header("X-Switchboard", "1")
             .header("Content-Type", "application/json")
             .send_json(body)
-            .map_err(|_| CoreError::Unreachable)?;
+            .map_err(|e| post_failed(Some(&e)))?;
         let status = r.status().as_u16();
-        let out = r.body_mut().read_to_vec().map_err(|_| CoreError::Unreachable)?;
+        let out = r.body_mut().read_to_vec().map_err(|_| post_failed(None))?;
         Ok((status, out))
     }
 
@@ -715,14 +790,14 @@ impl Client {
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", &data.len().to_string())
                 .send(ureq::SendBody::from_reader(&mut reader))
-                .map_err(|_| CoreError::Unreachable)?;
+                .map_err(|e| post_failed(Some(&e)))?;
             let status = r.status().as_u16();
-            let out = r.body_mut().read_to_vec().map_err(|_| CoreError::Unreachable)?;
+            let out = r.body_mut().read_to_vec().map_err(|_| post_failed(None))?;
             check(status, &out)?;
             let u: crate::api::ApiUpload =
                 serde_json::from_slice(&out).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
             if u.path.is_empty() {
-                return Err(CoreError::Bad("The machine did not say where it put the file.".into()));
+                return Err(CoreError::Bad("The machine didn't say where it put the file.".into()));
             }
             Ok(u)
         })
@@ -798,6 +873,11 @@ impl Client {
         self.get_json("/api/prefs")
     }
 
+    /// GET /api/models: the models the machines' Claude Code takes (an older server answers 404).
+    pub fn models(&self) -> Result<Vec<crate::api::ApiModel>, CoreError> {
+        self.get_json::<crate::api::ApiModels>("/api/models").map(|m| m.models)
+    }
+
     /// v2: POST /api/prefs with only the fields that change (chrome_machine, presets, last).
     /// POST /api/chrome: one chat's own Chrome machine, or None to clear it.
     pub fn set_chrome(&self, machine: &str, sid: &str, chrome_machine: Option<&str>) -> Result<(), CoreError> {
@@ -837,6 +917,28 @@ impl Client {
             p.push_str(&format!("&name={}", enc(n)));
         }
         self.get_json(&p)
+    }
+
+    /// GET /api/places/<machine>: the browser's sidebar and where New can go.
+    pub fn places(&self, machine: &str) -> Result<crate::api::ApiPlaces, CoreError> {
+        self.get_json(&format!("/api/places/{}", enc(machine)))
+    }
+
+    /// GET /api/folder_check/<machine>?folder=: may Claude work there yet.
+    pub fn folder_check(&self, machine: &str, folder: &str) -> Result<crate::api::ApiFolderCheck, CoreError> {
+        self.get_json(&format!("/api/folder_check/{}?folder={}", enc(machine), enc(folder)))
+    }
+
+    /// POST /api/privacy_settings {machine}: opens Files and Folders in System Settings on that Mac's own screen.
+    /// True when it opened.
+    pub fn privacy_settings(&self, machine: &str) -> Result<bool, CoreError> {
+        let body = serde_json::json!({ "machine": machine });
+        self.with_base(|base| {
+            let raw = self.post_json(base, "/api/privacy_settings", &body)?;
+            let v: serde_json::Value =
+                serde_json::from_slice(&raw).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
+            Ok(v.get("opened").and_then(|o| o.as_bool()).unwrap_or(true))
+        })
     }
 
     /// v2: POST /api/pair, Add a machine.
@@ -890,10 +992,15 @@ impl Client {
 
     /// v2: GET /api/stream, the server's live updates. `seen` hears the version on connect and on every change;
     /// this returns when the stream ends (the server closes it every ten minutes), drops, or `seen` says stop.
-    pub fn stream(&self, mut seen: impl FnMut(u64) -> bool) -> Result<(), CoreError> {
+    pub fn stream(&self, seen: impl FnMut(u64) -> bool) -> Result<(), CoreError> {
+        self.stream_idle(STREAM_IDLE, seen)
+    }
+
+    /// `stream`, given up as a dead link once nothing came for `idle`.
+    fn stream_idle(&self, idle: Duration, mut seen: impl FnMut(u64) -> bool) -> Result<(), CoreError> {
         use std::io::BufRead;
         let base = self.resolver.resolve().ok_or(CoreError::Unreachable)?;
-        let mut r = self
+        let r = self
             .stream_agent
             .get(&format!("{base}/api/stream"))
             .header("X-Switchboard", "1")
@@ -907,8 +1014,29 @@ impl Client {
         if status != 200 {
             return Err(CoreError::Bad(format!("The live stream answered {status}.")));
         }
-        for line in std::io::BufReader::new(r.body_mut().as_reader()).lines() {
-            let line = line.map_err(|_| CoreError::Unreachable)?;
+        // A read can't time out on its own, so lines come from a thread of their own and this side stops waiting.
+        // That thread ends with the connection, at the latest when STREAM_FOR runs out.
+        let (tx, rx) = mpsc::sync_channel::<std::io::Result<String>>(16);
+        let reader = r.into_body().into_reader();
+        thread::Builder::new()
+            .name("sb-live-read".into())
+            .spawn(move || {
+                for line in std::io::BufReader::new(reader).lines() {
+                    if tx.send(line).is_err() {
+                        break;
+                    }
+                }
+            })
+            .map_err(|_| CoreError::Unreachable)?;
+        loop {
+            let line = match rx.recv_timeout(idle) {
+                Ok(line) => line.map_err(|_| CoreError::Unreachable)?,
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.resolver.invalidate();
+                    return Err(CoreError::Unreachable);
+                }
+            };
             if let Some(data) = line.strip_prefix("data:") {
                 let v = serde_json::from_str::<serde_json::Value>(data.trim())
                     .ok()
@@ -982,7 +1110,7 @@ fn parse_reply(raw: &[u8]) -> Result<ApiPostReply, CoreError> {
 
 /// Turns a non-2xx status or `{ok: false}` into the server's own message.
 fn check(status: u16, body: &[u8]) -> Result<(), CoreError> {
-    if let Some(e) = busy_of(body) {
+    if let Some(e) = busy_of(body).or_else(|| trust_of(body)) {
         return Err(e);
     }
     let reply: Option<ApiPostReply> = serde_json::from_slice(body).ok();
@@ -1007,6 +1135,25 @@ fn busy_of(body: &[u8]) -> Option<CoreError> {
     };
     let message = v.get("error").and_then(|e| e.as_str()).unwrap_or("This chat still has work running.").to_string();
     Some(CoreError::Busy { message, busy })
+}
+
+/// A need "trust" answer (a 409): the folder to ask about, and whether the user once said no to it.
+fn trust_of(body: &[u8]) -> Option<CoreError> {
+    let v: serde_json::Value = serde_json::from_slice(body).ok()?;
+    if v.get("need").and_then(|n| n.as_str()) != Some("trust") {
+        return None;
+    }
+    let folder_shown = v.get("folder_shown").and_then(|f| f.as_str()).unwrap_or("").to_string();
+    let message = v
+        .get("error")
+        .and_then(|e| e.as_str())
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("Claude hasn't worked in {folder_shown} yet."));
+    Some(CoreError::Trust {
+        message,
+        folder_shown,
+        declined: v.get("declined").and_then(|d| d.as_bool()) == Some(true),
+    })
 }
 
 /// A body reader that counts what has been read (sent).
@@ -1170,6 +1317,109 @@ mod tests {
     }
 
     #[test]
+    fn a_lookup_that_finishes_late_keeps_the_newer_answer() {
+        let p: Probe = Arc::new(|b: &str| {
+            if b == "old" {
+                thread::sleep(Duration::from_millis(300));
+            }
+            true
+        });
+        let r = Arc::new(Resolver::new(c(&["old"]), Duration::from_secs(60), p));
+        let r2 = r.clone();
+        let slow = thread::spawn(move || r2.resolve());
+        thread::sleep(Duration::from_millis(50));
+        r.set_candidates(c(&["new"]));
+        assert_eq!(r.resolve().as_deref(), Some("new"));
+        assert_eq!(slow.join().unwrap().as_deref(), Some("old"), "its own caller still hears it");
+        assert_eq!(r.current().as_deref(), Some("new"), "the older lookup did not replace the newer answer");
+    }
+
+    #[test]
+    fn two_lookups_of_the_same_addresses_both_cache() {
+        let p: Probe = Arc::new(|_: &str| {
+            thread::sleep(Duration::from_millis(300));
+            true
+        });
+        let r = Arc::new(Resolver::new(c(&["a"]), Duration::from_secs(60), p));
+        let (r1, r2) = (r.clone(), r.clone());
+        let first = thread::spawn(move || r1.resolve());
+        thread::sleep(Duration::from_millis(150));
+        let second = thread::spawn(move || r2.resolve());
+        assert_eq!(first.join().unwrap().as_deref(), Some("a"));
+        assert_eq!(r.current().as_deref(), Some("a"), "the first one cached, though another had started since");
+        assert_eq!(second.join().unwrap().as_deref(), Some("a"));
+        assert_eq!(r.current().as_deref(), Some("a"));
+    }
+
+    /// A server that reads each request and hangs up without an answer. Counts the requests.
+    fn hangs_up() -> (String, Arc<AtomicUsize>) {
+        use std::io::{BufRead, Read};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let n = Arc::new(AtomicUsize::new(0));
+        let k = n.clone();
+        thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(s) = s else { continue };
+                k.fetch_add(1, Ordering::SeqCst);
+                let mut r = std::io::BufReader::new(s);
+                let mut len = 0;
+                loop {
+                    let mut line = String::new();
+                    if r.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                    if let Some(v) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap_or(0);
+                    }
+                }
+                let _ = r.read_exact(&mut vec![0u8; len]);
+            }
+        });
+        (base, n)
+    }
+
+    fn client_at(base: &str) -> Client {
+        let r = Resolver::new(vec![base.to_string()], Duration::from_secs(60), Arc::new(|_: &str| true));
+        Client::with_resolver(r, "t")
+    }
+
+    #[test]
+    fn a_post_that_may_have_arrived_is_not_sent_again() {
+        let (base, n) = hangs_up();
+        let client = client_at(&base);
+        assert!(matches!(client.new_session(&NewRequest::default()), Err(CoreError::Unreachable)));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "one new chat, not two");
+        assert_eq!(client.summary().err(), Some(CoreError::Unreachable));
+        assert_eq!(n.load(Ordering::SeqCst), 3, "a GET is still asked again");
+    }
+
+    #[test]
+    fn a_silent_live_stream_is_dropped() {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        thread::spawn(move || {
+            let Ok((mut s, _)) = l.accept() else { return };
+            let _ = s.read(&mut [0u8; 4096]);
+            let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
+            let _ = s.write_all(format!("{head}event: hello\ndata: {{\"v\": 7}}\n\n").as_bytes());
+            // Then nothing, and the connection stays open: a link that died without a word.
+            thread::sleep(Duration::from_secs(5));
+        });
+        let client = client_at(&base);
+        let mut heard = Vec::new();
+        let t = Instant::now();
+        let res = client.stream_idle(Duration::from_millis(300), |v| {
+            heard.push(v);
+            true
+        });
+        assert_eq!(res, Err(CoreError::Unreachable), "given up, so the caller opens it again");
+        assert_eq!(heard, vec![7]);
+        assert!(t.elapsed() < Duration::from_secs(3), "waited {:?}", t.elapsed());
+    }
+
+    #[test]
     fn typed_addresses_become_base_urls() {
         assert_eq!(normalize_base("192.0.2.10").as_deref(), Some("http://192.0.2.10:8130"));
         assert_eq!(normalize_base(" 192.0.2.10:8130/ ").as_deref(), Some("http://192.0.2.10:8130"));
@@ -1217,5 +1467,49 @@ mod tests {
         // Pick with nothing picked still says so to a server that knows Auto.
         r.tools = Tools::Pick(vec![]);
         assert_eq!(serde_json::to_value(&r).unwrap()["tools"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_folder_claude_was_never_let_into_is_its_own_error() {
+        let body = br#"{"ok": false, "error": "Claude has not worked in ~/Documents/site yet. Allow it to start a chat there.",
+            "need": "trust", "folder_shown": "~/Documents/site", "declined": false}"#;
+        match check(409, body) {
+            Err(CoreError::Trust { message, folder_shown, declined }) => {
+                assert_eq!(folder_shown, "~/Documents/site");
+                assert!(!declined);
+                assert!(message.starts_with("Claude has not worked in"));
+            }
+            other => panic!("expected Trust, got {other:?}"),
+        }
+        let said_no = br#"{"ok": false, "error": "You said no", "need": "trust", "folder_shown": "@Data/work", "declined": true}"#;
+        assert!(matches!(check(409, said_no), Err(CoreError::Trust { declined: true, .. })));
+        // Only the words: still a trust question.
+        let bare = br#"{"ok": false, "need": "trust", "folder_shown": "~/x"}"#;
+        let e = check(409, bare).unwrap_err();
+        assert_eq!(e.to_string(), "Claude hasn't worked in ~/x yet.");
+        // A plain 409 (an old agent) stays a server error.
+        let old =
+            br#"{"ok": false, "error": "Update Switchboard on Studio to start chats outside its Claude folder."}"#;
+        assert!(matches!(check(409, old), Err(CoreError::Server { status: 409, .. })));
+    }
+
+    #[test]
+    fn trust_is_sent_only_once_the_user_said_yes() {
+        let mut r = NewRequest { machine: "studio".into(), folder: "~/Documents/site".into(), ..Default::default() };
+        assert!(serde_json::to_value(&r).unwrap().get("trust").is_none());
+        r.trust = true;
+        assert_eq!(serde_json::to_value(&r).unwrap()["trust"], serde_json::json!(true));
+        let mut c = ContinueRequest {
+            machine: "studio".into(),
+            sid: "s".into(),
+            to: "laptop".into(),
+            folder: "~/Documents/site".into(),
+            create: false,
+            when: None,
+            trust: false,
+        };
+        assert!(serde_json::to_value(&c).unwrap().get("trust").is_none());
+        c.trust = true;
+        assert_eq!(serde_json::to_value(&c).unwrap()["trust"], serde_json::json!(true));
     }
 }

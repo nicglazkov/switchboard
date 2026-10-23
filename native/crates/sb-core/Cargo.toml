@@ -22,6 +22,8 @@ sha2 = "=0.10.9"
 # The update list's Ed25519 signature (update.rs), and the base64 key and signature that come with it.
 ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
 base64 = "=0.22.1"
+# Picks the adapter the local network search asks out of (discover.rs): std has no IP_MULTICAST_IF.
+socket2 = "=0.6.5"
 # The terminal's screen as bytes (term/screen.rs): the hub and the desktop app share it.
 alacritty_terminal = { workspace = true, optional = true }
 

@@ -142,10 +142,23 @@ impl Platform for Mac {
     }
 
     fn eject_after_exit(&self, img: &DiskImage) -> io::Result<()> {
-        // This binary runs from the image, so a copy outside it does the work once this process is gone.
+        // This binary runs from the image, so a copy outside it does the work once this process is gone. The whole
+        // app is copied: a signed executable taken out of its bundle fails its signature check and macOS kills it.
         let exe = std::env::current_exe()?;
-        let helper = std::env::temp_dir().join(format!("sb-install-eject-{}", std::process::id()));
-        std::fs::copy(&exe, &helper)?;
+        let dir = std::env::temp_dir().join(format!("{EJECT_DIR}{}", std::process::id()));
+        let helper = match bundle_of(&exe) {
+            Some(app) => {
+                let copy = dir.join(app.file_name().unwrap_or_default());
+                run(Command::new("/usr/bin/ditto").arg(&app).arg(&copy))?;
+                copy.join(exe.strip_prefix(&app).map_err(io::Error::other)?)
+            }
+            None => {
+                std::fs::create_dir_all(&dir)?;
+                let copy = dir.join(exe.file_name().unwrap_or_default());
+                std::fs::copy(&exe, &copy)?;
+                copy
+            }
+        };
         let mut cmd = Command::new(&helper);
         cmd.arg("--eject-after").arg(std::process::id().to_string()).arg(&img.mount);
         if let Some(i) = &img.image {
@@ -196,9 +209,23 @@ pub fn eject_helper(parent: u32, mount: &Path, image: Option<&Path>) {
     if ejected && let Some(i) = image {
         trash(i);
     }
-    if let Ok(me) = std::env::current_exe() {
-        let _ = std::fs::remove_file(me);
+    // Removes the copy eject_after_exit made: only its own folder in the temp dir, nothing else.
+    if let Ok(me) = std::env::current_exe()
+        && let Some(dir) =
+            me.ancestors().find(|a| a.file_name().is_some_and(|n| n.to_string_lossy().starts_with(EJECT_DIR)))
+        && dir.parent().and_then(|p| p.canonicalize().ok()) == std::env::temp_dir().canonicalize().ok()
+    {
+        let _ = std::fs::remove_dir_all(dir);
     }
+}
+
+/// The temp folder name (plus the installer's pid) the eject helper runs from.
+const EJECT_DIR: &str = "sb-install-eject-";
+
+/// The .app bundle an executable sits in (`X.app/Contents/MacOS/exe`), if any.
+fn bundle_of(exe: &Path) -> Option<PathBuf> {
+    let app = exe.parent()?.parent()?.parent()?;
+    (app.extension()? == "app").then(|| app.to_path_buf())
 }
 
 fn login_item_path() -> PathBuf {

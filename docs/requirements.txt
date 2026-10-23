@@ -1,0 +1,3 @@
+# What the documentation site is built with (mkdocs.yml). Pinned so a build today matches one next month.
+mkdocs==1.6.1
+mkdocs-material==9.7.7

@@ -94,7 +94,7 @@ def _read_meta(tf, m):
     try:
         d = json.loads(tf.extractfile(m).read().decode('utf-8'))
     except (ValueError, UnicodeDecodeError):
-        raise ValueError(f'{m.name} is not valid JSON.')
+        raise ValueError(f'{m.name} isn\'t valid JSON.')
     if not isinstance(d, dict):
         raise ValueError(f'{m.name} must be a JSON object.')
     return d
@@ -109,7 +109,7 @@ def check_secrets(v):
     for s in v:
         name = s.get('name') if isinstance(s, dict) else s
         if not isinstance(name, str) or not SECRET_NAME_RE.fullmatch(name):
-            raise ValueError('A secret name is letters, digits and _ (like WEB_FETCH_KEY).')
+            raise ValueError('A secret name can only use letters, digits and _ (like WEB_FETCH_KEY).')
         about = s.get('about') if isinstance(s, dict) else ''
         if name not in [x['name'] for x in out]:
             out.append({'name': name, 'about': str(about or '')[:300]})
@@ -133,7 +133,7 @@ def check_bundle(data, tool=None):
                 if parts is None:
                     raise ValueError(f'{m.name[:120]!r} points outside the tool folder.')
                 if not (m.isfile() or m.isdir()):
-                    raise ValueError(f'{m.name[:120]!r} is a link or a device. A tool holds plain files only.')
+                    raise ValueError(f'{m.name[:120]!r} is a link or a device. Tools can only hold plain files.')
                 key = '/'.join(parts).lower()
                 if key in seen:
                     raise ValueError(f'{m.name[:120]!r} is in the bundle twice.')
@@ -153,7 +153,7 @@ def check_bundle(data, tool=None):
                 elif len(parts) == 3 and parts[0] == 'skills' and parts[2] == 'SKILL.md':
                     skills.add(parts[1])
     except (tarfile.TarError, EOFError, zlib.error, OSError):
-        raise ValueError('That is not a tar.gz bundle.')
+        raise ValueError("That's not a tar.gz bundle.")
     if plugin is None:
         raise ValueError('The bundle has no .claude-plugin/plugin.json.')
     name = plugin.get('name')
@@ -221,7 +221,7 @@ class Library:
     def known(self, v):
         self.tool_name(v)
         if v not in self.d['tools']:
-            raise self._err(404, f'There is no tool {v} in the library.')
+            raise self._err(404, f"There's no tool {v} in the library.")
         return v
 
     def check_tools(self, v):
@@ -320,7 +320,7 @@ class Library:
             t = self.d['tools'].get(tool)
             v = t and t.get('latest')
         if not v:
-            raise self._err(404, f'There is no tool {tool} in the library.')
+            raise self._err(404, f"There's no tool {tool} in the library.")
         data = self._bundle(tool, v).read_bytes()
         sha, step = hashlib.sha256(data).hexdigest(), self._step(name)
         with self.lock:
@@ -363,7 +363,7 @@ class Library:
         with self.lock:
             want = [t for t in self.d['machines'].get(name) or [] if t in self.d['tools']]
             latest = {t: self.d['tools'][t].get('latest') for t in want}
-        for tool, row in (st.get('tools') or {}).items():
+        for tool in list(st.get('tools') or {}):  # a copy: _drop takes each one out of this dict
             if valid_tool(tool) and tool not in want:
                 self._try(self._drop, name, tool)
         for tool in want:

@@ -7,7 +7,7 @@ from tests.test_week_history import LA, MIN, HOUR, DAY, at
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
 import budget, fleet, server  # noqa: E402
 
-RESET = at(2026, 10, 15, 9)            # Thursday 9 AM
+RESET = at(2026, 10, 19, 9)            # next Monday 9 AM: six days to share what is left
 NOW = at(2026, 10, 13, 15)             # Tuesday 3 PM
 MACH = [{'name': 'desk', 'label': 'Desk', 'target': 'me@x', 'os': 'mac'},
         {'name': 'tower', 'label': 'Tower', 'target': 'me@y', 'os': 'windows'}]
@@ -39,7 +39,7 @@ class Base(unittest.TestCase):
         self.cfg, self.state = Path(mkdtemp()), Path(mkdtemp())
         self.f = fleet.Fleet(MACH, self.m, clock=lambda: self.clock[0])
         self.app = server.App(self.f, state_dir=self.state, web_dir=self.state, clock=lambda: self.clock[0], cfg_dir=self.cfg,
-                              pusher=lambda *a: self.pushes.append(a))
+                              pusher=lambda *a: self.pushes.append(a[:3]))
         self.app._refresh_soon = lambda *a, **k: None
         self.f.history.tz = LA
         self.b = self.app.feat.budget
@@ -123,6 +123,23 @@ class StatusMathTest(Base):
         self.assertTrue(st['notice'].endswith('Mention this to them once, briefly, then carry on.'))
         self.assertIsNone(st['block'])
 
+    def test_near_the_reset_the_day_can_use_what_is_left(self):
+        # 2026-10-19: 55% of the week used, 15% of it today, the reset under a day away. 45% would go unused, so
+        # 15% is not over a 14% budget, and a 20% hard limit does not stop anything.
+        self.post(op='set', hard={'on': True, 'daily': 20})
+        reset = NOW + 20 * 3600
+        st = budget.compute(self.b.settings(), 55.0, reset, 4.0, None, 15.0, NOW, LA)
+        self.assertEqual(st['room'], 60.0)
+        self.assertEqual((st['daily'], st['hard_daily']), (60.0, 60.0))
+        self.assertFalse(st['over_budget'] or st['over_hard'])
+        self.assertIsNone(st['notice'])
+        self.assertIn('raised to use what is left before the reset', st['summary'])
+        # A day and a half away, the rest is shared over two days; early in the week the settings stand.
+        self.assertEqual(budget.room_today(55.0, 15.0, NOW + 36 * 3600, NOW), 30.0)
+        st = budget.compute(self.b.settings(), 40.0, NOW + 6 * 86400, 4.0, None, 15.0, NOW, LA)  # 75% over 6 days
+        self.assertEqual(st['daily'], 14.3)
+        self.assertTrue(st['over_daily'])
+
     def test_days_follow_switchboard_tz_not_utc(self):
         # 4 PM in LA is 11 PM UTC; the LA day started at 07:00 UTC, when the week was at 30
         self.sample(at(2026, 10, 12, 23, 45), 29)
@@ -190,14 +207,14 @@ class HardLimitTest(Base):
         self.over()
         st = self.b.status()
         self.assertTrue(st['over_hard'] and st['blocking'])
-        self.assertEqual(st['block'], 'Switchboard hard limit: today is at 22% of the week (limit 20%). Lift it for today '
+        self.assertEqual(st['block'], "Switchboard hard limit: you've used 22% of the week today (limit 20%). Lift it for today "
                                       'in Switchboard Settings, or wait until tomorrow.')
         r = self.b.after_poll()
         self.assertEqual(r['stopped'], [{'machine': 'desk', 'sid': SID1, 'title': 'Build it'}])
         self.assertEqual(sorted(n for n, q in self.m.calls if q['verb'] == 'budget_stop'), ['desk', 'tower'])
-        self.assertEqual(self.pushes, [('Hard limit hit', 'Stopped 1 chat. Today at 22% of the week.', '/?usage=1')])
+        self.assertEqual(self.pushes, [('Hard limit hit', "Stopped 1 chat. You've used 22% of the week today.", '/?usage=1')])
         ev = self.app.get('/api/budget')['events'][0]
-        self.assertEqual((ev['kind'], ev['text']), ('hard', 'Hard limit hit: Stopped 1 chat. Today at 22% of the week.'))
+        self.assertEqual((ev['kind'], ev['text']), ('hard', "Hard limit hit: Stopped 1 chat. You've used 22% of the week today."))
         self.assertIsNone(self.b.after_poll(), 'once a day')
         self.assertEqual(len([1 for n, q in self.m.calls if q['verb'] == 'budget_stop']), 2)
         self.sample(at(2026, 10, 14, 0, 30), 41)     # the next day, over again: once more
@@ -228,7 +245,7 @@ class HardLimitTest(Base):
         self.over()
         r = self.b.after_poll()
         self.assertEqual(r['stopped'], [])
-        self.assertEqual(self.pushes[0][1], 'No background chats were working. Today at 22% of the week.')
+        self.assertEqual(self.pushes[0][1], "No background chats were running. You've used 22% of the week today.")
 
 
 # ---------------------------------------------------------------- the agent
@@ -289,7 +306,7 @@ class AgentBudgetTest(unittest.TestCase):
         self.assertIsNotNone(self.sb.budget_notice_due('S2', self.sb.budget_clean(STATUS)), 'not spent on a block')
 
     def test_hard_limit_blocks_typed_prompts(self):
-        text = ('Switchboard hard limit: today is at 22% of the week (limit 20%). Lift it for today in Switchboard Settings, '
+        text = ("Switchboard hard limit: you've used 22% of the week today (limit 20%). Lift it for today in Switchboard Settings, "
                 'or wait until tomorrow.')
         self.keep(dict(STATUS, blocking=True, block=text))
         out = self.hook(self.ups())

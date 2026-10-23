@@ -11,6 +11,16 @@ macro_rules! icons {
 }
 
 static ICONS: &[(&str, &[u8])] = icons![
+    "desktop",
+    "docs",
+    "download",
+    "code",
+    "cloud",
+    "drive",
+    "image",
+    "media",
+    "fcode",
+    "fdata",
     "archive",
     "auto",
     "back",

@@ -11,7 +11,7 @@ H=$SB_SERVER_HOST
 REMOTE=${SB_REMOTE:-switchboard-hub-build}
 
 ssh -q $H "mkdir -p $REMOTE/server"
-rsync -a --delete --exclude target --exclude dist --exclude server ./native/ $H:$REMOTE/
+rsync -a --delete --exclude target --exclude dist --exclude server ./native/ ./branding.toml $H:$REMOTE/
 rsync -a server/fleet.py server/term.py server/switchboard-hub.service $H:$REMOTE/server/
 ssh -q $H "set -e; export PATH=\$HOME/.cargo/bin:\$PATH; cd ~/$REMOTE
 cargo build --release --locked -q -p sb-hub

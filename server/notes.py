@@ -82,8 +82,8 @@ def pick(machines, sm, now=None, held=lambda m, sid: False):
     if cooling:
         left, m, s = min(cooling, key=lambda x: x[0])
         k = f'{round((s.get("ctx") or 0) / 1000)}k'
-        return {'kind': 'cooling', 'tone': 'warm', 'text': f'{_title(s)} goes cold in {_left(left)}. Reply before then to keep it cheap: '
-                f'after that, the next reply re-reads all {k}.',
+        return {'kind': 'cooling', 'tone': 'warm', 'text': f'{_title(s)} goes cold in {_left(left)}. Reply soon to keep it cheap. '
+                f'After that, the next reply re-reads all {k}.',
                 'machine': m['name'], 'sid': s.get('sid')}
     week, five, proj = sm.get('seven_day'), sm.get('five_hour'), sm.get('week_projected')
     reset, five_reset = sm.get('seven_day_reset'), sm.get('five_hour_reset')
@@ -92,26 +92,25 @@ def pick(machines, sm, now=None, held=lambda m, sid: False):
     age = now - seen if isinstance(seen, (int, float)) and seen > 0 else None
     old = age is not None and age > OLD_LIMITS
     if week is not None and reset and reset <= now:
-        return {'kind': 'pace', 'tone': 'ok', 'text': 'The week has reset since the last numbers. New ones show up after '
-                'any session sends a message.'}
-    aged = (lambda text: f'{text} (From numbers {_left(age)} old: they update when a session replies.)') if old else (lambda text: text)
+        return {'kind': 'pace', 'tone': 'ok', 'text': "Your week has reset. You'll see new numbers once a chat replies."}
+    aged = (lambda text: f'{text} (Updated {_left(age)} ago.)') if old else (lambda text: text)
     # 3. Usage is climbing much faster than this week's usual.
     rate = _week_rate(sm, now)
     if rate and rate[0] >= BURN_MIN and rate[0] >= BURN_TIMES * rate[1]:
-        return {'kind': 'burn', 'tone': 'warn', 'text': aged(f'{round(rate[0])}% of the week went in the last hour, '
+        return {'kind': 'burn', 'tone': 'warn', 'text': aged(f'You used {round(rate[0])}% of the week in the last hour, '
                 f'about {round(rate[0] / max(rate[1], 0.1))} times your usual pace.')}
     # 4. The plan: the 5-hour window nearly full, or the week on pace to run out.
     if five is not None and five >= 80 and five_reset and five_reset > now:
         return {'kind': 'five', 'tone': 'bad' if five >= 95 else 'warn',
-                'text': aged(f'The 5-hour window is at {round(five)}%. It resets in {_left(five_reset - now)}.')}
+                'text': aged(f'Your 5-hour window is at {round(five)}%. It frees up in {_left(five_reset - now)}.')}
     if proj is not None and proj > 100 and reset and reset > now:
-        return {'kind': 'week', 'tone': 'bad', 'text': aged(f'On pace to use the whole week {_left(reset - now)} before it resets. '
-                'Lighter sessions stretch it.')}
+        return {'kind': 'week', 'tone': 'bad', 'text': aged(f"At this rate you'll run out {_left(reset - now)} before the week resets. "
+                'Lighter chats make it last.')}
     if proj is not None and proj > 85:
-        return {'kind': 'week', 'tone': 'warn', 'text': aged(f'On pace for {proj}% of the week by reset. Leaves little room for long runs.')}
+        return {'kind': 'week', 'tone': 'warn', 'text': aged(f"At this rate you'll end the week around {proj}%, so there's not much room for long runs.")}
     # 5. Plain pace, or nothing.
     if week is None:
-        return {'kind': 'pace', 'tone': 'ok', 'text': 'Usage shows up after any session sends a message.'}
+        return {'kind': 'pace', 'tone': 'ok', 'text': 'Usage shows up once a chat replies.'}
     if proj is not None:
-        return {'kind': 'pace', 'tone': 'ok', 'text': aged(f'On pace for {proj}% of the week by reset.' + (' Plenty of room.' if proj <= 60 else ''))}
+        return {'kind': 'pace', 'tone': 'ok', 'text': aged(f"At this rate you'll end the week around {proj}%." + (' Plenty of room.' if proj <= 60 else ''))}
     return None

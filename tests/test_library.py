@@ -729,6 +729,16 @@ class ServerLibraryTest(unittest.TestCase):
         self.lib.after_poll()
         self.assertIsNone(self.install_of('lap', 'alpha'))
 
+    def test_one_catch_up_drops_every_tool_it_should(self):
+        for t in ('alpha', 'beta', 'gamma'):
+            self.publish(make_plugin(self.tmp / t, t), t)
+            self.app.post('/api/library/connect', {'tool': t, 'machine': 'lap', 'on': True})
+        self.assertEqual([self.install_of('lap', t) for t in ('alpha', 'beta', 'gamma')], [1, 1, 1])
+        self.lib.d['machines']['lap'] = []  # all three disconnected while away
+        self.lib.states['lap']['at'] = 0
+        self.lib.after_poll()
+        self.assertEqual([self.install_of('lap', t) for t in ('alpha', 'beta', 'gamma')], [None, None, None])
+
     def test_the_store_survives_a_restart(self):
         self.publish(make_plugin(self.tmp / 'a', 'alpha'), 'alpha')
         self.app.post('/api/library/defaults', {'tool': 'alpha', 'on': True})

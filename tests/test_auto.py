@@ -57,7 +57,7 @@ class Rules(unittest.TestCase):
     def test_a_need_nobody_has_says_so(self):
         name, _, why = self.pick('Fix the iOS app', cands=[('tower', 'Tower', PC)])
         self.assertEqual(name, 'tower')
-        self.assertEqual(why, 'No online machine has Xcode; this one has the most free memory.')
+        self.assertEqual(why, 'No online machine has Xcode. This one has the most free memory.')
 
     def test_words_inside_other_words_do_not_count(self):
         self.assertEqual(self.pick('Restrain the logging, it is too verbose')[0], 'tower')  # "train" inside "Restrain"
@@ -99,7 +99,7 @@ class Fake:
             return {'ok': True, 'caps': self.caps[name]} if self.caps.get(name) else {'ok': False, 'error': "unknown verb 'caps'"}
         if v == 'ask':
             if not self.ask_ok:
-                return {'ok': False, 'error': 'Claude did not answer: claude -p failed rc=1'}
+                return {'ok': False, 'error': "Claude didn't answer: claude -p failed rc=1"}
             return {'ok': True, 'text': 'Here you go:\n' + json.dumps(self.answer), 'ms': 2100}
         if v == 'start':
             return {'ok': True, 'job': '0123456789ab'}
@@ -121,7 +121,7 @@ class AutoServer(unittest.TestCase):
             (self.cfg / 'caps.json').write_text(json.dumps({n: True for n in on}))
         self.pushes = []
         app = server.App(fleet.Fleet(MACH, self.f), state_dir=self.state, web_dir=self.state, sleep=lambda s: None, poll_every=0,
-                         retry_waits=(0, 0), cfg_dir=self.cfg, pusher=lambda *a: self.pushes.append(a))
+                         retry_waits=(0, 0), cfg_dir=self.cfg, pusher=lambda *a: self.pushes.append(a[:3]))
         app._refresh_soon = lambda *a, **k: None
         app.post('/api/prefs', {'ai_auto_machine': True})  # Claude picks are opt-in; these tests cover them
         app.fleet.poll()
@@ -244,7 +244,7 @@ class AutoServer(unittest.TestCase):
         app.fleet.poll()
         r = app.post('/api/route', {'prompt': 'pytorch training', 'rules': True})
         self.assertEqual(r['machine'], 'desk')
-        self.assertEqual(r['why'], 'No online machine has CUDA; this one has the most free memory.')
+        self.assertEqual(r['why'], 'No online machine has CUDA. This one has the most free memory.')
 
     def test_new_session_on_auto(self):
         app = self.make()
@@ -393,7 +393,7 @@ class Ask(unittest.TestCase):
         try:
             with self.assertRaises(sb.RpcError) as e:
                 sb.rpc_ask({'prompt': 'p', 'system': 's'}, time.time(), mac=True)
-            self.assertIn('Claude did not answer', str(e.exception))
+            self.assertIn("Claude didn't answer", str(e.exception))
         finally:
             stop.set()
         sb.ASK_WAIT = 0.3  # nobody answering

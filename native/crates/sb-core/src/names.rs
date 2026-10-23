@@ -171,7 +171,7 @@ pub fn topic_from(msg: &str, folder: &str) -> String {
     if !folder.is_empty() {
         return crate::fmt::last_seg(folder);
     }
-    "New session".into()
+    "New chat".into()
 }
 
 pub fn fresh(topic: &str, n: u32) -> String {
@@ -305,7 +305,7 @@ mod tests {
         assert_eq!(created("Fix the login bug", "ultracode"), "Fix the login bug (UltraCode)");
         assert_eq!(topic_from("fix the login bug in the app for", ""), "Fix the login bug in the app");
         assert_eq!(topic_from("  ", "Developer/notebook-cli"), "notebook-cli");
-        assert_eq!(topic_from("", ""), "New session");
+        assert_eq!(topic_from("", ""), "New chat");
         assert_eq!(topic_from("what's up? :) ok", ""), "What's up ok");
     }
 }

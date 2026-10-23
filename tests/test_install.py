@@ -49,6 +49,14 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(self.settings.read_text(), before)
         self.assertFalse((self.home / '.claude' / 'agents').exists())
 
+    def test_uninstall_on_windows_removes_the_launcher_task(self):
+        from unittest import mock
+        ran = []
+        with mock.patch.object(self.sb, 'IS_WIN', True), \
+                mock.patch.object(self.sb.subprocess, 'run', lambda cmd, **k: ran.append(cmd)):
+            self.sb.uninstall(home=self.home)
+        self.assertIn(['schtasks', '/delete', '/tn', 'SwitchboardLaunch', '/f'], ran)
+
     def test_uninstall_restores_statusline_and_removes_hooks(self):
         sb_options(self.sb, **SETUP_ON)
         self.sb.install(home=self.home); self.sb.uninstall(home=self.home)

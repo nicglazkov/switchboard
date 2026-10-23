@@ -92,15 +92,16 @@ impl Saved {
         self.servers.insert(0, url);
     }
 
-    /// The user's Remove: gone, typed or learned. A learned one is not learned again until the user types it.
+    /// The user's Remove: gone, typed or learned. Neither is learned again until the user types it (the server may
+    /// list a typed one too).
     pub fn remove(&mut self, url: &str) -> bool {
         let Some(i) = self.find(url) else { return false };
         let u = self.servers.remove(i);
-        if self.server_notes.remove(&u).is_some_and(|n| n.learned) {
-            self.server_hidden.push(u);
-            let over = self.server_hidden.len().saturating_sub(HIDDEN_MAX);
-            self.server_hidden.drain(..over);
-        }
+        self.server_notes.remove(&u);
+        self.server_hidden.retain(|h| key(h) != key(&u));
+        self.server_hidden.push(u);
+        let over = self.server_hidden.len().saturating_sub(HIDDEN_MAX);
+        self.server_hidden.drain(..over);
         true
     }
 
@@ -433,6 +434,21 @@ mod tests {
         s.add_typed("http://studio.local:8130");
         assert_eq!(s.servers[0], "http://studio.local:8130");
         assert!(!s.is_learned("http://studio.local:8130"));
+        assert_eq!(s.server_hidden, vec!["http://192.0.2.20:8130".to_string()]);
+    }
+
+    #[test]
+    fn a_removed_typed_address_is_not_learned_again() {
+        let mut s = typed(&["http://192.0.2.10:8130"]);
+        s.learn(&home(), 0.0);
+        assert!(!s.is_learned("http://192.0.2.10:8130"), "the server lists it, but the user typed it");
+        assert!(s.remove("http://192.0.2.10:8130"));
+        s.learn(&home(), NOTE_EVERY * 2.0);
+        assert!(s.find("http://192.0.2.10:8130").is_none(), "the server's list does not bring it back");
+        assert!(!s.worked("http://192.0.2.10:8130", NOTE_EVERY * 3.0));
+        assert!(s.find("http://192.0.2.10:8130").is_none(), "nor does a connect to it");
+        s.add_typed("http://192.0.2.10:8130");
+        assert_eq!(s.servers[0], "http://192.0.2.10:8130");
         assert!(s.server_hidden.is_empty());
     }
 

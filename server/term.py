@@ -146,7 +146,7 @@ class Terms:
         if snap.get('online') is False:
             return self._need('offline', f"{label} is offline, so its terminal can't open. Try again once {label} is back.", about)
         if s is None and bg is None:
-            raise NotFound('That chat is not on the list any more.')
+            raise NotFound("That chat isn't on the list anymore.")
         if bg is None:
             kind, status = s.get('kind'), s.get('status')
             if kind == 'background' and s.get('bg_id') and status not in GONE:
@@ -154,9 +154,9 @@ class Terms:
             elif kind == 'interactive' and status not in GONE:
                 return self._need('terminal', f"This chat is open in a terminal on {label}, so it can't be opened here.", about)
             else:
-                return self._need('resume', 'This chat is not running. Resume it to open its terminal.', about)
+                return self._need('resume', "This chat isn't running. Resume it to open its terminal.", about)
         if not BG_RE.fullmatch(bg or ''):
-            return self._need('resume', 'This chat is not running. Resume it to open its terminal.', about)
+            return self._need('resume', "This chat isn't running. Resume it to open its terminal.", about)
         t = mint(self.key(), name, bg, self.clock())
         return {'ok': True, 'ws': f'ws://{ws_host(host)}:{self.hub_port}/term?t={t}', 'bg': bg,
                 'title': (s or {}).get('title'), 'machine': name, 'label': label}

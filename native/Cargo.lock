@@ -5545,7 +5545,7 @@ dependencies = [
 
 [[package]]
 name = "sb-core"
-version = "0.8.4"
+version = "0.8.9"
 dependencies = [
  "alacritty_terminal",
  "async-tungstenite",
@@ -5559,12 +5559,13 @@ dependencies = [
  "serde_json",
  "sha2",
  "smol",
+ "socket2",
  "ureq",
 ]
 
 [[package]]
 name = "sb-desktop"
-version = "0.8.4"
+version = "0.8.9"
 dependencies = [
  "alacritty_terminal",
  "chrono",
@@ -5574,6 +5575,7 @@ dependencies = [
  "image",
  "log",
  "objc",
+ "portable-pty",
  "raw-window-handle",
  "sb-core",
  "serde",
@@ -5585,7 +5587,7 @@ dependencies = [
 
 [[package]]
 name = "sb-hub"
-version = "0.8.4"
+version = "0.8.9"
 dependencies = [
  "alacritty_terminal",
  "axum",
@@ -5604,7 +5606,7 @@ dependencies = [
 
 [[package]]
 name = "sb-install"
-version = "0.8.4"
+version = "0.8.9"
 dependencies = [
  "dirs",
  "flate2",
@@ -5625,7 +5627,7 @@ dependencies = [
 
 [[package]]
 name = "sb-node"
-version = "0.8.4"
+version = "0.8.9"
 dependencies = [
  "futures-util",
  "sb-hub",

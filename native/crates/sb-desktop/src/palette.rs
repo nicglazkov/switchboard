@@ -1,5 +1,6 @@
-//! The command palette (Cmd-K): chats and commands in one list. Typing filters both; the arrows move, Enter runs.
-//! Cmd-T opens it with chats only, and Enter opens the chat in a terminal tab.
+//! The command palette (Cmd-K): new local terminals, chats and commands in one list. Typing filters them all; the
+//! arrows move, Enter runs (with nothing typed, the first row is a terminal with the default shell). Cmd-O opens it
+//! with chats only, and Enter opens the chat in a terminal tab.
 
 use gpui::{
     AnyElement, App, ClickEvent, InteractiveElement, IntoElement, MouseButton, ParentElement,
@@ -9,7 +10,7 @@ use sb_core::actions::{self as acts, ActionId};
 use sb_core::{Lamp, search};
 
 use crate::archive::ArcTab;
-use crate::theme::Theme;
+use crate::theme::{Mode, Theme};
 use crate::ui;
 use crate::view::{BoardView, Ctx};
 
@@ -36,6 +37,8 @@ pub enum PalRun {
     Term(String, bool),
     /// Switch to the chats-only palette.
     Chats,
+    /// A shell on this computer in a new tab, by profile id.
+    Local(String),
     /// v2: the session browser window.
     Browse,
     /// v2: Files and Add a machine windows.
@@ -82,12 +85,12 @@ impl BoardView {
         let app = self.app.read(cx);
         let snap = &app.snap;
         let now = crate::state::AppState::now();
-        let mut out = vec![row("New session", None, PalIcon::Icon("plus".into()), Some("N"), PalRun::New(None))];
+        let mut out = vec![row("New chat", None, PalIcon::Icon("plus".into()), Some("N"), PalRun::New(None))];
         out.push(row(
             "Open a chat in a terminal",
             None,
             PalIcon::Icon("term".into()),
-            Some(&ui::mod_cap("T")),
+            Some(&ui::term_cap("O")),
             PalRun::Chats,
         ));
         out.push(row(
@@ -216,6 +219,33 @@ impl BoardView {
         out
     }
 
+    /// One row per shell on this computer, the default first with its key.
+    fn local_rows(&self, cx: &App) -> Vec<PalRow> {
+        let profiles = crate::state::profiles();
+        let saved = self.app.read(cx).settings.term_profile.clone();
+        let def = sb_core::term::shells::pick_default(profiles, saved.as_deref()).map(|p| p.id.clone());
+        let cap = ui::term_cap("T");
+        let mut rows: Vec<PalRow> = profiles
+            .iter()
+            .map(|p| {
+                let first = def.as_deref() == Some(p.id.as_str());
+                row(
+                    format!("New {} terminal", p.name),
+                    Some(if first {
+                        format!("{}, the default", crate::term::LOCAL_LABEL)
+                    } else {
+                        crate::term::LOCAL_LABEL.into()
+                    }),
+                    PalIcon::Icon("term".into()),
+                    first.then_some(cap.as_str()),
+                    PalRun::Local(p.id.clone()),
+                )
+            })
+            .collect();
+        rows.sort_by_key(|r| r.key.is_none());
+        rows
+    }
+
     /// Chats matching `q`. `term`: for the chats-only palette, where Enter opens a terminal.
     fn chat_rows(&self, q: &str, term: bool, cx: &App) -> Vec<PalRow> {
         let app = self.app.read(cx);
@@ -307,14 +337,23 @@ impl BoardView {
                 (c.score > 0).then_some(c)
             })
             .collect();
+        let chats = self.chat_rows(&q, false, cx);
+        let mut locals = self.local_rows(cx);
         if !q.is_empty() {
+            // Typed: a terminal is one more command, ranked with the rest ("zsh", "terminal", "powershell").
+            for mut l in locals.drain(..) {
+                l.score = search::score(&format!("{} {}", l.title, l.sub.as_deref().unwrap_or("")), &q);
+                if l.score > 0 {
+                    cmds.push(l);
+                }
+            }
             cmds.sort_by_key(|c| std::cmp::Reverse(c.score));
         }
-        let chats = self.chat_rows(&q, false, cx);
         let top_cmd = cmds.first().map(|c| c.score).unwrap_or(0);
         let mut sections: Vec<(&'static str, Vec<PalRow>)> = if q.is_empty() {
             cmds.truncate(7);
-            vec![("Commands", cmds), ("Chats", chats)]
+            locals.truncate(6);
+            vec![("New terminal", locals), ("Commands", cmds), ("Chats", chats)]
         } else {
             cmds.truncate(14);
             vec![("Chats", chats), ("Commands", cmds)]
@@ -366,7 +405,12 @@ impl BoardView {
         self.close_overlay(window, cx);
         let Some(run) = run else { return };
         match run {
-            PalRun::Select(k) => self.select(Some(k), cx),
+            // Picked from a terminal tab or History: the board comes up, so the chat shows (select unfolds its lane).
+            PalRun::Select(k) => {
+                self.set_tab(0, cx);
+                self.view_board(cx);
+                self.select(Some(k), cx)
+            }
             PalRun::Older(k) => self.open_archive(ArcTab::Older, Some(k), window, cx),
             PalRun::New(m) => self.open_new(m, window, cx),
             PalRun::Act(id, k) => {
@@ -382,9 +426,11 @@ impl BoardView {
             PalRun::Shut(m, v) => self.app.update(cx, |s, cx| s.set_shut(&m, v, cx)),
             PalRun::Tear(m) => self.tear(m, cx),
             PalRun::Archive(tab) => self.open_archive(tab, None, window, cx),
-            PalRun::Theme(dark) => self.set_theme(dark, cx),
+            // Saved and synced like the header's switch, so the server's copy does not bring the old one back.
+            PalRun::Theme(dark) => self.set_mode(if dark { Mode::Dark } else { Mode::Light }, window, cx),
             PalRun::Term(k, resume) => self.open_terminal(k, resume, cx),
             PalRun::Chats => self.open_chat_palette(window, cx),
+            PalRun::Local(id) => self.open_local(Some(&id), cx),
             PalRun::Browse => crate::browser::open(cx),
             PalRun::Files => crate::files::open_files(cx),
             PalRun::Pair => crate::files::open_pair(cx),

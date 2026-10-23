@@ -231,6 +231,34 @@ class BusyServerTest(unittest.TestCase):
         self.assertIn('Cancelled', j['error'])
         self.assertEqual(self.verbs('resume'), [])
 
+    def test_a_cancel_after_the_wait_ended_is_too_late(self):
+        # The chat went quiet and the job went ahead, but its step still says "waiting": the cancel is refused,
+        # so the app is never told "cancelled" for a relaunch that then runs.
+        self.working()
+        gate, reached = threading.Event(), threading.Event()
+        go = self.fleet.transport
+
+        def held(target, req, timeout):
+            if req['verb'] == 'resume':
+                reached.set()
+                gate.wait(5)
+            return go(target, req, timeout)
+        self.fleet.transport = held
+        r = self.relaunch(when='idle')
+        for _ in range(200):
+            if self.app.job('server', r['job']).get('step') == 'waiting':
+                break
+            time.sleep(0.005)
+        self.busy = {'live': False}
+        self.assertTrue(reached.wait(5))
+        self.assertEqual(self.app.job('server', r['job']).get('step'), 'waiting')
+        with self.assertRaises(server.HttpError) as e:
+            self.app.post('/api/job/cancel', {'job': r['job']})
+        self.assertEqual(e.exception.code, 409)
+        gate.set()
+        self.assertEqual(self.wait(r['job'])['state'], 'done')
+        self.assertEqual(len(self.verbs('resume')), 1)
+
     def test_relaunch_now_goes_at_once(self):
         self.working()
         r = self.relaunch(when='now')

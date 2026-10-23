@@ -2,7 +2,8 @@
 # Build the Linux x86_64 binary on the Linux host (SB_LINUX_HOST, see hosts.sh) and bring it back.
 #   native/scripts/build-linux.sh
 # Output: native/dist/Switchboard-linux-x86_64          plain binary (curl, chmod +x, run)
-#         native/dist/Switchboard-linux-x86_64.tar.gz   binary + .desktop + icon + license notices, for a launcher entry
+#         native/dist/Switchboard-linux-x86_64.tar.gz   binary + .desktop + icon + license notices + server kit, for a
+#                                                       launcher entry
 #         native/dist/symbols/<version>-<build>/         *.debug files for crash backtraces, not shipped
 # Runtime needs Vulkan (mesa or vendor driver), libxkbcommon, and X11 or Wayland.
 set -euo pipefail
@@ -14,14 +15,20 @@ sb_update_env
 REMOTE=${SB_REMOTE:-switchboard-native-build}
 
 ssh -q $H "mkdir -p $REMOTE"
-rsync -a --delete --exclude target --exclude dist ./ ../branding.toml $H:$REMOTE/
+rsync -a --delete --exclude target --exclude dist --exclude kit ./ ../branding.toml $H:$REMOTE/
+# What the tar.gz's server kit is made of (scripts/server-kit.sh), in the repository's layout.
+ssh -q $H "mkdir -p $REMOTE/kit/agent $REMOTE/kit/scripts $REMOTE/kit/native/crates/sb-core/src/term"
+rsync -a --delete --exclude __pycache__ ../server $H:$REMOTE/kit/
+rsync -a ../agent/sb.py $H:$REMOTE/kit/agent/
+rsync -a crates/sb-core/src/term/schemes.json $H:$REMOTE/kit/native/crates/sb-core/src/term/
+rsync -a --delete --exclude __pycache__ ../scripts/install $H:$REMOTE/kit/scripts/
 ssh -q $H "set -e; export PATH=\$HOME/.cargo/bin:\$PATH; cd ~/$REMOTE
 export SB_BUILD=\${SB_BUILD:-\$(date -u +%Y%m%d%H%M%S)}
 export SB_UPDATE_PUBKEY='$SB_UPDATE_PUBKEY' SB_UPDATE_FEED='$SB_UPDATE_FEED'
 start=\$(date +%s)
 # Keep the line tables in the binary for objcopy to split off below (Cargo.toml's release profile says why).
 CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO=off CARGO_PROFILE_RELEASE_STRIP=none \\
-  cargo build --release --locked -q -p sb-desktop -p sb-node
+  cargo build --release --locked -q -p sb-desktop -p sb-node -p sb-hub
 secs=\$(( \$(date +%s) - start ))
 VER=\$(sed -n 's/^version = \"\\(.*\\)\"/\\1/p' Cargo.toml | head -1)
 SYM=dist/symbols/\$VER-\$SB_BUILD
@@ -37,7 +44,10 @@ echo \$SB_BUILD > dist/Switchboard-linux-x86_64.build
 mv dist/switchboard-node.stripped dist/switchboard-node-linux
 cp dist/Switchboard-linux-x86_64 dist/pkg/Switchboard
 cp packaging/linux/switchboard.desktop packaging/linux/switchboard.png packaging/THIRD-PARTY-NOTICES.txt dist/pkg/
-tar -czf dist/Switchboard-linux-x86_64.tar.gz -C dist/pkg Switchboard switchboard.desktop switchboard.png THIRD-PARTY-NOTICES.txt
+# The server kit beside the program, for \"Run the server on this computer\" (sb-core/src/hostsetup.rs).
+strip -o dist/switchboard-hub-linux target/release/switchboard-hub
+bash scripts/server-kit.sh kit dist/pkg/server-kit dist/switchboard-hub-linux dist/switchboard-node-linux
+tar -czf dist/Switchboard-linux-x86_64.tar.gz -C dist/pkg Switchboard switchboard.desktop switchboard.png THIRD-PARTY-NOTICES.txt server-kit
 echo \"symbols: \$SYM (\$(du -sk \$SYM | cut -f1) KB)\"
 echo \"linux: build=\${secs}s binary=\$(stat -c %s dist/Switchboard-linux-x86_64) bytes tar.gz=\$(stat -c %s dist/Switchboard-linux-x86_64.tar.gz) bytes\""
 mkdir -p dist

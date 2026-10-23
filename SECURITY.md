@@ -11,12 +11,15 @@ can only run the Switchboard helper, not a shell.
 
 ## Reporting a problem
 
+<!-- --8<-- [start:report] -->
 Please do not open a public issue for a security problem. Use GitHub's private report instead: the **Security**
-tab of this repository, then **Report a vulnerability**. Include what you found, how to reproduce it, and which
-version you ran (Settings, About in the app, or `switchboard status`).
+tab of [the repository](https://github.com/nicglazkov/switchboard/security), then **Report a
+vulnerability**. Include what you found, how to reproduce it, and which version you ran (About in the app shows
+it, and Copy version info copies it).
 
 You should hear back within a week. Fixes ship in the next release, and the release notes credit you unless you
-would rather they didn't.
+would rather they didn't. Only the latest release gets security fixes.
+<!-- --8<-- [end:report] -->
 
 ## Supported versions
 

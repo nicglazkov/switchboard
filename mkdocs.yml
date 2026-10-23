@@ -1,0 +1,160 @@
+# The documentation site, https://nicglazkov.github.io/switchboard/ (built and published by .github/workflows/docs.yml).
+# Preview it locally:
+#   python3 -m venv .venv && .venv/bin/pip install -r docs/requirements.txt && .venv/bin/mkdocs serve
+site_name: Switchboard
+site_description: One board for the Claude Code chats on all your computers.
+site_url: https://nicglazkov.github.io/switchboard/
+repo_url: https://github.com/nicglazkov/switchboard
+repo_name: nicglazkov/switchboard
+edit_uri: edit/main/docs/
+copyright: Switchboard is free software under the GNU AGPL-3.0. It is not made by or affiliated with Anthropic.
+
+docs_dir: docs
+site_dir: _site
+# Working notes that live next to the published pages in the private copy; never part of the site.
+exclude_docs: |
+  /cloud/
+  /history/
+  /plans/
+  /specs/
+  /TODO.md
+  /measurements.md
+  /rebuild.md
+  /requirements.txt
+  /overrides/
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/icon.png
+  favicon: assets/icon.png
+  icon:
+    repo: fontawesome/brands/github
+  font:
+    text: Instrument Sans
+    code: JetBrains Mono
+  palette:
+    - media: "(prefers-color-scheme)"
+      toggle:
+        icon: material/brightness-auto
+        name: Use light mode
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-sunny
+        name: Use dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      primary: custom
+      accent: custom
+      toggle:
+        icon: material/weather-night
+        name: Follow the system
+  features:
+    - navigation.tabs
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.footer
+    - navigation.indexes
+    - navigation.instant
+    - navigation.instant.progress
+    - navigation.tracking
+    - toc.follow
+    - search.suggest
+    - search.highlight
+    - search.share
+    - content.code.copy
+    - content.code.annotate
+    - content.tabs.link
+    - content.tooltips
+    - content.action.edit
+
+extra_css:
+  - stylesheets/extra.css
+
+extra:
+  generator: false
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/nicglazkov/switchboard
+      name: Switchboard on GitHub
+    - icon: material/download
+      link: https://github.com/nicglazkov/switchboard/releases/latest
+      name: The newest release
+
+markdown_extensions:
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Link to this section
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      base_path: ["."]
+      check_paths: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+
+nav:
+  - Home: index.md
+  - Get started:
+      - Install: install.md
+      - Add your computers: machines.md
+      - The apps: apps.md
+  - Use it:
+      - The board: board.md
+      - Chats and what they cost: chats.md
+      - Terminals: terminals.md
+      - History and files: history-files.md
+      - Usage and budget: usage.md
+      - Keyboard shortcuts: shortcuts.md
+      - Settings: settings.md
+  - Help:
+      - Troubleshooting: troubleshooting.md
+      - Questions: faq.md
+      - Updates: updates.md
+      - Privacy and security: privacy.md
+      - Get help: support.md
+  - Reference:
+      - Commands: commands.md
+      - Ports, files and settings: reference.md
+      - Changelog: changelog.md
+  - Develop:
+      - How the pieces fit: architecture.md
+      - Building and releasing: building.md
+      - Contributing: contributing.md
+      - Decisions: decisions.md
+
+validation:
+  omitted_files: warn
+  absolute_links: warn
+  unrecognized_links: warn
+  anchors: warn

@@ -43,12 +43,90 @@ pub fn copy_text(cx: &mut App, text: String) {
     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
 }
 const HIDE_SECS: f64 = 30.0;
+/// The open tabs go to the server at least this often, even unchanged (it forgets an app silent for 30 days).
+const TABS_RESEND: f64 = 86400.0;
+
+/// The open tabs need sending: never sent this run, changed since, or last sent a day ago.
+fn tabs_due(sent: Option<&(Vec<String>, f64)>, tabs: &[String], now: f64) -> bool {
+    sent.is_none_or(|(keys, at)| keys != tabs || now - at >= TABS_RESEND)
+}
+
+/// Reads the settings file. One that no longer parses keeps every setting that still reads, and the file as it was
+/// is copied to settings.json.bad first, so the next save cannot lose what was in it. True when that happened.
+fn load_settings(path: &std::path::Path) -> (Settings, bool) {
+    let Ok(bytes) = std::fs::read(path) else { return (Settings::default(), false) };
+    if let Ok(s) = serde_json::from_slice(&bytes) {
+        return (s, false);
+    }
+    let mut kept = serde_json::Map::new();
+    if let Ok(serde_json::Value::Object(all)) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+        for (k, v) in all {
+            let one = serde_json::Value::Object([(k.clone(), v.clone())].into_iter().collect());
+            if serde_json::from_value::<Settings>(one).is_ok() {
+                kept.insert(k, v);
+            }
+        }
+    }
+    let mut bad = path.as_os_str().to_owned();
+    bad.push(".bad");
+    if let Err(e) = std::fs::copy(path, &bad) {
+        log::warn!("could not keep a copy of the settings that did not read: {e}");
+    }
+    (serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default(), true)
+}
+
+/// The chat a notification's tag stands for: a needs-you one is the chat's key, a job's ("job:<id>") the chat the
+/// job made, else the one it came from. None when that chat is not in the list any more.
+fn tag_chat(tag: &str, jobs: &[Job], known: impl Fn(&str) -> bool) -> Option<String> {
+    let key = match tag.strip_prefix("job:") {
+        Some(id) => {
+            let j = jobs.iter().find(|j| j.id == id)?;
+            match (&j.new_machine, &j.new_sid) {
+                (Some(m), Some(s)) if known(&format!("{m}:{s}")) => format!("{m}:{s}"),
+                _ => j.key.clone()?,
+            }
+        }
+        None => tag.to_string(),
+    };
+    known(&key).then_some(key)
+}
+
+/// A refresh that left before a change made here showed has the old value of what changed.
+fn overtaken(edits_then: u64, edits_now: u64) -> bool {
+    edits_then != edits_now
+}
+
+/// The stops of chat `key` that closing its tab queued and that have not started yet.
+fn stops_from_close(jobs: &[Job], from_close: &HashSet<String>, key: &str) -> Vec<String> {
+    jobs.iter().filter(|j| from_close.contains(&j.id) && j.stop_waits_for(key)).map(|j| j.id.clone()).collect()
+}
+
+/// Follows a new job, unless one with its id is followed already. Says whether it was added.
+fn add_job(jobs: &mut Vec<Job>, job: Job) -> bool {
+    if jobs.iter().any(|j| j.id == job.id) {
+        return false;
+    }
+    jobs.push(job);
+    true
+}
+
+/// A relaunch left the queue (it waited for the chat's reply to end): only now is the old chat going away, so only
+/// now does its terminal let go of it.
+fn relaunch_started(kind: JobKind, was: JobState, now: JobState) -> bool {
+    kind == JobKind::Relaunch && was == JobState::Queued && matches!(now, JobState::Running | JobState::Done)
+}
 
 pub struct Shared(pub Entity<AppState>);
 impl Global for Shared {}
 
 pub fn app(cx: &App) -> Entity<AppState> {
     cx.global::<Shared>().0.clone()
+}
+
+/// The shells on this computer, for local terminal tabs. Found once (main.rs starts it on a thread at launch).
+pub fn profiles() -> &'static [sb_core::term::shells::Profile] {
+    static P: std::sync::OnceLock<Vec<sb_core::term::shells::Profile>> = std::sync::OnceLock::new();
+    P.get_or_init(sb_core::term::shells::detect)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -76,6 +154,9 @@ pub struct Settings {
     pub term_cursor: Option<String>,
     #[serde(default)]
     pub term_blink: Option<bool>,
+    /// The shell Cmd+T opens, by profile id (sb_core::term::shells). Absent: the first one found.
+    #[serde(default)]
+    pub term_profile: Option<String>,
     /// Folded lanes, by machine name.
     #[serde(default)]
     pub shut: Vec<String>,
@@ -241,8 +322,12 @@ pub enum AppEvent {
         key: String,
         text: String,
     },
-    /// v2, the flags drawer: a relaunch is under way (its terminal follows the job).
+    /// v2, the flags drawer: a relaunch was sent. It may wait for the chat's reply to end, so its terminal stays.
     Relaunching {
+        key: String,
+    },
+    /// The relaunch left the queue: the chat's terminal follows the job now.
+    RelaunchStarted {
         key: String,
         job: String,
     },
@@ -301,6 +386,22 @@ pub enum BusyRetry {
     },
 }
 
+/// The question shown when the server answers need "trust": Claude was never let into the folder a chat would move
+/// to. Yes sends the same request again with `trust: true`.
+pub struct TrustAsk {
+    /// The folder as people read it ("~/Documents/site").
+    pub shown: String,
+    /// The user once said no to it in Claude's own prompt.
+    pub declined: bool,
+    /// The machine it is on, by its label.
+    pub on: String,
+    pub retry: TrustRetry,
+}
+
+pub enum TrustRetry {
+    Continue { key: String, to: String, when: Option<&'static str> },
+}
+
 impl BusyAsk {
     pub fn only_reply(&self) -> bool {
         self.busy.len() == 1 && self.busy[0].only_reply()
@@ -325,6 +426,13 @@ pub struct AppState {
     pub settings: Settings,
     /// Actions in flight, "key:verb", so their buttons can say so.
     pub busy: HashSet<String>,
+    /// Chats opened again while the stop from closing their tab was still on its way: the stop is called off once
+    /// the server answers with its job.
+    stop_off: HashSet<String>,
+    /// Stops sent because a chat's tab closed: by key while the request is out, then by job id while the job waits.
+    /// Only these are called off when the chat opens again.
+    close_stop: HashSet<String>,
+    close_jobs: HashSet<String>,
     /// Stars changed here and not yet seen in a refresh: key -> (on, when). A refresh that left before the change
     /// would otherwise flip the star back for a moment.
     pub star_want: std::collections::HashMap<String, (bool, f64)>,
@@ -343,15 +451,19 @@ pub struct AppState {
     pub group_waiting: Vec<sb_core::groups::Op>,
     /// v2, the cleanup card: rows being stopped or kept, and rows put off with "Not now" (until the list changes).
     pub clean_busy: HashSet<String>,
-    /// The saved tabs the server last took (None: not yet this run), and whether a send is out. A chat open in a tab
-    /// is never offered for stopping, even while this app is closed.
-    tabs_sent: Option<Vec<String>>,
+    /// The saved tabs the server last took and when (None: not yet this run), and whether a send is out. A chat open
+    /// in a tab is never offered for stopping, even while this app is closed.
+    tabs_sent: Option<(Vec<String>, f64)>,
     tabs_sending: bool,
     /// A relaunch, stop, move or fresh start that would cut off a chat's own work: asked before anything happens.
     pub busy_ask: Option<BusyAsk>,
+    /// A move to a folder Claude was never let into: asked before it is sent again.
+    pub trust_ask: Option<TrustAsk>,
     pub clean_later: HashSet<String>,
     /// v2: the New sheet's memory (last used, presets) and the flags the server passes; fetched when the sheet opens.
     pub prefs: Option<ApiPrefs>,
+    /// The models the machines' Claude Code takes (GET /api/models), read with the prefs; None from an older server.
+    pub models: Option<Vec<sb_core::api::ApiModel>>,
     /// v2: the session browser's window, while it is open.
     pub browser_win: Option<gpui::AnyWindowHandle>,
     pub files_win: Option<gpui::AnyWindowHandle>,
@@ -366,8 +478,14 @@ pub struct AppState {
     /// v2: threads by chat key, for History and "This continues...".
     pub threads: HashMap<String, ThreadView>,
     needs: Option<HashSet<String>>,
+    /// The waiting spell each chat was last notified for (when it last did something): a chat that flickers out of
+    /// "needs you" and back, or is held again with nothing new, is not notified twice.
+    notified: HashMap<String, i64>,
     inflight: bool,
     again: bool,
+    /// Bumped by each change made here that the snapshot shows at once (a rename, Keep running, the budget): a
+    /// refresh that was already on its way has the old value, so it is read again instead.
+    edits: u64,
     seq: u64,
     settings_path: Option<PathBuf>,
     /// The minute last drawn, so ages like "14m" move on without a redraw every second.
@@ -379,10 +497,15 @@ pub struct AppState {
     pub update: Option<sb_core::update::Offer>,
     pub upd: crate::update::Upd,
     pub update_at: Option<f64>,
+    /// Why the last look failed, until a look works again.
+    pub update_err: Option<String>,
     pub update_started: f64,
     pub update_busy: bool,
     /// The tool library (Settings > Library, the New sheet's Tools, a chat's Tools), once asked for.
     pub library: Option<Result<sb_core::api::ApiLibrary, String>>,
+    /// Bumped per read of the library, and the newest read shown: an older read that comes back later is dropped.
+    pub lib_seq: u64,
+    pub lib_shown: u64,
     /// Library changes in flight, by what they change ("connect:tool@machine", "default:tool", "attach:key").
     pub lib_busy: HashSet<String>,
     /// Keys saved on this Mac from Settings ("tool/NAME", names only), shown as set until the server's next look agrees.
@@ -417,7 +540,7 @@ impl AppState {
             Some(p) => Some(std::path::PathBuf::from(p)),
             None => cache::settings_dir().map(|d| d.join("settings.json")),
         };
-        let mut settings: Settings = settings_path.as_deref().map(cache::load_json).unwrap_or_default();
+        let (mut settings, settings_bad) = settings_path.as_deref().map(load_settings).unwrap_or_default();
         let cache_dir = std::env::var("SWITCHBOARD_CACHE").ok().filter(|s| !s.is_empty());
         // Where the server is: SWITCHBOARD_URL, else the saved addresses (the last one that worked first), else
         // nothing (Core looks on the local network, and the board asks for an address if that finds none).
@@ -441,6 +564,8 @@ impl AppState {
             servers = settings.saved.connect_order();
         }
         let core = Arc::new(Core::new(CoreConfig { servers, cache_dir, user_agent: None }));
+        // With nothing saved, the empty board runs the search itself and lets the user pick (firstrun.rs).
+        core.set_discovery(false);
         let (snap, synced) = match core.cached_snapshot() {
             Some(s) => {
                 let at = s.fetched_at;
@@ -462,6 +587,9 @@ impl AppState {
                 toast_hover: None,
                 settings,
                 busy: HashSet::new(),
+                stop_off: HashSet::new(),
+                close_stop: HashSet::new(),
+                close_jobs: HashSet::new(),
                 star_want: Default::default(),
                 groups_want: None,
                 groups_pending: 0,
@@ -473,8 +601,10 @@ impl AppState {
                 tabs_sent: None,
                 tabs_sending: false,
                 busy_ask: None,
+                trust_ask: None,
                 clean_later: HashSet::new(),
                 prefs: None,
+                models: None,
                 browser_win: None,
                 files_win: None,
                 pair_win: None,
@@ -485,8 +615,10 @@ impl AppState {
                 usage_error: None,
                 threads: HashMap::new(),
                 needs: None,
+                notified: HashMap::new(),
                 inflight: false,
                 again: false,
+                edits: 0,
                 seq: 0,
                 settings_path,
                 minute: 0,
@@ -494,12 +626,23 @@ impl AppState {
                 update: None,
                 upd: Default::default(),
                 update_at: None,
+                update_err: None,
                 update_started: AppState::now(),
                 update_busy: false,
                 library: None,
+                lib_seq: 0,
+                lib_shown: 0,
                 lib_busy: HashSet::new(),
                 lib_keys_here: HashSet::new(),
             };
+            if settings_bad {
+                s.toast(
+                    "Some settings couldn't be read",
+                    Some("The rest were kept. The old file is saved next to it as settings.json.bad.".into()),
+                    true,
+                    cx,
+                );
+            }
             s.refresh(cx);
             s.listen(cx);
             s.load_prefs(|_, _| {}, cx);
@@ -552,11 +695,16 @@ impl AppState {
         }
         self.inflight = true;
         let core = self.core.clone();
+        let edits = self.edits;
         cx.spawn(async move |this, cx| {
             let res = cx.background_executor().spawn(async move { core.refresh() }).await;
             let _ = this.update(cx, |s, cx| {
                 s.inflight = false;
-                s.take(res, cx);
+                if res.is_ok() && overtaken(edits, s.edits) {
+                    s.again = true;
+                } else {
+                    s.take(res, cx);
+                }
                 if std::mem::take(&mut s.again) {
                     s.refresh(cx);
                 }
@@ -713,7 +861,7 @@ impl AppState {
     /// an address.
     pub fn use_server(&mut self, typed: &str, cx: &mut Context<Self>) -> Result<(), String> {
         let Some(base) = sb_core::net::normalize_base(typed) else {
-            return Err("That is not an address. Try something like 192.0.2.10:8130 or studio.local.".into());
+            return Err("That's not an address. Try something like 192.0.2.10:8130 or studio.local.".into());
         };
         self.settings.saved.add_typed(&base);
         self.save_settings();
@@ -1113,11 +1261,36 @@ impl AppState {
                         s.close_setup(&m, &id, cx);
                         s.toast("Fixed. New chats there get those tools", None, false, cx);
                     }
-                    Err(e) => s.toast("Could not fix it", Some(e.to_string()), true, cx),
+                    Err(e) => s.toast("Couldn't fix it", Some(e.to_string()), true, cx),
                 }
             });
         })
         .detach();
+    }
+
+    /// Stops the chat at `key` because its tab closed (`working`: once its reply is done). Only a stop sent this way
+    /// is called off when the chat opens again; one asked for on the board stays.
+    pub fn stop_on_close(&mut self, key: &str, working: bool, cx: &mut Context<Self>) {
+        let Some(busy) = ActionId::Stop.verb().map(|v| format!("{key}:{v}")) else { return };
+        if self.busy.contains(&busy) {
+            return; // a stop is on its way already
+        }
+        self.close_stop.insert(key.to_string());
+        self.act_when(ActionId::Stop, key, working.then_some("idle"), cx);
+        if !self.busy.contains(&busy) {
+            self.close_stop.remove(key); // not sent (the chat left the list)
+        }
+    }
+
+    /// The chat at `key` is open again: a stop still waiting for its reply to end, from closing its tab, is called
+    /// off, so it does not end the chat just reopened.
+    pub fn call_off_stops(&mut self, key: &str, cx: &mut Context<Self>) {
+        if self.close_stop.contains(key) {
+            self.stop_off.insert(key.to_string());
+        }
+        for id in stops_from_close(&self.jobs, &self.close_jobs, key) {
+            self.cancel_job(&id, cx);
+        }
     }
 
     /// Calls off a job still waiting for its chat's work to end (Cancel, Keep running). Nothing has changed yet, so
@@ -1186,7 +1359,8 @@ impl AppState {
     // ---------- notifications ----------
 
     /// Posts a notification when a chat starts needing you, and takes it back when it stops. Never on the first
-    /// load (that would replay everything), never while a Switchboard window is in front.
+    /// load (that would replay everything), never while a Switchboard window is in front, and once per waiting
+    /// spell: a chat that drops out of "needs you" for a poll and comes back has nothing new to say.
     fn notify_needs(&mut self, cx: &mut Context<Self>) {
         let now = Self::now();
         let current: HashSet<String> = self
@@ -1197,14 +1371,29 @@ impl AppState {
             .filter(|s| !s.stale && !self.is_hidden(&s.key) && s.needs_you(now))
             .map(|s| s.key.clone())
             .collect();
-        let Some(before) = self.needs.replace(current.clone()) else { return };
+        let spell = |s: &sb_core::Session| s.active.round() as i64;
+        let Some(before) = self.needs.replace(current.clone()) else {
+            // The first load is not news: what waits now counts as told.
+            self.notified =
+                current.iter().filter_map(|k| self.snap.session(k).map(|s| (k.clone(), spell(s)))).collect();
+            return;
+        };
         for gone in before.difference(&current) {
             cx.dismiss_system_notification(gone);
+        }
+        let snap = &self.snap;
+        self.notified.retain(|k, _| snap.session(k).is_some());
+        let mut new = Vec::new();
+        for key in current.difference(&before) {
+            let Some(s) = self.snap.session(key) else { continue };
+            if self.notified.insert(key.clone(), spell(s)) != Some(spell(s)) {
+                new.push(key.clone()); // not the spell it was already told about
+            }
         }
         if !self.notify_on() || cx.active_window().is_some() {
             return;
         }
-        for key in current.difference(&before) {
+        for key in &new {
             let Some(s) = self.snap.session(key) else { continue };
             cx.show_system_notification(SystemNotification {
                 tag: key.clone().into(),
@@ -1215,17 +1404,25 @@ impl AppState {
         }
     }
 
+    /// Selects a chat in every window: a key, or a notification's tag. One for a chat that is gone leaves the
+    /// selection as it is.
     pub fn select(&mut self, key: String, cx: &mut Context<Self>) {
-        cx.emit(AppEvent::Select(key));
+        let snap = &self.snap;
+        let known = |k: &str| snap.session(k).is_some() || snap.replaced_row(k).is_some();
+        if let Some(key) = tag_chat(&key, &self.jobs, known) {
+            cx.emit(AppEvent::Select(key));
+        }
     }
 
     // ---------- actions ----------
 
     /// Tells the server which chats this app has open in tabs (the saved list, so it holds while the app is closed),
-    /// when that changed since it last took it. A failed send goes again on the next refresh.
+    /// when that changed since it last took it, and once a day anyway: the server forgets an app it has not heard
+    /// from in 30 days. A failed send goes again on the next refresh.
     fn send_tabs(&mut self, cx: &mut Context<Self>) {
         let tabs = self.settings.tabs.clone();
-        if self.tabs_sending || self.tabs_sent.as_ref() == Some(&tabs) {
+        let now = Self::now();
+        if self.tabs_sending || !tabs_due(self.tabs_sent.as_ref(), &tabs, now) {
             return;
         }
         self.tabs_sending = true;
@@ -1237,7 +1434,7 @@ impl AppState {
             move |st, res, _| {
                 st.tabs_sending = false;
                 match res {
-                    Ok(()) => st.tabs_sent = Some(sent),
+                    Ok(()) => st.tabs_sent = Some((sent, now)),
                     Err(e) => log::info!("sending tabs failed: {e}"),
                 }
             },
@@ -1266,7 +1463,7 @@ impl AppState {
                 Some(u) => open_link(cx, u),
                 None => {
                     let sub = if s.alive && !s.background() {
-                        format!("It is open in the terminal on {}.", s.machine_label)
+                        format!("It's open in the terminal on {}.", s.machine_label)
                     } else if let (true, Some(id)) = (s.alive, &s.bg_id) {
                         format!(
                             "It runs in the background on {}. Run claude attach {id} there to watch it.",
@@ -1364,6 +1561,8 @@ impl AppState {
             move |core| core.act_when(&m2, &v2, &s2, close, when),
             move |st, res, cx| {
                 st.busy.remove(&busy);
+                let off = id == ActionId::Stop && st.stop_off.remove(&key);
+                let closing = id == ActionId::Stop && st.close_stop.remove(&key);
                 match res {
                     Err(CoreError::Busy { message, busy }) => {
                         if id == ActionId::Dismiss {
@@ -1380,6 +1579,11 @@ impl AppState {
                     // Queued until its work ends: a card follows it, with Stop now and Keep running.
                     Ok(Some(jid)) if id == ActionId::Stop => {
                         st.start_job(&jid, JobKind::Stop, Some(key), &label, &label, Some(title), None, cx);
+                        if off {
+                            st.cancel_job(&jid, cx);
+                        } else if closing {
+                            st.close_jobs.insert(jid);
+                        }
                     }
                     Ok(job) if id.is_job() => {
                         let (topic, tag) = names::split(&title);
@@ -1474,9 +1678,9 @@ impl AppState {
                         let title = if left < n {
                             format!("Stopped {}, {left} still running", n - left)
                         } else if n == 1 {
-                            "Did not stop it".into()
+                            "Didn't stop it".into()
                         } else {
-                            format!("Did not stop {n}")
+                            format!("Didn't stop {n}")
                         };
                         st.toast(title, Some(why.unwrap_or_else(|| "In use again, or kept.".into())), true, cx)
                     }
@@ -1658,7 +1862,7 @@ impl AppState {
                             let topic = title.as_deref().map(|t| names::split(t).0.to_string());
                             st.start_job(&jid, JobKind::Compact, Some(key), &label, &label, title, topic, cx)
                         }
-                        None => st.toast("Compacting did not start. Try again in a moment.", None, true, cx),
+                        None => st.toast("Compacting didn't start. Try again in a moment.", None, true, cx),
                     },
                     Err(e) => st.toast(e.to_string(), None, true, cx),
                 }
@@ -1695,6 +1899,11 @@ impl AppState {
         );
     }
 
+    /// The model picker: Default and what the server says the machines take, or the built-in list.
+    pub fn model_choices(&self) -> Vec<(String, String)> {
+        sb_core::actions::model_choices(self.models.as_deref())
+    }
+
     pub fn load_prefs(
         &mut self,
         done: impl FnOnce(&mut AppState, &mut Context<AppState>) + 'static,
@@ -1702,10 +1911,13 @@ impl AppState {
     ) {
         self.call(
             cx,
-            |core| core.prefs(),
+            |core| core.prefs().map(|p| (p, core.models())),
             move |st, res, cx| {
                 match res {
-                    Ok(p) => {
+                    Ok((p, models)) => {
+                        if models.is_some() {
+                            st.models = models;
+                        }
                         st.prefs_at = Self::now();
                         if p.appearance.as_ref().is_some_and(|a| st.take_appearance(a)) {
                             cx.emit(AppEvent::Appearance);
@@ -1843,14 +2055,21 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         if !name.is_empty() && self.snap.retitle(&format!("{machine}:{sid}"), &name) {
+            self.edits += 1;
             cx.notify();
         }
+        let (key, shown) = (format!("{machine}:{sid}"), name.clone());
         self.call(
             cx,
             move |core| core.rename(&machine, &sid, &name),
             move |st, res, cx| {
                 match res {
                     Ok(()) => {
+                        // Shown again, over a refresh that came back meanwhile with the old name.
+                        if !shown.is_empty() {
+                            st.snap.retitle(&key, &shown);
+                        }
+                        st.edits += 1;
                         st.refresh_in(Duration::from_millis(600), cx);
                         cx.defer(move |cx| done(true, cx))
                     }
@@ -1908,8 +2127,11 @@ impl AppState {
             |st, res, cx| {
                 st.budget_busy = false;
                 match res {
-                    Ok(b) => st.snap.budget = Some(b),
-                    Err(e) => st.toast("Could not change the budget", Some(e.to_string()), true, cx),
+                    Ok(b) => {
+                        st.snap.budget = Some(b);
+                        st.edits += 1;
+                    }
+                    Err(e) => st.toast("Couldn't change the budget", Some(e.to_string()), true, cx),
                 }
                 cx.notify();
             },
@@ -1968,7 +2190,7 @@ impl AppState {
                         st.group_waiting.clear();
                         let back = st.groups_server.clone();
                         st.snap.regroup(back);
-                        st.toast("The tab group change did not save", Some(e.to_string()), true, cx);
+                        st.toast("The tab group change didn't save", Some(e.to_string()), true, cx);
                         st.refresh_in(Duration::from_millis(200), cx);
                     }
                 }
@@ -2056,6 +2278,7 @@ impl AppState {
                         {
                             s.keep = kept;
                         }
+                        st.edits += 1;
                         let msg = if kept {
                             "Switchboard will keep it running."
                         } else {
@@ -2122,7 +2345,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let Some(s) = self.snap.session(key) else {
-            return cx.defer(move |cx| done(Err("This chat is no longer in the list.".into()), cx));
+            return cx.defer(move |cx| done(Err("This chat isn't in the list anymore.".into()), cx));
         };
         let (machine, sid) = (s.machine.clone(), s.sid.clone());
         let busy = format!("{key}:link");
@@ -2174,7 +2397,7 @@ impl AppState {
                     Ok(_) => {
                         st.threads.clear();
                         let msg = if older {
-                            "Split off. It is back on the list as a chat of its own."
+                            "Split off. It's back on the list as a chat of its own."
                         } else {
                             "Split off. This chat starts its own history now."
                         };
@@ -2194,6 +2417,22 @@ impl AppState {
     }
 
     pub fn continue_when(&mut self, key: &str, to: &str, when: Option<&'static str>, cx: &mut Context<Self>) {
+        self.continue_with(key, to, when, false, cx)
+    }
+
+    /// The user's answer to a need "trust": yes sends the move again with `trust: true`; no (None) drops it.
+    pub fn answer_trust(&mut self, yes: bool, cx: &mut Context<Self>) {
+        let Some(ask) = self.trust_ask.take() else { return };
+        cx.notify();
+        if !yes {
+            return;
+        }
+        match ask.retry {
+            TrustRetry::Continue { key, to, when } => self.continue_with(&key, &to, when, true, cx),
+        }
+    }
+
+    fn continue_with(&mut self, key: &str, to: &str, when: Option<&'static str>, trust: bool, cx: &mut Context<Self>) {
         let Some(s) = self.snap.session(key) else { return };
         let busy = format!("{key}:continue");
         if !self.busy.insert(busy.clone()) {
@@ -2206,6 +2445,7 @@ impl AppState {
             folder: String::new(),
             create: false,
             when: when.map(str::to_string),
+            trust,
         };
         let to_s = to.to_string();
         let src = s.machine_label.clone();
@@ -2227,6 +2467,14 @@ impl AppState {
                     Ok(None) => st.toast("Sent", None, false, cx),
                     Err(CoreError::Busy { message, busy }) => {
                         st.ask_busy("Move it", message, busy, BusyRetry::Continue { key, to: to_s }, cx)
+                    }
+                    Err(CoreError::Trust { folder_shown, declined, .. }) => {
+                        st.trust_ask = Some(TrustAsk {
+                            shown: folder_shown,
+                            declined,
+                            on: dst,
+                            retry: TrustRetry::Continue { key, to: to_s, when },
+                        });
                     }
                     Err(e) => st.toast(e.to_string(), None, true, cx),
                 }
@@ -2270,10 +2518,10 @@ impl AppState {
                                 None,
                                 cx,
                             );
-                            cx.emit(AppEvent::Relaunching { key, job: jid });
+                            cx.emit(AppEvent::Relaunching { key });
                         }
                         None => st.toast(
-                            r.error.unwrap_or_else(|| "Switchboard could not relaunch it.".into()),
+                            r.error.unwrap_or_else(|| "Switchboard couldn't relaunch it.".into()),
                             None,
                             true,
                             cx,
@@ -2295,7 +2543,7 @@ impl AppState {
         req: NewRequest,
         label: String,
         name: String,
-        done: impl FnOnce(Result<Option<String>, String>, &mut App) + 'static,
+        done: impl FnOnce(Result<Option<String>, CoreError>, &mut App) + 'static,
         cx: &mut Context<Self>,
     ) {
         let kind = if req.machine == "auto" { JobKind::Auto } else { JobKind::Start };
@@ -2312,8 +2560,9 @@ impl AppState {
                         st.toast(format!("Sent to {label}"), None, false, cx);
                         cx.defer(move |cx| done(Ok(None), cx));
                     }
-                    // The sheet shows the error under the message, so nothing typed is lost.
-                    Err(e) => cx.defer(move |cx| done(Err(e.to_string()), cx)),
+                    // The sheet shows the error under the message (or asks, for a folder Claude was never let
+                    // into), so nothing typed is lost.
+                    Err(e) => cx.defer(move |cx| done(Err(e), cx)),
                 }
             },
         );
@@ -2328,7 +2577,7 @@ impl AppState {
         cx: &mut Context<Self>,
     ) {
         let Some(s) = self.snap.session(key) else {
-            return cx.defer(move |cx| done(Err("This chat is no longer in the list.".into()), cx));
+            return cx.defer(move |cx| done(Err("This chat isn't in the list anymore.".into()), cx));
         };
         let (machine, sid, title, label, topic) =
             (s.machine.clone(), s.sid.clone(), s.title.clone(), s.machine_label.clone(), s.topic.clone());
@@ -2356,7 +2605,7 @@ impl AppState {
                         cx.defer(move |cx| done(Ok(jid), cx));
                     }
                     Ok(None) => cx.defer(move |cx| {
-                        done(Err("The server took the resume but did not say which job it is.".into()), cx)
+                        done(Err("The server took the resume but didn't say which job it is.".into()), cx)
                     }),
                     Err(e) => cx.defer(move |cx| done(Err(e.to_string()), cx)),
                 }
@@ -2379,7 +2628,9 @@ impl AppState {
         name: Option<String>,
         cx: &mut Context<Self>,
     ) {
-        self.jobs.push(Job::new(id, kind, key, label, src, from, name, Self::now()));
+        if !add_job(&mut self.jobs, Job::new(id, kind, key, label, src, from, name, Self::now())) {
+            return; // the server took the same action twice (a double click) and gave back the job it has
+        }
         self.poll_job(id.to_string(), Duration::from_millis(1200), cx);
         self.refresh_in(Duration::from_millis(1200), cx);
         cx.notify();
@@ -2419,6 +2670,11 @@ impl AppState {
         let finished = job.state.finished();
         let note =
             (finished && !was.finished() && !job.cancelled).then(|| (job.id.clone(), job.headline(), job.detail(now)));
+        if relaunch_started(job.kind, was, job.state)
+            && let Some(key) = job.key.clone()
+        {
+            cx.emit(AppEvent::RelaunchStarted { key, job: job.id.clone() });
+        }
         if finished && !was.finished() {
             let ev = if job.state == JobState::Done {
                 AppEvent::JobDone {
@@ -2510,5 +2766,94 @@ mod tests {
             .map(|(_, l)| *l)
             .collect();
         assert!(bad.is_empty(), "call these through cx.defer: {bad:#?}");
+    }
+
+    #[test]
+    fn unchanged_tabs_still_go_once_a_day() {
+        let tabs = vec!["studio:a".to_string()];
+        assert!(super::tabs_due(None, &tabs, 1000.0), "the first refresh sends them");
+        let sent = (tabs.clone(), 1000.0);
+        assert!(!super::tabs_due(Some(&sent), &tabs, 1000.0 + 3600.0), "unchanged within the day: not again");
+        assert!(super::tabs_due(Some(&sent), &tabs, 1000.0 + 86400.0), "a day later: again");
+        assert!(super::tabs_due(Some(&sent), &["studio:b".to_string()], 1001.0), "changed: at once");
+    }
+
+    fn job(id: &str, kind: super::JobKind, key: Option<&str>) -> super::Job {
+        super::Job::new(id, kind, key.map(str::to_string), "Studio", "Studio", None, None, 1000.0)
+    }
+
+    #[test]
+    fn the_same_job_twice_is_followed_once() {
+        use super::{JobKind, JobState};
+        let mut jobs = Vec::new();
+        assert!(super::add_job(&mut jobs, job("j1", JobKind::Resume, Some("studio:a"))));
+        assert!(!super::add_job(&mut jobs, job("j1", JobKind::Resume, Some("studio:a"))), "a double click");
+        assert_eq!(jobs.len(), 1);
+        let done = sb_core::api::ApiJob { state: Some("done".into()), ..Default::default() };
+        jobs[0].update(&done, 1010.0);
+        assert!(jobs.iter().all(|j| j.state == JobState::Done), "no card is left running");
+    }
+
+    #[test]
+    fn a_relaunch_lets_go_of_its_terminal_only_once_it_runs() {
+        use super::{JobKind, JobState, relaunch_started};
+        assert!(!relaunch_started(JobKind::Relaunch, JobState::Queued, JobState::Queued), "waiting for the reply");
+        assert!(relaunch_started(JobKind::Relaunch, JobState::Queued, JobState::Running));
+        assert!(relaunch_started(JobKind::Relaunch, JobState::Queued, JobState::Done), "done before the next look");
+        assert!(!relaunch_started(JobKind::Relaunch, JobState::Queued, JobState::Error), "cancelled: it stays live");
+        assert!(!relaunch_started(JobKind::Relaunch, JobState::Running, JobState::Done), "said once");
+        assert!(!relaunch_started(JobKind::Resume, JobState::Queued, JobState::Running));
+    }
+
+    #[test]
+    fn settings_that_do_not_parse_are_kept_aside() {
+        let dir = std::env::temp_dir().join(format!("sb-settings-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("settings.json");
+        let text = r#"{"theme": "dark", "tabs": "not a list", "servers": ["http://192.0.2.10:8130"]}"#;
+        std::fs::write(&p, text).unwrap();
+        let (s, bad) = super::load_settings(&p);
+        assert!(bad);
+        assert_eq!(s.theme.as_deref(), Some("dark"), "what still reads is kept");
+        assert!(s.tabs.is_empty());
+        assert_eq!(s.saved.servers, vec!["http://192.0.2.10:8130".to_string()]);
+        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), text, "the file as it was");
+        std::fs::write(&p, r#"{"theme": "light"}"#).unwrap();
+        let (s, bad) = super::load_settings(&p);
+        assert!(!bad);
+        assert_eq!(s.theme.as_deref(), Some("light"));
+        assert!(!super::load_settings(&dir.join("missing.json")).1, "no file yet is not a problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn opening_a_chat_calls_off_only_the_stop_from_closing_its_tab() {
+        use super::{JobKind, stops_from_close};
+        let jobs = vec![job("j1", JobKind::Stop, Some("studio:a")), job("j2", JobKind::Stop, Some("studio:a"))];
+        let from_close: std::collections::HashSet<String> = ["j1".to_string()].into();
+        assert_eq!(stops_from_close(&jobs, &from_close, "studio:a"), vec!["j1".to_string()]);
+        assert!(stops_from_close(&jobs, &Default::default(), "studio:a").is_empty(), "one from the board stays");
+        assert!(stops_from_close(&jobs, &from_close, "studio:b").is_empty());
+    }
+
+    #[test]
+    fn a_refresh_that_left_before_a_rename_is_read_again() {
+        assert!(!super::overtaken(3, 3));
+        assert!(super::overtaken(3, 4), "renamed while it was on its way: it has the old name");
+    }
+
+    #[test]
+    fn a_notification_for_a_chat_that_is_gone_selects_nothing() {
+        use super::{JobKind, tag_chat};
+        let known = |k: &str| k == "studio:a" || k == "studio:b";
+        let mut jobs = vec![job("j1", JobKind::Resume, Some("studio:a")), job("j2", JobKind::Stop, Some("studio:z"))];
+        assert_eq!(tag_chat("studio:a", &jobs, known).as_deref(), Some("studio:a"));
+        assert_eq!(tag_chat("studio:gone", &jobs, known), None);
+        assert_eq!(tag_chat("job:j1", &jobs, known).as_deref(), Some("studio:a"), "the chat it came from");
+        jobs[0].new_machine = Some("studio".into());
+        jobs[0].new_sid = Some("b".into());
+        assert_eq!(tag_chat("job:j1", &jobs, known).as_deref(), Some("studio:b"), "the chat it made");
+        assert_eq!(tag_chat("job:j2", &jobs, known), None, "its chat was removed");
+        assert_eq!(tag_chat("job:j9", &jobs, known), None);
     }
 }

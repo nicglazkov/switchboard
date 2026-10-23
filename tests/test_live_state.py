@@ -225,7 +225,7 @@ class ServerLiveTest(unittest.TestCase):
     def test_held_comes_from_the_guard(self):
         self.f.rows = [s(status='waiting')]
         self.app.fleet.poll()
-        self.app.guard.held_set.add(('desk', SID_A))
+        self.app.guard.held_set[('desk', SID_A)] = self.app.clock()
         _, _, row = self.row()
         self.assertEqual((row['held'], row['activity']), (True, 'held'))
 

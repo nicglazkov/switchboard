@@ -3,13 +3,15 @@
 
 use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
 
 pub struct Term {
-    master: Mutex<Box<dyn MasterPty + Send>>,
-    killer: Mutex<Box<dyn ChildKiller + Send + Sync>>,
+    /// On Windows, None once the process has exited: ConPTY ends the output only when it is closed.
+    master: Arc<Mutex<Option<Box<dyn MasterPty + Send>>>>,
+    /// None once the process has been waited for: its PID may belong to another process by then.
+    killer: Arc<Mutex<Option<Box<dyn ChildKiller + Send + Sync>>>>,
     input: mpsc::Sender<Vec<u8>>,
 }
 
@@ -60,7 +62,8 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     drop(pair.slave); // the child holds the only slave side, so its exit ends our reads
     let mut reader = pair.master.try_clone_reader().map_err(io_err)?;
     let mut writer = pair.master.take_writer().map_err(io_err)?;
-    let killer = child.clone_killer();
+    let killer = Arc::new(Mutex::new(Some(child.clone_killer())));
+    let master = Arc::new(Mutex::new(Some(pair.master)));
 
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
     let rate = s.rate.max(1) as f64;
@@ -95,15 +98,19 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     })?;
 
     let (exit_tx, exit_rx) = oneshot::channel();
+    let (reaped, console) = (killer.clone(), master.clone());
     std::thread::Builder::new().name("pty-wait".into()).spawn(move || {
         let code = child.wait().ok().map(|st| st.exit_code() as i64);
+        reaped.lock().unwrap_or_else(|e| e.into_inner()).take(); // a hang up after this would signal a stranger
+        if cfg!(windows) {
+            // ConPTY keeps the output open after the process ends; closing it lets the reader drain it and stop
+            let m = console.lock().unwrap_or_else(|e| e.into_inner()).take();
+            drop(m);
+        }
         let _ = exit_tx.send(code);
     })?;
 
-    Ok((
-        Term { master: Mutex::new(pair.master), killer: Mutex::new(killer), input: in_tx },
-        TermIo { output: out_rx, exited: exit_rx },
-    ))
+    Ok((Term { master, killer, input: in_tx }, TermIo { output: out_rx, exited: exit_rx }))
 }
 
 impl Term {
@@ -135,14 +142,19 @@ impl Term {
     }
 
     pub fn resize(&self, cols: u16, rows: u16) {
-        if let Ok(m) = self.master.lock() {
+        if let Ok(m) = self.master.lock()
+            && let Some(m) = m.as_ref()
+        {
             let _ = m.resize(size(cols, rows));
         }
     }
 
     /// Hang up: ssh gets SIGHUP and closes, and on the machine `claude attach` detaches. The session keeps running.
+    /// Nothing once it has exited.
     pub fn hang_up(&self) {
-        if let Ok(mut k) = self.killer.lock() {
+        if let Ok(mut k) = self.killer.lock()
+            && let Some(k) = k.as_mut()
+        {
             let _ = k.kill();
         }
     }
@@ -157,4 +169,36 @@ impl Drop for Term {
 /// portable-pty returns anyhow errors; this keeps anyhow out of our own dependency list.
 fn io_err(e: impl std::fmt::Display) -> std::io::Error {
     std::io::Error::other(e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn exit_with(code: u8) -> Vec<String> {
+        let (shell, flag) = if cfg!(windows) { ("cmd.exe", "/c") } else { ("/bin/sh", "-c") };
+        vec![shell.into(), flag.into(), format!("exit {code}")]
+    }
+
+    fn run(argv: &[String]) -> (Term, TermIo) {
+        spawn(Spawn { argv, env: &[], env_remove: &[], cwd: None, cols: 80, rows: 24, rate: 1 << 20 }).unwrap()
+    }
+
+    #[tokio::test]
+    async fn an_exited_process_is_never_signalled() {
+        let (term, mut io) = run(&exit_with(3));
+        while io.output.recv().await.is_some() {}
+        assert_eq!(io.exited.await.unwrap(), Some(3));
+        assert!(term.killer.lock().unwrap().is_none(), "its PID may be someone else's now");
+        drop(term); // hangs up nothing
+    }
+
+    #[tokio::test]
+    async fn output_ends_when_the_process_exits() {
+        // the Term stays alive, so only the exit can end the output (on Windows, ConPTY needed closing for that)
+        let (_term, mut io) = run(&exit_with(2));
+        let drained = async { while io.output.recv().await.is_some() {} };
+        assert!(tokio::time::timeout(Duration::from_secs(10), drained).await.is_ok(), "the output never ended");
+        assert_eq!(io.exited.await.unwrap(), Some(2));
+    }
 }

@@ -107,6 +107,21 @@ class ListTest(RpcBase):
         os.utime(p, (NOW + 10, NOW + 10))
         self.assertEqual(len(self.sb.rpc({'verb': 'list'}, NOW + 20, agents=[])['sessions']), 1)
 
+    def test_dismiss_while_busy_holds_until_the_next_reply(self):
+        p = self.transcript(SID_A, str(self.root), NOW - 60)
+        busy = [{'sessionId': SID_A, 'kind': 'interactive', 'status': 'busy', 'pid': 1}]
+        self.assertTrue(self.sb.rpc({'verb': 'dismiss', 'sid': SID_A}, NOW, agents=busy)['ok'])
+        with open(p, 'a') as f:  # Claude goes on writing the same turn
+            f.write(json.dumps(assistant(_iso(NOW + 10), 'still working', usage={'input_tokens': 5})) + '\n')
+        os.utime(p, (NOW + 10, NOW + 10))
+        self.assertEqual(self.sb.rpc({'verb': 'list'}, NOW + 20, agents=busy)['sessions'], [])
+        idle = [dict(busy[0], status='idle')]
+        self.assertEqual(self.sb.rpc({'verb': 'list'}, NOW + 30, agents=idle)['sessions'], [], 'the turn it was dismissed in')
+        with open(p, 'a') as f:
+            f.write(json.dumps(assistant(_iso(NOW + 40), 'a new reply', usage={'input_tokens': 5})) + '\n')
+        os.utime(p, (NOW + 40, NOW + 40))
+        self.assertEqual(len(self.sb.rpc({'verb': 'list'}, NOW + 50, agents=idle)['sessions']), 1)
+
     def test_dismiss_stops_a_background_session(self):
         self.transcript(SID_A, str(self.root), NOW - 60)
         agents = [{'sessionId': SID_A, 'id': 'aaaaaaaa', 'kind': 'background', 'status': 'busy', 'pid': 1}]
@@ -174,6 +189,32 @@ class MkdirTest(RpcBase):
         before = self.cjson.read_text()
         self.assertTrue(self.sb.rpc({'verb': 'mkdir', 'folder': 'deep/er'}, NOW, agents=[])['ok'])
         self.assertEqual(self.cjson.read_text(), before)
+
+    def test_inherit_trust_writes_own_entry_under_trusted_parent(self):
+        key = self.sb.trust_key
+        wt = self.root / 'repo' / '.claude' / 'worktrees' / 'feature'
+        wt.mkdir(parents=True)
+        self.cjson.write_text(json.dumps({'projects': {key(self.root / 'repo'): {'hasTrustDialogAccepted': True}}}))
+        self.assertTrue(self.sb.inherit_trust(wt))
+        self.assertTrue(json.loads(self.cjson.read_text())['projects'][key(wt)]['hasTrustDialogAccepted'])
+        self.assertFalse(self.sb.inherit_trust(wt))  # already has its own answer
+
+    def test_inherit_trust_leaves_declined_and_unanswered_alone(self):
+        key = self.sb.trust_key
+        a, b = self.root / 'no' / 'child', self.root / 'loose' / 'child'
+        a.mkdir(parents=True)
+        b.mkdir(parents=True)
+        self.cjson.write_text(json.dumps({'projects': {
+            key(self.root): {'hasTrustDialogAccepted': True},
+            key(self.root / 'no'): {'hasTrustDialogAccepted': False},
+            key(b): {'hasTrustDialogAccepted': False},
+        }}))
+        before = self.cjson.read_text()
+        self.assertFalse(self.sb.inherit_trust(a))  # the nearest answer above it said no
+        self.assertFalse(self.sb.inherit_trust(b))  # it said no itself
+        self.assertEqual(self.cjson.read_text(), before)
+        self.cjson.write_text(json.dumps({'projects': {}}))
+        self.assertFalse(self.sb.inherit_trust(a))  # nothing above it was ever trusted
 
     def test_folders_lists_subdirs_and_recent(self):
         (self.root / '.hidden').mkdir()

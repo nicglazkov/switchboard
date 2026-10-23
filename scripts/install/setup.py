@@ -147,15 +147,46 @@ def restart_server():
 
 
 # ---------------------------------------------------------------- talking to the person
+def _styled():
+    """Colors and an indent to match install-server.sh, on a terminal that takes them (never piped, never with
+    NO_COLOR or SWITCHBOARD_PLAIN)."""
+    return (sys.stdout.isatty() and not os.environ.get('NO_COLOR') and not os.environ.get('SWITCHBOARD_PLAIN')
+            and os.environ.get('TERM', 'dumb') not in ('dumb', 'unknown', '') and not IS_WIN)
+
+
+ACC, B, D, R = '\033[38;5;80m', '\033[1m', '\033[2m', '\033[0m'
+STEP_RE = re.compile(r'^(\n?)(Step \d of \d)(: .*)$')
+OPTION_RE = re.compile(r'^(\s+)(\d+)\. (.*)$')
+
+
+def _paint(text):
+    """One printed block, styled: indented two spaces, step titles bold, option numbers in the accent color."""
+    out = []
+    for line in str(text).split('\n'):
+        m = STEP_RE.match(line)
+        if m:
+            line = f'{B}{ACC}{m.group(2)}{R}{B}{m.group(3)}{R}'
+        elif (m := OPTION_RE.match(line)):
+            line = f'{m.group(1)}{ACC}{m.group(2)}.{R} {m.group(3)}'
+        out.append(f'  {line}' if line else line)
+    return '\n'.join(out)
+
+
 class Ask:
     def __init__(self, yes=False, inp=input, out=print):
         self.yes, self.inp, self.out = yes, inp, out
+        self.styled = inp is input and out is print and _styled()
+        if self.styled:
+            self.out = lambda text='': print(_paint(text))
 
     def line(self, prompt, default=''):
         if self.yes:
             return default
         try:
-            v = self.inp(f'{prompt}' + (f' [{default}]' if default else '') + ': ').strip()
+            if self.styled:
+                v = self.inp(f'  {prompt}' + (f' {D}[{default}]{R}' if default else '') + ': ').strip()
+            else:
+                v = self.inp(f'{prompt}' + (f' [{default}]' if default else '') + ': ').strip()
         except EOFError:
             return default
         return v or default
@@ -450,30 +481,30 @@ def main(argv=None):
             name, _, folder = spec.partition('=')
             step_folder(api, name, ask, folder or None)
         return 0
-    print('Switchboard setup. Press Enter to take the suggested answer in [brackets].')
+    ask.out('Switchboard setup. Press Enter to take the suggested answer in [brackets].')
     address = step_address(api, ask, a.address)
     api.host = address
     if ask.yes:
-        print('\nStep 2 of 3: your machines (skipped; add them with: switchboard setup)')
+        ask.out('\nStep 2 of 3: your machines (skipped; add them with: switchboard setup)')
         added = []
     else:
         added = step_machines(api, address, ask)
-    print('\nStep 3 of 3: Claude folders')
+    ask.out('\nStep 3 of 3: Claude folders')
     have = api.machines()
     todo = [m for m in have if m['name'] in added or not m.get('root')]
     if not have:
-        print('No machines yet. Add them any time with: switchboard setup')
+        ask.out('No machines yet. Add them any time with: switchboard setup')
     elif not todo:
-        print('Every machine has its Claude folder already.')
+        ask.out('Every machine has its Claude folder already.')
     for m in todo:
         if not m.get('online'):
-            print(f'{m["label"]} is not answering yet; set its folder later in Settings, Machines.')
+            ask.out(f'{m["label"]} is not answering yet; set its folder later in Settings, Machines.')
             continue
         try:
             step_folder(api, m['name'], ask)
         except RuntimeError as e:
-            print(f'{m["label"]}: {e}')
-    print(f'\nAll set. Open http://{address}:{PORT} in a browser, or put {address} in the app\'s Settings.')
+            ask.out(f'{m["label"]}: {e}')
+    ask.out(f'\nAll set. Open http://{address}:{PORT} in a browser, or put {address} in the app\'s Settings.')
     return 0
 
 

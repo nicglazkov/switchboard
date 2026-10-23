@@ -48,7 +48,7 @@ impl BoardView {
                 ),
             );
         let note = match tab {
-            ArcTab::Older => "Idle two days or more. They stay out of every view and count.",
+            ArcTab::Older => "Idle for two days or more. They're left out of every view and count.",
             ArcTab::Replaced => {
                 "Started fresh, resumed or continued elsewhere. Only the newer chat shows in the main view."
             }

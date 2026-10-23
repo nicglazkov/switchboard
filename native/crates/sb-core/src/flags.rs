@@ -111,7 +111,7 @@ pub fn words(text: &str) -> Result<Vec<String>, String> {
         }
     }
     if q.is_some() {
-        return Err("A quote is not closed.".into());
+        return Err("A quote isn't closed.".into());
     }
     out.extend(cur);
     Ok(out)
@@ -146,11 +146,11 @@ pub fn check_other(
         let raw = eq.map_or(w.as_str(), |e| &w[..e]);
         let name = aliases.get(raw).cloned().unwrap_or_else(|| raw.to_string());
         if !name.starts_with("--") {
-            return Some(format!("{} is not a flag. Flags start with --.", cut(w)));
+            return Some(format!("{} isn't a flag. Flags start with --.", cut(w)));
         }
         let chip = name == "--model" || name == "--effort";
         if !takes.contains_key(&name) && !chip {
-            return Some(format!("{} is not a flag Switchboard passes to Claude Code.", cut(&name)));
+            return Some(format!("{} isn't a flag Switchboard passes to Claude Code.", cut(&name)));
         }
         if name == "--chrome" && o.chrome {
             return Some("Claude in Chrome is already on above.".into());
@@ -275,10 +275,10 @@ mod tests {
     fn other_flags_are_checked() {
         let (t, a) = takes();
         let chk = |other: &str, o: Opts| check_other(&Opts { other: other.into(), ..o }, "", "normal", &t, &a);
-        assert_eq!(chk("agent x", Opts::default()).unwrap(), "agent is not a flag. Flags start with --.");
-        assert_eq!(chk("--nope", Opts::default()).unwrap(), "--nope is not a flag Switchboard passes to Claude Code.");
+        assert_eq!(chk("agent x", Opts::default()).unwrap(), "agent isn't a flag. Flags start with --.");
+        assert_eq!(chk("--nope", Opts::default()).unwrap(), "--nope isn't a flag Switchboard passes to Claude Code.");
         assert_eq!(chk("--agent", Opts::default()).unwrap(), "--agent needs a value.");
-        assert_eq!(chk("--agent 'x", Opts::default()).unwrap(), "A quote is not closed.");
+        assert_eq!(chk("--agent 'x", Opts::default()).unwrap(), "A quote isn't closed.");
         assert_eq!(
             chk("--chrome", Opts { chrome: true, ..Default::default() }).unwrap(),
             "Claude in Chrome is already on above."

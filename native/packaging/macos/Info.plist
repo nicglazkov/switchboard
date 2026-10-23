@@ -36,6 +36,10 @@
 	<false/>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Switchboard connects to your Switchboard server and its terminal hub on your home network.</string>
+	<key>NSBonjourServices</key>
+	<array>
+		<string>_switchboard._tcp</string>
+	</array>
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright Switchboard contributors</string>
 </dict>

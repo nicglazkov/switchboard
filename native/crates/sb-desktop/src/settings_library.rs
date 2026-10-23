@@ -238,8 +238,8 @@ impl SettingsView {
                     None,
                     vec![Self::crow(
                         t,
-                        "Could not read the library",
-                        Some(format!("{e}. The server may need an update to have one.")),
+                        "Couldn't read the library",
+                        Some(format!("{e}. The server might need an update first.")),
                         None,
                     )],
                 ))
@@ -368,7 +368,7 @@ impl SettingsView {
                     .bg(t.need.alpha(if t.dark { 0.14 } else { 0.1 }))
                     .child(div().mt(px(1.)).child(ui::icon("warn", 14., t.need)))
                     .child(
-                        ui::wrap("This skill uses keys Claude can read; make it an MCP to keep them hidden")
+                        ui::wrap("This skill uses keys Claude can read. Make it an MCP to keep them hidden")
                             .flex_1()
                             .text_size(px(12.5))
                             .line_height(relative(1.4))
@@ -828,7 +828,7 @@ impl SettingsView {
                 list =
                     list.child(div().py(px(6.)).text_size(px(12.5)).text_color(t.faint).child("No versions listed."));
             }
-            out = out.child(list).child(ui::wrap("Every version is kept. Machines that have the tool get the one marked latest; running chats keep the version they started with.").mt(px(2.)).text_size(px(12.)).text_color(t.faint));
+            out = out.child(list).child(ui::wrap("Every version is kept. Machines with the tool get the one marked latest, and running chats keep the version they started with.").mt(px(2.)).text_size(px(12.)).text_color(t.faint));
         }
         out.into_any_element()
     }
@@ -924,7 +924,7 @@ impl SettingsView {
             t,
             "lib-imp-x",
             "Import from a machine",
-            "Pick a machine, then a skill or an MCP server it has. A skill brings its whole folder. An MCP server keeps its command; its env values stay behind, and each one becomes a key to set on every machine.",
+            "Pick a machine, then a skill or an MCP server it has. A skill brings its whole folder. An MCP server keeps its command, but its env values stay behind and each one becomes a key to set on every machine.",
             cx,
             |this, _| this.lib_import = None,
         )
@@ -936,7 +936,7 @@ impl SettingsView {
         match &imp.sources {
             None => p = p.child(ui::loading(t, "lib-ask", format!("Asking {label} what it has"))),
             Some(Err(e)) => {
-                p = p.child(ui::wrap(format!("Could not ask {label}. {e}")).text_size(px(13.)).text_color(t.bad))
+                p = p.child(ui::wrap(format!("Couldn't ask {label}. {e}")).text_size(px(13.)).text_color(t.bad))
             }
             Some(Ok(s)) if s.skills.is_empty() && s.mcp.is_empty() => {
                 p = p.child(

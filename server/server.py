@@ -3,6 +3,7 @@ import base64, ipaddress, json, os, re, socket, subprocess, sys, threading, time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
+import urllib.error
 from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -11,15 +12,16 @@ import term as term_mod  # noqa: E402
 import nodes as nodes_mod  # noqa: E402
 import features as features_mod  # noqa: E402
 import flags as flags_mod  # noqa: E402
+import models as models_mod  # noqa: E402
 import notes as notes_mod  # noqa: E402
 import options as options_mod  # noqa: E402
 import addresses as addresses_mod  # noqa: E402
+import releases as releases_mod  # noqa: E402
 from guard import GuardTimer  # noqa: E402
 
 PORT = 8130
 LOCAL_HOSTS = ('localhost', '127.0.0.1')
 ACTION_VERBS = {'resume', 'fresh', 'handoff', 'stop', 'dismiss', 'pass'}
-MODELS = {'opus', 'sonnet', 'haiku', 'fable', None}
 MODES = {'normal', 'max', 'ultracode'}
 EFFORTS = {'low', 'medium', 'high', 'xhigh', 'max', None}
 PING_WHY = {'prompt', 'stop', 'wait', 'start', 'end', 'status'}
@@ -31,12 +33,13 @@ DEVICES_MAX = 16    # push tokens kept (each phone or iPad, and its reinstalls);
 NAME_RE = re.compile(r"[A-Za-z0-9 ._,:'+#()-]{1,64}")
 JOB_KEEP, WATCH_FOR, WATCH_GRACE = 3600, 1800, 6
 COMPACT_MAX = 40  # the newest chats of a thread that compacting reads
-DONE_TITLES = {'fresh': 'Fresh session ready', 'start': 'New session ready', 'resume': 'Session resumed',
+DONE_TITLES = {'fresh': 'Fresh chat ready', 'start': 'New chat ready', 'resume': 'Chat resumed',
                'continue': 'Continued on {where}', 'handoff': 'Handoff saved', 'relaunch': 'Relaunched with new flags',
                'stop': 'Stopped once its work finished', 'compact': 'Thread compacted into a fresh chat'}
-FAIL_TITLES = {'fresh': 'Start fresh did not finish', 'start': 'New session did not start', 'resume': 'Resume did not finish',
-               'continue': 'Continue did not finish', 'handoff': 'Handoff did not finish', 'relaunch': 'Relaunch did not finish',
-               'stop': 'Stop did not finish', 'compact': 'Compacting the thread did not finish'}
+FAIL_TITLES = {'fresh': "Start fresh didn't finish", 'start': "New chat didn't start", 'resume': "Resume didn't finish",
+               'continue': "Continue didn't finish", 'handoff': "Handoff didn't finish", 'relaunch': "Relaunch didn't finish",
+               'stop': "Stop didn't finish", 'compact': "Compacting the thread didn't finish"}
+QUICK_FOR, QUICK_POLL = 20, 1  # a job's machine is asked every second for its first 20 s: most resumes end by then
 RELAUNCH_WAIT = 15 * 60  # a relaunch that waits for Claude to finish its reply gives up after this
 CHILD_WAIT = 4 * 3600  # ... and one that waits for subagents or background commands, after this
 BUSY_THEN = {'fresh': 'Start fresh when they finish, or now, which stops them.',
@@ -233,9 +236,10 @@ class ServerConfig:
 
 
 class HttpError(Exception):
-    def __init__(self, code, msg):
+    def __init__(self, code, msg, extra=None):
         super().__init__(msg)
         self.code = code
+        self.extra = extra or {}  # more for the app to act on, e.g. {'need': 'trust'} (a folder to say yes to)
 
 
 def log(msg):
@@ -273,7 +277,7 @@ class App:
         if getattr(fleet, 'history', False) is None:  # every poll writes down the weekly percent for the widgets
             fleet.history = fleet_mod.WeekHistory(self.state_dir / 'week_history.json')
         self.pusher = pusher or (lambda *a: None)
-        self.guard = GuardTimer(guard_delay, self._push_guard)
+        self.guard = GuardTimer(guard_delay, self._push_guard, clock=clock)
         self.clock, self.sleep, self.poll_every, self.retry_waits = clock, sleep, poll_every, retry_waits
         self.jobs, self.jobs_lock = {}, threading.Lock()
         self.chrome_lock = threading.Lock()
@@ -296,17 +300,23 @@ class App:
         except (OSError, ValueError):
             return {}
 
-    def _push(self, title, body, url):
+    def _push(self, title, body, url, kind='jobs', group=None):
+        """One notification to every iPhone, unless its kind is turned off in Settings. `group`: pushes with the same
+        one replace each other on the phone instead of piling up."""
+        if not options_mod.notify_clean(self._prefs_raw().get('notify')).get(kind, True):
+            log(f'push {title!r} {url} not sent: {kind} notifications are off')
+            return
         log(f'push {title!r} {url}')
         try:
-            self.pusher(title, body, url)
+            self.pusher(title, body, url, kind, group)
         except Exception:
             log('push failed: ' + traceback.format_exc())
 
     def _push_guard(self, evt):
-        title = (evt.get('title') or 'A session').strip()[:80]
-        body = f'{title}: {int(evt.get("ctx") or 0) // 1000}k context, idle {fmt_idle(evt.get("idle"))}. Tap to start it fresh.'
-        self._push('Old session held', body, f'/s/{evt.get("machine")}/{evt.get("session_id")}')
+        title = (evt.get('title') or 'A chat').strip()[:80]
+        body = f'{title} has {int(evt.get("ctx") or 0) // 1000}k of context and has been idle {fmt_idle(evt.get("idle"))}. Tap to start it fresh.'
+        self._push('Message held', body, f'/s/{evt.get("machine")}/{evt.get("session_id")}', 'held',
+                   f'held-{evt.get("session_id")}')
 
     def _machine(self, body_or_name):
         name = body_or_name if isinstance(body_or_name, str) else body_or_name.get('machine')
@@ -334,8 +344,23 @@ class App:
         except fleet_mod.FleetError as e:
             raise HttpError(502, str(e))
         if not r.get('ok'):
-            raise HttpError(400, r.get('error') or 'request failed')
+            extra = {'need': 'trust', **{k: r[k] for k in ('folder_shown', 'declined') if k in r}} if r.get('need') == 'trust' else None
+            raise HttpError(409 if extra else 400, r.get('error') or 'request failed', extra)
         return r
+
+    def check_folder(self, name, folder, trust):
+        """Before New or Continue starts a chat outside the Claude folder: may Claude work there? A 409 with
+        need: trust asks the app to show the folder and send trust: true once the user says yes."""
+        if not folder or trust or not str(folder).startswith(('~', '@')):
+            return
+        if 'places' not in (self.fleet.state.get(name, {}).get('features') or []):
+            raise HttpError(409, f'Update Switchboard on {self._label(name)} to start chats outside its Claude folder.')
+        r = self._call(name, {'verb': 'folder_check', 'folder': folder}, timeout=20)
+        if r.get('trust') != 'yes':
+            shown = r.get('shown') or folder
+            raise HttpError(409, f'You said no to Claude working in {shown} before. Allow it to start a chat there.'
+                            if r.get('trust') == 'no' else f"Claude hasn't worked in {shown} yet. Allow it to start a chat there.",
+                            {'need': 'trust', 'folder_shown': shown, 'declined': r.get('trust') == 'no'})
 
     # ---- files dropped or pasted into a terminal: to the session's machine, in chunks small enough for a hub link
     def upload(self, query, data):
@@ -416,28 +441,35 @@ class App:
         m = next((m for m in self.fleet.snapshot()['machines'] if m['name'] == name), None)
         s = next((s for s in (m or {}).get('sessions') or [] if s.get('sid') == sid), None)
         if s is None:
-            raise HttpError(404, 'That chat is not on the list any more.')
+            raise HttpError(404, "That chat isn't on the list anymore.")
         return m, s
 
     # ---- the desktop app's "Restart to update": the newest build on the download page
     LATEST_FOR = 300  # seconds a look at the download page is kept
 
-    def app_latest(self):
-        """GET /api/app: {latest: <the download page's latest.json> | None, base: <its URL>, feed: {manifest, sig}}.
-        Where the page is lives in <config>/downloads.json ({"url": "http://host:port/app"}), which publish.sh writes;
-        without it, nothing is offered and set_up is false. `feed` is latest.json as text, byte for byte, with
-        latest.json.sig (None when the page has none): the app checks that signature itself, so this server is
-        only a messenger and can't change what is offered. `latest` is the parsed copy older apps read. The app
-        never installs on its own."""
+    def app_latest(self, host=''):
+        """GET /api/app: {latest, base, feed: {manifest, sig}, page, source}. The builds come from the newest GitHub
+        release (releases.py), or from the download page that <config>/downloads.json names ({"url":
+        "http://host:port/app"}, which publish.sh writes for a private page). `feed` is latest.json as text, byte
+        for byte, with latest.json.sig: the app checks that signature itself, so this server is only a messenger
+        and can't change what is offered. `base` is where the app downloads from: the page itself, or this server
+        (GET /api/app/files/<file>) for GitHub, since the app has no TLS. `latest` is the parsed copy older apps
+        read. When the look fails, `error` says why and nothing is offered. The app never installs on its own."""
         now = time.time()
         c = getattr(self, '_latest', None)
-        if c and now - c[0] < self.LATEST_FOR:
-            return c[1]
+        if not (c and now - c[0] < self.LATEST_FOR):
+            c = (now, self._look_for_builds())
+            self._latest = c
+        out = dict(c[1])
+        if out.pop('via_server', False):
+            out['base'] = releases_mod.base_for(host)
+        return out
+
+    def _look_for_builds(self):
         try:
             url = json.loads((self.cfg_dir / 'downloads.json').read_text()).get('url')
         except (OSError, ValueError, AttributeError):
             url = None
-        out = {'ok': True, 'latest': None, 'set_up': False}
         if isinstance(url, str) and re.fullmatch(r'https?://[A-Za-z0-9.:\-]+(?:/[A-Za-z0-9._\-/]*)?', url):
             base = url.rstrip('/')
             try:
@@ -449,12 +481,32 @@ class App:
                         sig = r.read(1000).decode('ascii').strip() or None
                 except Exception:  # an unsigned page: the app shows nothing
                     sig = None
-                out = {'ok': True, 'latest': d if isinstance(d, dict) else None, 'base': base, 'set_up': True,
-                       'feed': {'manifest': text, 'sig': sig}}
+                return {'ok': True, 'latest': d if isinstance(d, dict) else None, 'base': base, 'set_up': True,
+                        'feed': {'manifest': text, 'sig': sig}, 'page': base + '/', 'source': 'page'}
             except Exception as e:  # the page being down never breaks anything else
-                out = {'ok': True, 'latest': None, 'base': base, 'set_up': True, 'error': str(e)[:200]}
-        self._latest = (now, out)
-        return out
+                return {'ok': True, 'latest': None, 'base': base, 'set_up': True, 'source': 'page',
+                        'error': f"The download page didn't answer ({str(e)[:160]})."}
+        repo = releases_mod.repo()
+        if not repo:
+            return {'ok': True, 'latest': None, 'set_up': False}
+        try:
+            rel = releases_mod.latest(repo)
+        except Exception as e:
+            return {'ok': True, 'latest': None, 'set_up': True, 'source': 'github', 'page': releases_mod.page(repo),
+                    'error': f"GitHub didn't answer ({str(e)[:160]})."}
+        self._release = (repo, rel['version'], set(rel['files']))
+        return {'ok': True, 'latest': json.loads(rel['manifest']), 'set_up': True, 'source': 'github', 'via_server': True,
+                'feed': {'manifest': rel['manifest'], 'sig': rel['sig']}, 'page': releases_mod.page(repo, rel['version'])}
+
+    def app_file(self, name):
+        """The GitHub release and version a download comes from, for a file the newest list names; else None."""
+        rel = getattr(self, '_release', None)
+        if rel is None:
+            self.app_latest()
+            rel = getattr(self, '_release', None)
+        if rel and name in rel[2]:
+            return rel[0], rel[1]
+        return None
 
     def flags_view(self, name, sid):
         """GET /api/flags?machine=&sid=: the flags drawer's "Active now" and the header's summary."""
@@ -491,7 +543,7 @@ class App:
             raise HttpError(400, str(e))
         model = body.get('model') or f.get('model')
         effort = body.get('effort') or f.get('effort')
-        if model not in MODELS or (effort not in EFFORTS and effort != 'ultracode'):
+        if not self.model_ok(model) or (effort not in EFFORTS and effort != 'ultracode'):
             raise HttpError(400, 'unknown model or effort')
         m, s = self._session(name, sid)
         label = m.get('label') or name
@@ -606,17 +658,26 @@ class App:
             try:
                 self._session(name, sid)
             except HttpError:
-                return
+                return self._go(jid)
             b = self.busy(name, sid)
             if not b['live']:
-                return
+                return self._go(jid)
             only_reply = not (b['subagents'] or b['commands'] or b['pending'])
             if self.clock() - start > (RELAUNCH_WAIT if only_reply else CHILD_WAIT):
                 raise HttpError(409, ('Claude was still replying after 15 minutes' if only_reply else
-                                      'Its work was still running after 4 hours') + ', so nothing was changed. Try again when it is done.')
+                                      'Its work was still running after 4 hours') + ", so nothing changed. Try again when it's done.")
             self._set(jid, state='queued', step='waiting', note=b['summary'])
             self.sleep(self.poll_every)
             self.fleet.poll_one(name)
+
+    def _go(self, jid):
+        """The job stops waiting and goes ahead. Under jobs_lock, so a cancel lands either before this (and the job
+        never runs) or after it (and is told it is too late)."""
+        with self.jobs_lock:
+            j = self.jobs.get(jid, {})
+            if j.get('cancel'):
+                raise HttpError(409, 'Cancelled. Nothing was changed.')
+            j['started'] = True
 
     # ---- live updates
     def bump(self):
@@ -649,6 +710,8 @@ class App:
         if why not in PING_WHY or not SID_RE.fullmatch(sid):
             raise HttpError(400, 'bad ping')
         o = {}
+        if why in ('prompt', 'stop'):
+            self.guard.moved({'machine': name, 'session_id': sid})  # it went on: nothing is held there any more
         if why == 'prompt':
             o['status'] = 'busy'
         elif why == 'stop':
@@ -789,6 +852,7 @@ class App:
             out.append({'name': m['name'], 'label': m['label'], 'os': m.get('os') or '', 'form': m.get('form'),
                         'icon': fleet_mod.icon_of(m), 'via': 'link' if linked else 'ssh', 'target': None if linked else m['target'],
                         'root': m.get('root'), 'online': s.get('online'), 'root_shown': self._root_shown(m, s),
+                        'roam': m.get('roam') is not False,
                         'needs_root': not m.get('root') and s.get('root_set') is False, 'root_suggest': s.get('root_suggest'),
                         'versions': s.get('versions'), 'features': s.get('features') or [], 'updated': s.get('updated'),
                         'auto': self.feat.auto.settings().get(m['name'], {}).get('on', False), 'can': self.feat.auto.view(m['name'])['can']})
@@ -823,6 +887,8 @@ class App:
                 self.fleet.rename(self._machine(body), body.get('label'))
             elif op == 'root':
                 self.fleet.set_root(self._machine(body), body.get('root'))
+            elif op == 'roam':  # chats may start anywhere in the machine's home folder, or only in its Claude folder
+                self.fleet.set_roam(self._machine(body), body.get('roam'))
             elif op == 'caps':  # Auto: on or off, tools to leave out, the user's own lines
                 name = self._machine(body)
                 self.feat.auto.set_setting(name, body)
@@ -835,16 +901,16 @@ class App:
                     try:  # a linked machine is unpaired too, or the hub would bring it back
                         nodes_mod.hub_call('POST', f'/internal/unpair/{name}', {})
                     except OSError as e:
-                        raise HttpError(502, f'The hub could not unlink it ({e}).')
+                        raise HttpError(502, f"The hub couldn't unlink it ({e}).")
                 self.fleet.drop_machine(name)
             elif op == 'add':
                 name, target = body.get('name'), body.get('target')
                 if not isinstance(name, str) or not fleet_mod.NAME_RE.fullmatch(name or ''):
-                    raise HttpError(400, 'An id is 1 to 32 lowercase letters or digits.')
+                    raise HttpError(400, 'An id has to be 1 to 32 lowercase letters or digits.')
                 if name in self.fleet.machines:
-                    raise HttpError(409, 'There is a machine with that id already.')
+                    raise HttpError(409, "There's already a machine with that id.")
                 if not fleet_mod.valid_target(target) or target.startswith(nodes_mod.PREFIX):
-                    raise HttpError(400, 'The address is user@host, as you would type it after ssh.')
+                    raise HttpError(400, "The address is user@host, like you'd type after ssh.")
                 self.fleet.add_machine({'name': name, 'label': body.get('label') or name, 'target': target, 'os': body.get('os') or ''})
                 self._poll_soon(name, 0.2)
             else:
@@ -931,7 +997,8 @@ class App:
         return dict({'chrome_machine': d.get('chrome_machine'), 'last': d.get('last'), 'presets': d.get('presets') or [],
                      'appearance': appearance(d.get('appearance')),
                      'summary_model': d.get('summary_model') if d.get('summary_model') in SUMMARY_MODELS else 'opus',
-                     'migrations': [m for m in d.get('migrations') or [] if isinstance(m, str)]}, **options_mod.clean(d))
+                     'migrations': [m for m in d.get('migrations') or [] if isinstance(m, str)],
+                     'notify': options_mod.notify_clean(d.get('notify'))}, **options_mod.clean(d))
 
     def options(self):
         """The opt-in settings (options.py): {key: bool}."""
@@ -958,13 +1025,18 @@ class App:
         log('options: ' + ('this server ran before this change, so every opt-in setting stays on' if had_state
                            else 'a new server: every opt-in setting starts off'))
 
+    def model_ok(self, m):
+        """No model (the machine's default), an alias or a full model id, or an alias a machine's Claude Code names
+        (flags.model_ok, models.py)."""
+        return m is None or flags_mod.model_ok(m, models_mod.reported_aliases(self.fleet.snapshot()['machines']))
+
     def flag_set(self, d):
         """A New sheet setup (the last one used, or a preset), checked: model, effort, mode, flags, Other flags."""
         if not isinstance(d, dict):
             raise HttpError(400, 'a setup is an object')
         out = {'model': d.get('model') or None, 'effort': d.get('effort') or None, 'mode': d.get('mode') or 'normal',
                'flags': d.get('flags') or [], 'other': d.get('other') or ''}
-        if out['model'] not in MODELS or out['effort'] not in EFFORTS or out['mode'] not in MODES:
+        if not self.model_ok(out['model']) or out['effort'] not in EFFORTS or out['mode'] not in MODES:
             raise HttpError(400, 'unknown model, effort or mode')
         try:
             flags_mod.parse(out['flags'], out['other'])
@@ -999,6 +1071,11 @@ class App:
             if body['summary_model'] not in SUMMARY_MODELS:
                 raise HttpError(400, 'the summary model is opus or sonnet')
             d['summary_model'] = body['summary_model']
+        if 'notify' in body:  # {kind: bool} for the kinds given; the others stay as they were
+            n = body['notify']
+            if not isinstance(n, dict) or any(k not in options_mod.NOTIFY_KEYS or not isinstance(v, bool) for k, v in n.items()):
+                raise HttpError(400, 'notify is {kind: true or false} for ' + ', '.join(options_mod.NOTIFY_KEYS))
+            d['notify'] = dict(d['notify'], **n)
         for k in options_mod.KEYS:  # the opt-in settings: each one true or false
             if k in body:
                 if not isinstance(body[k], bool):
@@ -1130,7 +1207,8 @@ class App:
                 self.sleep(wait)
 
     def _watch(self, jid, name, inner, step=None):
-        deadline = self.clock() + WATCH_FOR
+        began = self.clock()
+        deadline = began + WATCH_FOR
         while True:
             try:
                 r = self._call(name, {'verb': 'job', 'id': inner}, timeout=30)
@@ -1145,7 +1223,7 @@ class App:
                 # the machine dropped off for a moment; the launch carries on there, so keep watching
             if self.clock() > deadline:
                 return {'state': 'error', 'error': f'This is taking too long. Check {self._label(name)} in the list in a minute.'}
-            self.sleep(self.poll_every)
+            self.sleep(min(self.poll_every, QUICK_POLL) if self.clock() - began < QUICK_FOR else self.poll_every)
 
     def _drive(self, jid):
         with self.jobs_lock:
@@ -1201,6 +1279,8 @@ class App:
         if p.get('create'):
             folder = self._reach(jid, dst, {'verb': 'mkdir', 'folder': folder}).get('folder') or folder
         req = {'verb': 'start', 'folder': folder, 'handoff_text': text, 'from': self._label(src)}
+        if p.get('trust'):
+            req['trust'] = True
         if p.get('topic'):
             req['topic'] = p['topic']
         if carry.get('chrome') is True:  # what the old chat could do comes along: Claude in Chrome, its effort, its model
@@ -1312,7 +1392,7 @@ class App:
         self._refresh_soon(j['machine'], 0.5)
         if watched or j.get('cancel'):  # the app is showing this job and says so itself, or the user called it off
             return
-        where, what = self._label(j['machine']), j.get('name') or j.get('title') or 'The session'
+        where, what = self._label(j['machine']), j.get('name') or j.get('title') or 'The chat'
         if state == 'done':
             title = DONE_TITLES[j['kind']].format(where=where)
             body = f'{what} on {where}.' + ('' if j['kind'] in ('handoff', 'stop') else ' Tap to open it.')
@@ -1321,7 +1401,7 @@ class App:
         url = f'/s/{j["machine"]}/{j["sid"]}' if state == 'done' and j.get('sid') and SID_RE.fullmatch(j['sid']) else '/'
         if state == 'error' and j['plan'].get('req', {}).get('sid'):
             url = f'/s/{j["machine"]}/{j["plan"]["req"]["sid"]}'
-        self._push(title, body[:220], url)
+        self._push(title, body[:220], url, 'jobs')
 
     def _chrome_carry(self, j):
         """A finished job's new chat gets the Chrome machine picked for it, or the one the chat it came from had."""
@@ -1374,10 +1454,10 @@ class App:
             raise HttpError(400, str(e))
         except OSError as e:
             log(f'terminal key: {e}')
-            raise HttpError(500, 'Switchboard could not read its terminal key.')
+            raise HttpError(500, "Switchboard couldn't read its terminal key.")
 
     # ---- routes
-    def get(self, path, query=None):
+    def get(self, path, query=None, host=''):
         r = self.feat.get(path, query)
         if r is not None:
             return r
@@ -1388,13 +1468,15 @@ class App:
         if path == '/api/prefs':
             return dict(self.prefs(), ok=True, flags=sorted(flags_mod.START_FLAGS), chips=flags_mod.CHIP_FLAGS,
                         takes={k: v is not None for k, v in flags_mod.START_FLAGS.items()}, aliases=flags_mod.ALIASES,
-                        live=flags_mod.LIVE, labels=flags_mod.LABELS, **options_mod.view(self.options(), self.push_ready))
+                        live=flags_mod.LIVE, labels=flags_mod.LABELS, **options_mod.view(self.options(), self.push_ready, self._prefs_raw().get('notify')))
         if path == '/api/summary':
             return self.summary()
         if path == '/api/usage':
             return self.fleet.usage()
         if path == '/api/app':
-            return self.app_latest()
+            return self.app_latest(host)
+        if path == '/api/models':  # the New sheet's and flags drawer's model picker (models.py)
+            return models_mod.view(self.fleet.snapshot()['machines'])
         if path == '/api/flags':
             q = query or {}
             return self.flags_view((q.get('machine') or [''])[0], (q.get('sid') or [''])[0])
@@ -1413,6 +1495,16 @@ class App:
             if query and 'parent' in query:  # ?parent=<folder> lists one level of the tree ('' = the root)
                 req['parent'] = query['parent'][0]
             return self._call(self._machine(m.group(1)), req)
+        m = re.fullmatch(r'/api/places/([a-z0-9]+)', path)
+        if m:  # where the file browser and New can go on a machine (agent: list_places)
+            name = self._machine(m.group(1))
+            if 'places' not in (self.fleet.state.get(name, {}).get('features') or []):
+                return {'ok': True, 'roam': False, 'old': True, 'places': [{'kind': 'claude', 'name': 'Claude folder', 'folder': '',
+                                                                            'shown': self._root_shown(self.fleet.machines[name], self.fleet.state.get(name) or {}), 'state': 'ok'}]}
+            return self._call(name, {'verb': 'places'}, timeout=20)
+        m = re.fullmatch(r'/api/folder_check/([a-z0-9]+)', path)
+        if m:  # ?folder=: may Claude work there yet ('yes', 'ask' or 'no'), before New offers to start a chat in it
+            return self._call(self._machine(m.group(1)), {'verb': 'folder_check', 'folder': (query or {}).get('folder', [''])[0]}, timeout=20)
         m = re.fullmatch(r'/api/files/([a-z0-9]+)', path)
         if m:  # the file browser: ?folder=<folder under the Claude folder>[&name=<file>] (agent: list_files)
             name = self._machine(m.group(1))
@@ -1434,7 +1526,7 @@ class App:
             try:
                 return nodes_mod.pair(host, cfg_dir=self.cfg_dir, origins=self.server_cfg.origins if self.server_cfg else ())
             except OSError as e:
-                raise HttpError(502, f'The hub could not make a code ({e}).')
+                raise HttpError(502, f"The hub couldn't make a code ({e}).")
         if path == '/api/machines':
             return self.machines_post(body)
         if path == '/api/relaunch':
@@ -1465,8 +1557,8 @@ class App:
             jid = body.get('job')
             with self.jobs_lock:
                 j = self.jobs.get(jid) if isinstance(jid, str) else None
-                if not j or j.get('step') != 'waiting' or j.get('state') != 'queued':
-                    raise HttpError(409, 'That is not waiting any more.')
+                if not j or j.get('step') != 'waiting' or j.get('state') != 'queued' or j.get('started'):
+                    raise HttpError(409, "That's not waiting anymore.")
                 j['cancel'] = True
             return {'ok': True}
         if path == '/api/flags':
@@ -1511,7 +1603,7 @@ class App:
             name = 'auto' if auto else self._machine(body)
             folder, model, mode = body.get('folder') or '', body.get('model') or None, body.get('mode') or 'normal'
             effort = body.get('effort') or None
-            if model not in MODELS:
+            if not self.model_ok(model):
                 raise HttpError(400, 'unknown model')
             if mode not in MODES:
                 raise HttpError(400, 'unknown mode')
@@ -1526,6 +1618,10 @@ class App:
                     raise HttpError(400, f'The {k} is set twice ({v} and {fl[k]} in Other flags).')
             model, effort = fl['model'] or model, fl['effort'] or effort
             req = {'verb': 'start', 'folder': folder, 'prompt': body.get('prompt') or '', 'mode': mode, 'origin': origin}
+            if body.get('trust') is True:  # the user said yes to Claude working in this folder (check_folder)
+                req['trust'] = True
+            elif not auto and not body.get('create'):
+                self.check_folder(name, folder, False)
             if model:
                 req['model'] = model
             if effort:
@@ -1560,14 +1656,17 @@ class App:
             if not isinstance(sid, str) or not SID_RE.fullmatch(sid):
                 raise HttpError(400, 'bad session id')
             model = body.get('model') or None
-            if model not in MODELS:
+            if not self.model_ok(model):
                 raise HttpError(400, 'unknown model')
             title = self._title(src, sid)
             need = self.busy_need(src, sid, body.get('when'), BUSY_THEN['continue'])
             if need:
                 return need
+            if not body.get('create'):
+                self.check_folder(dst, body.get('folder') or '', body.get('trust') is True)
             return self._submit('continue', dst, {'src': src, 'sid': sid, 'dst': dst, 'folder': body.get('folder') or '',
                                                   'create': bool(body.get('create')), 'model': model, 'topic': title,
+                                                  'trust': body.get('trust') is True,
                                                   'wait_idle': body.get('when') == 'idle'}, title)
         if path == '/api/event':
             ev = body.get('event')
@@ -1583,6 +1682,11 @@ class App:
             return {'ok': True}
         if path == '/api/prefs':
             return self.set_prefs(body)
+        if path == '/api/privacy_settings':  # {"machine"}: a folder macOS keeps closed; show the switch on its screen
+            name = self._machine(body.get('machine'))
+            if 'places' not in (self.fleet.state.get(name, {}).get('features') or []):
+                raise HttpError(409, 'Update Switchboard on this machine first.')
+            return self._call(name, {'verb': 'privacy_settings'}, timeout=20)
         if path == '/api/chrome':  # {"machine", "sid", "chrome_machine": name|null}: one chat's Chrome machine
             name, sid = self._machine(body.get('machine')), body.get('sid')
             if not isinstance(sid, str) or not SID_RE.fullmatch(sid):
@@ -1611,8 +1715,8 @@ class App:
             tmp.write_text(json.dumps(d, indent=1))
             os.replace(tmp, self.state_dir / 'devices.json')
             if not self.push_ready:  # the phone is kept, so pushes start once the server is set up
-                return {'ok': True, 'push': False, 'note': 'Notifications are not set up on this server. '
-                        'They need an APNs key and ~/.config/switchboard/apns.json on the server.'}
+                return {'ok': True, 'push': False, 'note': "Notifications aren't set up on this server yet. "
+                        'They need an APNs key and ~/.config/switchboard/apns.json.'}
             return {'ok': True, 'push': True}
         r = self.feat.post(path, body, origin)
         if r is not None:
@@ -1687,10 +1791,39 @@ def make_handler(app):
             try:
                 self._send(200, fn())
             except HttpError as e:
-                self._send(e.code, {'ok': False, 'error': str(e)})
+                self._send(e.code, {'ok': False, 'error': str(e), **e.extra})
             except Exception:
                 log('error: ' + traceback.format_exc())
                 self._send(500, {'ok': False, 'error': 'server error'})
+
+        def _app_file(self, name):
+            """GET /api/app/files/<file>: a build from the newest GitHub release, passed on as it comes (the app checks
+            its size and SHA-256 against the signed list). Range requests too, so a stopped download resumes."""
+            if not self._host_ok():
+                return self._send(403, {'ok': False, 'error': 'forbidden host'})
+            src = app.app_file(name) if releases_mod.FILE_RE.fullmatch(name) else None
+            if not src:
+                return self._send(404, {'ok': False, 'error': 'not a file of the newest release'})
+            try:
+                status, headers, resp = releases_mod.open_file(src[0], src[1], name, self.headers.get('Range'))
+            except urllib.error.HTTPError as e:
+                return self._send(416 if e.code == 416 else 502, {'ok': False, 'error': f'GitHub answered {e.code}'})
+            except OSError as e:
+                return self._send(502, {'ok': False, 'error': f"GitHub didn't answer ({e})"})
+            with resp:
+                self.send_response(status)
+                for k, v in headers.items():
+                    self.send_header(k, v)
+                self.send_header('Cache-Control', 'no-store')
+                if 'Content-Length' not in headers:
+                    self.send_header('Connection', 'close')
+                    self.close_connection = True
+                self.end_headers()
+                try:
+                    while chunk := resp.read(releases_mod.CHUNK):
+                        self.wfile.write(chunk)
+                except OSError:  # the app went away; it resumes from where it stopped
+                    self.close_connection = True
 
         def _stream(self):
             """Server-sent events: 'change' whenever a session or a machine changed, so pages load again at once."""
@@ -1729,8 +1862,11 @@ def make_handler(app):
             path = u.path
             if path == '/api/stream':
                 return self._stream()
+            if path.startswith('/api/app/files/'):
+                return self._app_file(path[len('/api/app/files/'):])
             if path.startswith('/api/'):
-                return self._guarded(lambda: app.get(path, parse_qs(u.query, keep_blank_values=True)))
+                return self._guarded(lambda: app.get(path, parse_qs(u.query, keep_blank_values=True),
+                                                     self.headers.get('Host') or ''))
             if not self._host_ok():
                 return self._send(403, {'ok': False, 'error': 'forbidden host'})
             if path == '/':
@@ -1812,13 +1948,13 @@ def main():
 
     app_ref = {}
 
-    def pusher(title, body, url):
+    def pusher(title, body, url, kind='jobs', group=None):
         if not apns:
             return
         app = app_ref['app']
         devs = app.devices()
         for tok in list(devs):
-            status, resp = apns.push(tok, title, body, url)
+            status, resp = apns.push(tok, title, body, url, thread=kind, collapse=group)
             log(f'apns {tok[:8]} -> {status} {resp[:120]}')
             if status == 410 or 'BadDeviceToken' in resp or 'Unregistered' in resp:
                 devs.pop(tok, None)

@@ -6,7 +6,7 @@ use crate::pty::TermIo;
 use axum::extract::ws::Message;
 use serde_json::Value;
 use std::collections::HashMap;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc, oneshot};
@@ -15,6 +15,8 @@ use tokio::sync::{Notify, mpsc, oneshot};
 const CHAN_BACKLOG: usize = 1024;
 /// Messages waiting to go out on a link (terminal input up to 1 MiB each) before the hub stops adding to it.
 pub const LINK_BACKLOG: usize = 256;
+/// How long a hang-up waits for room on a full link before it is given up.
+const CLOSE_PATIENCE: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Default)]
 pub struct Info {
@@ -87,6 +89,20 @@ impl Link {
         self.tx.try_send(Message::Text(link_proto::encode(m).into())).is_ok()
     }
 
+    /// Tells the node to hang up terminal `ch`. A terminal ends here mostly because the link is full, so this one
+    /// waits for room instead of being dropped too: else the PTY there keeps `claude attach` running for nobody.
+    fn send_close(&self, ch: u32) {
+        let m = Message::Text(link_proto::encode(&ToNode::TermClose { ch }).into());
+        if let Err(mpsc::error::TrySendError::Full(m)) = self.tx.try_send(m)
+            && let Ok(rt) = tokio::runtime::Handle::try_current()
+        {
+            let tx = self.tx.clone();
+            rt.spawn(async move {
+                let _ = tokio::time::timeout(CLOSE_PATIENCE, tx.send(m)).await;
+            });
+        }
+    }
+
     /// Run `sb.py rpc` on the machine and return its JSON answer.
     pub async fn rpc(&self, req: Value, timeout: Duration) -> Result<Value, RpcError> {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
@@ -117,7 +133,7 @@ impl Link {
         if !self.send(&ToNode::TermOpen { ch, bg: bg.into(), cols, rows }) {
             self.end_chan(ch, Some(255));
         }
-        (NodeTerm { link: self.clone(), ch }, TermIo { output: out_rx, exited: exit_rx })
+        (NodeTerm { link: self.clone(), ch, cut: AtomicBool::new(false) }, TermIo { output: out_rx, exited: exit_rx })
     }
 
     fn end_chan(&self, ch: u32, code: Option<i64>) -> bool {
@@ -156,7 +172,7 @@ impl Link {
             // the viewer stopped reading; never stall the whole link (and every other terminal) for one of them
             crate::server::log(format!("node {}: terminal {ch} fell behind, closing it", self.name));
             self.end_chan(ch, None);
-            self.send(&ToNode::TermClose { ch });
+            self.send_close(ch);
         }
     }
 
@@ -178,6 +194,8 @@ impl Link {
 pub struct NodeTerm {
     link: Arc<Link>,
     ch: u32,
+    /// The hub ended this terminal itself (input fell behind or got stuck), so the node still has to be told.
+    cut: AtomicBool,
 }
 
 impl NodeTerm {
@@ -198,7 +216,7 @@ impl NodeTerm {
                         "node {}: terminal {} input stuck, closing it",
                         self.link.name, self.ch
                     ));
-                    self.link.end_chan(self.ch, None);
+                    self.cut();
                     return false;
                 }
             }
@@ -212,7 +230,13 @@ impl NodeTerm {
         {
             // typed faster than the machine takes it: end this terminal rather than grow the link's queue without limit
             crate::server::log(format!("node {}: terminal {} input fell behind, closing it", self.link.name, self.ch));
-            self.link.end_chan(self.ch, None);
+            self.cut();
+        }
+    }
+
+    fn cut(&self) {
+        if self.link.end_chan(self.ch, None) {
+            self.cut.store(true, Ordering::Relaxed);
         }
     }
 
@@ -223,8 +247,10 @@ impl NodeTerm {
 
 impl Drop for NodeTerm {
     fn drop(&mut self) {
-        if self.link.end_chan(self.ch, None) {
-            self.link.send(&ToNode::TermClose { ch: self.ch });
+        // Tell the node unless it ended the terminal itself. That includes a terminal the hub already ended
+        // (input fell behind or got stuck): otherwise the PTY there keeps `claude attach` running for nobody.
+        if self.link.end_chan(self.ch, None) || self.cut.load(Ordering::Relaxed) {
+            self.link.send_close(self.ch);
         }
     }
 }
@@ -284,6 +310,24 @@ mod tests {
         term.write(b"b".to_vec());
         assert_eq!(link.terminals(), 0, "full: the terminal ended, the link did not grow");
         assert!(!link.send(&ToNode::TermClose { ch: 1 }), "nothing is queued past the limit");
+    }
+
+    #[tokio::test]
+    async fn a_terminal_the_hub_ended_still_hangs_up_on_the_node() {
+        let (tx, mut rx) = mpsc::channel(2);
+        let link = Arc::new(Link::new("lab", 1, 0, tx));
+        let (term, _io) = link.open_term("c03ef0d9", 80, 24);
+        term.write(b"a".to_vec());
+        term.write(b"b".to_vec()); // full: the hub ends the channel
+        assert_eq!(link.terminals(), 0);
+        drop(term); // the link is still full
+        let mut closed = false;
+        while let Ok(Some(m)) = tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+            if let Message::Text(t) = m {
+                closed |= serde_json::from_str::<ToNode>(t.as_str()).unwrap() == ToNode::TermClose { ch: 1 };
+            }
+        }
+        assert!(closed, "term.close went out once the link had room");
     }
 
     #[tokio::test]

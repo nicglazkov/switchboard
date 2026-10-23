@@ -25,6 +25,9 @@ pub struct Config {
     pub max_terms: usize,
     pub rate: u64,
     pub idle: Duration,
+    /// A viewer the hub has heard nothing from for this long (not even a pong) is gone: a laptop that slept, Wi-Fi
+    /// that dropped. The hub pings each viewer three times in this span.
+    pub silence: Duration,
 }
 
 pub const PORT: u16 = 8132;
@@ -46,6 +49,7 @@ impl Config {
             max_terms: 16,
             rate: 2 * 1024 * 1024,
             idle: Duration::from_secs(2 * 3600),
+            silence: Duration::from_secs(45),
         }
     }
 

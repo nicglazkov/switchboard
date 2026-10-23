@@ -38,12 +38,19 @@ class GuardInjectedTest(unittest.TestCase):
                   '<cross-session-message from="worker">check this</cross-session-message>',
                   '<teammate-message teammate_id="x">done</teammate-message>',
                   '<<autonomous-loop-dynamic>>', '[SYSTEM NOTIFICATION - NOT USER INPUT] wake',
-                  '\n  <task-notification>'):
+                  '\n  <task-notification>',
+                  'Another Claude session sent a message:\n<agent-message from="a5c7">[Subagent hand-back] done'):
             self.assertIsNone(self.run_hook(p), p)
         self.assert_untouched()
 
+    def test_a_subagents_prompt_passes(self):
+        inp = {'hook_event_name': 'UserPromptSubmit', 'session_id': 'S1', 'transcript_path': self.t,
+               'prompt': 'look at the logs', 'cwd': '/w', 'agent_id': 'a12'}
+        self.assertIsNone(self.sb.handle_hook(inp, self.now, 777, spawn=lambda *a: None, notify=self.notified.append))
+        self.assert_untouched()
+
     def test_typed_prompts_still_guarded(self):
-        for p in ('fix the lights', 'a < b please', '< not a tag', '<3 thanks'):
+        for p in ('fix the lights', 'a < b please', '< not a tag', '<3 thanks', 'Here is the error:\n<html>'):
             self.assertFalse(self.sb.is_injected(p), p)
         self.assertEqual(self.run_hook('fix the lights')['decision'], 'block')
 

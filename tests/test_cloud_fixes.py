@@ -194,6 +194,20 @@ class PairDownloadsTest(unittest.TestCase):
         os.environ['SWITCHBOARD_DOWNLOADS'] = 'http://10.0.0.9:9000/node/'
         self.assertIn('http://10.0.0.9:9000/node/switchboard-node.exe', self.pair()['install']['windows'])
 
+    def test_the_servers_own_downloads_then_github(self):
+        kit = Path(mkdtemp())
+        for f in tn.nodes.KIT_FILES:
+            (kit / f).write_text('x')
+        r = tn.nodes.pair('10.0.0.5:8130', hub=self.hub.url, cfg_dir=self.cfg, kit_node=kit)
+        self.assertIn('curl -fsSL http://10.0.0.5:8131/node/switchboard-node-linux', r['install']['linux'])  # its own version
+        (self.cfg / 'downloads.json').write_text('{"url": "https://dl.example.net/sb/app"}')
+        r = tn.nodes.pair('10.0.0.5:8130', hub=self.hub.url, cfg_dir=self.cfg, kit_node=kit)
+        self.assertIn('http://10.0.0.5:8131/node/switchboard-node.exe', r['install']['windows'])  # before an older page
+        (self.cfg / 'downloads.json').unlink()
+        with mock.patch.dict(os.environ, {'SWITCHBOARD_RELEASES': 'acme/board'}):
+            r = self.pair()
+        self.assertIn('curl -fsSL https://github.com/acme/board/releases/latest/download/switchboard-node-mac', r['install']['mac'])
+
     def test_a_bad_url_is_not_used(self):
         (self.cfg / 'downloads.json').write_text('{"node": "http://x/a b; rm -rf ~"}')
         self.assertNotIn('rm -rf', str(self.pair()['install']))

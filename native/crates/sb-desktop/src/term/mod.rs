@@ -15,6 +15,7 @@ pub mod colors;
 pub mod exitline;
 pub mod grid;
 pub mod links;
+pub mod local;
 pub mod upload;
 
 use std::cell::RefCell;
@@ -40,6 +41,7 @@ use gpui::{
 use sb_core::names;
 use sb_core::term::keys::{self, Mods};
 use sb_core::term::reconnect::{self, Backoff};
+use sb_core::term::shells::Profile;
 use sb_core::term::ws::{Closed, FromHub, ToHub};
 use sb_core::term::{Need, TermError, TermRequest, TermTicket};
 use smol::channel::{Receiver, Sender};
@@ -86,7 +88,9 @@ pub fn bind_keys(cx: &mut App) {
         b.push(KeyBinding::new("ctrl-shift-c", TermCopy, t));
         b.push(KeyBinding::new("ctrl-shift-v", TermPaste, t));
         b.push(KeyBinding::new("shift-insert", TermPaste, t));
-        for k in ["ctrl-n", "ctrl-k", "ctrl-enter", "ctrl-q", "ctrl-w", "ctrl-t", "ctrl-c", "ctrl-v"] {
+        for k in
+            ["ctrl-n", "ctrl-k", "ctrl-enter", "ctrl-q", "ctrl-w", "ctrl-t", "ctrl-o", "ctrl-b", "ctrl-c", "ctrl-v"]
+        {
             b.push(KeyBinding::new(k, NoAction, t));
         }
     }
@@ -153,9 +157,37 @@ fn size_step(hub_sizes: bool, open: bool, first: bool) -> SizeStep {
 /// Coming back by itself after the link dropped.
 #[derive(Debug, Default)]
 pub struct Reconnect {
-    backoff: Backoff,
     /// Bumped per wait, so "Reconnect now" and a new wait cancel the old timer.
     wait_id: u64,
+}
+
+/// How soon after Ctrl-D or Ctrl-Z the attach must end for the end to count as the person leaving. A key a program
+/// kept for itself (Ctrl-D in an editor) does not make an end minutes later look asked for.
+const QUIT_WINDOW: Duration = Duration::from_secs(5);
+
+fn quit_asked(at: Option<Instant>, now: Instant) -> bool {
+    at.is_some_and(|t| now.saturating_duration_since(t) <= QUIT_WINDOW)
+}
+
+/// The attach ended because the person asked: they left with `exit` (and typed nothing since, however long the end
+/// took to come), or pressed Ctrl-D or Ctrl-Z just before.
+fn end_asked(leaving: bool, quit_key: Option<Instant>, now: Instant) -> bool {
+    leaving || quit_asked(quit_key, now)
+}
+
+/// A job's tab asks by background id only when the job reported one: one that did not leaves an ordinary chat.
+fn prefer_bg_after(bg: Option<&str>) -> bool {
+    bg.is_some()
+}
+
+/// What to ask /api/term for: the background id right after a job that reported one, else the chat.
+fn term_request(machine: &str, bg: Option<&str>, sid: Option<&str>, prefer_bg: bool) -> Option<TermRequest> {
+    match (bg, sid) {
+        (Some(bg), _) if prefer_bg => Some(TermRequest::bg(machine, bg)),
+        (_, Some(sid)) => Some(TermRequest::chat(machine, sid)),
+        (Some(bg), None) => Some(TermRequest::bg(machine, bg)),
+        (None, None) => None,
+    }
 }
 
 fn new_term(cols: u16, rows: u16, events: &Listener) -> Term<Listener> {
@@ -232,10 +264,20 @@ pub enum Start {
     Stopped(String),
     /// A job already started (New session with "Open its terminal").
     Job { id: String, machine: String, label: String, title: String },
+    /// A shell on this computer (local.rs): no chat, no server, never on the board.
+    Local(Profile),
 }
+
+/// What a local terminal's tab shows where a chat's shows its machine.
+pub const LOCAL_LABEL: &str = if MAC { "This Mac" } else { "This PC" };
 
 /// The message of a starred tab that came back on launch while its chat had stopped.
 pub const STOPPED_STAR: &str = "stopped-starred";
+
+/// A terminal with key `tab_key` and background id `tab_bg` holds the chat at `key` (background id `bg`).
+pub fn same_chat(tab_key: Option<&str>, tab_bg: Option<&str>, key: &str, bg: Option<&str>) -> bool {
+    tab_key == Some(key) || (bg.is_some() && tab_bg == bg)
+}
 
 /// A clean exit (code 0: Ctrl-D) closes the tab. An error, a lost connection (ssh's 255) or no code keeps it open
 /// with the last output.
@@ -316,6 +358,8 @@ pub struct TermTab {
     pending: std::collections::VecDeque<FromHub>,
     /// The link dropped and it is coming back by itself: the screen stays, the bar says so.
     pub(crate) reconnect: Option<Reconnect>,
+    /// The waits between tries at coming back. A link that opens and drops again at once does not start them over.
+    backoff: Backoff,
     has_output: bool,
     /// When the terminal last showed output of Claude's own (not an echo of typing, a redraw after a resize, or the
     /// screen sent on connecting): the live state's hint that it is working, and where its warm countdown starts.
@@ -327,12 +371,16 @@ pub struct TermTab {
     /// What was typed since the last Enter, for "exit" (exitline.rs), and a leave sent that the attach's end closes.
     line: exitline::ExitLine,
     leaving: bool,
-    /// The last key typed was Ctrl-D or Ctrl-Z: a clean end after it is the user leaving, so the tab goes.
-    quit_key: bool,
+    /// When the last key typed was Ctrl-D or Ctrl-Z: a clean end soon after it is the user leaving, so the tab goes.
+    quit_key: Option<Instant>,
     /// When this terminal saw the current stretch of work start ("Working for 2m 10s").
     work_since: Option<f64>,
     /// Screenshots only: a live state to show without a connection.
     pub fake_live: Option<sb_core::live::Live>,
+    /// A local terminal's profile, and its PTY while the shell runs. The tab's title is the shell's own (OSC 0 or 2)
+    /// when it sets one, else the profile's name.
+    pub local: Option<Profile>,
+    pty: Option<local::Pty>,
     /// The color scheme popover above the bottom bar is open.
     colors_open: bool,
     /// What the chat runs with, in a few words ("Opus · High · Asks first"), read once it is attached.
@@ -400,15 +448,18 @@ impl TermTab {
             in_snapshot: false,
             pending: Default::default(),
             reconnect: None,
+            backoff: Backoff::default(),
             has_output: false,
             last_out: None,
             quiet_until: 0.0,
             last_key: std::cell::Cell::new(0.0),
             line: Default::default(),
             leaving: false,
-            quit_key: false,
+            quit_key: None,
             work_since: None,
             fake_live: None,
+            local: None,
+            pty: None,
             colors_open: false,
             flags_sum: None,
             flags_asked: false,
@@ -423,7 +474,7 @@ impl TermTab {
                 if app.read(cx).snap.session(&key).is_none() =>
             {
                 tab.key = Some(key);
-                tab.phase = Phase::Failed("This chat is no longer in the list.".into());
+                tab.phase = Phase::Failed("This chat isn't in the list anymore.".into());
             }
             Start::Chat(key) => {
                 tab.fill(&key, cx);
@@ -442,6 +493,12 @@ impl TermTab {
                 tab.label = label;
                 tab.title = if title.is_empty() { "New chat".into() } else { title };
                 tab.phase = Phase::Job(id);
+            }
+            Start::Local(p) => {
+                tab.title = p.name.clone();
+                tab.label = LOCAL_LABEL.into();
+                tab.local = Some(p);
+                tab.connect(cx);
             }
         }
         tab
@@ -492,6 +549,40 @@ impl TermTab {
                 true
             }
             _ => false,
+        }
+    }
+
+    /// This terminal holds the chat at `key` (background id `bg`): by its key, or by the background id while the key
+    /// has not caught up with a /clear yet.
+    pub fn shows(&self, key: &str, bg: Option<&str>) -> bool {
+        same_chat(self.key.as_deref(), self.bg.as_deref(), key, bg)
+    }
+
+    /// After /clear the chat goes on under a new session id with the same background id: the tab's key follows it, so
+    /// the tab is saved, closed and shown as the chat it holds now. True when it changed.
+    pub fn sync_key(&mut self, cx: &App) -> bool {
+        if self.local.is_some() || matches!(self.phase, Phase::Job(_)) {
+            return false;
+        }
+        let snap = &self.app.read(cx).snap;
+        let Some(s) = self.bg.as_deref().and_then(|b| snap.session_by_bg(&self.machine, b)) else { return false };
+        if self.key.as_deref() == Some(s.key.as_str()) {
+            return false;
+        }
+        self.key = Some(s.key.clone());
+        self.sid = Some(s.sid.clone());
+        true
+    }
+
+    /// The tab is no longer on screen (another tab shows, or it closed): it stops counting as focused, so its bell
+    /// shows on the tab again. Hidden, it gets no frame to notice by itself.
+    pub fn hide(&mut self) {
+        if !self.focused {
+            return;
+        }
+        self.focused = false;
+        if self.phase == Phase::Open && self.owner && self.term.mode().contains(TermMode::FOCUS_IN_OUT) {
+            self.send(b"\x1b[O".to_vec());
         }
     }
 
@@ -548,7 +639,48 @@ impl TermTab {
     /// Asks for a ticket, then dials. Also Reconnect and Try again.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         self.reconnect = None;
+        self.backoff = Backoff::default();
+        if self.local.is_some() {
+            return self.start_local(cx);
+        }
         self.dial_again(cx);
+    }
+
+    /// A local terminal: the shell starts in its PTY, and its events are read as the hub's are. Restart comes here
+    /// too, with a clean screen.
+    fn start_local(&mut self, cx: &mut Context<Self>) {
+        let Some(p) = self.local.clone() else { return };
+        self.epoch += 1;
+        self.drop_conn();
+        self.pty = None;
+        self.pending.clear();
+        self.exit_note = None;
+        self.exit_code = None;
+        self.hub_sizes = false;
+        self.owner = true;
+        self.in_snapshot = false;
+        self.apply_size(false);
+        let (cols, rows) = self.size;
+        match local::spawn(&p, cols, rows) {
+            Ok((conn, pty)) => {
+                self.conn = Some(conn.tx);
+                self.pty = Some(pty);
+                self.fresh = true;
+                self.phase = Phase::Dial;
+                self.read(conn.rx, self.epoch, cx);
+            }
+            Err(e) => {
+                log::warn!("local terminal: {} wouldn't start: {e}", p.name);
+                self.phase = Phase::Failed(format!("{} wouldn't start: {e}", p.program));
+            }
+        }
+        self.changed(cx);
+    }
+
+    /// A local terminal running something other than its shell (a build, an editor): its name, so closing the tab
+    /// asks first.
+    pub fn busy(&self) -> Option<String> {
+        self.pty.as_ref().filter(|_| self.phase == Phase::Open).and_then(|p| p.busy())
     }
 
     fn dial_again(&mut self, cx: &mut Context<Self>) {
@@ -559,14 +691,9 @@ impl TermTab {
         self.phase = Phase::Ticket;
         self.exit_note = None;
         self.exit_code = None;
-        let req = match (&self.bg, &self.sid) {
-            (Some(bg), _) if self.prefer_bg => TermRequest::bg(&self.machine, bg),
-            (_, Some(sid)) => TermRequest::chat(&self.machine, sid),
-            (Some(bg), None) => TermRequest::bg(&self.machine, bg),
-            (None, None) => {
-                self.phase = Phase::Failed("Switchboard does not know which chat this is.".into());
-                return self.changed(cx);
-            }
+        let Some(req) = term_request(&self.machine, self.bg.as_deref(), self.sid.as_deref(), self.prefer_bg) else {
+            self.phase = Phase::Failed("Switchboard doesn't know which chat this is.".into());
+            return self.changed(cx);
         };
         let core = self.app.read(cx).core.clone();
         cx.spawn(async move |this, cx| {
@@ -616,11 +743,12 @@ impl TermTab {
 
     /// The next try at coming back, after the backoff's wait. False once it has tried for long enough.
     fn retry_later(&mut self, cx: &mut Context<Self>) -> bool {
-        let r = self.reconnect.get_or_insert_with(Reconnect::default);
-        let Some(wait) = r.backoff.wait() else {
+        self.backoff.dropped(Instant::now());
+        let Some(wait) = self.backoff.wait() else {
             self.reconnect = None;
             return false;
         };
+        let r = self.reconnect.get_or_insert_with(Reconnect::default);
         r.wait_id += 1;
         let g = r.wait_id;
         self.epoch += 1;
@@ -760,6 +888,10 @@ impl TermTab {
                     crate::perf::time(crate::perf::Kind::Hub, || self.parser.advance(&mut self.term, &bytes));
                     self.has_output = true;
                 }
+                FromHub::Exit { code, note } if self.local.is_some() => {
+                    self.exit_code = Some(code);
+                    self.exit_note = note;
+                }
                 FromHub::Exit { code, note } => {
                     self.exit_code = Some(code);
                     self.exit_note = Some(note.filter(|n| !n.trim().is_empty()).unwrap_or_else(|| match code {
@@ -773,8 +905,25 @@ impl TermTab {
                     self.mouse_held = None;
                     self.pending.clear();
                     let exit = self.exit_code.take();
-                    let left = std::mem::take(&mut self.leaving);
-                    let asked = left || std::mem::take(&mut self.quit_key);
+                    if self.local.is_some() {
+                        // A shell that exits cleanly (exit, Ctrl-D) takes its tab with it; an error keeps the last
+                        // output with Restart.
+                        self.pty = None;
+                        self.leaving = false;
+                        self.quit_key = None;
+                        let note = self.exit_note.take();
+                        if exit_closes_tab(exit) {
+                            self.phase = Phase::Ended { note: String::new(), retry: true, code: None };
+                            cx.emit(TermEvent::Close);
+                            continue;
+                        }
+                        let code = exit.flatten().unwrap_or(1);
+                        let note = note
+                            .unwrap_or_else(|| format!("The shell exited with code {code}. The last output is above."));
+                        self.phase = Phase::Ended { note, retry: true, code: Some(code) };
+                        continue;
+                    }
+                    let asked = end_asked(std::mem::take(&mut self.leaving), self.quit_key.take(), Instant::now());
                     let attached = self.has_output || self.reconnect.is_some();
                     if !asked && reconnect::after_close(&c, exit, attached) && self.retry_later(cx) {
                         // the link dropped: back by itself, the screen kept
@@ -832,6 +981,7 @@ impl TermTab {
     fn opened(&mut self) {
         self.phase = Phase::Open;
         self.reconnect = None;
+        self.backoff.opened(Instant::now());
         self.quiet_until = AppState::now() + 2.0;
         self.flags_asked = false;
         // The view may have changed size while connecting, and a resize sent before the hub opened may be lost:
@@ -1002,9 +1152,10 @@ impl TermTab {
                 if sid.is_some() {
                     self.sid = sid.clone();
                 }
+                // A job that reported no background id leaves an ordinary chat: an older one is not asked for again.
+                self.prefer_bg = prefer_bg_after(bg.as_deref());
                 if bg.is_some() {
                     self.bg = bg.clone();
-                    self.prefer_bg = true;
                 }
                 if let Some(s) = &self.sid {
                     self.key = Some(format!("{}:{}", self.machine, s));
@@ -1120,6 +1271,24 @@ impl TermTab {
                     self.send(f(ws).into_bytes());
                 }
                 TermEv::ClipboardStore(_, text) => crate::state::copy_text(cx, text),
+                // A local shell names its tab (the folder, the program running); a chat's tab keeps the chat's name.
+                TermEv::Title(s) if self.local.is_some() => {
+                    let s = s.trim().to_string();
+                    let name = self.local.as_ref().map(|p| p.name.clone()).unwrap_or_default();
+                    let next = if s.is_empty() { name } else { s };
+                    if next != self.title {
+                        self.title = next;
+                        cx.emit(TermEvent::Changed);
+                    }
+                }
+                TermEv::ResetTitle if self.local.is_some() => {
+                    if let Some(p) = &self.local
+                        && p.name != self.title
+                    {
+                        self.title = p.name.clone();
+                        cx.emit(TermEvent::Changed);
+                    }
+                }
                 TermEv::Bell if !self.focused && !self.bell => {
                     self.bell = true;
                     cx.emit(TermEvent::Changed);
@@ -1188,6 +1357,8 @@ impl TermTab {
         let k = &ev.keystroke;
         let m = &k.modifiers;
         if self.colors_open && k.key == "escape" {
+            // the scheme under the pointer was only shown: put back the chosen one
+            colors::set_preview(None, cx);
             self.colors_open = false;
             cx.notify();
             cx.stop_propagation();
@@ -1232,7 +1403,9 @@ impl TermTab {
         let mods = Mods { ctrl: m.control, alt: m.alt, shift: m.shift, platform: false };
         let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
         if let Some(bytes) = keys::encode(&k.key, mods, app_cursor) {
-            if bytes == b"\r" && !m.modified() {
+            if self.local.is_some() {
+                // A shell's own exit ends it; nothing to leave.
+            } else if bytes == b"\r" && !m.modified() {
                 // "exit" (or /exit, quit, /quit) and Enter: leave instead (clear the box, then Ctrl+Z).
                 if let Some(n) = self.line.enter() {
                     self.leaving = true;
@@ -1243,7 +1416,9 @@ impl TermTab {
             } else {
                 self.line.key(&bytes);
             }
-            self.quit_key = bytes == [0x04] || bytes == [0x1a];
+            // A leave that was sent and then typed over did not happen.
+            self.leaving = false;
+            self.quit_key = (bytes == [0x04] || bytes == [0x1a]).then(Instant::now);
             self.typed(bytes, cx);
             cx.stop_propagation();
         }
@@ -1261,7 +1436,9 @@ impl TermTab {
         }
         // An image or files on the clipboard are sent to the chat's machine, then their path is pasted.
         #[cfg(not(feature = "shots"))]
-        if let Some(item) = cx.read_from_clipboard() {
+        if self.local.is_none()
+            && let Some(item) = cx.read_from_clipboard()
+        {
             for e in item.entries() {
                 match e {
                     gpui::ClipboardEntry::Image(img) => {
@@ -1507,9 +1684,7 @@ impl TermTab {
                 crate::state::open_link(cx, &u);
                 return;
             }
-            links::Target::Url(u) => {
-                ("Link copied", "It is not a web page, so it was copied instead of opened.".to_string(), u)
-            }
+            links::Target::Url(u) => ("Link copied", "It's not a web page, so it was copied instead.".to_string(), u),
             links::Target::Path(p) => ("Path copied", format!("The file is on {on}."), p),
         };
         crate::state::copy_text(cx, text);
@@ -1649,6 +1824,15 @@ impl TermTab {
         }
         let (title, body, main): (String, String, Option<&str>) = match &self.phase {
             Phase::Open => return None,
+            Phase::Ticket | Phase::Dial | Phase::Hub if self.local.is_some() => {
+                (format!("Starting {}", self.title), "Opening a shell on this computer.".into(), None)
+            }
+            Phase::Ended { note, retry, code: Some(_) } if self.local.is_some() => {
+                ("The shell exited".into(), note.clone(), retry.then_some("Restart"))
+            }
+            Phase::Failed(m) if self.local.is_some() => {
+                ("Couldn't start the shell".into(), ensure_stop(m), Some("Try again"))
+            }
             Phase::Ticket | Phase::Dial | Phase::Hub => {
                 let step = match self.phase {
                     Phase::Ticket => "Asking Switchboard for a terminal.",
@@ -1671,7 +1855,7 @@ impl TermTab {
                     Some((sb_core::JobKind::Auto, _)) => "Claude is picking the machine".into(),
                     _ => "Resuming the chat".into(),
                 };
-                (title, format!("{}. The terminal opens as soon as it is running.", step.trim_end_matches('.')), None)
+                (title, format!("{}. The terminal opens as soon as it's running.", step.trim_end_matches('.')), None)
             }
             Phase::Ended { note, retry, code: Some(_) } => {
                 ("Process exited".into(), note.clone(), retry.then_some("Restart"))
@@ -1684,12 +1868,12 @@ impl TermTab {
                 Some("Resume"),
             ),
             Phase::Need { need: Need::Resume, .. } => (
-                "This chat is not running".into(),
+                "This chat isn't running".into(),
                 "Resume and open starts it in the background on its machine, then opens it here.".into(),
                 Some("Resume and open"),
             ),
             Phase::Need { need: Need::Terminal, .. } => (
-                format!("It is open in a terminal on {label}"),
+                format!("It's open in a terminal on {label}"),
                 if self.url.is_some() {
                     format!("Only background chats open here. Type in it on {label}, or open it in Claude.")
                 } else {
@@ -1699,10 +1883,10 @@ impl TermTab {
             ),
             Phase::Need { need: Need::Offline, .. } => (
                 format!("{label} is offline"),
-                format!("Switchboard cannot reach {label} right now. Its chats open here again once it is back."),
+                format!("Switchboard can't reach {label} right now. Its chats open here again once it's back."),
                 Some("Try again"),
             ),
-            Phase::Failed(m) => ("Could not open the terminal".into(), ensure_stop(m), Some("Try again")),
+            Phase::Failed(m) => ("Couldn't open the terminal".into(), ensure_stop(m), Some("Try again")),
         };
         let color = self.phase.color(t);
         let connecting = self.phase.connecting();
@@ -2178,6 +2362,8 @@ impl TermTab {
         // the grid size are what every terminal does; the menus and the shortcut sheet list them.
         let close: Vec<String> =
             if MAC { vec!["⌘W".into()] } else { vec!["Ctrl".into(), "Shift".into(), "W".into()] };
+        let local = self.local.is_some();
+        let word = if local && self.phase == Phase::Open { "Running" } else { self.phase.word() };
         div()
             .flex_none()
             .h(px(ui::FOOTER))
@@ -2195,10 +2381,18 @@ impl TermTab {
                 Some(r) => d.child(r),
                 None => d
                     .child(div().flex_none().size(px(8.)).rounded_full().bg(self.phase.color(t)))
-                    .child(div().flex_none().text_color(t.ink2).child(self.phase.word())),
+                    .child(div().flex_none().text_color(t.ink2).child(word)),
             })
-            .child(ui::machine_icon(&self.machine, 14., t.dim))
-            .child(div().flex_none().text_color(t.dim).child(label))
+            .map(|d| match &self.local {
+                // A local shell: this computer, and the program it runs.
+                Some(p) => d
+                    .child(ui::icon("term", 14., t.dim))
+                    .child(div().flex_none().text_color(t.dim).child(label))
+                    .child(ui::num(p.program.clone(), 12., t.faint)),
+                None => d
+                    .child(ui::machine_icon(&self.machine, 14., t.dim))
+                    .child(div().flex_none().text_color(t.dim).child(label)),
+            })
             // The attach command and the grid size only mean something once it has been attached.
             .when(attached, |d| {
                 d.when_some(self.bg.clone(), |d, b| d.child(ui::num(format!("claude attach {b}"), 12., t.faint)))
@@ -2206,10 +2400,10 @@ impl TermTab {
             .child(ui::spacer())
             .children(self.size_chip(t, cx))
             .children(self.flags_btn(t, wide, cx))
-            .child(self.attach_btn(t, wide, cx))
+            .when(!local, |d| d.child(self.attach_btn(t, wide, cx)))
             .child(colors_btn)
             .children(cont)
-            .when(wide, |d| d.child(hint(close, "detach")))
+            .when(wide, |d| d.child(hint(close, if local { "close" } else { "detach" })))
     }
 }
 
@@ -2630,6 +2824,42 @@ mod size_tests {
 }
 
 #[cfg(test)]
+mod chat_tests {
+    use super::same_chat;
+
+    #[test]
+    fn a_terminal_holds_its_chat_by_key_or_by_background_id() {
+        assert!(same_chat(Some("studio:a"), None, "studio:a", None));
+        assert!(same_chat(Some("studio:a"), Some("bg-1"), "studio:b", Some("bg-1")), "after /clear, key not moved yet");
+        assert!(!same_chat(Some("studio:a"), Some("bg-1"), "studio:b", Some("bg-2")));
+        assert!(!same_chat(None, None, "studio:b", None), "no background id on either side is no match");
+    }
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::term_request;
+    use sb_core::term::TermRequest;
+
+    #[test]
+    fn the_background_id_wins_only_right_after_a_job_that_gave_one() {
+        let bg = Some("bg-1");
+        let sid = Some("s1");
+        assert_eq!(term_request("studio", bg, sid, true), Some(TermRequest::bg("studio", "bg-1")));
+        let chat = Some(TermRequest::chat("studio", "s1"));
+        assert_eq!(term_request("studio", bg, sid, false), chat, "after a job without one");
+        assert_eq!(term_request("studio", bg, None, false), Some(TermRequest::bg("studio", "bg-1")));
+        assert_eq!(term_request("studio", None, None, true), None);
+    }
+
+    #[test]
+    fn a_job_without_a_background_id_stops_asking_by_one() {
+        assert!(super::prefer_bg_after(Some("bg-1")));
+        assert!(!super::prefer_bg_after(None), "an older background id is not asked for again");
+    }
+}
+
+#[cfg(test)]
 mod exit_tests {
     use super::exit_closes_tab;
 
@@ -2642,5 +2872,26 @@ mod exit_tests {
         assert!(!exit_closes_tab(None), "a dropped socket is not an exit");
         assert!(super::left_chat(Some(Some(super::TERM_LEFT))), "exit typed in the chat closes the tab");
         assert!(!super::left_chat(Some(Some(0))), "a clean end nobody asked for keeps the tab");
+    }
+
+    #[test]
+    fn a_quit_key_counts_only_just_before_the_end() {
+        use super::{QUIT_WINDOW, quit_asked};
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        assert!(quit_asked(Some(t), t + Duration::from_secs(1)));
+        assert!(quit_asked(Some(t), t + QUIT_WINDOW));
+        assert!(!quit_asked(Some(t), t + Duration::from_secs(10)), "Ctrl-D kept by a program, the end much later");
+        assert!(!quit_asked(None, t));
+    }
+
+    #[test]
+    fn a_leave_counts_however_long_the_end_takes() {
+        use super::end_asked;
+        use std::time::{Duration, Instant};
+        let t = Instant::now();
+        assert!(end_asked(true, None, t + Duration::from_secs(6)), "exit, then a slow link");
+        assert!(!end_asked(false, None, t), "typed over: nothing was asked");
+        assert!(!end_asked(false, Some(t), t + Duration::from_secs(10)));
     }
 }

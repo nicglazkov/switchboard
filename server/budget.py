@@ -124,6 +124,22 @@ def fmt_pair(a, b):
     return fmt(a), fmt(b)
 
 
+def room_today(week, today, week_reset, now):
+    """How much of the week today can use without running out before the reset: what was left when today began,
+    shared evenly over the days left (today counts as one, and so does a part of a day). With 45% left and the
+    reset less than a day away, that is all 45% plus what today already used."""
+    if week is None or today is None or not week_reset or week_reset <= now:
+        return None
+    left = max(0.0, 100.0 - (week - today))
+    days = max(1, math.ceil((week_reset - now) / 86400 - 1e-9))
+    return round(left / days, 1)
+
+
+def _with_room(cap, room):
+    """A daily cap never counts as reached while the week has more room than that today."""
+    return None if cap is None else max(cap, room) if room is not None else cap
+
+
 def compute(settings, week, week_reset, five, five_reset, today, now, tz, updated=None):
     """The budget's status from the plan limits (pure: the tests drive it directly)."""
     s, h = settings, settings['hard']
@@ -132,14 +148,17 @@ def compute(settings, week, week_reset, five, five_reset, today, now, tz, update
         week, today = None, None
     lifted = bool(s.get('lifted_until')) and now < s['lifted_until']
     pace = fleet_mod._projected(week, week_reset, now) if known else None
-    over_daily = today is not None and s['daily'] is not None and today >= s['daily']
+    room = room_today(week, today, week_reset, now) if known else None
+    daily = _with_room(s['daily'], room)
+    over_daily = today is not None and daily is not None and today >= daily
     over_five = five is not None and s['five_hour'] is not None and five >= s['five_hour']
-    hard_daily = h['on'] and today is not None and h['daily'] is not None and today >= h['daily']
+    hard_cap = _with_room(h['daily'], room)
+    hard_daily = h['on'] and today is not None and hard_cap is not None and today >= hard_cap
     hard_five = h['on'] and five is not None and h['five_hour'] is not None and five >= h['five_hour']
     over_hard = bool(hard_daily or hard_five)
     day = datetime.fromtimestamp(now, fleet_mod._zone(tz)).date().isoformat()
     st = {'known': known, 'day': day, 'tz': tz if isinstance(tz, str) else str(tz),
-          'today': today, 'week': week, 'week_reset': week_reset if known else None, 'projected': pace,
+          'today': today, 'room': room, 'daily': daily, 'hard_daily': hard_cap, 'week': week, 'week_reset': week_reset if known else None, 'projected': pace,
           'five_hour': five, 'five_hour_reset': five_reset if five is not None else None, 'updated': updated,
           'over_daily': over_daily, 'over_five_hour': over_five, 'over_budget': over_daily or over_five,
           'over_hard': over_hard, 'hard_reason': 'daily' if hard_daily else 'five_hour' if hard_five else None,
@@ -160,8 +179,10 @@ def summary_text(s, st):
     elif s['daily'] is None:
         parts.append(f'Today: {fmt(st["today"])} of the week (no daily budget).')
     else:
-        a, b = fmt_pair(st['today'], s['daily'])
-        parts.append(f'Today: {a} of the week (budget {b}' + (', over' if st['over_daily'] else '') + ').')
+        a, b = fmt_pair(st['today'], st['daily'])
+        roomy = st['daily'] is not None and st['daily'] > s['daily']
+        parts.append(f'Today: {a} of the week (budget {b}' + (', raised to use what is left before the reset' if roomy else '')
+                     + (', over' if st['over_daily'] else '') + ').')
     if st['week'] is None:
         parts.append('Week: not known.')
     elif st['projected'] is not None:
@@ -194,7 +215,7 @@ def notice_text(s, st):
     """The one line a chat gets, once a day, when the user is over budget."""
     pace = f'; week on pace for {fmt(st["projected"])}' if st['projected'] is not None else ''
     if st['over_daily']:
-        a, b = fmt_pair(st['today'], s['daily'])
+        a, b = fmt_pair(st['today'], st['daily'])
         why = f'over their daily usage budget (today {a} of the week, budget {b}{pace})'
     else:
         a, b = fmt_pair(st['five_hour'], s['five_hour'])
@@ -206,19 +227,19 @@ def block_text(s, st):
     """Why a prompt was blocked, shown to the user in the chat."""
     h = s['hard']
     if st['hard_reason'] == 'daily':
-        a, b = fmt_pair(st['today'], h['daily'])
-        return (f'Switchboard hard limit: today is at {a} of the week (limit {b}). Lift it for today in Switchboard '
-                'Settings, or wait until tomorrow.')
+        a, b = fmt_pair(st['today'], st['hard_daily'])
+        return (f"Switchboard hard limit: you've used {a} of the week today (limit {b}). "
+                'Lift it for today in Switchboard Settings, or wait until tomorrow.')
     a, b = fmt_pair(st['five_hour'], h['five_hour'])
-    return (f'Switchboard hard limit: the 5-hour window is at {a} (limit {b}). Lift it for today in Switchboard '
+    return (f'Switchboard hard limit: your 5-hour window is at {a} (limit {b}). Lift it for today in Switchboard '
             'Settings, or wait for the window to reset.')
 
 
 def stop_text(n, st):
     """The notification and event when the hard limit stops chats."""
-    chats = 'No background chats were working' if n == 0 else f'Stopped {n} chat' + ('s' if n != 1 else '')
-    where = (f'Today at {fmt(st["today"])} of the week' if st['hard_reason'] == 'daily'
-             else f'The 5-hour window is at {fmt(st["five_hour"])}')
+    chats = 'No background chats were running' if n == 0 else f'Stopped {n} chat' + ('s' if n != 1 else '')
+    where = (f"You've used {fmt(st['today'])} of the week today" if st['hard_reason'] == 'daily'
+             else f'Your 5-hour window is at {fmt(st["five_hour"])}')
     return f'{chats}. {where}.'
 
 
@@ -341,7 +362,7 @@ class Budget:
             f'stopped {n}' + (f', {len(failed)} machines failed' if failed else ''))
         self._event({'kind': 'hard', 'day': st['day'], 'reason': st['hard_reason'], 'today': st['today'],
                      'five_hour': st['five_hour'], 'stopped': stopped, 'failed': failed, 'text': f'Hard limit hit: {text}'})
-        self.app._push('Hard limit hit', text, EVENTS_URL)
+        self.app._push('Hard limit hit', text, EVENTS_URL, 'budget', 'budget')
         if hasattr(self.app, 'bump'):
             self.app.bump()
         return {'stopped': stopped, 'failed': failed}

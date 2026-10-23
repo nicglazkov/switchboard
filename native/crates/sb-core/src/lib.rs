@@ -6,7 +6,8 @@
 //! - `board`: the Swimlanes grid. `actions`: what you can do with a chat. `jobs`: following server jobs.
 //! - `links`: claude.ai session links as the Claude desktop app's own links.
 //! - `net`: HTTP with the fallback across saved addresses. `discover`: finding the server on the local network
-//!   when none is saved. `cache`: the on-disk snapshot and folder trees.
+//!   when none is saved; `firstrun` is the empty board's search and `hostsetup` the guided setup that makes this
+//!   computer the server. `cache`: the on-disk snapshot and folder trees.
 //! - `term`: terminals: the /api/term ticket, the WebSocket to the hub, and the bytes each key sends.
 //! - `Core`: a small facade over all of it with owned inputs and outputs, no generics and no callbacks, so
 //!   UniFFI can wrap it for SwiftUI and Compose later (see native/STACK.md).
@@ -18,15 +19,18 @@ pub mod board;
 pub mod brand;
 pub mod cache;
 pub mod discover;
+pub mod firstrun;
 pub mod flags;
 pub mod fmt;
 pub mod groups;
+pub mod hostsetup;
 pub mod jobs;
 pub mod links;
 pub mod live;
 pub mod model;
 pub mod names;
 pub mod net;
+pub mod places;
 pub mod search;
 pub mod servers;
 pub mod term;
@@ -161,6 +165,17 @@ impl Core {
     /// (servers.rs).
     pub fn take_probe_outcomes(&self) -> Vec<(String, bool)> {
         self.client.resolver().take_outcomes()
+    }
+
+    /// Whether a lookup with nothing saved searches the local network itself (on by default). The desktop app turns it
+    /// off and runs its own search on the empty board (firstrun.rs), so the user picks when several servers answer.
+    pub fn set_discovery(&self, on: bool) {
+        self.client.resolver().set_discovery(on);
+    }
+
+    /// The user agent this app sends.
+    pub fn user_agent(&self) -> String {
+        self.ua.clone()
     }
 
     /// No address is saved and none was found on the local network: the app has to ask for one.
@@ -468,6 +483,11 @@ impl Core {
         self.client.prefs()
     }
 
+    /// The model picker's list from the server; None when it has none (an older server, or offline).
+    pub fn models(&self) -> Option<Vec<api::ApiModel>> {
+        self.client.models().ok().filter(|m| !m.is_empty())
+    }
+
     pub fn set_prefs(&self, body: &serde_json::Value) -> Result<(), CoreError> {
         self.client.set_prefs(body)
     }
@@ -483,6 +503,31 @@ impl Core {
 
     pub fn files(&self, machine: &str, folder: &str, name: Option<&str>) -> Result<api::ApiFiles, CoreError> {
         self.client.files(machine, folder, name)
+    }
+
+    /// Where the browser and New can go on a machine (GET /api/places).
+    pub fn places(&self, machine: &str) -> Result<api::ApiPlaces, CoreError> {
+        self.client.places(machine)
+    }
+
+    /// Before New: may Claude work in that folder yet (GET /api/folder_check).
+    pub fn folder_check(&self, machine: &str, folder: &str) -> Result<api::ApiFolderCheck, CoreError> {
+        self.client.folder_check(machine, folder)
+    }
+
+    /// Opens Files and Folders in System Settings on that Mac's screen.
+    pub fn privacy_settings(&self, machine: &str) -> Result<bool, CoreError> {
+        self.client.privacy_settings(machine)
+    }
+
+    /// "Anywhere in home" on or off for a machine: POST /api/machines {op: roam}.
+    pub fn set_roam(&self, machine: &str, roam: bool) -> Result<api::ApiMachines, CoreError> {
+        self.client.machines_edit(&serde_json::json!({"op": "roam", "machine": machine, "roam": roam}))
+    }
+
+    /// Turns one kind of iPhone notification on or off: POST /api/prefs {notify: {<key>: bool}}.
+    pub fn set_notify(&self, key: &str, on: bool) -> Result<(), CoreError> {
+        self.client.set_prefs(&api::notify_body(key, on))
     }
 
     pub fn pair(&self) -> Result<api::ApiPair, CoreError> {

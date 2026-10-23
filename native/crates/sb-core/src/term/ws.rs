@@ -11,7 +11,7 @@
 //! Output reaches the UI through a bounded channel: when the UI falls behind, this thread stops reading the socket,
 //! and the hub, seeing this viewer fall behind, sends it the screen again once it catches up instead of every byte.
 
-use std::net::TcpStream;
+use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -21,6 +21,7 @@ use async_tungstenite::tungstenite::protocol::CloseFrame;
 use async_tungstenite::tungstenite::protocol::frame::coding::CloseCode;
 use async_tungstenite::tungstenite::{Error as WsError, Message};
 use futures_util::StreamExt;
+use futures_util::stream::FuturesUnordered;
 use serde::Deserialize;
 use smol::channel::{Receiver, Sender, bounded, unbounded};
 use smol::{Async, Timer};
@@ -29,6 +30,10 @@ use smol::{Async, Timer};
 pub const PING_EVERY: Duration = Duration::from_secs(20);
 pub const SILENCE: Duration = Duration::from_secs(50);
 const DIAL: Duration = Duration::from_secs(8);
+/// With more than one address, the next is tried this long after the one before, without waiting for it to fail.
+const NEXT_ADDR: Duration = Duration::from_millis(250);
+/// The WebSocket handshake after the TCP connection is up (shorter in tests, which wait for it).
+const HANDSHAKE: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(10) };
 /// Events waiting for the UI before this thread stops reading the socket.
 pub const UI_BACKLOG: usize = 256;
 /// Input goes out in frames of at most this much (the hub takes frames up to 1 MiB).
@@ -111,7 +116,7 @@ impl Closed {
     /// A sentence for the Detached card.
     pub fn message(&self) -> String {
         match self {
-            Closed::Normal | Closed::ByClient => "Detached. The session keeps running.".into(),
+            Closed::Normal | Closed::ByClient => "Detached. The chat keeps running.".into(),
             Closed::Ticket => "The terminal ticket expired or was already used.".into(),
             Closed::Origin => "The terminal hub refused this app.".into(),
             Closed::Limit => "Too many terminals are open. Close one and try again.".into(),
@@ -210,7 +215,7 @@ pub fn connect(url: String, user_agent: String) -> Conn {
         }
     });
     if let Err(e) = spawned {
-        let _ = from_tx.try_send(FromHub::Closed(Closed::Failed(format!("Could not start the terminal: {e}"))));
+        let _ = from_tx.try_send(FromHub::Closed(Closed::Failed(format!("Couldn't start the terminal: {e}"))));
     }
     Conn { tx: to_tx, rx: from_rx }
 }
@@ -222,17 +227,52 @@ enum Ev {
 }
 
 async fn dial(host: &str, port: u16) -> Result<Async<TcpStream>, String> {
-    let unreachable = || format!("Could not reach the terminal hub at {host}:{port}.");
-    let addrs: Vec<std::net::SocketAddr> = smol::net::resolve((host, port)).await.map_err(|_| unreachable())?;
-    let addr = *addrs.first().ok_or_else(unreachable)?;
-    let connect = async { Async::<TcpStream>::connect(addr).await.map_err(|_| unreachable()) };
-    let timeout = async {
-        Timer::after(DIAL).await;
-        Err(unreachable())
-    };
-    let stream = smol::future::or(connect, timeout).await?;
+    let unreachable = || format!("Couldn't reach the terminal hub at {host}:{port}.");
+    let addrs: Vec<SocketAddr> = smol::net::resolve((host, port)).await.map_err(|_| unreachable())?;
+    let stream = dial_any(&addrs).await.ok_or_else(unreachable)?;
     let _ = stream.get_ref().set_nodelay(true);
     Ok(stream)
+}
+
+/// The addresses in the order to try them: IPv6 and IPv4 taking turns, starting with the family listed first, so an
+/// unreachable IPv6 address listed first does not keep a working IPv4 one waiting.
+fn dial_order(addrs: &[SocketAddr]) -> Vec<SocketAddr> {
+    let Some(first) = addrs.first() else { return Vec::new() };
+    let (same, other): (Vec<SocketAddr>, Vec<SocketAddr>) =
+        addrs.iter().copied().partition(|a| a.is_ipv6() == first.is_ipv6());
+    let mut out = Vec::with_capacity(addrs.len());
+    let (mut a, mut b) = (same.into_iter(), other.into_iter());
+    loop {
+        match (a.next(), b.next()) {
+            (None, None) => return out,
+            (x, y) => out.extend(x.into_iter().chain(y)),
+        }
+    }
+}
+
+/// Connects to the first address that answers, each tried `NEXT_ADDR` after the one before, within `DIAL`.
+async fn dial_any(addrs: &[SocketAddr]) -> Option<Async<TcpStream>> {
+    let mut tries: FuturesUnordered<_> = dial_order(addrs)
+        .into_iter()
+        .enumerate()
+        .map(|(i, addr)| async move {
+            Timer::after(NEXT_ADDR * i as u32).await;
+            Async::<TcpStream>::connect(addr).await
+        })
+        .collect();
+    let first = async {
+        while let Some(res) = tries.next().await {
+            if let Ok(stream) = res {
+                return Some(stream);
+            }
+        }
+        None
+    };
+    let timeout = async {
+        Timer::after(DIAL).await;
+        None
+    };
+    smol::future::or(first, timeout).await
 }
 
 async fn run(
@@ -249,7 +289,7 @@ async fn run(
         }
     };
     let Some((host, port)) = host_port(url) else {
-        return Closed::Failed("The terminal address is not one this app can open.".into());
+        return Closed::Failed("The terminal address isn't one this app can open.".into());
     };
     let stream = match dial(&host, port).await {
         Ok(s) => s,
@@ -257,12 +297,21 @@ async fn run(
     };
     let mut req = match url.into_client_request() {
         Ok(r) => r,
-        Err(_) => return Closed::Failed("The terminal address is not valid.".into()),
+        Err(_) => return Closed::Failed("The terminal address isn't valid.".into()),
     };
     if let Ok(v) = HeaderValue::from_str(user_agent) {
         req.headers_mut().insert("User-Agent", v);
     }
-    let ws = match async_tungstenite::client_async(req, stream).await {
+    // a proxy or a stuck hub can take the connection and never answer: give up rather than wait in Dial for good
+    let handshake = async { Some(async_tungstenite::client_async(req, stream).await) };
+    let timeout = async {
+        Timer::after(HANDSHAKE).await;
+        None
+    };
+    let Some(answer) = smol::future::or(handshake, timeout).await else {
+        return Closed::Failed(format!("The terminal hub at {host}:{port} didn't answer."));
+    };
+    let ws = match answer {
         Ok((ws, _)) => ws,
         Err(WsError::Http(r)) => {
             let status = r.status().as_u16();
@@ -273,7 +322,7 @@ async fn run(
                 _ => Closed::Failed(format!("The terminal hub said no ({status}).")),
             };
         }
-        Err(_) => return Closed::Failed(format!("The terminal hub at {host}:{port} did not answer.")),
+        Err(_) => return Closed::Failed(format!("The terminal hub at {host}:{port} didn't answer.")),
     };
     let _ = from_tx.send(FromHub::Connected).await;
     let (mut sink, mut stream) = ws.split();
@@ -366,8 +415,8 @@ mod tests {
     fn controls() {
         assert_eq!(parse_control(r#"{"type":"status","state":"open"}"#), Some(FromHub::Status("open".into())));
         assert_eq!(
-            parse_control(r#"{"type":"exit","code":0,"note":"Detached. The session keeps running."}"#),
-            Some(FromHub::Exit { code: Some(0), note: Some("Detached. The session keeps running.".into()) })
+            parse_control(r#"{"type":"exit","code":0,"note":"Detached. The chat keeps running."}"#),
+            Some(FromHub::Exit { code: Some(0), note: Some("Detached. The chat keeps running.".into()) })
         );
         assert_eq!(
             parse_control(r#"{"type":"error","error":"ssh failed"}"#),
@@ -427,7 +476,7 @@ mod tests {
                         ws.send(Message::binary(format!("echo:{s}").into_bytes())).unwrap();
                         if s == "q" {
                             ws.send(Message::text(
-                                r#"{"type":"exit","code":0,"note":"Detached. The session keeps running."}"#,
+                                r#"{"type":"exit","code":0,"note":"Detached. The chat keeps running."}"#,
                             ))
                             .unwrap();
                             ws.close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() })).unwrap();
@@ -482,7 +531,7 @@ mod tests {
         assert!(evs.contains(&FromHub::Status("open".into())), "{evs:?}");
         assert!(evs.contains(&FromHub::Data(b"echo:ls\r".to_vec())), "{evs:?}");
         assert!(
-            evs.contains(&FromHub::Exit { code: Some(0), note: Some("Detached. The session keeps running.".into()) }),
+            evs.contains(&FromHub::Exit { code: Some(0), note: Some("Detached. The chat keeps running.".into()) }),
             "{evs:?}"
         );
         assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::Normal)));
@@ -526,8 +575,49 @@ mod tests {
         let evs = collect(&c.rx);
         assert_eq!(
             evs,
-            vec![FromHub::Closed(Closed::Failed(format!("Could not reach the terminal hub at 127.0.0.1:{port}.")))]
+            vec![FromHub::Closed(Closed::Failed(format!("Couldn't reach the terminal hub at 127.0.0.1:{port}.")))]
         );
+    }
+
+    #[test]
+    fn every_address_is_tried() {
+        let v6 = |p: u16| SocketAddr::from(([0xfd7a_u16, 0, 0, 0, 0, 0, 0, 1], p));
+        let v4 = |p: u16| SocketAddr::from(([192_u8, 0, 2, 1], p));
+        assert_eq!(dial_order(&[v6(1), v6(2), v4(3), v4(4)]), vec![v6(1), v4(3), v6(2), v4(4)]);
+        assert_eq!(dial_order(&[v4(3), v6(1)]), vec![v4(3), v6(1)]);
+        assert!(dial_order(&[]).is_empty());
+
+        // the first address goes nowhere, the second refuses: the third, which works, is reached
+        let good = TcpListener::bind("127.0.0.1:0").unwrap();
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let refused = closed.local_addr().unwrap();
+        drop(closed);
+        let start = Instant::now();
+        let got = smol::block_on(dial_any(&[v4(9), refused, good.local_addr().unwrap()]));
+        let got = got.expect("the working address connects");
+        assert_eq!(got.get_ref().peer_addr().unwrap(), good.local_addr().unwrap());
+        assert!(start.elapsed() < DIAL, "{:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_hub_that_never_answers_the_handshake_fails() {
+        // takes the connection and says nothing
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            thread::sleep(HANDSHAKE * 3);
+            drop(s);
+        });
+        let start = Instant::now();
+        let c = connect(format!("ws://127.0.0.1:{port}/term?t=x"), "t".into());
+        let evs = collect(&c.rx);
+        assert_eq!(
+            evs,
+            vec![FromHub::Closed(Closed::Failed(format!("The terminal hub at 127.0.0.1:{port} didn't answer.")))]
+        );
+        assert!(start.elapsed() < HANDSHAKE * 2, "{:?}", start.elapsed());
+        h.join().unwrap();
     }
 
     #[test]

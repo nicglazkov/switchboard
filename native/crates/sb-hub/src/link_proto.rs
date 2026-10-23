@@ -42,7 +42,7 @@ pub enum FromNode {
 
 /// The hub closes a link with this code when the same machine links again (two nodes with one token).
 pub const CLOSE_REPLACED: u16 = 4409;
-/// ... and with this one when its token stopped working (unpaired, or paired again): the node stops.
+/// ... and with this one when its token stopped working (unpaired, or paired again): the node waits for a new pairing.
 pub const CLOSE_UNPAIRED: u16 = 4401;
 
 pub fn encode<T: Serialize>(m: &T) -> String {

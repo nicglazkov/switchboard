@@ -9,6 +9,8 @@ desktop_id = "com.glazkov.switchboard.desktop"  # leakscan: allow
 launcher_id = "com.glazkov.switchboard.launcher"  # leakscan: allow
 publisher = "Switchboard contributors"
 homepage = "https://github.com/nicglazkov/switchboard"
+# The documentation site (mkdocs.yml). The apps' "Install guide" and other help links open pages under it.
+docs = "https://nicglazkov.github.io/switchboard/"
 category = "public.app-category.developer-tools"
 min_macos = "11.0"
 
@@ -22,14 +24,16 @@ text_light = "#1B1C1F"
 text_dark = "#ECECEE"
 
 [dmg]
-# The disk image's Finder window (points). The background art is drawn to this size by
-# native/scripts/make-installer-art.sh, so change both together (the script reads these).
+# The disk image's Finder window (points, title bar included). The background art is drawn to this size by
+# native/scripts/make-installer-art.sh, so change both together (the script reads these). The lowest label stays
+# 56 points or more above the bottom: Finder adds its tab bar (about 28) to every window when someone has it on,
+# whatever the image asks for, and anything lower scrolls out of sight.
 window_width = 660
-window_height = 460
+window_height = 530
 icon_size = 112
 app_x = 170
 app_y = 196
 applications_x = 490
 applications_y = 196
 installer_x = 330
-installer_y = 346
+installer_y = 370

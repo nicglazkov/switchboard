@@ -43,7 +43,7 @@ fn state_text(s: &Session, l: &Live, now: f64) -> String {
 /// One plain sentence about where it stands.
 fn state_sentence(s: &Session, l: &Live, now: f64, offline: bool) -> String {
     if offline {
-        return format!("{} is offline, so this chat can't be opened right now.", s.machine_label);
+        return format!("{} is offline, so you can't open this chat right now.", s.machine_label);
     }
     let said = match l.kind {
         LiveKind::Held => format!(
@@ -51,13 +51,13 @@ fn state_sentence(s: &Session, l: &Live, now: f64, offline: bool) -> String {
             s.ctx_label()
         ),
         LiveKind::Parked => format!(
-            "Waiting for your answer since {}. After a day it is parked: it stays here but no longer counts toward the badge or notifications.",
+            "Waiting for your answer since {}. After a day it's parked: it stays here but stops counting toward the badge and notifications.",
             fmt::when(s.active, now)
         ),
         LiveKind::Wait => format!("Waiting for your answer since {}.", fmt::when(s.active, now)),
         LiveKind::Run => "Working right now.".into(),
         LiveKind::Stall => format!(
-            "No word from it for {}, though it never finished its turn. It may be stuck on one step.",
+            "No word from it for {}, and it never finished its turn. It might be stuck on one step.",
             fmt::sago(s.active, now)
         ),
         LiveKind::Warm => format!("Warm for {} more. Replies stay cheap until then.", fmt::mins(l.left)),
@@ -68,13 +68,13 @@ fn state_sentence(s: &Session, l: &Live, now: f64, offline: bool) -> String {
         LiveKind::Idle => match &s.reaped {
             Some(r) if s.reaped_note() => r.text(),
             _ if s.ctx > 0 => {
-                format!("Quiet since {}. Whether its cache is still warm is not known yet.", fmt::when(s.active, now))
+                format!("Quiet since {}. Not sure yet if its cache is still warm.", fmt::when(s.active, now))
             }
             _ => format!("Quiet since {}.", fmt::when(s.active, now)),
         },
     };
     match &l.stale {
-        Some(a) => format!("{said} This is {a}: {} has not reported since.", s.machine_label),
+        Some(a) => format!("{said} This is {a}: {} hasn't reported since.", s.machine_label),
         None => said,
     }
 }
@@ -395,7 +395,7 @@ impl BoardView {
             return wrap(
                 div().child(
                     ui::wrap(format!(
-                        "{} is offline. When it is back, you can resume or start fresh from here.",
+                        "{} is offline. Once it's back, you can resume or start fresh from here.",
                         s.machine_label
                     ))
                     .text_size(px(13.))
@@ -448,7 +448,7 @@ impl BoardView {
                 k(c.resume.each)
             ),
             Some(c) => format!(
-                "About {} up front, because the cache is cold and all {} is read again. Then about {} each reply.",
+                "About {} up front, since the cache is cold and all {} gets read again. Then about {} each reply.",
                 k(c.resume.cold),
                 s.ctx_label(),
                 k(c.resume.each)
@@ -850,7 +850,7 @@ impl BoardView {
             div()
                 .text_size(px(12.5))
                 .text_color(t.faint)
-                .child("None. Tools on for every new chat join when one starts.")
+                .child("None. Tools that are on for every new chat get added when it starts.")
                 .into_any_element()
         } else {
             div()
@@ -989,7 +989,7 @@ impl BoardView {
             card = card
                 .child(
                     ui::wrap(if running {
-                        "It is running, so it restarts to load them."
+                        "It's running, so it restarts to load them."
                     } else {
                         "It loads them the next time it starts."
                     })
@@ -1071,7 +1071,7 @@ impl BoardView {
                             .items_start()
                             .gap(px(6.))
                             .child(ui::icon("warn", 13., t.need).mt(px(2.)))
-                            .child(ui::wrap("Claude in Chrome did not connect: Claude Code started this chat without it, so it cannot use your browser. Starting it in a terminal (claude --chrome) connects it.").flex_1().text_size(px(12.)).line_height(relative(1.45)).text_color(t.ink2)),
+                            .child(ui::wrap("Claude in Chrome isn't connected. Claude Code started this chat without it, so it can't use your browser. Start it in a terminal with claude --chrome to connect it.").flex_1().text_size(px(12.)).line_height(relative(1.45)).text_color(t.ink2)),
                     )
                 })
                 .child(keys)
@@ -1455,7 +1455,7 @@ impl BoardView {
                     .py(px(6.))
                     .text_size(px(12.))
                     .text_color(t.faint)
-                    .child(format!("Could not load it: {}", v.failed.clone().unwrap_or_default())),
+                    .child(format!("Couldn't load it: {}", v.failed.clone().unwrap_or_default())),
                 _ => ui::loading(&t, "ins-hist-load", "Loading the thread").py(px(6.)).text_size(px(12.)),
             });
         }

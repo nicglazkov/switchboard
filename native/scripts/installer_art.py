@@ -113,6 +113,8 @@ def dmg(b, scale):
     # The arrow from the app to Applications, between the icons, a little below their centers.
     x1, x2, y = ax + icon * 0.62, px - icon * 0.62, ay - 4
     name = a['name']
+    # The rule between the rows: halfway from the top row's labels (about 24 below its icons) to the installer's icon.
+    rule = ((ay + icon / 2 + 24) + (d['installer_y'] - icon / 2)) / 2
     return f'''<svg xmlns="http://www.w3.org/2000/svg" width="{W * s}" height="{H * s}" viewBox="0 0 {W} {H}">
 <defs>
 <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{mix(bg, '#FFFFFF', 0.6)}"/><stop offset="1" stop-color="{mix(bg, accent, 0.06)}"/></linearGradient>
@@ -130,7 +132,7 @@ def dmg(b, scale):
  stroke-width="2.4" stroke-linecap="round" stroke-dasharray="1 7"/>
 <path d="M{x2 - 16:.1f},{y - 9} L{x2 - 4:.1f},{y + 1} L{x2 - 18:.1f},{y + 5}" fill="none" stroke="{accent}" stroke-width="2.4"
  stroke-linecap="round" stroke-linejoin="round"/>
-<line x1="60" x2="{W - 60}" y1="{(ay + d['installer_y']) / 2 + 30}" y2="{(ay + d['installer_y']) / 2 + 30}" stroke="{ink}" stroke-opacity="0.07"/>
+<line x1="60" x2="{W - 60}" y1="{rule}" y2="{rule}" stroke="{ink}" stroke-opacity="0.07"/>
 </svg>'''
 
 

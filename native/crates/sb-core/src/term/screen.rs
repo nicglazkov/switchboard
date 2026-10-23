@@ -354,14 +354,118 @@ pub fn carry_history<T: EventListener, U: EventListener>(old: &mut Term<T>, fres
     parser.advance(fresh, &push);
 }
 
+/// Where the stream is between sequences: in plain text, or partway through an escape sequence or a UTF-8 character.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Seq {
+    #[default]
+    Ground,
+    Esc,
+    Csi,
+    /// OSC (ended by BEL or ST), or DCS, SOS, PM and APC (ended by ST).
+    Str {
+        osc: bool,
+    },
+    /// An ESC inside a string: ST if a backslash follows.
+    StrEsc,
+    /// Continuation bytes still to come.
+    Utf8(u8),
+}
+
+/// An unfinished sequence this long is not kept (a large image, say): the viewer may then show the rest as text.
+const TAIL_MAX: usize = 64 * 1024;
+
+/// The bytes of a sequence the stream has started and not finished, so a snapshot taken in the middle of one ends
+/// with them and the bytes that follow it finish it on the viewer too.
+#[derive(Default)]
+struct Tail {
+    seq: Seq,
+    bytes: Vec<u8>,
+    too_long: bool,
+}
+
+impl Tail {
+    fn feed(&mut self, bytes: &[u8]) {
+        for &b in bytes {
+            self.byte(b);
+        }
+    }
+
+    fn byte(&mut self, b: u8) {
+        let next = match (self.seq, b) {
+            (Seq::StrEsc, b'\\') => Seq::Ground,
+            // the ESC ended the string and starts a sequence of its own
+            (Seq::StrEsc, _) => {
+                self.seq = Seq::Ground;
+                self.bytes.clear();
+                self.too_long = false;
+                self.byte(0x1b);
+                return self.byte(b);
+            }
+            (Seq::Str { .. }, 0x1b) => Seq::StrEsc,
+            (Seq::Str { osc: true }, 0x07) => Seq::Ground,
+            (Seq::Str { .. }, 0x18 | 0x1a) => Seq::Ground,
+            (s @ Seq::Str { .. }, _) => s,
+            (_, 0x1b) => {
+                self.bytes.clear();
+                self.too_long = false;
+                Seq::Esc
+            }
+            (Seq::Utf8(n), 0x80..=0xbf) => {
+                if n > 1 {
+                    Seq::Utf8(n - 1)
+                } else {
+                    Seq::Ground
+                }
+            }
+            // not a continuation byte: the character is cut off, and this byte starts afresh
+            (Seq::Utf8(_), _) => {
+                self.seq = Seq::Ground;
+                self.bytes.clear();
+                return self.byte(b);
+            }
+            (Seq::Esc | Seq::Csi, 0x18 | 0x1a) => Seq::Ground,
+            (Seq::Esc, b'[') => Seq::Csi,
+            (Seq::Esc, b']') => Seq::Str { osc: true },
+            (Seq::Esc, b'P' | b'X' | b'^' | b'_') => Seq::Str { osc: false },
+            // intermediates ("ESC ( B") and controls run inside a sequence without ending it
+            (Seq::Esc, 0x00..=0x2f) => Seq::Esc,
+            (Seq::Esc, _) => Seq::Ground,
+            (Seq::Csi, 0x00..=0x3f | 0x7f) => Seq::Csi,
+            (Seq::Csi, _) => Seq::Ground,
+            (Seq::Ground, 0xc2..=0xdf) => Seq::Utf8(1),
+            (Seq::Ground, 0xe0..=0xef) => Seq::Utf8(2),
+            (Seq::Ground, 0xf0..=0xf4) => Seq::Utf8(3),
+            (Seq::Ground, _) => Seq::Ground,
+        };
+        self.seq = next;
+        if next == Seq::Ground {
+            self.bytes.clear();
+            self.too_long = false;
+        } else if !self.too_long {
+            self.bytes.push(b);
+            if self.bytes.len() > TAIL_MAX {
+                self.bytes = Vec::new();
+                self.too_long = true;
+            }
+        }
+    }
+
+    /// What a snapshot ends with: the unfinished sequence, unless it was too long to keep.
+    fn open(&self) -> &[u8] {
+        if self.too_long { &[] } else { &self.bytes }
+    }
+}
+
 /// A headless terminal: the hub's copy of a screen. It parses everything the program writes, keeps up to
 /// `HISTORY` lines of scrollback, and remembers the raw bytes of a synchronized update still open, so a snapshot
-/// taken in the middle of one replays it whole.
+/// taken in the middle of one replays it whole. A sequence cut off at the end of what came so far is replayed the
+/// same way.
 pub struct Screen<T: EventListener> {
     pub term: Term<T>,
     parser: Processor<StdSyncHandler>,
     /// The bytes the parser holds for the open synchronized update: always the tail of the stream.
     sync: Vec<u8>,
+    tail: Tail,
 }
 
 struct Size(usize, usize);
@@ -386,11 +490,17 @@ pub fn dims(cols: u16, rows: u16) -> impl Dimensions {
 impl<T: EventListener> Screen<T> {
     pub fn new(cols: u16, rows: u16, history: usize, listener: T) -> Self {
         let config = alacritty_terminal::term::Config { scrolling_history: history, ..Default::default() };
-        Screen { term: Term::new(config, &dims(cols, rows), listener), parser: Processor::new(), sync: Vec::new() }
+        Screen {
+            term: Term::new(config, &dims(cols, rows), listener),
+            parser: Processor::new(),
+            sync: Vec::new(),
+            tail: Tail::default(),
+        }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
         self.parser.advance(&mut self.term, bytes);
+        self.tail.feed(bytes);
         let held = self.parser.sync_bytes_count();
         if held == 0 {
             self.sync.clear();
@@ -416,7 +526,12 @@ impl<T: EventListener> Screen<T> {
     }
 
     pub fn snapshot(&mut self, history: usize) -> Vec<u8> {
-        snapshot(&mut self.term, history, &self.sync)
+        let mut out = snapshot(&mut self.term, history, &self.sync);
+        // an open synchronized update already holds the unfinished sequence at its end
+        if self.sync.is_empty() {
+            out.extend_from_slice(self.tail.open());
+        }
+        out
     }
 
     pub fn size(&self) -> (u16, u16) {
@@ -602,6 +717,42 @@ mod tests {
         copy.feed(b" and the end\x1b[?2026l");
         assert_eq!(dump(&copy.term, 0), dump(&s.term, 0));
         assert!(dump(&s.term, 0)[0].contains("in the middle and the end"));
+    }
+
+    #[test]
+    fn a_sequence_cut_off_at_the_end_is_finished_by_what_follows() {
+        let cuts: [(&[u8], &[u8]); 4] = [
+            (b"ab\x1b[3", b"1mX"),
+            (b"ab\x1b]8;;https://example.com", b"\x1b\\link\x1b]8;;\x1b\\"),
+            (b"ab\xe6\xbc", b"\xa2X"),
+            (b"ab\x1b", b"[1mX"),
+        ];
+        for (first, rest) in cuts {
+            let mut s = screen(20, 4, first);
+            let snap = s.snapshot(0);
+            let mut copy = Screen::new(20, 4, 2000, VoidListener);
+            copy.feed(&snap);
+            s.feed(rest);
+            copy.feed(rest);
+            assert_eq!(dump(&copy.term, 0), dump(&s.term, 0), "{first:?} then {rest:?}");
+            assert_eq!(state(&copy.term), state(&s.term));
+        }
+        let mut s = screen(20, 4, b"\x1b[3");
+        let mut copy = Screen::new(20, 4, 2000, VoidListener);
+        copy.feed(&s.snapshot(0));
+        copy.feed(b"1mX");
+        s.feed(b"1mX");
+        let row = &dump(&copy.term, 0)[0];
+        assert!(row.contains("Named(Red)") && row.contains('X') && !row.contains("1m"), "{row}");
+    }
+
+    #[test]
+    fn a_finished_sequence_leaves_nothing_open() {
+        let mut t = Tail::default();
+        t.feed(b"\x1b[31mred\x1b]0;title\x07\x1bP1$r\x1b\\\xe6\xbc\xa2\x1b(B");
+        assert_eq!(t.open(), b"");
+        t.feed(b"\x1b]0;a\x1b[2");
+        assert_eq!(t.open(), b"\x1b[2", "the ESC ended the title and began a new sequence");
     }
 
     #[test]

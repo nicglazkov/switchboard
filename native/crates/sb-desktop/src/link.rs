@@ -323,7 +323,7 @@ impl Render for LinkSheet {
             .p(px(6.));
         let note = |text: String| div().px(px(12.)).py(px(18.)).text_size(px(13.)).text_color(t.faint).child(text);
         match (&self.rows, &self.failed) {
-            (_, Some(e)) => list = list.child(note(format!("Could not load the chats: {e}"))),
+            (_, Some(e)) => list = list.child(note(format!("Couldn't load the chats: {e}"))),
             (None, None) => list = list.child(ui::loading(&t, "lk-load", "Loading the chats").px(px(12.)).py(px(18.))),
             (Some(rows), None) if rows.is_empty() => {
                 list = list.child(note(

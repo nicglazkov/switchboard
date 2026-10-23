@@ -32,6 +32,11 @@ enum Stop {
     Replaced,
 }
 
+/// `run`'s answer when the hub no longer knows the token.
+pub const UNPAIRED: i32 = 3;
+/// ... and when another node with the same token took the link.
+pub const REPLACED: i32 = 4;
+
 /// Keep the link up until the token stops working or a signal arrives. Returns the exit code.
 pub async fn run(cfg: NodeConfig) -> i32 {
     log(format!("{VERSION} linking {} to the hub at {}", cfg.machine, cfg.hub));
@@ -43,11 +48,11 @@ pub async fn run(cfg: NodeConfig) -> i32 {
                 Ok(why) => log(format!("link closed: {why}")),
                 Err(Ok(Stop::Unpaired(why))) => {
                     log(format!("{why} Pair it again: switchboard-node pair {} <code>", cfg.hub));
-                    return 3;
+                    return UNPAIRED;
                 }
                 Err(Ok(Stop::Replaced)) => {
-                    log("another switchboard-node for this machine took over the link; this one stops.");
-                    return 4;
+                    log("another switchboard-node for this machine took over the link; this one waits.");
+                    return REPLACED;
                 }
                 Err(Err(e)) => log(format!("cannot reach the hub at {} ({e}); trying again in {wait} s", cfg.hub)),
             }
@@ -67,7 +72,7 @@ pub async fn run(cfg: NodeConfig) -> i32 {
     }
 }
 
-async fn shutdown() {
+pub async fn shutdown() {
     #[cfg(unix)]
     {
         let mut term =
@@ -242,9 +247,15 @@ async fn open_term(
     tx: mpsc::Sender<Message>,
     done: mpsc::UnboundedSender<u32>,
 ) -> Option<Term> {
+    // Sent on its own task, waiting for room: on a busy link a dropped `term.exit` would leave the hub's channel
+    // open with nothing behind it.
     let say_and_exit = |msg: String, code: i64| {
-        let _ = tx.try_send(Message::Binary(link_proto::frame(ch, msg.as_bytes()).into()));
-        let _ = tx.try_send(Message::Text(link_proto::encode(&FromNode::TermExit { ch, code: Some(code) }).into()));
+        let tx = tx.clone();
+        tokio::spawn(async move {
+            let _ = tx.send(Message::Binary(link_proto::frame(ch, msg.as_bytes()).into())).await;
+            let _ =
+                tx.send(Message::Text(link_proto::encode(&FromNode::TermExit { ch, code: Some(code) }).into())).await;
+        });
     };
     if !sb_hub::ticket::valid_bg(bg) {
         say_and_exit("Switchboard: that is not a background session id.\r\n".into(), 2);
@@ -296,4 +307,31 @@ async fn open_term(
         log(format!("terminal {ch} closed ({code:?})"));
     });
     Some(term)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn a_terminal_that_cannot_start_still_ends_on_a_busy_link() {
+        let cfg = NodeConfig {
+            hub: "192.0.2.10:8132".into(),
+            machine: "lab".into(),
+            token: "t".into(),
+            sb: None,
+            python: None,
+        };
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.try_send(Message::Ping(Vec::new().into())).unwrap(); // the link is full
+        let (done, _done_rx) = mpsc::unbounded_channel();
+        assert!(open_term(&cfg, 7, "not-a-bg", 80, 24, tx, done).await.is_none());
+        let mut exit = None;
+        while let Ok(Some(m)) = tokio::time::timeout(Duration::from_secs(2), rx.recv()).await {
+            if let Message::Text(t) = m {
+                exit = serde_json::from_str::<FromNode>(t.as_str()).ok();
+            }
+        }
+        assert_eq!(exit, Some(FromNode::TermExit { ch: 7, code: Some(2) }), "the hub is told it ended");
+    }
 }

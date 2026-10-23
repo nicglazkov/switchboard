@@ -4,7 +4,7 @@
 //! and nothing else on the machine has to share port 5353.
 
 use std::collections::HashMap;
-use std::net::{Ipv4Addr, SocketAddr, UdpSocket};
+use std::net::{IpAddr, Ipv4Addr, SocketAddr, UdpSocket};
 use std::time::{Duration, Instant};
 
 pub const SERVICE: &str = "_switchboard._tcp.local";
@@ -17,21 +17,38 @@ const A: u16 = 1;
 /// Server addresses announced on this network ("http://studio.local:8130"), in the order they answered.
 /// Empty when nothing answered within `wait`, or the network does not allow multicast.
 pub fn browse(wait: Duration) -> Vec<String> {
-    match ask(wait) {
-        Ok(v) => v,
-        Err(e) => {
-            log::info!("local network search failed: {e}");
-            Vec::new()
-        }
+    let mut out = Vec::new();
+    if let Err(e) = browse_each(wait, |a| out.push(a.url)) {
+        log::info!("local network search failed: {e}");
     }
+    out
 }
 
-fn ask(wait: Duration) -> std::io::Result<Vec<String>> {
+/// One server that answered: the name it goes by ("studio1", from "Switchboard on studio1") and its address.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Announced {
+    pub name: String,
+    pub url: String,
+}
+
+/// Asks the local network for servers and calls `on` with each one as soon as its address is known, until `wait`
+/// is up. Err when the search could not run at all (no network, or multicast is not allowed).
+pub fn browse_each(wait: Duration, mut on: impl FnMut(Announced)) -> std::io::Result<()> {
     let sock = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0)))?;
     sock.set_multicast_ttl_v4(255)?;
     let to = SocketAddr::from(GROUP);
-    sock.send_to(&query(1, &[(SERVICE, PTR)]), to)?;
+    let ask = query(1, &[(SERVICE, PTR)]);
+    sock.send_to(&ask, to)?;
+    // Windows sends multicast from a socket on 0.0.0.0 out whichever adapter it likes, and on a PC with Hyper-V,
+    // VPN or Bluetooth adapters that is often not the network the server is on: ask again out the one the default
+    // route uses. Answers to both come back to this socket, and the same server is told only once.
+    if let Some(ip) = lan_ip()
+        && socket2::SockRef::from(&sock).set_multicast_if_v4(&ip).is_ok()
+    {
+        let _ = sock.send_to(&ask, to);
+    }
     let mut found = Found::default();
+    let mut told: Vec<String> = Vec::new();
     let mut asked_again = false;
     let end = Instant::now() + wait;
     let mut buf = [0u8; 9000];
@@ -46,6 +63,12 @@ fn ask(wait: Duration) -> std::io::Result<Vec<String>> {
             Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => break,
             Err(e) => return Err(e),
         }
+        for a in found.announced() {
+            if !told.contains(&a.url) {
+                told.push(a.url.clone());
+                on(a);
+            }
+        }
         // A responder that only listed the name: ask for its record once.
         let bare: Vec<String> = found.instances.iter().filter(|i| found.url(i).is_none()).cloned().collect();
         if !bare.is_empty() && !asked_again {
@@ -54,7 +77,36 @@ fn ask(wait: Duration) -> std::io::Result<Vec<String>> {
             let _ = sock.send_to(&query(2, &qs), to);
         }
     }
-    Ok(found.urls())
+    Ok(())
+}
+
+/// This computer's address on the local network: the one its default route leaves from (no packet is sent), when
+/// that is on a private network.
+fn lan_ip() -> Option<Ipv4Addr> {
+    let s = UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 0))).ok()?;
+    s.connect(SocketAddr::from((Ipv4Addr::new(192, 0, 2, 1), 9))).ok()?;
+    match s.local_addr().ok()?.ip() {
+        IpAddr::V4(ip) if on_lan(ip) => Some(ip),
+        _ => None,
+    }
+}
+
+/// A private IPv4 address (10/8, 172.16/12, 192.168/16): not Tailscale's 100.64.0.0/10, a link-local one or
+/// loopback, where no server's announcement is heard.
+fn on_lan(ip: Ipv4Addr) -> bool {
+    ip.is_private()
+}
+
+/// The name a server goes by, from its instance name: "Switchboard on studio1._switchboard._tcp.local" is
+/// "studio1".
+pub fn short_name(instance: &str) -> String {
+    let lower = instance.to_ascii_lowercase();
+    let base = match lower.rfind(&format!(".{SERVICE}")) {
+        Some(at) => &instance[..at],
+        None => instance,
+    };
+    let base = base.strip_prefix("Switchboard on ").unwrap_or(base);
+    base.trim().to_string()
 }
 
 /// What the answers said so far.
@@ -109,15 +161,22 @@ impl Found {
         Some(format!("http://{host}:{port}"))
     }
 
-    fn urls(&self) -> Vec<String> {
-        let mut out: Vec<String> = Vec::new();
-        for u in self.instances.iter().filter_map(|i| self.url(i)) {
-            let u = u.trim_end_matches('/').to_string();
-            if !out.contains(&u) {
-                out.push(u);
+    /// Each instance whose address is known, with its name, one per address, in the order they answered.
+    fn announced(&self) -> Vec<Announced> {
+        let mut out: Vec<Announced> = Vec::new();
+        for i in &self.instances {
+            let Some(u) = self.url(i) else { continue };
+            let url = u.trim_end_matches('/').to_string();
+            if !out.iter().any(|a| a.url == url) {
+                out.push(Announced { name: short_name(i), url });
             }
         }
         out
+    }
+
+    #[cfg(test)]
+    fn urls(&self) -> Vec<String> {
+        self.announced().into_iter().map(|a| a.url).collect()
     }
 }
 
@@ -283,6 +342,27 @@ mod tests {
         f.take(&[0xFF; 5]);
         f.take(&reply(true)[..40]);
         assert!(f.urls().is_empty());
+    }
+
+    #[test]
+    fn names_a_server_by_its_host() {
+        let mut f = Found::default();
+        f.take(&reply(true));
+        assert_eq!(f.announced(), vec![Announced { name: "studio1".into(), url: "http://192.0.2.10:8130".into() }]);
+        assert_eq!(short_name("Switchboard on Tower._switchboard._tcp.local"), "Tower");
+        assert_eq!(short_name("Mine._SWITCHBOARD._tcp.local"), "Mine");
+        assert_eq!(short_name("plain"), "plain");
+    }
+
+    #[test]
+    fn asks_again_only_out_a_private_network() {
+        assert!(on_lan(Ipv4Addr::new(192, 168, 0, 126)));
+        assert!(on_lan(Ipv4Addr::new(10, 1, 2, 3)));
+        assert!(on_lan(Ipv4Addr::new(172, 20, 0, 1)));
+        assert!(!on_lan(Ipv4Addr::new(100, 70, 127, 22)));
+        assert!(!on_lan(Ipv4Addr::new(169, 254, 84, 27)));
+        assert!(!on_lan(Ipv4Addr::new(127, 0, 0, 1)));
+        assert!(!on_lan(Ipv4Addr::new(8, 8, 8, 8)));
     }
 
     #[test]

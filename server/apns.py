@@ -71,14 +71,18 @@ class Apns:
         except ValueError:
             return 0, (r.stderr or r.stdout or '').strip()
 
-    def push(self, token, title, body, url):
+    def push(self, token, title, body, url, thread='switchboard', collapse=None):
+        """An alert. `thread` groups it on the phone with its kind; pushes with the same `collapse` replace each
+        other; one that cannot be delivered within a day is dropped, not shown late."""
         if not isinstance(token, str) or not TOKEN_RE.fullmatch(token):
             raise ValueError('bad device token')
         payload = json.dumps({'aps': {'alert': {'title': title, 'body': body}, 'sound': 'default',
-                                      'thread-id': 'switchboard'}, 'url': url})
+                                      'thread-id': thread}, 'url': url})
+        extra = ['-H', f'apns-collapse-id: {collapse[:64]}'] if collapse else []
         args = ['curl', '-sS', '--http2', '--max-time', '15', '-w', '\n%{http_code}',
                 '-H', '@-', '-H', f'apns-topic: {self.topic}',
-                '-H', 'apns-push-type: alert', '-H', 'apns-priority: 10', '-d', payload,
+                '-H', 'apns-push-type: alert', '-H', 'apns-priority: 10',
+                '-H', f'apns-expiration: {int(time.time()) + 86400}', *extra, '-d', payload,
                 f'{HOSTS[self.sandbox]}/3/device/{token}']
         r = self.runner(args, input=self._auth(), capture_output=True, text=True, timeout=20)
         lines = (r.stdout or '').rstrip('\n').rsplit('\n', 1)

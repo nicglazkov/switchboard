@@ -114,6 +114,7 @@ impl AppState {
                 .await;
             let _ = this.update(cx, |s, cx| {
                 s.update_busy = false;
+                s.update_err = res.as_ref().err().map(|e| e.to_string());
                 match res {
                     // A download or a queued install keeps the offer it is for.
                     Ok(o) if matches!(s.upd, Upd::Idle | Upd::Failed(_)) => s.update = o,
@@ -163,7 +164,7 @@ impl AppState {
             let res = cx
                 .background_executor()
                 .spawn(async move {
-                    let dir = download_dir().ok_or("There is no folder to download the update into.")?;
+                    let dir = download_dir().ok_or("There's no folder to download the update into.")?;
                     let file = up::download(&o, &dir, &got, &total, &ua).map_err(|e| e.to_string())?;
                     stage(&file, &dir, &o)
                 })
@@ -183,7 +184,7 @@ impl AppState {
                         Upd::Idle
                     }
                     Err(e) => Upd::Failed(format!(
-                        "Version {} is installed, but it did not open: {e}. Quit Switchboard and open it again.",
+                        "Version {} is installed, but it didn't open: {e}. Quit Switchboard and open it again.",
                         st.offer.version
                     )),
                 },
@@ -225,11 +226,14 @@ fn download_dir() -> Option<PathBuf> {
 
 /// What is replaced: the .app bundle on a Mac, the program elsewhere.
 fn this_app() -> Result<PathBuf, String> {
-    let exe = std::env::current_exe().map_err(|e| format!("Could not find this app: {e}"))?;
+    let exe = std::env::current_exe().map_err(|e| format!("Couldn't find this app: {e}"))?;
     if cfg!(target_os = "macos") {
         // .../Switchboard.app/Contents/MacOS/Switchboard
         exe.ancestors().nth(3).filter(|p| p.extension().is_some_and(|x| x == "app")).map(Path::to_path_buf).ok_or_else(
-            || "This copy is not inside Switchboard.app, so it can't update itself. Download the new one from the page.".into(),
+            || {
+                "This copy isn't inside Switchboard.app, so it can't update itself. Download the new one from the page."
+                    .into()
+            },
         )
     } else {
         Ok(exe)
@@ -252,7 +256,7 @@ fn stage(file: &Path, dir: &Path, o: &Offer) -> Result<Staged, String> {
         }
         up::Kind::Exe => {
             up::remove_any(&unpack);
-            std::fs::create_dir_all(&unpack).map_err(|e| format!("Could not unpack the update: {e}"))?;
+            std::fs::create_dir_all(&unpack).map_err(|e| format!("Couldn't unpack the update: {e}"))?;
             run(&windows_tar(), &["-xf", &file.to_string_lossy(), "-C", &unpack.to_string_lossy()])?;
             let new = unpack.join("Switchboard.exe");
             (new.clone(), new)
@@ -260,7 +264,7 @@ fn stage(file: &Path, dir: &Path, o: &Offer) -> Result<Staged, String> {
         up::Kind::Bin => {
             // The download is the binary itself.
             let new = target.with_extension("new");
-            std::fs::copy(file, &new).map_err(|e| format!("Could not unpack the update: {e}"))?;
+            std::fs::copy(file, &new).map_err(|e| format!("Couldn't unpack the update: {e}"))?;
             #[cfg(unix)]
             {
                 use std::os::unix::fs::PermissionsExt;
@@ -285,7 +289,7 @@ fn stage(file: &Path, dir: &Path, o: &Offer) -> Result<Staged, String> {
 
 /// Runs `bin --version` and expects "Switchboard <version>" back within a few seconds.
 fn starts(bin: &Path, version: &str) -> Result<(), String> {
-    let bad = |why: &str| format!("The new version would not start on this computer ({why}), so it was not installed.");
+    let bad = |why: &str| format!("The new version wouldn't start on this computer ({why}), so it wasn't installed.");
     let mut cmd = std::process::Command::new(bin);
     // CREATE_NO_WINDOW, in case the new build is a console program.
     #[cfg(target_os = "windows")]
@@ -304,7 +308,7 @@ fn starts(bin: &Path, version: &str) -> Result<(), String> {
                 return if out.status.success() && text.trim() == format!("Switchboard {version}") {
                     Ok(())
                 } else {
-                    Err(bad("it did not say its version"))
+                    Err(bad("it didn't say its version"))
                 };
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(100)),
@@ -312,12 +316,12 @@ fn starts(bin: &Path, version: &str) -> Result<(), String> {
         }
     }
     let _ = child.kill();
-    Err(bad("it did not answer"))
+    Err(bad("it didn't answer"))
 }
 
 /// The swap: the new build in place, the old one kept, update.json noting it (sb_core::update::swap_in).
 fn swap(st: &Staged) -> Result<(), String> {
-    let state = up::state_path().ok_or("There is no settings folder to note the update in.")?;
+    let state = up::state_path().ok_or("There's no settings folder to note the update in.")?;
     let from = up::this_build().unwrap_or_default();
     up::swap_in(up::kind(), &st.new, &st.target, &state, &st.offer, from)?;
     for d in &st.scratch {
@@ -370,7 +374,7 @@ fn run(cmd: &str, args: &[&str]) -> Result<(), String> {
     match c.status() {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!("{cmd} failed ({s}).")),
-        Err(e) => Err(format!("Could not run {cmd}: {e}")),
+        Err(e) => Err(format!("Couldn't run {cmd}: {e}")),
     }
 }
 
@@ -481,6 +485,13 @@ impl BoardView {
                         .flex()
                         .justify_end()
                         .gap(px(8.))
+                        .when(o.page.starts_with("https://"), |d| {
+                            let page = o.page.clone();
+                            d.child(
+                                btn("upd-news", "What's new")
+                                    .on_click(move |_, _, cx| crate::state::open_link(cx, &page)),
+                            )
+                        })
                         .child(if queued {
                             btn("upd-cancel", "Don't install").on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.app.update(cx, |s, cx| s.cancel_on_quit(cx))
@@ -568,7 +579,11 @@ pub fn status_line(app: &AppState) -> String {
     let found = match (&app.update, &app.upd) {
         (Some(o), Upd::OnQuit(_)) => format!(" Version {} installs when you quit.", o.version),
         (Some(o), _) => format!(" Version {} is ready: use Update ready in the header.", o.version),
-        (None, _) if app.update_at.is_some() && !app.update_busy => " This is the newest version.".to_string(),
+        (None, _) if app.update_busy => String::new(),
+        (None, _) if app.update_err.is_some() => {
+            format!(" It couldn't look this time: {}", app.update_err.as_deref().unwrap_or_default())
+        }
+        (None, _) if app.update_at.is_some() => " This is the newest version.".to_string(),
         _ => String::new(),
     };
     format!("Switchboard checks for a newer version once a day and asks before installing it. {last}{found}")

@@ -115,7 +115,7 @@ class TermModeTest(unittest.TestCase):
         err = io.StringIO()
         with mock.patch.object(sys, 'stderr', err), mock.patch.object(self.sb, 'IS_WIN', False):
             self.assertEqual(self.sb.run_term('term c03ef0d9', isatty=lambda: True, execve=gone), 127)
-        self.assertIn('could not start Claude Code', err.getvalue())
+        self.assertIn("couldn't start Claude Code", err.getvalue())
 
     def test_main_routes_on_ssh_original_command(self):
         with mock.patch.dict(os.environ, {'SSH_ORIGINAL_COMMAND': 'term c03ef0d9'}), \

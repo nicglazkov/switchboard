@@ -128,7 +128,7 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
         let mut x = a(
             ActionId::Terminal,
             "Open terminal",
-            &format!("It is open in a terminal on {label}. Only background chats open here."),
+            &format!("It's open in a terminal on {label}. Only background chats open here."),
             "term",
         );
         x.disabled = true;
@@ -203,7 +203,7 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
     ));
     if s.can_keep() {
         let (title, note) = if s.keep {
-            ("Kept running", "Switchboard leaves it running. Click to let it stop it when idle.")
+            ("Kept running", "Switchboard leaves it running. Click to let Switchboard stop it when idle.")
         } else {
             ("Keep running", "Switchboard stops idle background chats to free memory. Not this one.")
         };
@@ -222,7 +222,7 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
         } else if alive {
             "Hides it here. The terminal stays open."
         } else {
-            "Hides it until it is used again"
+            "Hides it until it's used again"
         },
         "dismiss",
     ));
@@ -281,7 +281,7 @@ pub fn for_replaced(r: &Replaced, snap: &Snapshot) -> Vec<Action> {
     let mut resume = a(
         ActionId::Resume,
         "Resume as is",
-        if r.alive { "It is still open on that machine" } else { "Re-opens this older chat, as it was" },
+        if r.alive { "It's still open on that machine" } else { "Re-opens this older chat, as it was" },
         "resume",
     );
     resume.disabled = r.alive;
@@ -312,7 +312,7 @@ pub fn fresh_confirm(s: &Session) -> Confirm {
     Confirm {
         title: format!("Start {} fresh?", s.topic),
         body: format!(
-            "Writes a summary on {} and opens a new chat with your notes{}, so the next message does not re-read {}. The old chat moves to Replaced.{cost}",
+            "Writes a summary on {} and opens a new chat with your notes{}, so the next message doesn't re-read {}. The old chat moves to Replaced.{cost}",
             s.machine_label,
             if s.held { " and the held message" } else { "" },
             s.ctx_label()
@@ -328,7 +328,46 @@ pub const MODES: [(&str, &str, &str); 3] = [
     ("max", "Max effort", "Deepest reasoning on every turn"),
     ("ultracode", "UltraCode", "Multi-agent workflows for big builds"),
 ];
-pub const MODELS: [(&str, &str); 4] = [("", "Default"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
+/// The model picker when the server has not said (an older one, or offline): the aliases every Claude Code takes.
+pub const MODELS: [(&str, &str); 5] =
+    [("", "Default"), ("fable", "Fable"), ("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku")];
+
+/// The model picker from GET /api/models: Default, then what the machines' Claude Code takes, each shown with the
+/// newest version the chats ran on ("Opus 5.5") when there is one. Nothing from the server: the built-in list.
+pub fn model_choices(list: Option<&[crate::api::ApiModel]>) -> Vec<(String, String)> {
+    match list {
+        Some(l) if !l.is_empty() => std::iter::once((String::new(), "Default".to_string()))
+            .chain(l.iter().map(|m| {
+                let shown = if !m.detail.is_empty() {
+                    m.detail.clone()
+                } else if !m.label.is_empty() {
+                    m.label.clone()
+                } else {
+                    model_word(&m.id)
+                };
+                (m.id.clone(), shown)
+            }))
+            .collect(),
+        _ => MODELS.iter().map(|(v, l)| (v.to_string(), l.to_string())).collect(),
+    }
+}
+
+/// "Opus" for opus, "Opus 5.5" for claude-opus-5-5: a model as a chip says it.
+pub fn model_word(v: &str) -> String {
+    let cap = |s: &str| {
+        let mut c = s.chars();
+        c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+    };
+    let parts: Vec<&str> = v.trim_end_matches("[1m]").split('-').collect();
+    if parts.len() >= 3
+        && parts[0] == "claude"
+        && let Ok(major) = parts[2].parse::<u32>()
+    {
+        let minor = parts.get(3).filter(|p| p.len() <= 2).and_then(|p| p.parse::<u32>().ok());
+        return format!("{} {major}{}", cap(parts[1]), minor.map(|m| format!(".{m}")).unwrap_or_default());
+    }
+    cap(v)
+}
 pub const ULTRA_NOTE: &str =
     "Runs multi-agent workflows for big builds, on Opus at extra high effort. Uses the plan faster.";
 
@@ -388,17 +427,17 @@ pub fn suggest(s: &Session, now: f64) -> Suggest {
         "Nothing to re-read yet".to_string()
     };
     let (pick, why) = match s.lamp(now) {
-        Lamp::Run => (None, "It is working right now. Open the terminal to watch or steer it.".to_string()),
+        Lamp::Run => (None, "It's working right now. Open the terminal to watch or steer it.".to_string()),
         _ if s.held => (
             Some(Pick::Fresh),
             format!("It went cold at {kk}. Sending your held message would re-read all of it first."),
         ),
         _ if left > 0 => (
             Some(Pick::Resume),
-            format!("It is still warm for {}, so resuming only pays for your new message.", crate::fmt::mins(left)),
+            format!("It's still warm for {}, so resuming only pays for your new message.", crate::fmt::mins(left)),
         ),
         _ if s.ctx >= NEAR_COMPACT => {
-            (Some(Pick::Fresh), format!("At {kk} it is close to the 300k point where Claude squeezes the chat down."))
+            (Some(Pick::Fresh), format!("At {kk} it's close to the 300k point where Claude squeezes the chat down."))
         }
         _ if s.ctx == 0 => (Some(Pick::Resume), "It has no history to re-read yet.".to_string()),
         _ => {
@@ -412,10 +451,10 @@ pub fn suggest(s: &Session, now: f64) -> Suggest {
             let band = s.band();
             let pick = s.cost_pick(now).unwrap_or(if band == Band::Small { Pick::Resume } else { Pick::Fresh });
             let why = match (pick, band) {
-                (_, Band::Small) => format!("It is small ({kk}), so going back is cheap even with the cache cold."),
+                (_, Band::Small) => format!("It's small ({kk}), so going back is cheap even with the cache cold."),
                 (Pick::Fresh, Band::Big) => format!("{went} and holds {kk}. Resuming re-reads all of it."),
                 (Pick::Fresh, Band::Medium) => format!(
-                    "{went}. Resuming re-reads all {kk}; Start fresh is cheaper if you do not need the history."
+                    "{went}. Resuming re-reads all {kk}, so Start fresh is cheaper if you don't need the history."
                 ),
                 (Pick::Resume, _) => {
                     format!("{went}, but resuming its {kk} still costs less than writing a summary and starting over.")

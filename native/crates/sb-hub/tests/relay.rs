@@ -164,7 +164,7 @@ async fn a_terminal_from_open_to_exit() {
     read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
     let exit = s.texts.iter().find(|t| t["type"] == "exit").expect("exit frame");
     assert_eq!(exit["code"], 0);
-    assert_eq!(exit["note"], "Detached. The session keeps running.");
+    assert_eq!(exit["note"], "Detached. The chat keeps running.");
     assert_eq!(s.close, Some(1000));
 
     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -281,7 +281,7 @@ async fn ssh_failures_say_so() {
     read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
     let exit = s.texts.iter().find(|t| t["type"] == "exit").expect("exit frame");
     assert_eq!(exit["code"], 255);
-    assert!(exit["note"].as_str().unwrap().starts_with("Could not reach Lab"));
+    assert!(exit["note"].as_str().unwrap().starts_with("Couldn't reach Lab"));
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -408,4 +408,23 @@ async fn a_big_paste_waits_for_the_machine_instead_of_closing() {
     read_until(&mut ws, &mut s, Duration::from_secs(60), |s| s.out.contains("SWALLOWED") || s.close.is_some()).await;
     assert!(s.out.contains("SWALLOWED"), "{:?}", s.close);
     assert_eq!(s.close, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_viewer_that_went_away_is_let_go() {
+    let lab = lab(|c| c.silence = Duration::from_millis(600)).await;
+    let mut ws = lab.connect(&lab.ticket("c03ef0d9"), None, "").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(10), |s| s.out.contains("PID")).await;
+    // still reading, so its pongs go back: it stays well past the silence
+    read_until(&mut ws, &mut s, Duration::from_millis(1500), |_| false).await;
+    assert_eq!(s.close, None);
+    assert_eq!(lab.get("/internal/open").await["open"].as_array().map(Vec::len), Some(1));
+    // it stops reading, as a laptop that slept does: no pongs, and the hub ends it without waiting for idle
+    let end = Instant::now() + Duration::from_secs(5);
+    while lab.get("/internal/open").await["open"] != serde_json::json!([]) && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert_eq!(lab.get("/internal/open").await["open"], serde_json::json!([]));
+    drop(ws);
 }

@@ -15,7 +15,7 @@ use gpui::{
 };
 use gpui_base::input::{InputEvent, InputState};
 use sb_core::api::{ApiBrowseRow, ApiChatSummary, ApiCompact};
-use sb_core::{fmt, names};
+use sb_core::{JobKind, fmt, names};
 
 use crate::state::{AppEvent, AppState, copy_text, open_link};
 use crate::theme::{NUM, Theme};
@@ -398,6 +398,7 @@ impl BrowserView {
             None => {
                 let (m, sid) = (r.machine.clone(), r.sid.clone());
                 let label = r.label.clone().unwrap_or_else(|| m.clone());
+                let from = r.title.clone();
                 let title = r.title.clone().unwrap_or_else(|| "Untitled".into());
                 let core = app.read(cx).core.clone();
                 cx.spawn(async move |_, cx| {
@@ -406,14 +407,14 @@ impl BrowserView {
                         .spawn(async move { core.act(&m, "resume", &sid, None).map(|j| (j, m)) })
                         .await;
                     app.update(cx, |s, cx| match res {
-                        Ok((Some(job), machine)) => cx.emit(AppEvent::OpenJobTerm {
-                            job,
-                            machine,
-                            label,
-                            title: names::resumed(&names::split(&title).0),
-                        }),
+                        Ok((Some(job), machine)) => {
+                            // Followed like the board's Resume, so the tab hears when it is done.
+                            let name = names::resumed(&names::split(&title).0);
+                            s.start_job(&job, JobKind::Resume, Some(k), &label, &label, from, Some(name.clone()), cx);
+                            cx.emit(AppEvent::OpenJobTerm { job, machine, label, title: name })
+                        }
                         Ok((None, _)) => {
-                            s.toast("The server took the resume but did not say which job it is.", None, true, cx)
+                            s.toast("The server took the resume but didn't say which job it is.", None, true, cx)
                         }
                         Err(e) => s.toast(e.to_string(), None, true, cx),
                     });
@@ -432,7 +433,7 @@ impl BrowserView {
             self.app.update(cx, |s, cx| {
                 s.toast(
                     "A name needs letters or digits.",
-                    Some("It may use letters, digits, spaces and . , : ' + # ( ) - _".into()),
+                    Some("Use letters, digits, spaces and . , : ' + # ( ) - _".into()),
                     true,
                     cx,
                 )
@@ -706,7 +707,7 @@ impl BrowserView {
             .gap(px(8.))
             .child(div().flex().items_center().gap(px(7.)).child(ui::icon("fresh", 14., t.accent)).child(div().text_size(px(13.5)).font_weight(FontWeight::BOLD).text_color(t.ink).child("Compact into one fresh chat")))
             .child(ui::wrap(format!(
-                "Writes one summary of all {n} chats in this thread (each chat's own summary where it has one, otherwise its condensed transcript), then opens a new chat from it. The old chats stay here."
+                "Writes one summary of all {n} chats in this thread, then opens a new chat from it. It uses each chat's own summary if it has one, or else a condensed transcript. The old chats stay here."
             )).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.dim));
         let h2 = head.clone();
         card = match ask {
@@ -735,7 +736,7 @@ impl BrowserView {
                 let mut note = cost.text.clone();
                 if c.found < c.chats {
                     note.push_str(&format!(
-                        " {} of the {} chats could not be read (their machine is offline) and are left out.",
+                        " {} of the {} chats couldn't be read (their machine is offline), so they're left out.",
                         c.chats - c.found,
                         c.chats
                     ));
@@ -981,7 +982,7 @@ impl BrowserView {
                 } else {
                     "Resume"
                 },
-                if alive { "It is running".into() } else { ctx_note },
+                if alive { "It's running".into() } else { ctx_note },
                 true,
             )
             .when(busy, |d| d.opacity(0.6))
@@ -1077,7 +1078,7 @@ impl BrowserView {
                     div()
                         .text_size(px(12.5))
                         .text_color(t.faint)
-                        .child(format!("Could not read the chat on {label}. {e}")),
+                        .child(format!("Couldn't read the chat on {label}. {e}")),
                 )
             }
             None => {
@@ -1098,7 +1099,7 @@ impl BrowserView {
                 Some(Ok(text)) => {
                     ui::wrap(text.clone()).text_size(px(12.5)).line_height(relative(1.5)).text_color(t.ink2)
                 }
-                Some(Err(e)) => ui::wrap(format!("Could not read the summary on {label}. {e}"))
+                Some(Err(e)) => ui::wrap(format!("Couldn't read the summary on {label}. {e}"))
                     .text_size(px(12.5))
                     .text_color(t.faint),
                 None => ui::loading(t, "br-note", format!("Reading the summary on {label}")).text_size(px(12.5)),
@@ -1149,7 +1150,7 @@ impl BrowserView {
             if (head.history.len() as u64) < n {
                 list = list.child(
                     ui::wrap(format!(
-                        "{} older chats are not shown here. Search for them by name.",
+                        "{} older chats aren't shown here. Search for them by name.",
                         n - head.history.len() as u64
                     ))
                     .text_size(px(12.))
@@ -1320,7 +1321,7 @@ impl BrowserView {
         // The list's lines: a day heading before each day's first chat, the chats, then Show more.
         let mut lines: Vec<HistLine> = Vec::new();
         if let Some(e) = &self.error {
-            lines.push(HistLine::Note(format!("Could not load the chats. {e}"), true));
+            lines.push(HistLine::Note(format!("Couldn't load the chats. {e}"), true));
         } else if self.rows.is_empty() && !self.loading {
             lines.push(HistLine::Note("No chats match.".into(), false));
         } else if self.rows.is_empty() {

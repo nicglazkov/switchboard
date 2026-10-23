@@ -4,16 +4,16 @@
 //! makes it a window. The shortcuts are shown next to each.
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FontWeight, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div,
-    prelude::*, px, relative, size,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, FontWeight, Global, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Pixels, Point, Render, SharedString, StatefulInteractiveElement, Styled, Subscription,
+    TitlebarOptions, WeakEntity, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions,
+    div, prelude::*, px, relative, size,
 };
 
 use crate::term::{Start, TermEvent, TermTab};
 use crate::theme::Theme;
 use crate::ui::{self, MAC};
-use crate::view::{BoardView, Ctx};
+use crate::view::{BoardView, CloseTab, Ctx};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Place {
@@ -59,6 +59,19 @@ impl Place {
     }
 }
 
+/// The terminals in windows of their own, so closing a chat's tab elsewhere does not stop a chat still shown in one.
+/// A window's terminal goes from here when the window closes.
+#[derive(Default)]
+struct WindowTabs(Vec<WeakEntity<TermTab>>);
+
+impl Global for WindowTabs {}
+
+/// A terminal window shows the chat at `key` (background id `bg`; a window's key is not moved on after /clear).
+pub fn window_shows(key: &str, bg: Option<&str>, cx: &App) -> bool {
+    cx.try_global::<WindowTabs>()
+        .is_some_and(|w| w.0.iter().filter_map(|t| t.upgrade()).any(|t| t.read(cx).shows(key, bg)))
+}
+
 /// A terminal in a window of its own. Closing the window detaches; the chat keeps running.
 pub struct TermWindow {
     tab: Entity<TermTab>,
@@ -77,6 +90,9 @@ impl TermWindow {
                 if t.label.is_empty() { t.machine.clone() } else { t.label.clone() }
             )
         };
+        let list = &mut cx.default_global::<WindowTabs>().0;
+        list.retain(|t| t.upgrade().is_some());
+        list.push(tab.downgrade());
         let bounds = gpui::Bounds::centered(None, size(px(980.), px(640.)), cx);
         let opts = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
@@ -116,7 +132,10 @@ impl TermWindow {
 impl Render for TermWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let t = Theme::get(cx);
+        // Cmd+W here closes this window (the board's own Cmd+W never reaches it).
         let body = div()
+            .key_context("TermWindow")
+            .on_action(cx.listener(|_, _: &CloseTab, window, _| window.remove_window()))
             .size_full()
             .flex()
             .flex_col()
@@ -134,8 +153,9 @@ impl BoardView {
         match place {
             Place::Tab => self.open_terminal(key, false, cx),
             _ => {
+                self.app.update(cx, |s, cx| s.call_off_stops(&key, cx));
                 let alive = self.app.read(cx).snap.session(&key).map(|s| s.alive).unwrap_or(true);
-                let found = self.tabs.iter().position(|t| t.read(cx).key.as_deref() == Some(key.as_str()));
+                let found = self.tab_for(&key, cx);
                 let tab = match found {
                     Some(i) => {
                         let tab = self.tabs.remove(i);
@@ -155,9 +175,15 @@ impl BoardView {
 
     fn place(&mut self, tab: Entity<TermTab>, place: Place, cx: &mut Context<Self>) {
         match place {
-            Place::Window => TermWindow::open(tab, cx),
+            Place::Window => {
+                // Its window follows it from now on.
+                self.unwatch_tab(&tab);
+                TermWindow::open(tab, cx)
+            }
             Place::Float => {
+                self.watch_tab(&tab, cx);
                 if let Some(old) = self.float.replace(tab) {
+                    self.unwatch_tab(&old);
                     old.update(cx, |t, _| t.detach());
                 }
                 self.focus_float = true;
@@ -190,6 +216,7 @@ impl BoardView {
     /// The floating sheet back into the tab row.
     pub fn float_to_tab(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.float.take() {
+            self.watch_tab(&tab, cx);
             self.tabs.push(tab);
             self.set_tab(self.tabs.len(), cx);
         }
@@ -197,6 +224,7 @@ impl BoardView {
 
     pub fn float_to_window(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.float.take() {
+            self.unwatch_tab(&tab);
             TermWindow::open(tab, cx);
             cx.notify();
         }
@@ -204,22 +232,25 @@ impl BoardView {
 
     pub fn close_float(&mut self, cx: &mut Context<Self>) {
         if let Some(tab) = self.float.take() {
+            self.unwatch_tab(&tab);
             tab.update(cx, |t, _| t.detach());
             cx.notify();
         }
     }
 
     pub fn open_tab_menu(&mut self, i: usize, at: Point<Pixels>, cx: &mut Context<Self>) {
-        self.tab_menu = Some((i, at));
+        let Some(id) = self.tabs.get(i).map(|t| t.entity_id()) else { return };
+        self.tab_menu = Some((id, at));
         self.tab_menu_sub = false;
         self.group_menu = None;
         self.add_open = false;
         cx.notify();
     }
 
-    /// A terminal tab's own menu: where else it can live, and close.
+    /// A terminal tab's own menu: where else it can live, and close. Its rows find the tab again by its id when
+    /// picked, so a tab closing meanwhile does not move them onto another.
     pub fn tab_menu_el(&self, c: &Ctx, i: usize, w: f32) -> Option<AnyElement> {
-        let (_, at) = self.tab_menu?;
+        let (id, at) = self.tab_menu?;
         let t = c.t;
         let cx = c.cx;
         let x = f32::from(at.x).min(w - 300.).max(8.);
@@ -235,13 +266,15 @@ impl BoardView {
         let (infos, groups) = self.tab_infos(cx);
         let info = infos.get(i).cloned().unwrap_or_default();
         let can_group = !starred && info.thread.is_some();
+        let local = self.tabs.get(i).is_some_and(|t| t.read(cx).local.is_some());
+        let stops = self.tabs.get(i).and_then(|t| t.read(cx).key.clone()).is_some_and(|k| self.close_stops(&k, id, cx));
         let own = info.group.map(|g| groups[g].id.clone());
         let others = groups.iter().filter(|g| Some(&g.id) != own.as_ref()).count();
         // Where "Add to group" sits, for its list beside the menu: the menu's top and padding, the star and rename
         // rows and their rule, then "Add to new group".
         let top_rows = can_star as u8 + can_rename as u8;
         let sub_top = ui::header() + 2. + 7. + if top_rows > 0 { 32. * top_rows as f32 + 9. } else { 0. } + 32. - 6.;
-        let sub = if can_group && others > 0 { self.group_submenu(c, i, x, sub_top, w, own.as_deref()) } else { None };
+        let sub = if can_group && others > 0 { self.group_submenu(c, id, x, sub_top, w, own.as_deref()) } else { None };
         let row = |id: &'static str, ic: &'static str, title: &str, keys: String| {
             let hover = t.hover;
             div()
@@ -298,7 +331,13 @@ impl BoardView {
                                     String::new(),
                                 )
                                 .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.star_tab(i, cx))),
+                                .on_click(cx.listener(
+                                    move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(i) = this.tab_index(id) {
+                                            this.star_tab(i, cx)
+                                        }
+                                    },
+                                )),
                             )
                         })
                         .when(can_rename, |d| {
@@ -306,7 +345,9 @@ impl BoardView {
                                 row("tm-rename", "pencil", "Rename chat", String::new())
                                     .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                        this.rename_tab(i, window, cx)
+                                        if let Some(i) = this.tab_index(id) {
+                                            this.rename_tab(i, window, cx)
+                                        }
                                     })),
                             )
                         })
@@ -316,7 +357,9 @@ impl BoardView {
                                 row("tm-newgroup", "group-add", "Add to new group", String::new())
                                     .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
                                     .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
-                                        this.new_group_from_tab(i, window, cx)
+                                        if let Some(i) = this.tab_index(id) {
+                                            this.new_group_from_tab(i, window, cx)
+                                        }
                                     })),
                             )
                             .when(others > 0, |d| {
@@ -342,7 +385,9 @@ impl BoardView {
                                     row("tm-ungroup", "ungroup", "Remove from group", String::new())
                                         .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
                                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                            this.remove_tab_from_group(i, cx)
+                                            if let Some(i) = this.tab_index(id) {
+                                                this.remove_tab_from_group(i, cx)
+                                            }
                                         })),
                                 )
                             })
@@ -351,25 +396,42 @@ impl BoardView {
                         .child(
                             row("tm-win", "popout", "Move to a new window", String::new())
                                 .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
-                                .on_click(
-                                    cx.listener(move |this, _: &ClickEvent, _, cx| this.move_tab(i, Place::Window, cx)),
-                                ),
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    if let Some(i) = this.tab_index(id) {
+                                        this.move_tab(i, Place::Window, cx)
+                                    }
+                                })),
                         )
                         .child(
                             row("tm-float", "window", "Show as a floating sheet", String::new())
                                 .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
-                                .on_click(
-                                    cx.listener(move |this, _: &ClickEvent, _, cx| this.move_tab(i, Place::Float, cx)),
-                                ),
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    if let Some(i) = this.tab_index(id) {
+                                        this.move_tab(i, Place::Float, cx)
+                                    }
+                                })),
                         )
                         .child(div().my(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule))
                         .child(
-                            row("tm-close", "x", "Close tab (the chat keeps running)", ui::mod_cap("W"))
-                                .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
-                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    this.tab_menu = None;
+                            row(
+                                "tm-close",
+                                "x",
+                                if local {
+                                    "Close tab (ends the shell)"
+                                } else if stops {
+                                    "Close tab (stops the chat)"
+                                } else {
+                                    "Close tab (the chat keeps running)"
+                                },
+                                ui::mod_cap("W"),
+                            )
+                            .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.tab_menu = None;
+                                if let Some(i) = this.tab_index(id) {
                                     this.close_tab(i, cx);
-                                })),
+                                }
+                            })),
                         )
                         .child(
                             div()

@@ -2,7 +2,7 @@
 //! status bars, and the overlays (palette, sheets, popover, confirm, toasts and job progress).
 //! A torn-off lane is the same view with `solo` set to one machine.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use gpui::{
     AnimationExt, AnyElement, App, AppContext, ClickEvent, Context, Decorations, Entity, FocusHandle, FontWeight,
@@ -46,6 +46,7 @@ actions!(
         CloseWindow,
         CloseTab,
         ChatPalette,
+        NewTerminal,
         Browse,
         OpenWindow,
         OpenFloat,
@@ -109,10 +110,14 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", PalPrev, Some("Palette > Input")),
         KeyBinding::new("ctrl-n", PalNext, Some("Palette > Input")),
         KeyBinding::new("secondary-q", Quit, None),
-        // Tabs: Cmd/Ctrl+W closes the terminal tab (detaches), or the window on the board; Cmd/Ctrl+T finds a chat
-        // to open; Cmd/Ctrl+1 is the board, 2 to 8 the terminals in order, 9 the last one.
+        // Tabs: Cmd/Ctrl+W closes the terminal tab (detaches), or the window on the board; Cmd+T opens a shell on
+        // this computer and Cmd+O finds a chat to open; Cmd/Ctrl+1 is the board, 2 to 8 the terminals in order, 9
+        // the last one.
         KeyBinding::new("secondary-w", CloseTab, b),
-        KeyBinding::new("secondary-t", ChatPalette, b),
+        // A terminal in a window of its own: Cmd/Ctrl+W closes that window (place.rs).
+        KeyBinding::new("secondary-w", CloseTab, Some("TermWindow")),
+        KeyBinding::new("secondary-t", NewTerminal, b),
+        KeyBinding::new("secondary-o", ChatPalette, b),
         KeyBinding::new("secondary-b", Browse, b),
         KeyBinding::new("secondary-1", Tab1, b),
         KeyBinding::new("secondary-2", Tab2, b),
@@ -125,14 +130,18 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-9", Tab9, b),
     ]);
     if !MAC {
-        // In a terminal, Ctrl+W, T, K and N belong to the program (a shell deletes a word with Ctrl+W): the app
-        // takes them with Shift there, like the Windows and Linux terminals do.
+        // In a terminal, Ctrl+W, T, O, B, K, N and Q belong to the program (a shell deletes a word with Ctrl+W): the
+        // app takes them with Shift there, like the Windows and Linux terminals do.
         // The Shift forms work on the board too, so one habit covers both.
         cx.bind_keys([
             KeyBinding::new("ctrl-shift-w", CloseTab, b),
-            KeyBinding::new("ctrl-shift-t", ChatPalette, b),
+            KeyBinding::new("ctrl-shift-w", CloseTab, Some("TermWindow")),
+            KeyBinding::new("ctrl-shift-t", NewTerminal, b),
+            KeyBinding::new("ctrl-shift-o", ChatPalette, b),
+            KeyBinding::new("ctrl-shift-b", Browse, b),
             KeyBinding::new("ctrl-shift-k", TogglePalette, b),
             KeyBinding::new("ctrl-shift-n", NewSession, b),
+            KeyBinding::new("ctrl-shift-q", Quit, None),
         ]);
     }
     crate::files::bind_keys(cx);
@@ -243,13 +252,14 @@ pub struct BoardView {
     /// Freed memory last frame, and (from, since) while it ticks up to the new total.
     pub freed_seen: std::cell::Cell<f64>,
     pub freed_from: std::cell::Cell<(f64, f64)>,
-    /// The header's "+" menu, and the update popover.
+    /// The header's "+" menu (from the chevron beside "+": with the local shells first), and the update popover.
     pub add_open: bool,
+    pub add_terms: bool,
     /// Windows and Linux: the app menu (the Mac's menu bar) is open.
     pub app_menu_open: bool,
     pub update_open: bool,
-    /// A terminal tab's own menu: which tab, and where.
-    pub tab_menu: Option<(usize, gpui::Point<gpui::Pixels>)>,
+    /// A terminal tab's own menu: which tab (found again on each use, as tabs before it may close), and where.
+    pub tab_menu: Option<(gpui::EntityId, gpui::Point<gpui::Pixels>)>,
     /// The flags drawer: the chat it is for, and its pending changes.
     pub flags: Option<crate::flagsui::Drawer>,
     /// History: its search box, filters and scroll.
@@ -278,6 +288,13 @@ pub struct BoardView {
     pub tab_scroll: ScrollHandle,
     pub tab_scrolled: std::cell::Cell<(usize, usize, i32)>,
     pub tab_scroll_pending: std::cell::Cell<bool>,
+    /// The tab row's width last frame; a change draws one more frame so the tab that shows is brought into sight.
+    tab_row_w: f32,
+    /// The tab row's arrows: where a move under way is headed, that move (a newer one cancels it), and the press
+    /// being held (released or newer, it stops repeating).
+    pub tab_glide_to: Option<f32>,
+    pub tab_glide: u64,
+    pub tab_held: u64,
     /// Tab groups (tabgroups.rs): a chip's menu (which group, where), the group whose name is being typed on its
     /// chip and that field, the tab menu's "Add to group" list, the group a dragged tab would join, and a dragged
     /// chip's group with the place among the groups it would move to.
@@ -291,6 +308,17 @@ pub struct BoardView {
     /// The empty board's address field (firstrun.rs), and why the last address typed there was not taken.
     pub server_field: Entity<InputState>,
     pub server_err: Option<String>,
+    /// The empty board's search for a server (firstrun.rs): what it found, whether the unreachable screen shows it
+    /// instead of the saved address, whether the address field is open under "Type an address", and the server being
+    /// connected to.
+    pub find: sb_core::firstrun::Search,
+    pub find_view: bool,
+    pub type_open: bool,
+    pub joining: Option<sb_core::firstrun::Found>,
+    /// `shots`: the empty board shows a fixed search state and nothing is searched.
+    pub find_shot: bool,
+    /// "Run the server on this computer" (serversetup.rs).
+    pub setup: Option<crate::serversetup::Setup>,
     pub(crate) pending_rename: Option<String>,
     pub tab_menu_sub: bool,
     pub drop_group: Option<String>,
@@ -310,9 +338,13 @@ pub struct BoardView {
     pub confirm: Option<(String, Confirm)>,
     /// The confirm is the fix "Restart with Chrome" (not Start fresh).
     pub confirm_chrome: bool,
+    /// The confirm is closing this local terminal, which still runs a program (not Start fresh).
+    pub confirm_close: Option<Entity<TermTab>>,
     /// The details sheet's "Needs you" card: its picks and text fields (askcard.rs), and whether one is typing.
     pub ask: Option<crate::askcard::AskForm>,
     pub ask_focus: bool,
+    /// Chats whose reply from the card is on its way into their terminal: Send waits for it.
+    pub ask_sending: std::collections::HashSet<String>,
     /// A chat being restarted with Chrome from its card, until the relaunch starts or asks for its terminal.
     pub chrome_pending: Option<String>,
     /// The note of the action under the pointer.
@@ -338,10 +370,15 @@ pub struct BoardView {
     /// The last launch's tabs reopen once live data is in (the saved snapshot can miss newer chats), or after a few
     /// seconds without it.
     restore_due: bool,
+    /// Saved tabs the snapshot did not know when they reopened without live data: they stay saved, and open once the
+    /// server answers.
+    restore_left: Vec<String>,
+    /// Moves and resizes of the window: its frame is saved once it has been still for a moment, or on the way out.
+    bounds: Debounce,
     pub tab: usize,
     /// Focus the current tab on the next frame (actions without a window switch tabs).
     pub(crate) focus_tab: bool,
-    /// The palette lists only chats, to open in a terminal (Cmd+T).
+    /// The palette lists only chats, to open in a terminal (Cmd+O).
     pub pal_chats: bool,
     /// "This continues..." was picked where there is no window to build its sheet: the next frame opens it.
     pending_link: Option<String>,
@@ -355,6 +392,10 @@ pub struct BoardView {
     pub stopped_seen: std::cell::Cell<Option<usize>>,
     pub stopped_flash: std::cell::Cell<f64>,
     shot: Option<String>,
+    /// Each terminal tab's events (tabs in the row and the floating sheet), dropped when it closes or leaves.
+    tab_subs: HashMap<gpui::EntityId, Subscription>,
+    /// The New or "This continues..." sheet's events, for the one open now.
+    sheet_sub: Option<Subscription>,
     pub(crate) _subs: Vec<Subscription>,
 }
 
@@ -371,14 +412,22 @@ impl BoardView {
                 if this.restore_due && app.read(cx).live {
                     this.restore_due = false;
                     this.restore_tabs(cx);
+                } else if !this.restore_left.is_empty() && app.read(cx).live {
+                    this.restore_late(cx);
                 }
-                // a chat renamed anywhere: its tab says the new name
-                for tab in this.tabs.clone() {
+                // a chat renamed anywhere: its tab says the new name; after /clear, its key follows the chat
+                let mut moved = false;
+                for tab in this.tabs.iter().chain(this.float.iter()).cloned().collect::<Vec<_>>() {
                     tab.update(cx, |tb, cx| {
-                        if tb.sync_title(cx) {
+                        let key = tb.sync_key(cx);
+                        if tb.sync_title(cx) || key {
                             cx.notify();
                         }
+                        moved |= key;
                     });
+                }
+                if moved {
+                    this.remember_tabs(cx);
                 }
                 cx.notify()
             }),
@@ -426,15 +475,18 @@ impl BoardView {
                     window.activate_window();
                 }
                 AppEvent::PasteInto { .. } => {}
-                AppEvent::Relaunching { key, job } => {
+                AppEvent::Relaunching { key } => {
                     this.ask_relaunch_news(key, None, cx);
+                    this.flags_relaunching(key, cx);
+                }
+                // Not while it waits for the chat's reply to end: the terminal stays live, and a Cancel leaves it so.
+                AppEvent::RelaunchStarted { key, job } => {
                     for tab in this.tabs.clone() {
                         if tab.read(cx).key.as_deref() == Some(key.as_str()) {
                             let j = job.clone();
                             tab.update(cx, |t, cx| t.follow_job(j, cx));
                         }
                     }
-                    this.flags_relaunching(key, cx);
                 }
                 AppEvent::RelaunchCmd { key, command, error } => {
                     this.ask_relaunch_news(key, Some((command.clone(), error.clone())), cx);
@@ -497,12 +549,34 @@ impl BoardView {
                     h: b.size.height.into(),
                     maximized,
                 };
-                this.app.update(cx, |s, _| {
-                    if s.settings.window != Some(saved) {
-                        s.settings.window = Some(saved);
-                        s.save_settings();
-                    }
-                });
+                if this.app.read(cx).settings.window == Some(saved) {
+                    return;
+                }
+                this.app.update(cx, |s, _| s.settings.window = Some(saved));
+                // A drag or a resize sends many of these: the file is written once the window has been still for
+                // half a second.
+                let n = this.bounds.bump();
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(std::time::Duration::from_millis(500)).await;
+                    let _ = this.update(cx, |this, cx| {
+                        if this.bounds.settled(n) {
+                            this.app.read(cx).save_settings();
+                        }
+                    });
+                })
+                .detach();
+            }));
+            // Quit or closed within that half second: the new frame is still written.
+            subs.push(cx.on_app_quit(|this, cx| {
+                if this.bounds.flush() {
+                    this.app.read(cx).save_settings();
+                }
+                async {}
+            }));
+            subs.push(cx.on_release(|this, cx| {
+                if this.bounds.flush() {
+                    this.app.read(cx).save_settings();
+                }
             }));
         }
         window.focus(&focus, cx);
@@ -517,6 +591,7 @@ impl BoardView {
             freed_seen: std::cell::Cell::new(0.),
             freed_from: std::cell::Cell::new((0., 0.)),
             add_open: false,
+            add_terms: false,
             app_menu_open: false,
             update_open: false,
             tab_menu: None,
@@ -538,6 +613,10 @@ impl BoardView {
             tab_scroll: ScrollHandle::new(),
             tab_scrolled: std::cell::Cell::new((usize::MAX, 0, 0)),
             tab_scroll_pending: std::cell::Cell::new(false),
+            tab_row_w: 0.,
+            tab_glide_to: None,
+            tab_glide: 0,
+            tab_held: 0,
             group_menu: None,
             group_edit: None,
             group_name,
@@ -545,6 +624,12 @@ impl BoardView {
             chat_name,
             server_field,
             server_err: None,
+            find: sb_core::firstrun::Search::default(),
+            find_view: false,
+            type_open: false,
+            joining: None,
+            find_shot: false,
+            setup: None,
             pending_rename: None,
             tab_menu_sub: false,
             drop_group: None,
@@ -557,8 +642,10 @@ impl BoardView {
             menu: None,
             confirm: None,
             confirm_chrome: false,
+            confirm_close: None,
             ask: None,
             ask_focus: false,
+            ask_sending: Default::default(),
             chrome_pending: None,
             hint: None,
             pal,
@@ -576,6 +663,8 @@ impl BoardView {
             tab: 0,
             restoring: false,
             restore_due: false,
+            restore_left: Vec::new(),
+            bounds: Debounce::default(),
             focus_tab: false,
             pal_chats: false,
             pending_link: None,
@@ -585,6 +674,8 @@ impl BoardView {
             stopped_seen: std::cell::Cell::new(None),
             stopped_flash: std::cell::Cell::new(0.),
             shot,
+            tab_subs: HashMap::new(),
+            sheet_sub: None,
             _subs: subs,
         };
         if v.solo.is_none() {
@@ -635,15 +726,6 @@ impl BoardView {
             t.install(cx);
             cx.refresh_windows();
         }
-    }
-
-    pub fn set_theme(&mut self, dark: bool, cx: &mut Context<Self>) {
-        self.app.update(cx, |s, _| {
-            s.settings.theme = Some(if dark { "dark" } else { "light" }.into());
-            s.save_settings();
-        });
-        (if dark { Theme::dark() } else { Theme::light() }).install(cx);
-        cx.refresh_windows();
     }
 
     // ---------- selection and keys ----------
@@ -766,6 +848,10 @@ impl BoardView {
             cx.propagate();
             return;
         }
+        if self.app.read(cx).trust_ask.is_some() {
+            self.app.update(cx, |s, cx| s.answer_trust(true, cx));
+            return;
+        }
         if self.app.read(cx).busy_ask.is_some() {
             // Enter takes the default: when they finish
             self.app.update(cx, |s, cx| s.answer_busy(Some("idle"), cx));
@@ -877,7 +963,7 @@ impl BoardView {
     fn on_start_new(&mut self, _: &StartNew, window: &mut Window, cx: &mut Context<Self>) {
         if let Overlay::New(sheet) = &self.overlay {
             let sheet = sheet.clone();
-            sheet.update(cx, |s, cx| s.start(window, cx));
+            sheet.update(cx, |s, cx| if s.trust_open() { s.answer_trust(true, cx) } else { s.start(window, cx) });
         }
     }
 
@@ -895,6 +981,13 @@ impl BoardView {
             self.group_menu = None;
             self.tab_menu = None;
             self.tab_menu_sub = false;
+        } else if let Overlay::New(sheet) = &self.overlay
+            && sheet.read(cx).trust_open()
+        {
+            let sheet = sheet.clone();
+            sheet.update(cx, |s, cx| s.answer_trust(false, cx));
+        } else if self.app.read(cx).trust_ask.is_some() {
+            self.app.update(cx, |s, cx| s.answer_trust(false, cx));
         } else if self.app.read(cx).busy_ask.is_some() {
             self.app.update(cx, |s, cx| s.answer_busy(None, cx));
         } else if self.menu.is_some() {
@@ -906,7 +999,7 @@ impl BoardView {
         } else if self.stopped_open {
             self.stopped_open = false;
         } else if self.confirm.is_some() {
-            self.confirm = None;
+            self.drop_confirm();
         } else if self.cont_open.is_some() {
             self.cont_open = None;
         } else if !self.overlay.is_none() {
@@ -921,12 +1014,26 @@ impl BoardView {
         window.remove_window();
     }
 
+    /// Cmd+W closes what is on top: an open sheet or the palette, then the floating sheet, then the terminal tab
+    /// showing, and on the board the window.
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
-        if self.tab == 0 {
+        if !self.overlay.is_none() {
+            self.close_overlay(window, cx);
+        } else if self.float.is_some() {
+            self.close_float(cx);
+            self.focus_tab = true;
+        } else if self.tab == 0 {
             window.remove_window();
         } else {
             self.close_tab(self.tab - 1, cx);
         }
+    }
+
+    fn on_new_terminal(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
+        if !self.overlay.is_none() {
+            self.close_overlay(window, cx);
+        }
+        self.open_local(None, cx);
     }
 
     fn on_chat_palette(&mut self, _: &ChatPalette, window: &mut Window, cx: &mut Context<Self>) {
@@ -945,12 +1052,8 @@ impl BoardView {
         self.menu = None;
         self.overlay = Overlay::None;
         self.cont_open = None;
-        let bg = self.app.read(cx).snap.session(&key).and_then(|s| s.bg_id.clone());
-        let found = self.tabs.iter().position(|t| {
-            let t = t.read(cx);
-            t.key.as_deref() == Some(key.as_str()) || (bg.is_some() && t.bg == bg)
-        });
-        if let Some(i) = found {
+        self.app.update(cx, |s, cx| s.call_off_stops(&key, cx));
+        if let Some(i) = self.tab_for(&key, cx) {
             let tab = self.tabs[i].clone();
             tab.update(cx, |t, cx| {
                 if t.ended() {
@@ -961,6 +1064,21 @@ impl BoardView {
             return;
         }
         let tab = cx.new(|cx| TermTab::new(if resume { Start::Resume(key) } else { Start::Chat(key) }, cx));
+        self.add_tab(tab, cx);
+    }
+
+    /// A shell on this computer in a new tab: the profile with this id, or the default one (Settings > Terminal).
+    pub fn open_local(&mut self, id: Option<&str>, cx: &mut Context<Self>) {
+        self.menu = None;
+        self.add_open = false;
+        self.cont_open = None;
+        let p = {
+            let app = self.app.read(cx);
+            let saved = id.or(app.settings.term_profile.as_deref());
+            sb_core::term::shells::pick_default(crate::state::profiles(), saved).cloned()
+        };
+        let Some(p) = p else { return };
+        let tab = cx.new(|cx| TermTab::new(Start::Local(p), cx));
         self.add_tab(tab, cx);
     }
 
@@ -978,34 +1096,114 @@ impl BoardView {
     }
 
     fn add_tab(&mut self, tab: Entity<TermTab>, cx: &mut Context<Self>) {
-        let sub = cx.subscribe(&tab, |this, tab, ev: &TermEvent, cx| match ev {
+        self.watch_tab(&tab, cx);
+        self.tabs.push(tab);
+        self.set_tab(self.tabs.len(), cx);
+    }
+
+    /// Follows a terminal in this window, in the tab row or as the floating sheet: its Close closes whichever it is.
+    pub(crate) fn watch_tab(&mut self, tab: &Entity<TermTab>, cx: &mut Context<Self>) {
+        let sub = cx.subscribe(tab, |this, tab, ev: &TermEvent, cx| match ev {
             TermEvent::Changed => {
                 this.remember_tabs(cx); // a job's tab learns its chat once the job is done
                 cx.notify()
             }
             TermEvent::Flags(k) => this.open_flags(k.clone(), cx),
+            TermEvent::Close if this.float.as_ref() == Some(&tab) => this.close_float(cx),
             TermEvent::Close => {
                 if let Some(i) = this.tabs.iter().position(|t| *t == tab) {
                     this.close_tab(i, cx);
                 }
             }
         });
-        self._subs.push(sub);
-        self.tabs.push(tab);
-        self.set_tab(self.tabs.len(), cx);
+        self.tab_subs.insert(tab.entity_id(), sub);
     }
 
-    /// Closes tab `i` (of `tabs`): detaches, the chat keeps running.
+    /// A terminal leaves this window (closed, or off to a window of its own, which follows it there).
+    pub(crate) fn unwatch_tab(&mut self, tab: &Entity<TermTab>) {
+        self.tab_subs.remove(&tab.entity_id());
+        if self.tab_menu.is_some_and(|(id, _)| id == tab.entity_id()) {
+            self.tab_menu = None;
+        }
+    }
+
+    /// Terminal tab `i`'s place in `tabs` now, from its id (a menu or a drag keeps the id: tabs may close meanwhile).
+    pub fn tab_index(&self, id: gpui::EntityId) -> Option<usize> {
+        self.tabs.iter().position(|t| t.entity_id() == id)
+    }
+
+    /// The chat's background id, which a terminal still holds after /clear moved the chat to a new key.
+    fn bg_of(&self, key: &str, cx: &App) -> Option<String> {
+        self.app.read(cx).snap.session(key).and_then(|s| s.bg_id.clone())
+    }
+
+    /// The tab (of `tabs`) holding the chat at `key`, by its key or its background id.
+    pub fn tab_for(&self, key: &str, cx: &App) -> Option<usize> {
+        let bg = self.bg_of(key, cx);
+        self.tabs.iter().position(|t| t.read(cx).shows(key, bg.as_deref()))
+    }
+
+    /// The chat is still on screen somewhere other than tab `except` (the floating sheet, a terminal window, another
+    /// tab), so closing that one does not stop it.
+    fn shown_elsewhere(&self, key: &str, except: gpui::EntityId, cx: &App) -> bool {
+        let bg = self.bg_of(key, cx);
+        let holds = |t: &Entity<TermTab>| t.entity_id() != except && t.read(cx).shows(key, bg.as_deref());
+        self.tabs.iter().any(holds)
+            || self.float.as_ref().is_some_and(holds)
+            || crate::place::window_shows(key, bg.as_deref(), cx)
+    }
+
+    /// Closing tab `tab`, which holds this chat, stops it: a background chat that runs, unless Keep running is on or
+    /// it still shows somewhere else (force_close_tab).
+    pub fn close_stops(&self, key: &str, tab: gpui::EntityId, cx: &App) -> bool {
+        self.app.read(cx).snap.session(key).is_some_and(|s| s.background() && s.alive && !s.keep)
+            && !self.shown_elsewhere(key, tab, cx)
+    }
+
+    /// Only the tab showing gets frames: the others stop counting as focused, so a bell there marks their tab.
+    fn hide_others(&self, cx: &mut Context<Self>) {
+        let shown = self.tab.checked_sub(1).and_then(|i| self.tabs.get(i));
+        for t in self.tabs.iter().filter(|t| Some(*t) != shown) {
+            t.update(cx, |t, _| t.hide());
+        }
+    }
+
+    /// Closes tab `i` (of `tabs`): detaches, the chat keeps running. A local terminal's shell ends with it; while a
+    /// program other than the shell runs there, it asks first.
     pub fn close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
+        let Some(tab) = self.tabs.get(i).cloned() else { return };
+        if let Some(what) = tab.read(cx).busy() {
+            self.confirm = Some((
+                String::new(),
+                Confirm {
+                    title: "Close this terminal?".into(),
+                    body: format!("{what} is still running in it. Closing the tab ends it."),
+                    ok: "Close".into(),
+                    cancel: "Cancel".into(),
+                },
+            ));
+            self.confirm_chrome = false;
+            self.confirm_close = Some(tab);
+            // The keyboard leaves the terminal, so Enter and Esc answer the question instead of reaching the shell.
+            self.focus_tab = true;
+            return cx.notify();
+        }
+        self.force_close_tab(i, cx);
+    }
+
+    /// Closes tab `i` without asking.
+    fn force_close_tab(&mut self, i: usize, cx: &mut Context<Self>) {
         if i >= self.tabs.len() {
             return;
         }
         let tab = self.tabs.remove(i);
         let key = tab.read(cx).key.clone();
         tab.update(cx, |t, _| t.detach());
+        self.unwatch_tab(&tab);
         // Closing a chat's tab ends the chat, so nothing piles up in the background (Resume brings it back). One
-        // that is working stops once its reply is done; Keep running and a chat open on its machine stay.
-        if let Some(key) = key {
+        // that is working stops once its reply is done; Keep running, a chat open on its machine and one still
+        // showing here (the floating sheet, a window) stay.
+        if let Some(key) = key.filter(|k| !self.shown_elsewhere(k, tab.entity_id(), cx)) {
             let now = crate::state::AppState::now();
             let stop = self
                 .app
@@ -1015,7 +1213,7 @@ impl BoardView {
                 .filter(|s| s.background() && s.alive && !s.keep)
                 .map(|s| matches!(s.lamp(now), sb_core::Lamp::Run | sb_core::Lamp::Stall));
             if let Some(working) = stop {
-                self.app.update(cx, |s, cx| s.act_when(ActionId::Stop, &key, working.then_some("idle"), cx));
+                self.app.update(cx, |s, cx| s.stop_on_close(&key, working, cx));
             }
         }
         // Closing the current tab shows the one to its left (the board after the first terminal).
@@ -1024,6 +1222,7 @@ impl BoardView {
         }
         self.tab = self.tab.min(self.tabs.len());
         self.focus_tab = true;
+        self.hide_others(cx);
         self.remember_tabs(cx);
         cx.notify();
     }
@@ -1037,19 +1236,29 @@ impl BoardView {
         cx.notify();
     }
 
-    /// "Reply: <suggested reply>": opens the chat's terminal tab and types the reply there, then Enter.
+    /// "Reply: <suggested reply>": opens the chat's terminal tab and types the reply there, then Enter. The card
+    /// says Sent only once it went in.
     pub fn reply_with(&mut self, key: String, text: String, cx: &mut Context<Self>) {
         self.open_terminal(key.clone(), false, cx);
-        if let Some(tab) = self.tabs.iter().find(|t| t.read(cx).key.as_deref() == Some(key.as_str())).cloned() {
-            tab.update(cx, |t, cx| t.reply_when_open(text, cx));
+        let me = cx.entity().downgrade();
+        let (k, t2) = (key.clone(), text.clone());
+        let done = move |ok: bool, cx: &mut App| {
+            let _ = me.update(cx, |v, cx| v.ask_sent(&k, &t2, ok, cx));
+        };
+        match self.tab_for(&key, cx).and_then(|i| self.tabs.get(i)).cloned() {
+            Some(tab) => tab.update(cx, |t, cx| t.reply_when_open(text, done, cx)),
+            None => cx.defer(move |cx| done(false, cx)),
         }
     }
 
     pub fn set_tab(&mut self, n: usize, cx: &mut Context<Self>) {
         self.tab = n.min(self.tabs.len());
+        // Brought into sight even when it already showed (the arrows may have moved it out).
+        self.tab_scrolled.set((usize::MAX, 0, 0));
         self.menu = None;
         self.plan_open = false;
         self.focus_tab = true;
+        self.hide_others(cx);
         self.remember_tabs(cx);
         cx.notify();
     }
@@ -1071,7 +1280,7 @@ impl BoardView {
             Some(Some(_)) => keys[..self.tab].iter().filter(|k| k.is_some()).count(),
             _ => 0,
         };
-        let keys: Vec<String> = keys.into_iter().flatten().collect();
+        let keys = saved_keys(keys, &self.restore_left);
         self.app.update(cx, |s, _| {
             if s.settings.tabs != keys || s.settings.tab != at {
                 s.settings.tabs = keys;
@@ -1092,6 +1301,9 @@ impl BoardView {
         if keys.is_empty() {
             return;
         }
+        // Without live data yet (the server slow or away), a chat the saved snapshot does not know may still be
+        // there: it stays in the saved list and opens once the server answers.
+        let live = self.app.read(cx).live;
         self.restoring = true;
         let mut show = 0;
         let mut seen = std::collections::HashSet::new();
@@ -1101,7 +1313,12 @@ impl BoardView {
             if !seen.insert(key.clone()) {
                 continue;
             }
-            let (alive, star) = self.app.read(cx).snap.session(key).map(|s| (s.alive, s.star)).unwrap_or_default();
+            let known = self.app.read(cx).snap.session(key).map(|s| (s.alive, s.star));
+            if known.is_none() && !live {
+                self.restore_left.push(key.clone());
+                continue;
+            }
+            let (alive, star) = known.unwrap_or_default();
             if alive {
                 self.open_terminal(key.clone(), false, cx);
             } else if star {
@@ -1118,6 +1335,31 @@ impl BoardView {
         self.set_tab(show, cx);
     }
 
+    /// The saved tabs that waited for the server open now, after the others, as on a launch with live data (a chat
+    /// that stopped meanwhile stays closed unless starred). The tab showing stays.
+    fn restore_late(&mut self, cx: &mut Context<Self>) {
+        for key in std::mem::take(&mut self.restore_left) {
+            let key = self.app.read(cx).snap.latest_key(&key);
+            if self.tabs.iter().any(|t| t.read(cx).key.as_deref() == Some(key.as_str())) {
+                continue;
+            }
+            let (alive, star) = self.app.read(cx).snap.session(&key).map(|s| (s.alive, s.star)).unwrap_or_default();
+            let start = if alive {
+                Start::Chat(key)
+            } else if star {
+                Start::Stopped(key)
+            } else {
+                continue;
+            };
+            let tab = cx.new(|cx| TermTab::new(start, cx));
+            self.watch_tab(&tab, cx);
+            self.tabs.push(tab);
+        }
+        self.hide_others(cx);
+        self.remember_tabs(cx);
+        cx.notify();
+    }
+
     /// Cmd+1..9: 1 the board, 2 to 8 the terminals in order, 9 the last tab.
     fn tab_key(&mut self, n: usize, cx: &mut Context<Self>) {
         if !self.overlay.is_none() && !matches!(self.overlay, Overlay::Archive { .. }) {
@@ -1130,9 +1372,9 @@ impl BoardView {
         }
     }
 
-    /// Focus where typing should go: the current terminal, or the board.
+    /// Focus where typing should go: the current terminal, or the board (also while a confirm asks something).
     fn focus_current(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match self.tab.checked_sub(1).and_then(|i| self.tabs.get(i)) {
+        match self.tab.checked_sub(1).and_then(|i| self.tabs.get(i)).filter(|_| self.confirm.is_none()) {
             Some(t) => {
                 let f = t.read(cx).focus.clone();
                 window.focus(&f, cx);
@@ -1164,7 +1406,7 @@ impl BoardView {
         cx.notify();
     }
 
-    /// The palette with chats only: Enter opens the chat in a terminal tab (Cmd+T).
+    /// The palette with chats only: Enter opens the chat in a terminal tab (Cmd+O).
     pub fn open_chat_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.plan_open = false;
         self.menu = None;
@@ -1193,7 +1435,7 @@ impl BoardView {
                 this.open_job_terminal(job.clone(), machine.clone(), label.clone(), title.clone(), cx)
             }
         });
-        self._subs.push(sub);
+        self.sheet_sub = Some(sub);
         sheet.update(cx, |s, cx| s.focus_message(window, cx));
         self.overlay = Overlay::New(sheet);
         cx.notify();
@@ -1220,7 +1462,7 @@ impl BoardView {
         let sub = cx.subscribe_in(&sheet, window, |this, _, ev: &LinkEvent, window, cx| match ev {
             LinkEvent::Close => this.close_overlay(window, cx),
         });
-        self._subs.push(sub);
+        self.sheet_sub = Some(sub);
         sheet.update(cx, |s, cx| s.focus(window, cx));
         self.overlay = Overlay::Link(sheet);
         cx.notify();
@@ -1442,9 +1684,43 @@ impl BoardView {
                 }
                 "spare" => self.spare_open = true,
                 "add" => self.add_open = true,
+                // addterm: the chevron's menu, the shells first. local=<n>: n tabs with a shell on this computer.
+                "addterm" => {
+                    self.add_open = true;
+                    self.add_terms = true;
+                }
+                "local" => {
+                    for _ in 0..arg.parse::<usize>().unwrap_or(1).max(1) {
+                        self.open_local(None, cx);
+                    }
+                }
                 "appmenu" => self.app_menu_open = true,
                 "stopped" => self.stopped_open = true,
                 "files" => cx.defer(crate::files::open_files),
+                // newin=<machine>/<folder>: New in that folder, as Files' New chat here does.
+                "newin" => {
+                    let (m, f) = arg.split_once('/').unwrap_or((arg, ""));
+                    self.open_new_in(m.to_string(), f.to_string(), window, cx);
+                }
+                // newtrust: the New sheet's trust question for the folder it is in.
+                "newtrust" => {
+                    if let Overlay::New(sheet) = &self.overlay {
+                        sheet.update(cx, |s, cx| s.start(window, cx));
+                    }
+                }
+                // trust=<declined 0|1>: Continue's trust question over the board.
+                "trust" => {
+                    let key = self.sel.clone().unwrap_or_default();
+                    self.app.update(cx, |s, cx| {
+                        s.trust_ask = Some(crate::state::TrustAsk {
+                            shown: "~/Documents/Papers".into(),
+                            declined: arg == "1",
+                            on: "Studio".into(),
+                            retry: crate::state::TrustRetry::Continue { key, to: "studio".into(), when: None },
+                        });
+                        cx.notify();
+                    });
+                }
                 "update" => {
                     self.app.update(cx, |s, _| {
                         s.update = Some(sb_core::update::Offer {
@@ -1565,7 +1841,8 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
         let start = Instant::now();
         loop {
             cx.background_executor().timer(Duration::from_millis(200)).await;
-            let ready = this.update(cx, |v, cx| v.shot.is_none() && v.app.read(cx).live).unwrap_or(true);
+            let ready =
+                this.update(cx, |v, cx| v.shot.is_none() && (v.find_shot || v.app.read(cx).live)).unwrap_or(true);
             if ready || start.elapsed() > Duration::from_secs(20) {
                 break;
             }
@@ -1836,8 +2113,21 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
 
 impl Render for BoardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if let Some(shot) = self.shot.clone()
+            && let Some((what, arg)) = shot.split_once('=').filter(|(w, _)| *w == "find" || *w == "setup")
+        {
+            self.shot = None;
+            if what == "find" {
+                self.shot_find(arg, cx);
+            } else {
+                self.shot_setup(arg, cx);
+            }
+        }
         if self.shot.is_some() {
             self.apply_shot(window, cx);
+        }
+        if !self.find_shot {
+            self.search_if_first(cx);
         }
         if let Some(k) = self.pending_link.take() {
             self.open_link(k, window, cx);
@@ -1846,6 +2136,11 @@ impl Render for BoardView {
             self.rename_chat(k, window, cx);
         }
         self.win_w = f32::from(window.viewport_size().width);
+        let row_w = f32::from(self.tab_scroll.bounds().size.width).round();
+        if row_w != self.tab_row_w {
+            self.tab_row_w = row_w;
+            window.request_animation_frame();
+        }
         // Starred tabs sit at the left; a star changed anywhere (here, the iPhone) moves its tab.
         self.order_tabs(cx);
         if !self.tabs.is_empty() && !self.live_ticking {
@@ -1993,6 +2288,7 @@ impl Render for BoardView {
             .on_action(cx.listener(Self::on_close_window))
             .on_action(cx.listener(Self::on_close_tab))
             .on_action(cx.listener(Self::on_chat_palette))
+            .on_action(cx.listener(Self::on_new_terminal))
             .on_action(cx.listener(|this, _: &Browse, _, cx| this.view_history(cx)))
             .on_action(cx.listener(|this, _: &OpenWindow, _, cx| {
                 if let Some(k) = this.target() {
@@ -2010,8 +2306,10 @@ impl Render for BoardView {
             }))
             .on_drop::<crate::chrome::TabDrag>(cx.listener(|this, d: &crate::chrome::TabDrag, window, cx| {
                 // A tab dragged down out of the tab row opens in a window of its own.
-                if f32::from(window.mouse_position().y) > ui::header() + 6. {
-                    this.move_tab(d.0, crate::place::Place::Window, cx);
+                if f32::from(window.mouse_position().y) > ui::header() + 6.
+                    && let Some(i) = this.tab_index(d.0)
+                {
+                    this.move_tab(i, crate::place::Place::Window, cx);
                 }
             }))
             .on_action(cx.listener(|this, _: &Tab1, _, cx| this.tab_key(1, cx)))
@@ -2128,7 +2426,7 @@ impl Render for BoardView {
         if self.menu.is_some() {
             root = root.child(self.ctx_menu(&c, w, h));
         }
-        if let Some(i) = self.tab_menu.as_ref().map(|m| m.0) {
+        if let Some(i) = self.tab_menu.and_then(|(id, _)| self.tab_index(id)) {
             root = root.children(self.tab_menu_el(&c, i, w));
         }
         root = root.children(self.group_menu_el(&c, w));
@@ -2153,6 +2451,12 @@ impl Render for BoardView {
         root = root.children(self.rename_sheet(&c));
         if let Some(ask) = &c.app.busy_ask {
             root = root.child(self.busy_box(&c, ask));
+        }
+        if let Some(ask) = &c.app.trust_ask {
+            root = root.child(self.trust_box(&c, ask));
+        }
+        if let Some(s) = &self.setup {
+            root = root.child(self.setup_box(&c, s));
         }
         // Jobs and toasts stay above every layer, so an error from the New sheet is readable while it stays open.
         root = root.child(self.corner(&c));
@@ -2347,9 +2651,52 @@ impl BoardView {
             )
     }
 
-    /// The confirm's OK: Start fresh, or the card's fix (restart with Chrome).
+    /// Asked when a move would take a chat into a folder Claude was never let into (need "trust").
+    fn trust_box(&self, c: &Ctx, ask: &crate::state::TrustAsk) -> impl IntoElement {
+        let t = c.t;
+        let cx = c.cx;
+        let answer = |yes: bool| {
+            cx.listener(move |this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.answer_trust(yes, cx)))
+        };
+        let words = crate::trust::words(&ask.shown, ask.declined, &ask.on, "move it");
+        div()
+            .absolute()
+            .inset_0()
+            .bg(t.scrim)
+            .occlude()
+            .flex()
+            .items_center()
+            .justify_center()
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _, _, cx| this.app.update(cx, |s, cx| s.answer_trust(false, cx))),
+            )
+            .child(
+                div()
+                    .id("trust-ask")
+                    .occlude()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .child(crate::trust::card(&t, "trust-mv", &ask.shown, words, answer(true), answer(false))),
+            )
+    }
+
+    /// The confirm goes away unanswered, and the keyboard goes back where it was.
+    fn drop_confirm(&mut self) {
+        self.confirm = None;
+        self.confirm_chrome = false;
+        self.confirm_close = None;
+        self.focus_tab = true;
+    }
+
+    /// The confirm's OK: Start fresh, the card's fix (restart with Chrome), or closing a busy local terminal.
     fn confirm_ok(&mut self, cx: &mut Context<Self>) {
-        if let Some((key, _)) = self.confirm.take() {
+        if let Some(tab) = self.confirm_close.take() {
+            self.confirm = None;
+            self.focus_tab = true;
+            if let Some(i) = self.tabs.iter().position(|t| *t == tab) {
+                self.force_close_tab(i, cx);
+            }
+        } else if let Some((key, _)) = self.confirm.take() {
             if std::mem::take(&mut self.confirm_chrome) {
                 self.relaunch_chrome(key, cx);
             } else {
@@ -2373,7 +2720,7 @@ impl BoardView {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _, _, cx| {
-                    this.confirm = None;
+                    this.drop_confirm();
                     cx.notify();
                 }),
             )
@@ -2422,7 +2769,7 @@ impl BoardView {
                                     .child(conf.cancel.clone())
                                     .child(div().font_family(NUM).text_size(px(11.)).text_color(t.faint).child("Esc"))
                                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                        this.confirm = None;
+                                        this.drop_confirm();
                                         cx.notify();
                                     })),
                             )
@@ -2430,7 +2777,13 @@ impl BoardView {
                                 ui::primary_btn(&t, "cf-ok", 36.)
                                     .px(px(14.))
                                     .child(ui::icon(
-                                        if self.confirm_chrome { "relaunch" } else { "fresh" },
+                                        if self.confirm_close.is_some() {
+                                            "x"
+                                        } else if self.confirm_chrome {
+                                            "relaunch"
+                                        } else {
+                                            "fresh"
+                                        },
                                         15.,
                                         t.on_accent,
                                     ))
@@ -2904,4 +3257,71 @@ pub fn grid_row(label: Option<AnyElement>, cells: Vec<AnyElement>) -> gpui::Div 
         row = row.child(div().flex_basis(px(0.)).flex_grow(if i == 4 { 0.82 } else { 1.0 }).min_w_0().child(cell));
     }
     row
+}
+
+/// The tabs to save: those that know their chat, in order, then the saved ones still waiting for the server (a launch
+/// without live data keeps them rather than forgetting them).
+fn saved_keys(open: Vec<Option<String>>, waiting: &[String]) -> Vec<String> {
+    let mut keys: Vec<String> = open.into_iter().flatten().collect();
+    for k in waiting {
+        if !keys.contains(k) {
+            keys.push(k.clone());
+        }
+    }
+    keys
+}
+
+/// Changes that come in bursts (a window being dragged): written once they stop, or on the way out.
+#[derive(Default)]
+struct Debounce {
+    changed: u64,
+    saved: u64,
+}
+
+impl Debounce {
+    /// A change came in; its number, for the timer that waits after it.
+    fn bump(&mut self) -> u64 {
+        self.changed += 1;
+        self.changed
+    }
+
+    /// The wait after change `n` ran out: true (write it) when no other change came since.
+    fn settled(&mut self, n: u64) -> bool {
+        if n != self.changed || self.saved == n {
+            return false;
+        }
+        self.saved = n;
+        true
+    }
+
+    /// Leaving: true when a change is not written yet.
+    fn flush(&mut self) -> bool {
+        self.settled(self.changed)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Debounce, saved_keys};
+
+    #[test]
+    fn a_drag_is_written_once_and_a_quick_quit_still_writes_it() {
+        let mut d = Debounce::default();
+        let ns: Vec<u64> = (0..100).map(|_| d.bump()).collect();
+        assert_eq!(ns.iter().filter(|n| d.settled(**n)).count(), 1);
+        assert!(!d.flush(), "written already");
+        d.bump();
+        assert!(d.flush(), "quit before the wait ran out");
+        assert!(!d.flush());
+        assert!(!Debounce::default().flush(), "never moved: nothing to write");
+    }
+
+    #[test]
+    fn tabs_waiting_for_the_server_stay_saved() {
+        let open = vec![Some("studio:a".to_string()), None, Some("studio:b".to_string())];
+        assert_eq!(saved_keys(open.clone(), &[]), vec!["studio:a", "studio:b"]);
+        let waiting = vec!["studio:c".to_string(), "studio:a".to_string()];
+        assert_eq!(saved_keys(open, &waiting), vec!["studio:a", "studio:b", "studio:c"], "once, after the open ones");
+        assert_eq!(saved_keys(Vec::new(), &waiting), vec!["studio:c", "studio:a"], "none opened: the list stays");
+    }
 }

@@ -154,7 +154,7 @@ fn actions_match_the_web_app() {
     assert!(a[0].primary);
     let term = a.iter().find(|x| x.id == ActionId::Terminal).unwrap();
     assert!(term.disabled, "an interactive chat cannot be attached");
-    assert_eq!(term.note, "It is open in a terminal on Studio. Only background chats open here.");
+    assert_eq!(term.note, "It's open in a terminal on Studio. Only background chats open here.");
     assert_eq!(a.iter().find(|x| x.id == ActionId::Open).unwrap().key.as_deref(), Some("Enter"));
     assert!(a.iter().find(|x| x.id == ActionId::Resume).unwrap().disabled, "already open in a terminal");
     assert_eq!(
@@ -167,7 +167,7 @@ fn actions_match_the_web_app() {
     assert_eq!(c.title, "Start Garden planner fresh?");
     assert_eq!(
         c.body,
-        "Writes a summary on Studio and opens a new chat with your notes and the held message, so the next message does not re-read 210k. The old chat moves to Replaced."
+        "Writes a summary on Studio and opens a new chat with your notes and the held message, so the next message doesn't re-read 210k. The old chat moves to Replaced."
     );
 
     let waiting = s.session("studio:22222222-2222-4222-8222-222222222222").unwrap();
@@ -500,8 +500,8 @@ fn same_board_ignores_fetch_times_only() {
 fn claude_app_links() {
     use sb_core::links::claude_app_link;
     assert_eq!(
-        claude_app_link("https://claude.ai/code/session_01TpXMroLvVvsYTKwF6n1BUm").as_deref(),
-        Some("claude://code/session_01TpXMroLvVvsYTKwF6n1BUm")
+        claude_app_link("https://claude.ai/code/session_01Md7EirN5fTPEkccyZwU82A").as_deref(),
+        Some("claude://code/session_01Md7EirN5fTPEkccyZwU82A")
     );
     assert_eq!(
         claude_app_link("https://claude.ai/code/session_01Abc?x=1#y").as_deref(),
@@ -562,7 +562,7 @@ fn v2_fields() {
     let a = actions::for_session(kept, &s, NOW);
     let keep = a.iter().find(|x| x.id == ActionId::Keep).unwrap();
     assert_eq!(keep.title, "Kept running");
-    assert_eq!(keep.note, "Switchboard leaves it running. Click to let it stop it when idle.");
+    assert_eq!(keep.note, "Switchboard leaves it running. Click to let Switchboard stop it when idle.");
     let stop_at = a.iter().position(|x| x.id == ActionId::Stop).unwrap();
     assert_eq!(a[stop_at - 1].id, ActionId::Keep, "Keep running sits right above Stop");
     assert!(!a.iter().any(|x| x.id == ActionId::Unlink), "no history, nothing to split");
@@ -654,7 +654,7 @@ fn three_size_bands_with_the_actual_size() {
     assert_eq!(Band::words(40_000, false), "40k, small, so going back is cheap");
     assert_eq!(
         Band::words(145_000, false),
-        "145k, resuming re-reads 145k; Start fresh is cheaper if you do not need the history"
+        "145k, resuming re-reads 145k, so Start fresh is cheaper if you don't need the history"
     );
     assert_eq!(Band::words(200_000, false), "200k, big: resuming re-reads all 200k at full price");
     for k in [40_000, 145_000, 200_000] {
@@ -808,4 +808,24 @@ fn a_cleanup_stop_says_what_is_still_running() {
         ]
     );
     assert_eq!(sb_core::CleanStopped::read(&serde_json::json!({"ok": true})), sb_core::CleanStopped::default());
+}
+
+#[test]
+fn model_picker_list() {
+    let list: sb_core::api::ApiModels = serde_json::from_str(
+        r#"{"ok": true, "models": [{"id": "fable", "label": "Fable", "detail": "Fable 5.1"}, {"id": "opus", "label": "Opus"},
+            {"id": "claude-zephyr-1"}]}"#,
+    )
+    .unwrap();
+    let got = actions::model_choices(Some(&list.models));
+    let ids: Vec<&str> = got.iter().map(|m| m.0.as_str()).collect();
+    let shown: Vec<&str> = got.iter().map(|m| m.1.as_str()).collect();
+    assert_eq!(ids, ["", "fable", "opus", "claude-zephyr-1"]);
+    assert_eq!(shown, ["Default", "Fable 5.1", "Opus", "Zephyr 1"]);
+    let fallback: Vec<String> = actions::model_choices(None).into_iter().map(|m| m.0).collect();
+    assert_eq!(fallback, ["", "fable", "opus", "sonnet", "haiku"]);
+    assert_eq!(actions::model_word("claude-opus-5-5"), "Opus 5.5");
+    assert_eq!(actions::model_word("claude-haiku-4-5-20251001"), "Haiku 4.5");
+    assert_eq!(actions::model_word("claude-opus-4-7[1m]"), "Opus 4.7");
+    assert_eq!(actions::model_word("sonnet"), "Sonnet");
 }

@@ -223,8 +223,8 @@ class ThreadsTest(unittest.TestCase):
         self.poll()
         app.post('/api/action', {'machine': 'desk', 'verb': 'link', 'sid': sid(2), 'to': {'machine': 'desk', 'sid': sid(1)}})
         for body, msg in [({'sid': sid(1), 'to': {'machine': 'desk', 'sid': sid(2)}}, 'already continues'),
-                          ({'sid': sid(1), 'to': {'machine': 'desk', 'sid': sid(1)}}, 'cannot continue itself'),
-                          ({'sid': sid(1), 'to': {'machine': 'desk', 'sid': sid(7)}}, 'not one Switchboard has seen'),
+                          ({'sid': sid(1), 'to': {'machine': 'desk', 'sid': sid(1)}}, "can't continue itself"),
+                          ({'sid': sid(1), 'to': {'machine': 'desk', 'sid': sid(7)}}, "hasn't seen that chat"),
                           ({'sid': sid(1), 'to': {'machine': 'nope', 'sid': sid(2)}}, 'unknown machine'),
                           ({'sid': 'x', 'to': {'machine': 'desk', 'sid': sid(2)}}, 'bad session id')]:
             with self.assertRaises(server.HttpError) as e:

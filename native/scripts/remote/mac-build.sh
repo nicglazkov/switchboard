@@ -60,6 +60,25 @@ plutil -replace CFBundleVersion -string "$VER" dist/Switchboard.app/Contents/Inf
 plutil -lint -s dist/Switchboard.app/Contents/Info.plist
 printf 'APPL????' > dist/Switchboard.app/Contents/PkgInfo
 
+# switchboard-node for Add a machine and switchboard-hub for the server kit: universal binaries, signed ad hoc like
+# the app.
+cargo build --release --locked -q -p sb-node -p sb-hub --target aarch64-apple-darwin --target x86_64-apple-darwin
+lipo -create -output dist/switchboard-node-mac target/aarch64-apple-darwin/release/switchboard-node target/x86_64-apple-darwin/release/switchboard-node
+lipo -create -output dist/switchboard-hub-mac target/aarch64-apple-darwin/release/switchboard-hub target/x86_64-apple-darwin/release/switchboard-hub
+codesign --force -s - dist/switchboard-node-mac
+codesign --force -s - dist/switchboard-hub-mac
+for t in "${TARGETS[@]}"; do
+  cp -RL "target/$t/release/switchboard-node.dSYM" "$SYM/switchboard-node-$t.dSYM"
+done
+
+# The server kit, for "Run the server on this computer" on a Mac with no server yet (sb-core/src/hostsetup.rs): the
+# server, the agent, the installer and the hub, in Contents/Resources/server-kit. build-mac.sh syncs their sources to
+# kit/, build-dmg.sh to the repository layout one folder up.
+KIT_SRC=""
+for d in kit ..; do [ -f "$d/server/server.py" ] && [ -f "$d/scripts/install/install-server.sh" ] && { KIT_SRC=$d; break; }; done
+[ -n "$KIT_SRC" ] || { echo "mac-build: no server/ and scripts/install/ to put in the server kit (see build-mac.sh)" >&2; exit 1; }
+bash scripts/server-kit.sh "$KIT_SRC" dist/Switchboard.app/Contents/Resources/server-kit dist/switchboard-hub-mac dist/switchboard-node-mac
+
 codesign --force --deep -s - dist/Switchboard.app 2>/dev/null
 codesign --verify --deep --strict dist/Switchboard.app
 ditto -c -k --keepParent dist/Switchboard.app dist/Switchboard-mac.zip
@@ -70,12 +89,5 @@ bin=$(stat -f %z dist/Switchboard.app/Contents/MacOS/Switchboard)
 zip=$(stat -f %z dist/Switchboard-mac.zip)
 echo "mac: v$VER [$archs] shaders=$SHADERS build=${secs}s binary=$bin bytes zip=$zip bytes"
 
-# switchboard-node for Add a machine: one universal binary, signed ad hoc like the app.
-cargo build --release --locked -q -p sb-node --target aarch64-apple-darwin --target x86_64-apple-darwin
-lipo -create -output dist/switchboard-node-mac target/aarch64-apple-darwin/release/switchboard-node target/x86_64-apple-darwin/release/switchboard-node
-codesign --force -s - dist/switchboard-node-mac
-for t in "${TARGETS[@]}"; do
-  cp -RL "target/$t/release/switchboard-node.dSYM" "$SYM/switchboard-node-$t.dSYM"
-done
 echo "symbols: $SYM ($(du -sk "$SYM" | cut -f1) KB)"
 echo "node mac: [$(lipo -archs dist/switchboard-node-mac)] $(stat -f %z dist/switchboard-node-mac) bytes"

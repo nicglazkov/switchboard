@@ -58,7 +58,7 @@ class ServerOptionsTest(unittest.TestCase):
             self.assertIn(o['kind'], ('ai', 'setup'))
             for words in (o['label'], o['explain'], o['off']):
                 self.assertTrue(words and '\u2014' not in words, o)
-        self.assertIn('sent to Claude', next(o for o in p['options'] if o['key'] == 'ai_ask_cards')['explain'])
+        self.assertIn('goes to Claude', next(o for o in p['options'] if o['key'] == 'ai_ask_cards')['explain'])
         r = app.post('/api/prefs', {'ai_ask_cards': True, 'setup_explore_agent': True})
         self.assertTrue(r['ai_ask_cards'] and r['setup_explore_agent'] and not r['ai_chat_names'])
         p = app.get('/api/prefs')

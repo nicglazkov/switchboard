@@ -188,7 +188,8 @@ impl Installer {
             stuck: false,
             notes: vec![],
             open_after: false,
-            eject_after: false,
+            // On by default: the disk image isn't needed once the app is installed.
+            eject_after: true,
             force_tx: None,
             theme_override,
         };

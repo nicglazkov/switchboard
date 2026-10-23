@@ -127,4 +127,11 @@ ssh "$H" "mkdir -p ~/.config/switchboard && printf '{\"url\": \"%s\"}\n' '$BASE'
 if [ "$DEST" = switchboard-lab/app ]; then
   code="$(ssh "$H" "curl -s -o /dev/null -w '%{http_code}' '$BASE/'")"
   echo "publish: $BASE/ answers $code"
+  # Add a machine downloads the node and the agent from the folder beside the page: the same release, or a
+  # machine added later gets whatever was there last (a 0.1.0 node and agent once, which could not link).
+  if [ "$DIST" = "$NATIVE/dist" ] && [ -s "$DIST/switchboard-node-mac" ] && [ -s "$DIST/switchboard-node-linux" ] && [ -s "$DIST/switchboard-node.exe" ]; then
+    SB_HOST="$H" bash "$HERE/publish-node.sh"
+  else
+    echo "publish: the node was not published (build it on all three to publish it with the apps)"
+  fi
 fi

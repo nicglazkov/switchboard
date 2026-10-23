@@ -8,7 +8,8 @@ issue first so we can agree on the shape before you spend time on it.
 - `server/` and `agent/` are Python 3.9+, with no packages beyond the standard library.
 - `native/` is a Rust workspace: `sb-core` (models, rules, the HTTP client; no UI), `sb-desktop` (the app, built
   with [GPUI](https://www.gpui.rs)), `sb-hub` (terminals and linked computers) and `sb-node`.
-- `docs/architecture.md` explains how the pieces talk to each other.
+- [How the pieces fit](https://nicglazkov.github.io/switchboard/architecture/) (`docs/architecture.md`) explains how
+  the pieces talk to each other.
 
 ## Running the tests
 
@@ -34,7 +35,7 @@ cd native && cargo build --release --locked -p sb-desktop
 
 On Linux you need the usual GPUI system packages (`libxkbcommon-dev`, `libvulkan-dev`, `libwayland-dev`,
 `libx11-xcb-dev`, `libfontconfig-dev`). Release builds, installers and signing are covered in
-[docs/building.md](docs/building.md). Signing keys and update feed addresses come from your environment and are
+[Building and releasing](https://nicglazkov.github.io/switchboard/building/). Signing keys and update feed addresses come from your environment and are
 never stored in the repository.
 
 ## Writing style

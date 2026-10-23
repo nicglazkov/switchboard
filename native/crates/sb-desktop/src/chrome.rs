@@ -242,6 +242,11 @@ impl BoardView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex()
             .flex_col()
+            .child(item("am-term", "term", "New terminal", ui::term_cap("T"), || Box::new(crate::view::NewTerminal)))
+            .child(item("am-chat", "search", "Open a chat in a terminal", ui::term_cap("O"), || {
+                Box::new(crate::view::ChatPalette)
+            }))
+            .child(rule())
             .child(item("am-settings", "gear", "Settings", ui::mod_cap(","), || Box::new(crate::view::Settings)))
             .child(item("am-history", "history", "History", ui::mod_cap("B"), || Box::new(crate::view::Browse)))
             .child(item("am-theme", "contrast", "Switch light and dark", ui::mod_cap("Shift L"), || {
@@ -398,7 +403,7 @@ impl BoardView {
         // past that the row scrolls sideways, with the tab that shows kept in sight.
         // (With 40 px to spare: the Week chip and the header's own padding vary, and an estimate a little short scrolls the
         // first group's chip half out of sight.)
-        let fixed = if self.solo.is_some() { 730. } else { 810. };
+        let fixed = if self.solo.is_some() { 750. } else { 830. };
         let n_vis = slots.iter().filter(|s| matches!(s, crate::tabgroups::Slot::Tab(_))).count();
         let chip_room = |max: f32| -> f32 {
             slots
@@ -444,7 +449,11 @@ impl BoardView {
                     this.drop_group = None;
                 }
             }))
-            .on_drop::<TabDrag>(cx.listener(|this, d: &TabDrag, _, cx| this.drop_tab(d.0, cx)))
+            .on_drop::<TabDrag>(cx.listener(|this, d: &TabDrag, _, cx| {
+                if let Some(from) = this.tab_index(d.0) {
+                    this.drop_tab(from, cx)
+                }
+            }))
             .on_drop::<crate::tabgroups::GroupDrag>(
                 cx.listener(|this, d: &crate::tabgroups::GroupDrag, _, cx| this.drop_group_chip(&d.id, cx)),
             );
@@ -527,13 +536,17 @@ impl BoardView {
                             this.open_tab_menu(i, ev.position, cx);
                         }),
                     )
-                    .on_drag(TabDrag(i), |d, _, _, cx| cx.new(|_| d.clone()))
+                    .on_drag(TabDrag(self.tabs[i].entity_id()), |d, _, _, cx| cx.new(|_| d.clone()))
                     // Over a tab, the drop goes before it (its left half) or after it (its right half); over a
                     // group's tabs it joins that group, over the tabs in no group it leaves its group.
                     .on_drag_move::<TabDrag>(cx.listener(move |this, ev: &gpui::DragMoveEvent<TabDrag>, _, cx| {
                         let (b, p) = (ev.bounds, ev.event.position);
-                        if p.x >= b.left() && p.x < b.right() && p.y >= b.top() - px(6.) && p.y <= b.bottom() + px(6.) {
-                            let from = ev.drag(cx).0;
+                        if p.x >= b.left()
+                            && p.x < b.right()
+                            && p.y >= b.top() - px(6.)
+                            && p.y <= b.bottom() + px(6.)
+                            && let Some(from) = this.tab_index(ev.drag(cx).0)
+                        {
                             this.tab_drag_over(from, i, p.x >= b.left() + b.size.width / 2., cx);
                         }
                     }))
@@ -566,8 +579,23 @@ impl BoardView {
                                 .bg(crate::tabgroups::group_color(&t, gc)),
                         )
                     })
-                    // The live state's dot (the connection's color until the chat is known), then the star.
+                    // The live state's dot (the connection's color until the chat is known), then the star. A local
+                    // shell has no chat: a terminal glyph, in the phase's color once it has ended.
                     .child(match tb.live_state(cx) {
+                        _ if tb.local.is_some() => ui::icon(
+                            "term",
+                            12.,
+                            if tb.ended() {
+                                tb.phase.color(&t)
+                            } else if on {
+                                t.dim
+                            } else {
+                                t.faint
+                            },
+                        )
+                        .ml(px(-2.))
+                        .mr(px(-3.))
+                        .into_any_element(),
                         Some(l) => live_dot(&t, &l, ("tab-live", i), 7.),
                         None => div().flex_none().size(px(7.)).rounded_full().bg(tb.phase.color(&t)).into_any_element(),
                     })
@@ -660,7 +688,9 @@ impl BoardView {
         // The tab that shows is brought into sight when it changes (or the row or window does). gpui can only scroll
         // to it once the row has been laid out as a scroller, so it asks again each frame until the tab is in sight.
         if let Some(ix) = shown_child {
-            let key = (self.tab, n_tabs, self.win_w.round() as i32);
+            // The row's own width, not the window's: the arrows coming or going narrow it too. It is last frame's,
+            // so a change is seen one frame late and the tab is brought into sight again then.
+            let key = (self.tab, n_tabs, f32::from(self.tab_scroll.bounds().size.width).round() as i32);
             if self.tab_scrolled.get() != key {
                 self.tab_scrolled.set(key);
                 self.tab_scroll_pending.set(true);
@@ -682,6 +712,7 @@ impl BoardView {
         }
         let off = f32::from(self.tab_scroll.offset().x);
         let max = f32::from(self.tab_scroll.max_offset().x);
+        let scrolls = max > 1.;
         let bg = t.bg2;
         let fade = |left: bool| {
             let (from, to) = if left { (bg, bg.opacity(0.)) } else { (bg.opacity(0.), bg) };
@@ -700,19 +731,181 @@ impl BoardView {
             .min_w_0()
             .child(terms)
             .when(off < -1., |d| d.child(fade(true)))
-            .when(max > 1. && off > -max + 1., |d| d.child(fade(false)));
-        strip.child(row).child(
-            ui::icon_btn(&t, "tab-add", "plus", 28.)
-                .ml(px(2.))
-                .shadow(vec![Theme::ring(t.line2)])
-                .when(self.add_open, |d| d.bg(t.press))
+            .when(scrolls && off > -max + 1., |d| d.child(fade(false)));
+        // Too many tabs for the window: an arrow at each end moves the row a tab at a time (held, it keeps going),
+        // dimmed at that end (or a few pixels from it: the last divider is not worth a click). The wheel and the
+        // trackpad still scroll it.
+        let row = div()
+            .flex()
+            .items_center()
+            .min_w_0()
+            .when(scrolls, |d| d.child(self.tab_arrow(c, -1, off < -12.)))
+            .child(row)
+            .when(scrolls, |d| d.child(self.tab_arrow(c, 1, off > -max + 12.)));
+        strip.child(row).child(self.add_btn(c))
+    }
+
+    /// "+" (a new chat, as always) joined to a chevron with the rest: a shell on this computer, by profile.
+    fn add_btn(&self, c: &Ctx) -> impl IntoElement {
+        let t = c.t;
+        let cx = c.cx;
+        let (hover, press) = (t.hover, t.press);
+        let half = |id: &'static str, ic: &'static str, w: f32, size: f32, open: bool| {
+            div()
+                .id(id)
+                .flex_none()
+                .w(px(w))
+                .h_full()
+                .flex()
+                .items_center()
+                .justify_center()
+                .cursor_pointer()
+                .hover(move |s| s.bg(hover))
+                .active(move |s| s.bg(press))
+                .when(open, |d| d.bg(press))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                    this.add_open = !this.add_open;
+                .child(ui::icon(ic, size, t.dim))
+        };
+        div()
+            .flex_none()
+            .ml(px(2.))
+            .h(px(28.))
+            .flex()
+            .items_center()
+            .rounded(px(ui::R_ITEM))
+            .overflow_hidden()
+            .shadow(vec![Theme::ring(t.line2)])
+            .child(half("tab-add", "plus", 28., 14., self.add_open && !self.add_terms).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.add_open = !(this.add_open && !this.add_terms);
+                    this.add_terms = false;
                     this.plan_open = false;
                     cx.notify();
-                })),
-        )
+                },
+            )))
+            .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line2))
+            .child(half("tab-add-more", "down", 20., 11., self.add_open && self.add_terms).on_click(cx.listener(
+                |this, _: &ClickEvent, _, cx| {
+                    this.add_open = !(this.add_open && this.add_terms);
+                    this.add_terms = true;
+                    this.plan_open = false;
+                    cx.notify();
+                },
+            )))
+    }
+
+    /// One end of the tab row: `dir` -1 moves toward the first tab, 1 toward the last. `live`: there is more that way.
+    fn tab_arrow(&self, c: &Ctx, dir: i32, live: bool) -> impl IntoElement {
+        let t = c.t;
+        let cx = c.cx;
+        let (hover, press) = (t.hover, t.press);
+        div()
+            .id(if dir < 0 { "tab-left" } else { "tab-right" })
+            .flex_none()
+            .size(px(24.))
+            .when(dir < 0, |d| d.mr(px(2.)))
+            .when(dir > 0, |d| d.ml(px(2.)))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(ui::R_ITEM))
+            .child(ui::icon(
+                if dir < 0 { "back" } else { "chev" },
+                13.,
+                if live { t.dim } else { t.faint.opacity(0.5) },
+            ))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .when(live, |d| {
+                d.cursor_pointer()
+                    .hover(move |s| s.bg(hover))
+                    .active(move |s| s.bg(press))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| this.tab_hold(dir, cx)),
+                    )
+                    .on_mouse_up(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &gpui::MouseUpEvent, _, _| this.tab_release()),
+                    )
+                    .on_mouse_up_out(
+                        MouseButton::Left,
+                        cx.listener(|this, _: &gpui::MouseUpEvent, _, _| this.tab_release()),
+                    )
+            })
+    }
+
+    /// An arrow pressed: one tab's width now, then again and again while it is held.
+    fn tab_hold(&mut self, dir: i32, cx: &mut gpui::Context<Self>) {
+        self.tab_step(dir, cx);
+        self.tab_held += 1;
+        let g = self.tab_held;
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_millis(400)).await;
+            loop {
+                let more = this
+                    .update(cx, |this, cx| {
+                        let max = f32::from(this.tab_scroll.max_offset().x);
+                        let at = this.tab_glide_to.unwrap_or(f32::from(this.tab_scroll.offset().x));
+                        let room = if dir < 0 { at < -1. } else { at > -max + 1. };
+                        if this.tab_held != g || !room {
+                            return false;
+                        }
+                        this.tab_step(dir, cx);
+                        true
+                    })
+                    .unwrap_or(false);
+                if !more {
+                    break;
+                }
+                cx.background_executor().timer(std::time::Duration::from_millis(170)).await;
+            }
+        })
+        .detach();
+    }
+
+    fn tab_release(&mut self) {
+        self.tab_held += 1;
+    }
+
+    /// Moves the tab row one tab's width, easing over a few frames. A press while it moves goes on from where that
+    /// move was headed, so quick clicks add up.
+    fn tab_step(&mut self, dir: i32, cx: &mut gpui::Context<Self>) {
+        let max = f32::from(self.tab_scroll.max_offset().x);
+        let from = f32::from(self.tab_scroll.offset().x);
+        let to = (self.tab_glide_to.unwrap_or(from) - dir as f32 * (TAB_W + 5.)).clamp(-max, 0.);
+        if max <= 1. || (to - from).abs() < 0.5 {
+            return;
+        }
+        // The tab that shows may leave sight now; it is not pulled back until it changes.
+        self.tab_scroll_pending.set(false);
+        self.tab_glide_to = Some(to);
+        self.tab_glide += 1;
+        let g = self.tab_glide;
+        const FRAMES: u32 = 9;
+        cx.spawn(async move |this, cx| {
+            for k in 1..=FRAMES {
+                cx.background_executor().timer(std::time::Duration::from_millis(14)).await;
+                let gone = this
+                    .update(cx, |this, cx| {
+                        if this.tab_glide != g {
+                            return true;
+                        }
+                        let p = k as f32 / FRAMES as f32;
+                        let e = 1. - (1. - p).powi(3);
+                        this.tab_scroll.set_offset(gpui::point(px(from + (to - from) * e), px(0.)));
+                        if k == FRAMES {
+                            this.tab_glide_to = None;
+                        }
+                        cx.notify();
+                        false
+                    })
+                    .unwrap_or(true);
+                if gone {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn week_chip(&self, c: &Ctx) -> AnyElement {
@@ -784,13 +977,14 @@ impl BoardView {
     }
 
     /// The "+" menu under the header: a new session (a terminal on any machine and folder), or attach to a chat.
+    /// From the chevron beside it, the same under "Claude", after the shells on this computer under "Terminal".
     pub fn add_menu(&self, c: &Ctx, win_w: f32) -> Option<AnyElement> {
         if !self.add_open {
             return None;
         }
         let t = c.t;
         let cx = c.cx;
-        let row = |id: &'static str, ic: &'static str, title: &'static str, sub: &'static str, keys: String| {
+        let row = |id: gpui::ElementId, ic: &'static str, title: String, sub: String, keys: Option<String>| {
             let hover = t.hover;
             div()
                 .id(id)
@@ -814,8 +1008,39 @@ impl BoardView {
                         )
                         .child(div().text_size(px(12.)).text_color(t.dim).child(sub)),
                 )
-                .child(ui::kbd(&t, &keys))
+                .when_some(keys, |d, k| d.child(ui::kbd(&t, &k)))
         };
+        let head = |text: &'static str, first: bool| {
+            div()
+                .px(px(10.))
+                .pt(px(if first { 4. } else { 10. }))
+                .pb(px(4.))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(t.faint)
+                .child(text)
+        };
+        let terms: Vec<AnyElement> = if self.add_terms {
+            let profiles = crate::state::profiles();
+            let def = sb_core::term::shells::pick_default(profiles, c.app.settings.term_profile.as_deref())
+                .map(|p| p.id.clone());
+            let mut list: Vec<_> = profiles.iter().collect();
+            list.sort_by_key(|p| def.as_deref() != Some(p.id.as_str()));
+            list.into_iter()
+                .enumerate()
+                .map(|(n, p)| {
+                    let first = def.as_deref() == Some(p.id.as_str());
+                    let sub = if first { format!("{}, the default", p.program) } else { p.program.clone() };
+                    let id = p.id.clone();
+                    row(("add-term", n).into(), "term", p.name.clone(), sub, first.then(|| ui::term_cap("T")))
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_local(Some(&id), cx)))
+                        .into_any_element()
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let grouped = self.add_terms;
         // Kept inside the window when many tabs push "+" toward the right edge.
         let x = (lead() + self.tab_strip_width() - 16.).min(win_w - 348.).max(8.);
         Some(
@@ -847,13 +1072,14 @@ impl BoardView {
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .flex()
                         .flex_col()
+                        .when(grouped, |d| d.child(head("Terminal", true)).children(terms).child(head("Claude", false)))
                         .child(
                             row(
-                                "add-new",
+                                "add-new".into(),
                                 "plus",
-                                "New session",
-                                "Any machine and folder, with a terminal",
-                                ui::mod_cap("N"),
+                                "New chat".into(),
+                                "Any machine and folder, with a terminal".into(),
+                                Some(ui::mod_cap("N")),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.add_open = false;
@@ -862,11 +1088,11 @@ impl BoardView {
                         )
                         .child(
                             row(
-                                "add-attach",
+                                "add-attach".into(),
                                 "term",
-                                "Open a chat in a terminal",
-                                "Attach to one that is running",
-                                ui::mod_cap("T"),
+                                "Open a chat in a terminal".into(),
+                                "Attach to one that's running".into(),
+                                Some(ui::term_cap("O")),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.add_open = false;
@@ -875,11 +1101,11 @@ impl BoardView {
                         )
                         .child(
                             row(
-                                "add-history",
+                                "add-history".into(),
                                 "history",
-                                "Find an older chat",
-                                "Every chat on every machine",
-                                ui::mod_cap("B"),
+                                "Find an older chat".into(),
+                                "Every chat on every machine".into(),
+                                Some(ui::mod_cap("B")),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.add_open = false;
@@ -986,8 +1212,9 @@ pub fn cost_badge(t: &Theme, text: &str, stale: bool) -> gpui::Div {
 }
 
 /// What a terminal tab carries while it is dragged: along the tab row it reorders, dropped below it becomes a window.
+/// It carries the tab's id, not its place: a tab closing during the drag moves the others.
 #[derive(Clone)]
-pub struct TabDrag(pub usize);
+pub struct TabDrag(pub gpui::EntityId);
 
 impl gpui::Render for TabDrag {
     fn render(&mut self, _: &mut gpui::Window, cx: &mut gpui::Context<Self>) -> impl IntoElement {

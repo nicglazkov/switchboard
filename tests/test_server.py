@@ -144,13 +144,34 @@ class GuardTimerTest(unittest.TestCase):
         self.assertEqual(self.sent, [])
         self.assertFalse(self.g.held('desk', 'S1'))
 
-    def test_no_repeat_push_within_two_minutes(self):
+    def test_one_push_per_held_message(self):
         self.g.block(self.evt); self.timers[0].fn()
-        self.now += 60
+        for _ in range(5):  # more messages typed into the held chat, hours apart: nothing new to say
+            self.now += 3600
+            self.g.block(self.evt)
+        self.assertEqual((len(self.timers), len(self.sent)), (1, 1))
+        self.assertTrue(self.g.held('desk', 'S1'))
+
+    def test_after_an_answer_a_new_hold_waits_half_an_hour(self):
+        self.g.block(self.evt); self.timers[0].fn()
+        self.g.answer({'machine': 'desk', 'session_id': 'S1'})
+        self.now += 600
         self.g.block(self.evt)
-        if len(self.timers) > 1:
-            self.timers[1].fn()
-        self.assertEqual(len(self.sent), 1)
+        self.assertEqual(len(self.timers), 1)
+        self.assertTrue(self.g.held('desk', 'S1'))  # held, shown in the apps, but no second push
+        self.g.answer({'machine': 'desk', 'session_id': 'S1'})
+        self.now += guard.REPEAT_QUIET
+        self.g.block(self.evt)
+        self.assertEqual(len(self.timers), 2)
+
+    def test_a_chat_that_moved_on_or_sat_for_hours_is_not_held(self):
+        self.g.block(self.evt); self.timers[0].fn()
+        self.g.moved({'machine': 'desk', 'session_id': 'S1'})
+        self.assertFalse(self.g.held('desk', 'S1'))
+        self.now += guard.REPEAT_QUIET + 1
+        self.g.block(self.evt); self.timers[1].fn()
+        self.now += guard.HELD_FOR + 1
+        self.assertFalse(self.g.held('desk', 'S1'))
 
 
 class ApnsTest(unittest.TestCase):
@@ -280,6 +301,56 @@ class HttpTest(unittest.TestCase):
         finally:
             st['features'] = had
 
+    def test_places_and_the_trust_question_before_new(self):
+        st = self.app.fleet.state['desk']
+        had = st.get('features')
+        st['features'] = []
+        b = json.loads(self.req('/api/places/desk')[1])
+        self.assertTrue(b['old'])
+        self.assertEqual([p['kind'] for p in b['places']], ['claude'])  # an older machine has only its Claude folder
+        st, body = self.req('/api/new', {'machine': 'desk', 'folder': '~/Documents/site', 'prompt': 'hi'})
+        self.assertEqual(st, 409)
+        self.app.fleet.state['desk']['features'] = ['places']
+        answers = {'trust': 'ask'}
+        real = self.t.__call__
+        def call(target, req, timeout, real=real):
+            if req['verb'] == 'folder_check':
+                self.t.calls.append(('desk', req))
+                return {'ok': True, 'trust': answers['trust'], 'shown': '~/Documents/site', 'folder': req['folder']}
+            return real(target, req, timeout)
+        self.app.fleet.transport = call
+        try:
+            st, body = self.req('/api/new', {'machine': 'desk', 'folder': '~/Documents/site', 'prompt': 'hi'})
+            b = json.loads(body)
+            self.assertEqual((st, b['need'], b['folder_shown'], b['declined']), (409, 'trust', '~/Documents/site', False))
+            answers['trust'] = 'no'
+            self.assertTrue(json.loads(self.req('/api/new', {'machine': 'desk', 'folder': '~/Documents/site', 'prompt': 'hi'})[1])['declined'])
+            self.t.calls.clear()
+            st, body = self.req('/api/new', {'machine': 'desk', 'folder': '~/Documents/site', 'prompt': 'hi', 'trust': True})
+            self.assertEqual(st, 200, body)
+            for _ in range(100):
+                starts = [c[1] for c in self.t.calls if c[1]['verb'] == 'start']
+                if starts:
+                    break
+                time.sleep(0.02)
+            self.assertIs(starts[0]['trust'], True)
+            self.assertEqual(self.req('/api/new', {'machine': 'desk', 'folder': 'proj', 'prompt': 'hi'})[0], 200)  # the Claude folder: no question
+            self.t.calls.clear()
+            self.assertEqual(self.req('/api/privacy_settings', {'machine': 'desk'})[0], 200)
+            self.assertIn('privacy_settings', [c[1]['verb'] for c in self.t.calls])
+        finally:
+            self.app.fleet.state['desk']['features'] = had
+
+    def test_roam_setting(self):
+        st, _ = self.req('/api/machines', {'op': 'roam', 'machine': 'desk', 'roam': False})
+        self.assertEqual(st, 200)
+        self.assertIs(self.app.fleet.machines['desk']['roam'], False)
+        self.assertIs(self.app.fleet._list_req(self.app.fleet.machines['desk'])['roam'], False)
+        self.assertFalse([m for m in json.loads(self.req('/api/machines')[1])['machines'] if m['name'] == 'desk'][0]['roam'])
+        self.req('/api/machines', {'op': 'roam', 'machine': 'desk', 'roam': True})
+        self.assertNotIn('roam', self.app.fleet.machines['desk'])
+        self.assertEqual(self.req('/api/machines', {'op': 'roam', 'machine': 'desk', 'roam': 'yes'})[0], 400)
+
     def test_post_requires_header(self):
         st, _ = self.req('/api/action', {'machine': 'desk', 'verb': 'stop', 'sid': 'x'}, headers={'X-Switchboard': ''})
         self.assertEqual(st, 403)
@@ -316,6 +387,24 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(len(self.pushes), 1)
         self.assertIn('Lights', self.pushes[0][1])
         self.assertEqual(self.pushes[0][2], '/s/desk/S1')
+        self.assertEqual(self.pushes[0][3:], ('held', 'held-S1'))  # replaces an older one for the chat on the phone
+
+    def test_each_kind_of_notification_can_be_turned_off(self):
+        st, b = self.req('/api/prefs')
+        self.assertEqual([n['key'] for n in json.loads(b)['notify_kinds']], ['held', 'jobs', 'cleanup', 'budget'])
+        self.assertTrue(all(n['on'] for n in json.loads(b)['notify_kinds']))
+        st, b = self.req('/api/prefs', {'notify': {'held': False}})
+        self.assertEqual(st, 200, b)
+        self.assertEqual(json.loads(b)['notify'], {'held': False, 'jobs': True, 'cleanup': True, 'budget': True})
+        self.assertEqual(self.req('/api/prefs', {'notify': {'held': 'no'}})[0], 400)
+        self.assertEqual(self.req('/api/prefs', {'notify': {'spam': True}})[0], 400)
+        try:
+            self.pushes.clear()
+            self.req('/api/event', {'event': 'guard', 'machine': 'desk', 'session_id': 'S9', 'ctx': 640000, 'idle': 3600 * 9, 'title': 'Off'})
+            time.sleep(0.3)
+            self.assertEqual(self.pushes, [])
+        finally:
+            self.req('/api/prefs', {'notify': {'held': True}})
 
     def test_devices_and_summary(self):
         st, b = self.req('/api/devices', {'token': 'cd' * 32, 'name': 'iPhone'})

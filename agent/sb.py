@@ -960,7 +960,8 @@ def cache_left(exp, now):
 # <agent-message ...> / <cross-session-message ...> from other agents and sessions, <<autonomous-loop...>> loop
 # wake-ups, [SYSTEM NOTIFICATION...]. Nobody is at the keyboard for those, and holding one strands the session: the
 # notification is dropped and the session waits forever (2026-10-12: an overnight orchestrator lost four reports).
-INJECTED_RE = re.compile(r'\s*(?:<[A-Za-z][\w:.-]*[\s>/]|<<|\[SYSTEM NOTIFICATION|\[Subagent hand-back\])')
+# Some arrive under one plain line first ("Another Claude session sent a message:"), so that line may come before.
+INJECTED_RE = re.compile(r'\s*(?:Another [^\n<]{1,60} sent a message:[ \t]*\n\s*)?(?:<[A-Za-z][\w:.-]*[\s>/]|<<|\[SYSTEM NOTIFICATION|\[Subagent hand-back\])')
 
 
 def is_injected(prompt):
@@ -1358,6 +1359,8 @@ def remember_identity(req):
             want['servers'] = urls
     if req.get('summary_model') in SUMMARY_MODELS:
         want['summary_model'] = req['summary_model']
+    if isinstance(req.get('roam'), bool):  # Settings: chats may start anywhere in home, or only in the Claude folder
+        want['roam'] = req['roam']
     if isinstance(req.get('options'), dict):  # the opt-in settings (server/options.py), each true or false
         want['options'] = {k: req['options'].get(k) is True for k in OPTION_KEYS}
     cur = agent_conf()
@@ -1442,12 +1445,12 @@ def device_form():
 def guard_card(ctx, idle_s, link, cost=None):
     cost = cost or cost_model(ctx)
     fresh_first = cost['pick']['cold'] == 'fresh'
-    return (f'Cold session: {_k(ctx)} tokens, idle {_dur(idle_s)}. Sending now re-reads the whole chat.\n'
+    return (f"This chat has gone cold: {_k(ctx)} tokens, idle {_dur(idle_s)}. Sending now re-reads all of it.\n"
             f'{cost["text"]["cold"]}\n'
-            f'> Start fresh{" (cheaper)" if fresh_first else ""}: type /clear, then send anything. A summary with all your '
-            f'instructions is written then (about a minute), loads in the new chat, and your message carries over.\n'
+            f'> Start fresh{" (cheaper)" if fresh_first else ""}: type /clear, then send anything. Switchboard writes a summary '
+            f'with all your instructions (about a minute), loads it in the new chat and carries your message over.\n'
             f'> Keep going: send the same message again, or type: go' + (f'\n> Or open: {link}' if link else '') +
-            '\n(Estimates use API price ratios; plan usage may weigh tokens differently.)')
+            '\n(These are estimates from API prices. Your plan may count tokens differently.)')
 
 # ---------------------------------------------------------------- Hooks
 import urllib.request
@@ -1757,7 +1760,7 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
             text, path = seed_take(m.group(1))
             if text is not None:
                 return _ctx_out('UserPromptSubmit', _fresh_context(text, None, path))
-    if ev == 'UserPromptSubmit' and sid and tp and is_injected(inp.get('prompt')):
+    if ev == 'UserPromptSubmit' and sid and tp and (is_injected(inp.get('prompt')) or inp.get('agent_id')):
         p = (inp.get('prompt') or '').lstrip()
         log(f'guard: let through an injected prompt for {sid[:8]}: {p[:40]!r} (keys {sorted(inp)})')
         return None
@@ -1800,8 +1803,8 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
                 pending_put(claude_pid, {'session_id': sid, 'transcript_path': tp, 'held': keep, 'ts': now})
             notify(answer)
             start_handoff(tp, sid, now, spawn)
-            return {'decision': 'block', 'reason': 'Writing a handoff of this session (about a minute). Type /clear now: '
-                    'the new session waits for it and loads your instructions automatically.'}
+            return {'decision': 'block', 'reason': 'Writing a handoff of this chat (about a minute). Type /clear now. '
+                    'The new chat waits for it and loads your instructions on its own.'}
         held_set(sid, prompt, now)
         if claude_pid:
             pending_put(claude_pid, {'session_id': sid, 'transcript_path': tp, 'held': prompt, 'ts': now})
@@ -2792,7 +2795,7 @@ def flag_list(args, root=None):
             continue
         if spec_of[a] == 'folder':
             try:
-                rel = _rel(root or machine_root(), val)
+                rel = folder_of(val, root or machine_root())
             except Exception:
                 rel = None
             if not rel or rel.startswith('..') or os.path.isabs(rel):
@@ -2974,6 +2977,7 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
     state_dir = paths()['state']
     idx = _jget(state_dir / 'index.json') or {}
     dismissed = _jget(state_dir / 'dismissed.json') or {}
+    dismissed_moved = False
     marks = _jget(state_dir / 'replaced.json') or {}
     try:
         flush_names(agents)
@@ -2991,8 +2995,15 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
             c = dict(session_meta(f), mtime=mtime, size=size, v=META_V)
         new_idx[key] = c
         active = c.get('last_assistant_ts') or mtime
-        if sid in dismissed and active <= dismissed[sid]:  # hidden until Claude replies there again
-            continue
+        if sid in dismissed:
+            d = dismissed[sid]
+            if isinstance(d, dict):  # dismissed while Claude was working there: hidden for the rest of that turn
+                if (by_sid.get(sid) or {}).get('status') == 'busy':
+                    continue
+                dismissed[sid] = d = active  # that turn is over: from here on, as any dismiss
+                dismissed_moved = True
+            if active <= d:  # hidden until Claude replies there again
+                continue
         if name_overruled(sid, c.get('custom_title'), names, pending_names):
             names.pop(sid, None)
             drop_given_name(sid)
@@ -3008,9 +3019,11 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
         show, gone = supersede(rows, marks)
     try:
         _jput(state_dir / 'index.json', new_idx)
+        if dismissed_moved:
+            _jput(state_dir / 'dismissed.json', dismissed)
     except OSError:
         pass
-    folder = lambda c: _rel(root, c['cwd']) if c.get('cwd') else None
+    folder = lambda c: folder_of(c['cwd'], root) if c.get('cwd') else None
     out = []
     try:
         full = {}
@@ -3140,6 +3153,28 @@ def pretrust(p):
     return True
 
 
+def inherit_trust(p):
+    """Give a folder its own trust entry when the nearest folder above it with an answer was trusted and it has none.
+    A background launch refuses a folder that only a parent trusts (a git worktree inside a trusted project, say), so
+    this writes what accepting the prompt there would. A folder or parent that said no is left alone."""
+    p = Path(p)
+    cj = claude_json_path()
+    data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    projects = data.setdefault('projects', {})
+    if 'hasTrustDialogAccepted' in (projects.get(trust_key(p)) or {}):
+        return False
+    for d in p.parents:
+        e = projects.get(trust_key(d)) or {}
+        if 'hasTrustDialogAccepted' in e:
+            if not e['hasTrustDialogAccepted']:
+                return False
+            _backup(cj)
+            projects.setdefault(trust_key(p), {})['hasTrustDialogAccepted'] = True
+            _jput_text(cj, json.dumps(data, indent=2))
+            return True
+    return False
+
+
 def home_standin():
     """Where work from the home folder runs (Claude Code does not run background sessions in home): a folder named
     Claude, on the Desktop when there is one there already."""
@@ -3177,7 +3212,7 @@ def launch_dir(cwd):
     time), so work from there continues in a trusted folder: the machine's root, or ~/Desktop/Claude when the root is
     home. That folder shares the home folder's memory, so nothing Claude learned there is lost."""
     root = machine_root()
-    if outside_root(cwd):  # a chat from outside the Claude folder carries on inside it: nothing starts outside
+    if not in_places(cwd):  # a chat from outside every shared place carries on in the Claude folder
         root.mkdir(parents=True, exist_ok=True)
         pretrust(root)
         return str(root)
@@ -3195,6 +3230,307 @@ def launch_dir(cwd):
         except OSError:
             pass
     return str(d)
+
+
+# ---------------------------------------------------------------- Places: folders outside the Claude folder
+# A client names a folder in one of three ways, never by an absolute path:
+#   'site/app'          under the Claude folder (as before)
+#   '~/Documents/x'     anywhere in the home folder, when the machine lets chats roam (on unless turned off)
+#   '@Data/x'           under a place the owner added on the machine itself (`sb.py places add D:\Data`)
+# The server can already move the Claude folder anywhere in home, so roaming in home gives a client nothing new.
+# Folders outside home are only ever reachable through a place added at the machine. Dot folders, ~/Library and
+# AppData (keys, tokens, mail, browser data) are never listed or opened, except iCloud Drive inside ~/Library.
+ICLOUD_REL = ('Library', 'Mobile Documents', 'com~apple~CloudDocs')
+PRIVATE_TOP = {'Library', 'AppData', 'Application Data', 'Local Settings', 'NTUSER.DAT'}
+PLACE_NAME_RE = re.compile(r'[A-Za-z0-9][A-Za-z0-9 ._-]{0,31}')
+TRUST_ASK = 'ask'
+
+
+class TrustNeeded(ValueError):
+    """A chat would start in a folder Claude has not been allowed into. The apps ask, then send trust: true."""
+    def __init__(self, shown, declined=False):
+        self.shown, self.declined = shown, declined
+        super().__init__(f'You said no to Claude working in {shown} before. Allow it to start a chat there.' if declined
+                         else f'Claude has not worked in {shown} yet. Allow it to start a chat there.')
+
+    def extra(self):
+        return {'need': 'trust', 'folder_shown': self.shown, 'declined': self.declined}
+
+
+def roam_on():
+    """Chats may start anywhere in the home folder. Off only when the server's Settings turned it off."""
+    return agent_conf().get('roam') is not False
+
+
+def local_places():
+    """Places the owner added on this machine (`sb.py places add`). Never set by the server or an app."""
+    out = []
+    for p in (agent_conf().get('places') or []):
+        if isinstance(p, dict) and isinstance(p.get('name'), str) and PLACE_NAME_RE.fullmatch(p['name']) and \
+                isinstance(p.get('path'), str) and p['path']:
+            out.append({'name': p['name'], 'path': p['path']})
+    return out
+
+
+def any_name(s):
+    """A folder or file name that exists on disk, as the browser may name it: any characters but a separator,
+    NUL or a control character, not '.', '..' or a dot name. New folders still take valid_name."""
+    return (isinstance(s, str) and 0 < len(s) <= 255 and s == s.strip(' ') and not s.startswith('.') and
+            not any(c in s for c in '/\\') and not any(ord(c) < 32 for c in s))
+
+
+def _private(parts):
+    """True for what a client never sees under home: dot folders, ~/Library (but iCloud Drive) and AppData."""
+    if any(x.startswith('.') for x in parts):
+        return True
+    if parts and parts[0] in PRIVATE_TOP:
+        return tuple(parts[:3]) != ICLOUD_REL
+    return False
+
+
+def _clean_parts(rel, strict=False):
+    rel = rel.replace('\\', '/')
+    parts = [x for x in rel.split('/') if x not in ('', '.')]
+    ok = valid_name if strict else any_name
+    if not all(ok(x) for x in parts):
+        raise ValueError('That folder name has characters Switchboard cannot use.')
+    return parts
+
+
+def _place_root(name):
+    for p in local_places():
+        if p['name'] == name:
+            return Path(os.path.expanduser(p['path'])).resolve()
+    raise ValueError('There is no such place on this machine.')
+
+
+def resolve_folder(folder, must_exist=True, strict_last=False):
+    """The real folder a client's folder names, checked (see the comment above). Raises ValueError otherwise."""
+    if folder in (None, ''):
+        return machine_root()
+    if not isinstance(folder, str) or len(folder) > 1024 or '\x00' in folder:
+        raise ValueError('bad folder')
+    f = folder.replace('\\', '/')
+    if f == '~' or f.startswith('~/'):
+        if not roam_on():
+            raise ValueError('This machine keeps chats in its Claude folder. Settings can let them start anywhere in home.')
+        base, parts = user_home(), _clean_parts(f[1:])
+        if _private(parts):
+            raise ValueError('That folder is private to the machine.')
+    elif f.startswith('@'):
+        name, _, rest = f[1:].partition('/')
+        base, parts = _place_root(name), _clean_parts(rest)
+        if any(x.startswith('.') for x in parts):
+            raise ValueError('That folder is private to the machine.')
+    else:
+        if not must_exist:
+            return _new_under(machine_root(), _clean_parts(f, True)) if strict_last else safe_path(machine_root(), folder)
+        p = safe_path(machine_root(), folder)
+        if not p.is_dir():
+            raise ValueError('folder does not exist')
+        return p
+    if strict_last and parts and not valid_name(parts[-1]):
+        raise ValueError('folder names may use letters, digits, space, dot, dash and underscore (max 64)')
+    p = base.joinpath(*parts).resolve()
+    if p != base and base not in p.parents:
+        raise ValueError('That folder is outside the places this machine shares.')
+    if must_exist and not p.is_dir():
+        raise ValueError('folder does not exist')
+    return p
+
+
+def _new_under(root, parts):
+    if not parts:
+        raise ValueError('folder is required')
+    root = Path(root).resolve()
+    p = root.joinpath(*parts).resolve()
+    if p == root or root not in p.parents:
+        raise ValueError('folder is outside the root')
+    return p
+
+
+def folder_of(cwd, root=None):
+    """How the apps name a chat's folder: under the Claude folder as before, else '~/...' in home when chats
+    may roam, else '@place/...'. None for a folder no client may name."""
+    if not cwd:
+        return None
+    root = root or machine_root()
+    rel = _rel(root, cwd)
+    if rel is not None:
+        return rel
+    try:
+        p = Path(cwd).resolve()
+    except (OSError, TypeError, ValueError):
+        return None
+    home = user_home()
+    if roam_on() and (p == home or home in p.parents):
+        parts = p.relative_to(home).parts
+        return None if _private(parts) else ('~/' + '/'.join(parts) if parts else '~')
+    for pl in local_places():
+        try:
+            base = Path(os.path.expanduser(pl['path'])).resolve()
+        except (OSError, RuntimeError):
+            continue
+        if p == base or base in p.parents:
+            parts = p.relative_to(base).parts
+            if not any(x.startswith('.') for x in parts):
+                return '@' + pl['name'] + ('/' + '/'.join(parts) if parts else '')
+    return None
+
+
+def shown_path(p):
+    """A folder as people read it: '~/Documents/x' in home, else the full path."""
+    p, home = Path(p), user_home()
+    try:
+        rel = p.relative_to(home).as_posix()
+        return '~' if rel == '.' else '~/' + rel
+    except ValueError:
+        return str(p)
+
+
+def in_places(cwd):
+    """True when a chat's folder is somewhere a client may name: the Claude folder, home (roaming) or a place."""
+    if not outside_root(cwd):
+        return True
+    return folder_of(cwd) is not None
+
+
+def trust_state(p):
+    """What Claude itself would do in folder p: 'yes' (trusted, or under a trusted folder), 'no' (the nearest
+    answer was no) or 'ask' (never answered)."""
+    cj = claude_json_path()
+    try:
+        data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    except (OSError, ValueError):
+        data = {}
+    projects = data.get('projects') if isinstance(data.get('projects'), dict) else {}
+    for d in [Path(p), *Path(p).parents]:
+        e = projects.get(trust_key(d)) or {}
+        if isinstance(e, dict) and 'hasTrustDialogAccepted' in e:
+            return 'yes' if e['hasTrustDialogAccepted'] else 'no'
+    return TRUST_ASK
+
+
+def grant_trust(p):
+    """The user allowed Claude into folder p from an app: write the answer accepting Claude's own prompt would."""
+    cj = claude_json_path()
+    data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    projects = data.setdefault('projects', {})
+    e = projects.setdefault(trust_key(p), {})
+    if e.get('hasTrustDialogAccepted') is True:
+        return False
+    _backup(cj)
+    e['hasTrustDialogAccepted'] = True
+    _jput_text(cj, json.dumps(data, indent=2))
+    log(f'trusted {p} at the user\'s request')
+    return True
+
+
+def check_trust(p, allow):
+    """Before a chat starts in folder p. Inside the Claude folder nothing is asked (as before). Elsewhere a folder
+    Claude was never allowed into needs the user's yes from the app (allow), which is then written down."""
+    if not outside_root(str(p)) or _is_home(str(p)):
+        return
+    st = trust_state(p)
+    if st == 'yes':
+        return
+    if not allow:
+        raise TrustNeeded(shown_path(p), declined=st == 'no')
+    grant_trust(p)
+
+
+def _place(kind, name, path, folder, icon=None):
+    p = Path(path)
+    st = 'ok'
+    try:
+        if not p.is_dir():
+            st = 'missing'
+        else:
+            next(iter(os.scandir(p)), None)
+    except PermissionError:
+        st = 'privacy'
+    except OSError:
+        st = 'missing'
+    return {'kind': kind, 'name': name, 'folder': folder, 'shown': shown_path(p), 'state': st}
+
+
+def list_places():
+    """Where the browser and New can go on this machine: the Claude folder first, then home and its usual folders
+    when chats may roam, iCloud Drive on a Mac, and the places added on the machine. A folder macOS has not granted
+    the helper permission for says so ('privacy') instead of looking empty."""
+    root, home = machine_root(), user_home()
+    out = [_place('claude', 'Claude folder', root, '')]
+    if roam_on():
+        if root != home:
+            out.append(_place('home', 'Home', home, '~'))
+        for d, kind in (('Desktop', 'desktop'), ('Documents', 'documents'), ('Downloads', 'downloads'),
+                        ('Developer', 'code'), ('Projects', 'code'), ('Code', 'code'), ('src', 'code'), ('repos', 'code')):
+            p = home / d
+            if p.is_dir() and p != root and not p.is_symlink():
+                out.append(_place(kind, d if kind != 'code' else d, p, '~/' + d))
+        icloud = home.joinpath(*ICLOUD_REL)
+        if sys.platform == 'darwin' and icloud.is_dir():
+            out.append(_place('icloud', 'iCloud Drive', icloud, '~/' + '/'.join(ICLOUD_REL)))
+    for pl in local_places():
+        try:
+            out.append(_place('place', pl['name'], Path(os.path.expanduser(pl['path'])).resolve(), '@' + pl['name']))
+        except (OSError, RuntimeError):
+            continue
+    return {'ok': True, 'roam': roam_on(), 'places': out, 'os': os_name()}
+
+
+PRIVACY_PANE = 'x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders'
+
+
+def privacy_hint(p):
+    if sys.platform == 'darwin':
+        return (f'macOS permission not granted for {shown_path(p)}. On this Mac, open System Settings, Privacy & Security, '
+                'Files and Folders, and turn it on for the app that runs Claude Code.')
+    return f'Permission not granted for {shown_path(p)} on this machine.'
+
+
+def open_privacy_settings(run=subprocess.run):
+    """Opens Privacy & Security > Files and Folders on the Mac's own screen, for the person sitting there."""
+    if sys.platform != 'darwin':
+        return False
+    argv = ['open', PRIVACY_PANE]
+    if not os.environ.get('DISPLAY') and os.environ.get('SSH_CONNECTION'):  # over ssh: the logged-in session's screen
+        argv = ['launchctl', 'asuser', str(os.getuid())] + argv
+    try:
+        return run(argv, capture_output=True, timeout=15).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def places_cli(args):
+    """`sb.py places [list | add PATH [--name NAME] | remove NAME | roam on|off]`, run on the machine itself."""
+    conf = agent_conf()
+    places = [p for p in (conf.get('places') or []) if isinstance(p, dict)]
+    if not args or args[0] == 'list':
+        for p in list_places()['places']:
+            print(f"{p['name']:<16} {p['shown']}  ({p['state']})")
+        return 0
+    if args[0] == 'add' and len(args) >= 2:
+        path = Path(os.path.expanduser(args[1])).resolve()
+        if not path.is_dir():
+            print(f"There's no folder {path}.", file=sys.stderr)
+            return 1
+        name = args[args.index('--name') + 1] if '--name' in args[:-1] else (path.name or str(path).strip(':\\/') or 'Drive')
+        if not PLACE_NAME_RE.fullmatch(name):
+            print('A place name can be 1 to 32 letters, digits, spaces, dots, dashes or underscores.', file=sys.stderr)
+            return 1
+        places = [p for p in places if p.get('name') != name] + [{'name': name, 'path': str(path)}]
+    elif args[0] == 'remove' and len(args) == 2:
+        places = [p for p in places if p.get('name') != args[1]]
+    elif args[0] == 'roam' and len(args) == 2 and args[1] in ('on', 'off'):
+        conf['roam'] = args[1] == 'on'
+    else:
+        print(places_cli.__doc__, file=sys.stderr)
+        return 2
+    conf['places'] = places
+    SB_HOME.mkdir(parents=True, exist_ok=True)
+    _jput(SB_HOME / 'agent.json', conf)
+    return places_cli(['list'])
 
 
 WORKTREE_RE = re.compile(r'[\\/]\.claude[\\/]worktrees[\\/]')
@@ -3257,18 +3593,17 @@ SECRET_RE = re.compile(r'^\.env|^id_(rsa|dsa|ecdsa|ed25519)|\.(key|pem|p8|p12|pf
 
 
 def list_files(folder, name=None):
-    """The file browser, inside the machine's Claude folder only: one folder (folders, then files), or the first
-    64 KB of one file. No dot entries, nothing through a symlink, and a file that looks like a key or a secret is
-    listed but never read."""
-    root = machine_root().resolve()
+    """The file browser: one folder (folders, then files), or the first 64 KB of one file, in any place a client may
+    name (resolve_folder). No dot entries, ~/Library or AppData, nothing through a symlink, and a file that looks
+    like a key or a secret is listed but never read. A folder macOS keeps the helper out of says so ('privacy')."""
     if isinstance(folder, str) and any(x.startswith('.') and x != '.' for x in folder.replace('\\', '/').split('/')):
         raise ValueError('folder does not exist')  # dot folders (.ssh, .config, .claude) hold keys and tokens
-    base = safe_path(root, folder) if folder else root
-    if not base.is_dir():
-        raise ValueError('folder does not exist')
-    out = {'ok': True, 'root': root_label(), 'folder': _rel(root, base) if folder else ''}
+    base = resolve_folder(folder or '')
+    addr = (folder_of(str(base)) or '') if folder else ''
+    out = {'ok': True, 'root': root_label(), 'folder': addr, 'shown': shown_path(base),
+           'trust': 'yes' if not outside_root(str(base)) else trust_state(base)}
     if name is not None:
-        if not valid_name(name) or name.startswith('.') or name.endswith('.'):  # Windows opens "x.pem." as "x.pem"
+        if not any_name(name) or name.endswith('.'):  # Windows opens "x.pem." as "x.pem"
             raise ValueError('bad file name')
         p = base / name
         if p.is_symlink() or not p.is_file():
@@ -3276,8 +3611,11 @@ def list_files(folder, name=None):
         st = p.stat()
         f = {'name': name, 'size': st.st_size, 'mtime': st.st_mtime, 'secret': bool(SECRET_RE.search(name))}
         if not f['secret']:
-            with open(p, 'rb') as fh:
-                head = fh.read(FILE_PREVIEW)
+            try:
+                with open(p, 'rb') as fh:
+                    head = fh.read(FILE_PREVIEW)
+            except PermissionError:
+                raise ValueError(privacy_hint(base))
         if not f['secret'] and (head.lstrip().startswith(b'-----BEGIN') or b'openssh-key-v1' in head[:200]):
             f['secret'] = True  # a key, whatever its name
         if not f['secret']:
@@ -3289,19 +3627,23 @@ def list_files(folder, name=None):
     dirs, files = [], []
     try:
         kids = sorted(base.iterdir(), key=lambda d: d.name.lower())
+    except PermissionError:
+        out.update(dirs=[], files=[], more=False, blocked='privacy', hint=privacy_hint(base))
+        return out
     except OSError:
         kids = []
     for d in kids:
         try:
-            if d.name.startswith('.') or d.is_symlink():
+            if d.name.startswith('.') or d.is_symlink() or not any_name(d.name):
                 continue
             if d.is_dir():
-                if _shown_dir(d) and len(dirs) < FILES_MAX:
-                    dirs.append({'folder': _rel(root, d), 'name': d.name})
+                sub = folder_of(str(d))
+                if sub is not None and len(dirs) < FILES_MAX:
+                    dirs.append({'folder': sub, 'name': d.name})
             elif d.is_file() and len(files) < FILES_MAX:
                 st = d.stat()
                 files.append({'name': d.name, 'size': st.st_size, 'mtime': st.st_mtime,
-                              'open': valid_name(d.name) and not SECRET_RE.search(d.name.rstrip('. '))})
+                              'open': not SECRET_RE.search(d.name.rstrip('. '))})
         except OSError:
             continue
     out.update(dirs=dirs, files=files, more=len(dirs) >= FILES_MAX or len(files) >= FILES_MAX)
@@ -3313,7 +3655,7 @@ def list_folders(now):
     seen, out = set(), []
     idx = _jget(paths()['state'] / 'index.json') or {}
     for c in sorted(idx.values(), key=lambda c: -(c.get('mtime') or 0)):
-        rel = _rel(root, c.get('cwd')) if c.get('cwd') else None
+        rel = folder_of(c.get('cwd'), root) if c.get('cwd') else None
         if rel:  # a session in a worktree belongs to its repo; the worktree itself is temporary
             rel = WORKTREE_RE.split(rel)[0]
         if rel and rel not in seen:
@@ -3396,7 +3738,7 @@ def rpc(req, now, agents=None):
 
                     'launcher': {'alive': None} if IS_WIN else launcher_status(now), 'mem': mem_or_none(ags, procs),
                     'features': list(AGENT_FEATURES), 'versions': {'agent': agent_version(), 'claude': claude_version()},
-                    'root_suggest': None if root_is_set() else root_suggest()}
+                    'models': models_or_none(), 'root_suggest': None if root_is_set() else root_suggest()}
         if verb == 'folders':
             list_sessions(now, [])
             if 'parent' in req:  # the tree: one level at a time
@@ -3412,6 +3754,14 @@ def rpc(req, now, agents=None):
             return root_dirs(rel)
         if verb == 'mcp':  # Settings: the MCP servers Claude Code has configured here, nothing secret
             return {'ok': True, 'servers': mcp_servers(), 'root': root_text()}
+        if verb == 'places':  # the browser's and New's sidebar: the Claude folder, home and its folders, iCloud, drives
+            return list_places()
+        if verb == 'folder_check':  # before New: may Claude work there, or does the user have to say yes first
+            p = resolve_folder(req.get('folder') or '')
+            st = 'yes' if not outside_root(str(p)) else trust_state(p)
+            return {'ok': True, 'folder': folder_of(str(p)) or '', 'shown': shown_path(p), 'trust': st}
+        if verb == 'privacy_settings':  # a folder macOS keeps the helper out of: show the person at the Mac the switch
+            return {'ok': True, 'opened': open_privacy_settings()}
         if verb == 'files':
             folder, name = req.get('folder') or '', req.get('name')
             if not isinstance(folder, str) or len(folder) > 512 or (name is not None and not isinstance(name, str)):
@@ -3422,10 +3772,11 @@ def rpc(req, now, agents=None):
         if verb == 'setup_fix':
             return setup_fix(req.get('fix'), now)
         if verb == 'mkdir':
-            p = safe_path(machine_root(), req.get('folder'))
+            p = resolve_folder(req.get('folder'), must_exist=False, strict_last=True)
             p.mkdir(parents=True, exist_ok=True)
-            pretrust(p)
-            return {'ok': True, 'folder': _rel(machine_root(), p)}
+            if not outside_root(str(p)):  # elsewhere Claude is let in when the chat starts (check_trust)
+                pretrust(p)
+            return {'ok': True, 'folder': folder_of(str(p))}
         if verb == 'pass':
             sid = _need_sid(req)
             (paths()['state'] / f'{sid}.pass').write_text(str(now))
@@ -3447,7 +3798,9 @@ def rpc(req, now, agents=None):
             a = _agent_for(sid, get_agents())
             if verb == 'dismiss':
                 d = _jget(paths()['state'] / 'dismissed.json') or {}
-                d[sid] = now
+                # One still working keeps writing to its transcript: it stays hidden until that turn is over, so it
+                # comes back only for a reply after it.
+                d[sid] = {'at': now} if a and a.get('status') == 'busy' else now
                 _jput(paths()['state'] / 'dismissed.json', d)
             if a and a.get('kind') == 'background' and a.get('id'):
                 if a.get('status') == 'stopped':
@@ -3467,10 +3820,10 @@ def rpc(req, now, agents=None):
             return rpc_library(verb, req, now, get_agents)
         return rpc_jobs(verb, req, now, get_agents)
     except (ValueError, RpcError) as e:
-        return {'ok': False, 'error': str(e)}
+        return {'ok': False, 'error': str(e), **(e.extra() if isinstance(e, TrustNeeded) else {})}
     except Exception:
         log(f'rpc failed: {traceback.format_exc()}')
-        return {'ok': False, 'error': 'internal error (see sb.log on that machine)'}
+        return {'ok': False, 'error': 'Something went wrong. Check sb.log on that machine.'}
 
 
 # ---------------------------------------------------------------- Terminal (the hub's `ssh -tt <machine> term <bg_id>`)
@@ -3590,11 +3943,24 @@ def run_term(cmd, isatty=None, run=None, execve=None, watch=None):
         return (watch or attach_watch)(argv, env)
     except OSError as e:
         log(f'term attach {arg} failed: {e}')
-        out.write(f'Switchboard: could not start Claude Code here ({e.strerror or e}).\r\n')
+        out.write(f"Switchboard: couldn't start Claude Code here ({e.strerror or e}).\r\n")
         return 127
 
 
 MODELS = ('opus', 'sonnet', 'haiku', 'fable')
+MODEL_PICK_RE = re.compile(r'(?:opus|sonnet|haiku|fable)(?:\[1m\])?|claude-[a-z0-9]+(?:-[a-z0-9]+){1,6}(?:\[1m\])?')  # = server flags.MODEL_PATTERN
+
+
+def model_ok(model):
+    """A model a start or relaunch may pass to --model: a known alias, a full model id (claude-opus-5-5), or an alias
+    this machine's Claude Code names in its help (a newer family). Claude Code itself says no to an id it does not know."""
+    if model is None:
+        return True
+    if not isinstance(model, str):
+        return False
+    return bool(MODEL_PICK_RE.fullmatch(model)) or model in ((_claude_help() or {}).get('models') or [])
+
+
 JOB_QUEUED_TTL, JOB_RUNNING_TTL, QUEUE_LOCK_TTL = 600, 900, 900
 SEED_RE = re.compile(r'^\[switchboard:([0-9a-f]{12})\]')
 ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
@@ -3622,10 +3988,7 @@ def find_session(sid):
 def _job_dir(root, folder):
     if folder in (None, ''):
         return root  # the home folder itself launches in ~/Claude (launch_dir)
-    p = safe_path(root, folder)
-    if not p.is_dir():
-        raise ValueError('folder does not exist')
-    return p
+    return resolve_folder(folder)
 
 
 WAKE_NAME, WAKE_TTL = 'switchboard-wake', 150
@@ -3721,6 +4084,7 @@ def rpc_jobs(verb, req, now, get_agents):
     root = machine_root()
     if verb == 'start':
         cwd = _job_dir(root, req.get('folder'))
+        check_trust(cwd, req.get('trust') is True)  # outside the Claude folder Claude goes only where it was let in
         name = req.get('name') or None  # unnamed: named at launch from the topic and where it came from
         model = req.get('model') or None
         prompt, htext = req.get('prompt') or '', req.get('handoff_text')
@@ -3730,7 +4094,7 @@ def rpc_jobs(verb, req, now, get_agents):
             raise ValueError('unknown effort')
         if name is not None and not (isinstance(name, str) and SESSION_NAME_RE.fullmatch(name) and name == name.strip()):
             raise ValueError("name may use letters, digits, spaces and . , : ' + # ( ) - _ (max 64)")
-        if model not in (None,) + MODELS:
+        if not model_ok(model):
             raise ValueError('unknown model')
         if mode not in RUN_MODES or (origin is not None and origin not in ORIGINS) or \
                 (via is not None and not (isinstance(via, str) and VIA_RE.fullmatch(via))) or \
@@ -3751,8 +4115,8 @@ def rpc_jobs(verb, req, now, get_agents):
         tp, meta = find_session(sid)
         if not meta.get('cwd'):
             raise ValueError('session folder unknown')
-        if verb == 'resume' and outside_root(meta['cwd']):  # a resume runs where the chat lives, and that is outside
-            raise ValueError('This chat ran outside the Claude folder, so it cannot be resumed. '
+        if verb == 'resume' and not in_places(meta['cwd']):  # a resume runs where the chat lives, and that is outside
+            raise ValueError('This chat ran outside the folders this machine shares, so it cannot be resumed. '
                              'Start fresh carries it on inside the Claude folder.')
         topic, fresh = session_topic(meta, sid)
         job = {'verb': verb, 'sid': sid, 'transcript': tp, 'cwd': meta['cwd'], 'model_was': meta.get('model'), 'name': compose_name(topic, 'copy', name_stamp(now)),
@@ -3760,7 +4124,7 @@ def rpc_jobs(verb, req, now, get_agents):
                'tools': check_tools(req['tools']) if req.get('tools') is not None else None, **tools_extra(req)}  # None: the chat's own list
         if verb == 'resume' and req.get('relaunch'):
             model, effort = req.get('model') or None, req.get('effort') or None
-            if model not in (None,) + MODELS or effort not in (None, 'ultracode') + EFFORTS:
+            if not model_ok(model) or effort not in (None, 'ultracode') + EFFORTS:
                 raise ValueError('unknown model or effort')
             a = _agent_for(sid, get_agents()) or {}
             if a.get('kind') == 'interactive' and a.get('status') not in (None, 'stopped'):
@@ -3783,7 +4147,7 @@ def rpc_jobs(verb, req, now, get_agents):
         res = _jget(q / f'{jid}.result.json')
         if res:
             if res.get('state') == 'running' and now - res.get('started', now) > JOB_RUNNING_TTL:
-                return dict(res, ok=True, state='error', error='the launch took too long; check sb.log on that machine')
+                return dict(res, ok=True, state='error', error='The launch took too long. Check sb.log on that machine.')
             return dict(res, ok=True)
         job = _jget(q / f'{jid}.json')
         if not job:
@@ -3893,7 +4257,7 @@ def check_flags(flags, root=None, known=None):
             raise ValueError(f'{name} needs a value')
         v = f[1]
         if spec == 'folder':
-            d = safe_path(root or machine_root(), v)
+            d = safe_path(root, v) if root and root != machine_root() else resolve_folder(v, must_exist=False)
             if not d.is_dir():
                 raise ValueError(f'{name}: there is no folder {v[:80]}')
             v = str(d)
@@ -3908,8 +4272,9 @@ def check_flags(flags, root=None, known=None):
 HELP_FLAG_RE = re.compile(r'(?<![\w-])--[a-z][a-z0-9-]+')
 
 
-def claude_flags(refresh=False, runner=None):
-    """The long flags this machine's `claude --help` lists, cached per Claude Code build; None when it cannot say."""
+def _claude_help(refresh=False, runner=None):
+    """What this machine's `claude --help` says, cached per Claude Code build: {'flags': [...], 'models': [...]};
+    None when it cannot say."""
     exe = _claude_exe()
     try:
         mt = os.stat(exe).st_mtime
@@ -3917,8 +4282,9 @@ def claude_flags(refresh=False, runner=None):
         return None
     p = paths()['state'] / 'claude_help.json'
     d = _jget(p) or {}
-    if not refresh and d.get('exe') == exe and d.get('mtime') == mt and isinstance(d.get('flags'), list):
-        return set(d['flags'])
+    if not refresh and d.get('exe') == exe and d.get('mtime') == mt and isinstance(d.get('flags'), list) \
+            and isinstance(d.get('models'), list):
+        return d
     try:
         text = (runner or (lambda: run_claude_cmd(['--help'], timeout=20)))() or ''
     except Exception:
@@ -3926,11 +4292,54 @@ def claude_flags(refresh=False, runner=None):
     found = sorted(set(HELP_FLAG_RE.findall(text)))
     if '--chrome' not in found and '--model' not in found:  # not a help page
         return None
+    d = {'exe': exe, 'mtime': mt, 'flags': found, 'models': help_model_aliases(text)}
     try:
-        _jput(p, {'exe': exe, 'mtime': mt, 'flags': found})
+        _jput(p, d)
     except OSError:
         pass
-    return set(found)
+    return d
+
+
+def claude_flags(refresh=False, runner=None):
+    """The long flags this machine's `claude --help` lists, cached per Claude Code build; None when it cannot say."""
+    d = _claude_help(refresh, runner)
+    return set(d['flags']) if d else None
+
+
+MODEL_ALIAS_RE = re.compile(r"'([a-z][a-z0-9]{1,23})'")
+
+
+def help_model_aliases(text):
+    """The model aliases `claude --help` names under --model ("an alias for the latest model (e.g. 'fable', 'opus', or
+    'sonnet')"), in its order. Only what the help text says: Claude Code takes other aliases too (haiku)."""
+    m = re.search(r'--model\b[^\n]*((?:\n(?!\s*-)[^\n]*)*)', text or '')
+    if not m:
+        return []
+    out = []
+    for a in MODEL_ALIAS_RE.findall(m.group(0)):
+        if a not in out and a != 'default':
+            out.append(a)
+    return out[:12]
+
+
+def claude_models():
+    """The models this machine's Claude Code takes, for the New sheet's model picker (server /api/models): the aliases
+    its help names, and the settings' availableModels when the user narrowed them. Nothing secret is read."""
+    d = _claude_help()
+    s = _jget(claude_dir() / 'settings.json')
+    s = s if isinstance(s, dict) else {}
+    allowed = s.get('availableModels')
+    allowed = [a[:80] for a in allowed if isinstance(a, str)][:40] if isinstance(allowed, list) else None
+    return {'aliases': (d or {}).get('models') or [], 'allowed': allowed,
+            'default': s['model'][:80] if isinstance(s.get('model'), str) else None}
+
+
+def models_or_none():
+    try:
+        return claude_models()
+    except Exception:
+        log(f'models failed: {traceback.format_exc(limit=2)}')
+        return None
 
 
 CHROME_HOST = 'com.anthropic.claude_code_browser_extension'  # Claude Code's connector, registered with Chrome
@@ -4190,6 +4599,11 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
         launch['tools'] = tools or []
         if tools is not None:
             pending = tools_pending_put(cwd, tools_rec(tools, versions, tmode, skipped, tmeta, cands), now)
+    if not _is_home(cwd) and Path(cwd).is_dir():
+        try:  # a folder inside a trusted one gets its own entry first, so the launch does not stop on the prompt
+            inherit_trust(Path(cwd))
+        except (OSError, ValueError):
+            log(f'trust check failed: {traceback.format_exc(limit=2)}')
     for attempt in (1, 2):
         rc, out = runner(launch_argv(launch), cwd, claude_env(internal=False))
         bg = parse_bg_id(out)
@@ -4198,7 +4612,7 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
             if 'not trusted' in msg and attempt == 1 and not _is_home(cwd) and Path(cwd).is_dir():
                 # the chat already ran in this folder: trust it the way accepting the prompt would, and go again
                 try:
-                    if pretrust(Path(cwd)):
+                    if pretrust(Path(cwd)) or inherit_trust(Path(cwd)):
                         log(f'job {job.get("id")}: trusted {cwd} after a not-trusted launch')
                         continue
                 except (OSError, ValueError):
@@ -4216,7 +4630,7 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
             except Exception:
                 pass
     else:
-        return {'state': 'error', 'error': 'Claude started the session but it never came up. Try again in a minute.'}
+        return {'state': 'error', 'error': 'Claude started the chat, but it never came up. Try again in a minute.'}
     new_sid = bg_session_id(bg)
     if verb == 'fresh':  # only now: if the launch had failed, the held message would still be there to send
         held_clear(job['sid'])
@@ -4313,7 +4727,7 @@ def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=N
                                    progress=lambda d, rp=rp: _jput(rp, dict(d, state='running', started=now)))
                 except Exception as e:
                     log(f'job {job.get("id")} failed: {traceback.format_exc()}')
-                    res = {'state': 'error', 'error': f'launch failed: {e}'}
+                    res = {'state': 'error', 'error': f"Couldn't launch it: {e}"}
                 _jput(rp, dict(res, finished=time.time()))
     finally:
         try:
@@ -4836,7 +5250,7 @@ def rpc_browse(req, now, budget=BROWSE_BUDGET):
             last = c.get('last_ts') or mtime
             rows.append({'sid': sid, 'title': names.get(sid) or c['title'], 'first_prompt': c.get('first_prompt'),
                          'last_prompt': c.get('last_prompt'), 'cwd': c.get('cwd'),
-                         'folder': _rel(root, c['cwd']) if c.get('cwd') else None, 'model': c.get('model'),
+                         'folder': folder_of(c['cwd'], root) if c.get('cwd') else None, 'model': c.get('model'),
                          'ctx': c.get('ctx'), 'size': size, 'mtime': mtime, 'started': c.get('first_ts'), 'last': last,
                          'archived': c.get('archived'), 'url': session_url(c.get('bridge')),
                          'replaced': (m.get('how') or 'fresh') if m and last <= (m.get('ts') or 0) + 1 else None,
@@ -5275,9 +5689,9 @@ def _chrome_bg_issue(sessions):
         return None
     ver = claude_version() or 'this version'
     return {'id': f'chrome-bg-{ver}', 'tone': 'warn', 'title': 'Background chats start without Claude in Chrome',
-            'text': f'Claude Code {ver} started "{(last.get("title") or "a chat")[:60]}" without the Chrome connection, though '
-                    'it asked for it. Background chats here cannot use your browser until Claude Code fixes this. Until '
-                    'then, resume such a chat in a terminal with claude --chrome.', 'fix': None}
+            'text': f'Claude Code {ver} started "{(last.get("title") or "a chat")[:60]}" without Chrome, even though '
+                    'it asked for it. Background chats here can\'t use your browser until Claude Code fixes this. For '
+                    'now, resume the chat in a terminal with claude --chrome.', 'fix': None}
 
 
 def setup_issues(sessions, now, force=False):
@@ -5298,10 +5712,10 @@ def setup_issues(sessions, now, force=False):
                 names = ', '.join(sorted(bad))
                 cmds = ', '.join(sorted(set(bad.values())))
                 cached.append({'id': 'mcp-path-' + ','.join(sorted(bad)), 'tone': 'warn',
-                               'title': 'Some MCP servers cannot start in background chats',
+                               'title': "Some MCP servers can't start in background chats",
                                'text': f'{names} {"is" if len(bad) == 1 else "are"} started by name ({cmds}), and '
-                                       'background chats do not get your shell\'s PATH, so they come up without those '
-                                       'tools. Fix points them at the full path (a backup of ~/.claude.json is kept).',
+                                       'background chats don\'t get your shell\'s PATH, so those tools are missing. '
+                                       'Fix points them at the full path (and keeps a backup of ~/.claude.json).',
                                'fix': 'mcp-path'})
         except Exception:
             log(f'setup mcp check failed: {traceback.format_exc(limit=2)}')
@@ -5344,7 +5758,7 @@ def setup_fix(fix, now):
         _jput_text(cj, json.dumps(data, indent=2))
     _jput(paths()['state'] / 'setup.json', {})  # check again on the next list
     if missing:
-        return {'ok': bool(fixed), 'fixed': fixed, 'error': f'Could not find {", ".join(missing)} in your login shell either.'}
+        return {'ok': bool(fixed), 'fixed': fixed, 'error': f"Couldn't find {', '.join(missing)} in your login shell either."}
     return {'ok': True, 'fixed': fixed}
 
 
@@ -5510,7 +5924,7 @@ def mcp_servers():
     return out[:MCP_MAX]
 
 
-AGENT_FEATURES = ('setup', 'flags', 'ping', 'cleanup', 'browse', 'rename', 'summary', 'files', 'upload', 'busy', 'relaunch', 'tail', 'compact', 'mcp', 'root_dirs',
+AGENT_FEATURES = ('places', 'setup', 'flags', 'ping', 'cleanup', 'browse', 'rename', 'summary', 'files', 'upload', 'busy', 'relaunch', 'tail', 'compact', 'mcp', 'root_dirs',
                   'library', 'budget_stop', 'tools_auto')  # the server checks before it uses one
 
 
@@ -5925,7 +6339,7 @@ def rpc_ask(req, now, ask=None, sleep=time.sleep, mac=None):
         try:
             return {'ok': True, 'text': (ask or ask_claude)(prompt, system), 'ms': round((time.time() - t0) * 1000)}
         except Exception as e:
-            raise RpcError(f'Claude did not answer: {str(e)[:200]}')
+            raise RpcError(f"Claude didn't answer: {str(e)[:200]}")
     if not launcher_status(now)['alive']:
         raise RpcError('The launcher is not running on this Mac, so Claude cannot be asked here.')
     d, qid = _asks_dir(), os.urandom(6).hex()
@@ -5957,7 +6371,7 @@ def ask_worker(stop, ask=None, wait=None):
         try:
             out = {'ok': True, 'text': ask(q['prompt'], q['system'])}
         except Exception as e:
-            out = {'ok': False, 'error': f'Claude did not answer: {str(e)[:200]}'}
+            out = {'ok': False, 'error': f"Claude didn't answer: {str(e)[:200]}"}
         _jput(d / f'{f.stem}.result.json', out)
         busy.discard(f.stem)
 
@@ -6447,7 +6861,7 @@ def _read_meta(tf, m):
     try:
         d = json.loads(tf.extractfile(m).read().decode('utf-8'))
     except (ValueError, UnicodeDecodeError):
-        raise ValueError(f'{m.name} is not valid JSON.')
+        raise ValueError(f'{m.name} isn\'t valid JSON.')
     if not isinstance(d, dict):
         raise ValueError(f'{m.name} must be a JSON object.')
     return d
@@ -6463,7 +6877,7 @@ def check_secrets(v):
     for s in v:
         name = s.get('name') if isinstance(s, dict) else s
         if not isinstance(name, str) or not SECRET_NAME_RE.fullmatch(name):
-            raise ValueError('A secret name is letters, digits and _ (like WEB_FETCH_KEY).')
+            raise ValueError('A secret name can only use letters, digits and _ (like WEB_FETCH_KEY).')
         about = s.get('about') if isinstance(s, dict) else ''
         if name not in [x['name'] for x in out]:
             out.append({'name': name, 'about': str(about or '')[:300]})
@@ -6487,7 +6901,7 @@ def bundle_info(data, tool=None):
                 if parts is None:
                     raise ValueError(f'{m.name[:120]!r} points outside the tool folder.')
                 if not (m.isfile() or m.isdir()):
-                    raise ValueError(f'{m.name[:120]!r} is a link or a device. A tool holds plain files only.')
+                    raise ValueError(f'{m.name[:120]!r} is a link or a device. Tools can only hold plain files.')
                 key = '/'.join(parts).lower()
                 if key in seen:
                     raise ValueError(f'{m.name[:120]!r} is in the bundle twice.')
@@ -6507,7 +6921,7 @@ def bundle_info(data, tool=None):
                 elif len(parts) == 3 and parts[0] == 'skills' and parts[2] == 'SKILL.md':
                     skills.add(parts[1])
     except (tarfile.TarError, EOFError, zlib.error, OSError):
-        raise ValueError('That is not a tar.gz bundle.')
+        raise ValueError("That's not a tar.gz bundle.")
     if plugin is None:
         raise ValueError('The bundle has no .claude-plugin/plugin.json.')
     name = plugin.get('name')
@@ -6647,7 +7061,7 @@ def pack_folder(path, tool=None, description=None):
     if pj.is_file():
         plugin = _jget(pj)
         if not isinstance(plugin, dict):
-            raise ValueError('.claude-plugin/plugin.json is not valid JSON.')
+            raise ValueError(".claude-plugin/plugin.json isn't valid JSON.")
         sbj = _jget(p / '.claude-plugin' / 'switchboard.json') or {}
         sbj = sbj if isinstance(sbj, dict) else {}
         tool = tool or (plugin.get('name') if valid_tool(plugin.get('name')) else tool_slug(p.name))
@@ -7471,7 +7885,7 @@ def tool_run(args, env=None, keys=None, execvpe=None, run=None, err=None):
         (execvpe or os.execvpe)(cmd[0], cmd, env)
         return 0  # only reached when execvpe is faked
     except OSError as e:
-        err.write(f'Switchboard: could not start {cmd[0]} for {tool} ({e.strerror or e}).\n')
+        err.write(f"Switchboard: couldn't start {cmd[0]} for {tool} ({e.strerror or e}).\n")
         return 127
 
 
@@ -7488,11 +7902,11 @@ def secret_cli(args, keys=None, ask=None, out=None, stdin=None):
             out.write(TOOL_NAME_ERR + '\n')
             return 2
         if not SECRET_NAME_RE.fullmatch(name):
-            out.write('A secret name is letters, digits and _ (like WEB_FETCH_KEY).\n')
+            out.write('A secret name can only use letters, digits and _ (like WEB_FETCH_KEY).\n')
             return 2
         try:
             if sub == 'rm':
-                out.write(f'Removed {name} for {tool}.\n' if kc.rm(tool, name) else f'{name} for {tool} was not set here.\n')
+                out.write(f'Removed {name} for {tool}.\n' if kc.rm(tool, name) else f"{name} for {tool} wasn't set here.\n")
                 return 0
             if ask is None and stdin.isatty():
                 ask = lambda p: getpass.getpass(p)
@@ -7502,7 +7916,7 @@ def secret_cli(args, keys=None, ask=None, out=None, stdin=None):
             out.write(f'Not saved: {e or "cancelled"}\n')
             return 1
         declared = tool_declares(tool)
-        note = '' if name in declared or not tool_dir(tool) else f' ({tool} does not declare {name}, so nothing reads it yet.)'
+        note = '' if name in declared or not tool_dir(tool) else f" ({tool} doesn't declare {name}, so nothing reads it yet.)"
         out.write(f'Saved {name} for {tool} in the {kc.kind}.{note}\n')
         log(f'secret set {tool}/{name}')
         return 0
@@ -7763,6 +8177,11 @@ def uninstall(home=None):
     except OSError:
         pass
     uninstall_mcp(home)
+    if IS_WIN:  # the logon task install_launcher made; gone already is fine
+        try:
+            subprocess.run(['schtasks', '/delete', '/tn', WIN_TASK, '/f'], capture_output=True, timeout=30)
+        except (OSError, subprocess.SubprocessError):
+            pass
     return 0
 
 
@@ -7831,6 +8250,8 @@ def main(argv):
             return launch_queue() if IS_WIN else 0
         if cmd == 'launcher':
             return launcher_daemon()
+        if cmd == 'places':  # run on the machine: what the apps may browse, and drives outside home
+            return places_cli(argv[2:])
         if cmd == 'wake':
             return 0 if wake_launcher() else 1
         if cmd == 'mcp':  # v2: Claude Code starts this as the switchboard MCP server (stdio)

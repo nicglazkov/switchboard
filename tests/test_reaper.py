@@ -1,6 +1,6 @@
 """Cleanup (was the reaper): which background chats it suggests stopping, what it never suggests, the once-a-day
 notice, and that only a person's click stops anything."""
-import json, os, sys, threading, unittest
+import json, os, subprocess, sys, threading, unittest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import mkdtemp
@@ -56,7 +56,7 @@ class CleanupTest(unittest.TestCase):
             (self.cfg / 'reaper.json').write_text(cfg if isinstance(cfg, str) else json.dumps(cfg))
         self.now = [NOW]
         app = server.App(fleet.Fleet(MACH, self.m, clock=lambda: self.now[0]), state_dir=self.state, web_dir=self.state,
-                         clock=lambda: self.now[0], cfg_dir=self.cfg, pusher=lambda *a: self.pushes.append(a))
+                         clock=lambda: self.now[0], cfg_dir=self.cfg, pusher=lambda *a: self.pushes.append(a[:3]))
         app._refresh_soon = lambda *a, **k: None
         app.feat.reaper.opened = lambda: set(opened)
         self.app = app
@@ -127,7 +127,7 @@ class CleanupTest(unittest.TestCase):
         self.m.sessions['desk'] = [bg(1, 'idle', 99, mb=365), bg(2, 'busy', 30, mb=432)]
         app.fleet.poll()
         app.feat.after_poll()
-        self.assertEqual(self.pushes, [("2 sessions aren't in use", 'They hold 797 MB. Tap to look; nothing stops until you say so.',
+        self.assertEqual(self.pushes, [("2 chats aren't in use", "They're using 797 MB. Tap to take a look. Nothing stops unless you say so.",
                                         '/?cleanup=1')])
         app.feat.after_poll()
         self.assertEqual(len(self.pushes), 1, 'the same ones again: no notice')
@@ -144,7 +144,7 @@ class CleanupTest(unittest.TestCase):
         app.fleet.poll()
         app.feat.after_poll()
         self.assertEqual(len(self.pushes), 2)
-        self.assertTrue(self.pushes[1][0].startswith('4 sessions'))
+        self.assertTrue(self.pushes[1][0].startswith('4 chats'))
         self.assertEqual(self.calls('stop'), [])
 
     def test_stop_on_click(self):
@@ -297,6 +297,19 @@ class HubOpenTest(unittest.TestCase):
             srv.shutdown()
         self.assertEqual(got, {('desk', 'abcd1234'), ('laptop', 'ffff0000')})
         self.assertEqual(features.hub_open('http://127.0.0.1:9/internal/open', timeout=0.5), set())
+
+    def test_asks_the_hub_on_its_own_port(self):
+        # A hub on SWITCHBOARD_HUB_PORT: the open list comes from that port, not 8132.
+        code = ('import sys; sys.path.insert(0, "server"); import features\n'
+                'seen = []\n'
+                'def fake(url, timeout): seen.append(url); raise OSError("no hub")\n'
+                'features.urllib.request.urlopen = fake\n'
+                'features.hub_open(); print(seen[0])')
+        env = {k: v for k, v in os.environ.items() if k != 'SWITCHBOARD_HUB_URL'}
+        env['SWITCHBOARD_HUB_PORT'] = '9000'
+        out = subprocess.run([sys.executable, '-c', code], cwd=Path(__file__).resolve().parents[1], env=env,
+                             capture_output=True, text=True, timeout=30)
+        self.assertEqual(out.stdout.strip(), 'http://127.0.0.1:9000/internal/open', out.stderr)
 
 
 if __name__ == '__main__':

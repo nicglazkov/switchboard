@@ -93,7 +93,7 @@ impl BoardView {
             self.app.update(cx, |s, cx| {
                 s.toast(
                     "A name needs letters or digits.",
-                    Some("It may use letters, digits, spaces and . , : ' + # ( ) - _".into()),
+                    Some("Use letters, digits, spaces and . , : ' + # ( ) - _".into()),
                     true,
                     cx,
                 )

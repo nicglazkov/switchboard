@@ -22,7 +22,9 @@ START_FLAGS = {
 FLAG_REPEAT = {'--add-dir': 8}
 FLAGS_MAX = 24
 # Typed in "Other flags" but shown as chips: they go to the session's own fields.
-CHIP_FLAGS = {'--model': r'opus|sonnet|haiku|fable', '--effort': r'low|medium|high|xhigh|max'}
+MODEL_ALIASES = ('fable', 'opus', 'sonnet', 'haiku')  # the aliases every Claude Code this app knows takes
+MODEL_PATTERN = r'(?:fable|opus|sonnet|haiku)(?:\[1m\])?|claude-[a-z0-9]+(?:-[a-z0-9]+){1,6}(?:\[1m\])?'
+CHIP_FLAGS = {'--model': MODEL_PATTERN, '--effort': r'low|medium|high|xhigh|max'}
 ALIASES = {'-w': '--worktree', '--allowedTools': '--allowed-tools', '--disallowedTools': '--disallowed-tools'}
 NAME_PART_RE = re.compile(r'[A-Za-z0-9._ -]{1,64}')
 OTHER_MAX = 4000
@@ -74,7 +76,7 @@ def tokens(text):
     if not text or not text.strip():
         return []
     if len(text) > OTHER_MAX or '\x00' in text or '\n' in text.strip():
-        raise FlagError('Other flags is one line, up to 4000 characters')
+        raise FlagError('Other flags has to be one line, up to 4000 characters')
     try:
         words = shlex.split(text)
     except ValueError as e:
@@ -85,13 +87,13 @@ def tokens(text):
         name, eq, val = w.partition('=')
         name = ALIASES.get(name, name)
         if not name.startswith('--'):
-            raise FlagError(f'Other flags: {w[:40]!r} is not a flag (flags start with --)')
+            raise FlagError(f'Other flags: {w[:40]!r} isn\'t a flag (flags start with --)')
         spec = START_FLAGS.get(name, CHIP_FLAGS.get(name, '?'))
         if spec == '?':
-            raise FlagError(f'{name[:40]} is not a flag Switchboard passes to Claude Code')
+            raise FlagError(f'{name[:40]} isn\'t a flag Switchboard passes to Claude Code')
         if spec is None:
             if eq:
-                raise FlagError(f'{name} takes no value')
+                raise FlagError(f'{name} doesn\'t take a value')
             out.append([name])
         elif eq:
             out.append([name, val])
@@ -121,25 +123,25 @@ def parse(flags, other=None):
         name = ALIASES.get(f[0], f[0])
         if name in CHIP_FLAGS:
             if len(f) != 2 or not re.fullmatch(CHIP_FLAGS[name], f[1]):
-                raise FlagError(f'{name}: that value is not allowed')
+                raise FlagError(f'{name}: that value isn\'t allowed')
             picked[name[2:]] = f[1]
             continue
         if name not in START_FLAGS:
-            raise FlagError(f'{name[:40]!r} is not a flag Switchboard passes to Claude Code')
+            raise FlagError(f'{name[:40]!r} isn\'t a flag Switchboard passes to Claude Code')
         seen[name] = seen.get(name, 0) + 1
         if seen[name] > FLAG_REPEAT.get(name, 1):
-            raise FlagError(f'{name} is given too many times')
+            raise FlagError(f'{name} is in there too many times')
         spec = START_FLAGS[name]
         if spec is None:
             if len(f) != 1:
-                raise FlagError(f'{name} takes no value')
+                raise FlagError(f'{name} doesn\'t take a value')
             out.append([name])
             continue
         if len(f) != 2 or not f[1]:
             raise FlagError(f'{name} needs a value')
         v = check_folder(f[1]) if spec == 'folder' else f[1]
         if spec != 'folder' and not re.fullmatch(spec, v):
-            raise FlagError(f'{name}: that value is not allowed')
+            raise FlagError(f'{name}: that value isn\'t allowed')
         out.append([name, v])
     if '--chrome' in seen and '--no-chrome' in seen:
         raise FlagError('--chrome and --no-chrome cancel out')
@@ -154,6 +156,25 @@ def command_line(flags):
 
 # ---- a running session's flags: what it has now, and what a change needs (the flags drawer in every client)
 MODEL_WORD = {'opus': 'Opus', 'sonnet': 'Sonnet', 'haiku': 'Haiku', 'fable': 'Fable'}
+MODEL_ID_RE = re.compile(r'claude-([a-z]+)-(\d+)(?:-(\d{1,2}))?(?:-\d{8})?(?:-[a-z]+)?(\[1m\])?')
+
+
+def model_ok(m, more=()):
+    """An alias (opus, fable), a full model id (claude-opus-5-5), or one of `more`: aliases a machine's own Claude Code
+    names in its help (a newer family), for --model."""
+    return isinstance(m, str) and (re.fullmatch(MODEL_PATTERN, m) is not None or m in more)
+
+
+def model_word(m):
+    """How a model is shown: "Opus" for an alias, "Opus 5.5" for claude-opus-5-5, None for nothing."""
+    if not isinstance(m, str) or not m:
+        return None
+    if m in MODEL_WORD:
+        return MODEL_WORD[m]
+    x = MODEL_ID_RE.fullmatch(m)
+    if x:
+        return f'{x.group(1).capitalize()} {x.group(2)}' + (f'.{x.group(3)}' if x.group(3) else '')
+    return m.capitalize() if re.fullmatch(r'[a-z][a-z0-9]{1,23}', m) else m
 EFFORT_WORD = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'max': 'Max', 'ultracode': 'UltraCode'}
 PERM_WORD = {'default': 'Asks first', 'manual': 'Asks first', 'acceptEdits': 'Accept edits', 'plan': 'Plan', 'auto': 'Auto',
              'bypassPermissions': 'Bypass', 'dontAsk': 'Never asks'}
@@ -172,7 +193,7 @@ def view(s):
     launch = s.get('launch') or {}
     out = []
     if now.get('model'):
-        out.append(_item('--model', now['model'], MODEL_WORD.get(now['model'], now['model']), 'live'))
+        out.append(_item('--model', now['model'], model_word(now['model']), 'live'))
     if now.get('effort'):
         out.append(_item('--effort', now['effort'], EFFORT_WORD.get(now['effort'], now['effort']), 'live'))
     perm = now.get('perm') or 'default'
@@ -214,7 +235,7 @@ def plan(s, want, root=None):
     checked = parse([f for f in want.get('flags') or [] if isinstance(f, list) and f and f[0] not in CHIPS], other)
     if checked.get('model') or checked.get('effort') or checked.get('chrome') or any(f[0] in CHIPS for f in checked['flags']):
         raise FlagError('Pick the model, effort and Chrome above instead.')
-    model = want.get('model') if want.get('model') in MODEL_WORD else hv('--model')
+    model = want.get('model') if model_ok(want.get('model')) else hv('--model')
     effort = want.get('effort') if want.get('effort') in EFFORT_WORD else hv('--effort')
     perm = want.get('perm') if want.get('perm') in PERM_WORD else hv('--permission-mode') or 'default'
     chrome = bool(want.get('chrome')) if 'chrome' in want else '--chrome' in have
@@ -228,7 +249,7 @@ def plan(s, want, root=None):
         changes.append(c)
 
     if model != hv('--model'):
-        change('--model', MODEL_WORD.get(hv('--model')), MODEL_WORD.get(model), 'live', f'/model {model}')
+        change('--model', model_word(hv('--model')), model_word(model), 'live', f'/model {model}')
     if effort != hv('--effort'):
         change('--effort', EFFORT_WORD.get(hv('--effort')), EFFORT_WORD.get(effort), 'live',
                '/effort ultracode on' if effort == 'ultracode' else f'/effort {effort}')

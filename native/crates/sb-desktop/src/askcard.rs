@@ -44,6 +44,16 @@ fn sig(a: &Ask) -> String {
     format!("{:?}|{}|{}|{}|{}", a.kind, a.at, a.summary, a.options.len(), a.questions.len())
 }
 
+/// The line under the card once Send is done with: what went in, or that the terminal never opened for it.
+fn sent_note(text: &str, ok: bool) -> String {
+    if ok { format!("Sent: {text}") } else { "Not sent, its terminal didn't open. Try Send again.".into() }
+}
+
+/// A reply from the card to chat `key` sets off, unless one is still on its way there.
+fn start_send(sending: &mut std::collections::HashSet<String>, key: &str) -> bool {
+    sending.insert(key.to_string())
+}
+
 /// The kind's tag: a soft accent pill.
 pub fn kind_tag(t: &Theme, k: AskKind) -> gpui::Div {
     div()
@@ -216,13 +226,26 @@ impl BoardView {
         self.ask.as_mut().filter(|f| f.key == key)
     }
 
-    /// Types `text` into the chat's terminal (its tab opens) with Enter, and notes it under the card.
+    /// Types `text` into the chat's terminal (its tab opens) with Enter, and notes it under the card. A click while
+    /// one is still on its way does nothing, so the reply goes in once.
     pub fn ask_send(&mut self, key: String, text: String, cx: &mut Context<Self>) {
+        if !start_send(&mut self.ask_sending, &key) {
+            return;
+        }
         if let Some(f) = self.form_mut(&key) {
-            f.sent = Some(format!("Sent: {text}"));
             f.free_open = false;
+            f.sent = Some("Sending...".into());
         }
         self.reply_with(key, text, cx);
+        cx.notify();
+    }
+
+    /// The reply went into the chat's terminal, or the terminal never opened for it.
+    pub fn ask_sent(&mut self, key: &str, text: &str, ok: bool, cx: &mut Context<Self>) {
+        self.ask_sending.remove(key);
+        if let Some(f) = self.form_mut(key) {
+            f.sent = Some(sent_note(text, ok));
+        }
         cx.notify();
     }
 
@@ -245,11 +268,11 @@ impl BoardView {
                 format!("About {} up front, because the cache is warm.", k(c.resume.warm))
             }
             Some(c) => format!(
-                "About {} up front, because the cache is cold and all {} is read again.",
+                "About {} up front, since the cache is cold and all {} gets read again.",
                 k(c.resume.cold),
                 s.ctx_label()
             ),
-            None if s.cache_left(now) > 0 => "The cache is warm, so it is cheap right now.".to_string(),
+            None if s.cache_left(now) > 0 => "The cache is warm, so it's cheap right now.".to_string(),
             None => format!("It re-reads {} of context.", s.ctx_label()),
         };
         let conf = Confirm {
@@ -293,7 +316,7 @@ impl BoardView {
                             f.sent = None;
                         }
                         v.app.update(cx, |s, cx| {
-                            s.toast(format!("Could not restart it with Chrome: {e}"), None, true, cx)
+                            s.toast(format!("Couldn't restart it with Chrome: {e}"), None, true, cx)
                         });
                     }
                 }
@@ -310,7 +333,7 @@ impl BoardView {
         }
         self.chrome_pending = None;
         let msg = match cmd {
-            None => "Restarting it with Chrome. Its progress is in the corner.".to_string(),
+            None => "Restarting it with Chrome. You can follow it in the corner.".to_string(),
             Some((command, error)) => {
                 crate::state::copy_text(cx, command.clone());
                 format!("{error} The command is copied: {command}")
@@ -573,7 +596,7 @@ impl BoardView {
                                     .min_w_0()
                                     .text_size(px(12.))
                                     .text_color(t.faint)
-                                    .child("Answer every question first, by a chip or typing."),
+                                    .child("Answer every question first, with a chip or by typing."),
                             )
                         }),
                 );
@@ -670,7 +693,7 @@ impl BoardView {
         }
         if offline {
             card = card.child(
-                ui::wrap(format!("{} is offline, so answers can't be sent right now.", s.machine_label))
+                ui::wrap(format!("{} is offline, so you can't send answers right now.", s.machine_label))
                     .text_size(px(12.))
                     .text_color(t.dim),
             );
@@ -678,9 +701,7 @@ impl BoardView {
             card = card.child(ui::wrap(sent.clone()).text_size(px(12.)).line_height(relative(1.45)).text_color(t.warm));
         } else if a.kind != AskKind::Fix {
             card = card.child(
-                ui::wrap("Send opens its terminal and types this in, as if you did.")
-                    .text_size(px(11.5))
-                    .text_color(t.faint),
+                ui::wrap("Send opens its terminal and types this in for you.").text_size(px(11.5)).text_color(t.faint),
             );
         }
         Some(card.into_any_element())
@@ -742,5 +763,24 @@ impl BoardView {
                 ),
             )
             .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn sent_shows_only_once_the_reply_went_in() {
+        assert_eq!(super::sent_note("yes", true), "Sent: yes");
+        assert!(!super::sent_note("yes", false).starts_with("Sent"), "a terminal that never opened sent nothing");
+    }
+
+    #[test]
+    fn a_second_send_while_one_is_on_its_way_types_nothing() {
+        let mut sending = std::collections::HashSet::new();
+        assert!(super::start_send(&mut sending, "studio:a"));
+        assert!(!super::start_send(&mut sending, "studio:a"), "clicked again");
+        assert!(super::start_send(&mut sending, "studio:b"), "another chat");
+        sending.remove("studio:a");
+        assert!(super::start_send(&mut sending, "studio:a"), "the first one is done");
     }
 }

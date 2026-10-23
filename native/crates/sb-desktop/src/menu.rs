@@ -219,7 +219,7 @@ impl BoardView {
         if costs {
             // Where the numbers come from: the detail sheet (open beside the menu) has "How is this estimated?".
             menu = menu.child(div().mt(px(4.)).mx(px(4.)).h(px(1.)).bg(t.rule)).child(
-                ui::wrap("Costs in tokens, for the cache as it is now. How they are estimated is in the detail sheet.")
+                ui::wrap("Costs in tokens, for the cache as it is right now. The details sheet explains how they're estimated.")
                     .px(px(8.))
                     .pt(px(6.))
                     .pb(px(2.))

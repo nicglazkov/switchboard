@@ -14,7 +14,7 @@ cd "$(dirname "$0")/.."
 sb_hosts SB_MAC_BUILD_HOST
 sb_update_env
 # Signing settings may also live in the hosts file; the environment still wins.
-for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE; do sb_host_opt $v || true; done
+for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE SB_NOTARY_KEYCHAIN; do sb_host_opt $v || true; done
 H=$SB_MAC_BUILD_HOST
 REMOTE=${SB_REMOTE:-src/switchboard-dmg}  # SB_REMOTE: a separate build dir per worktree
 
@@ -22,8 +22,13 @@ REMOTE=${SB_REMOTE:-src/switchboard-dmg}  # SB_REMOTE: a separate build dir per 
 ssh -q $H "mkdir -p $REMOTE/native"
 rsync -a --delete --exclude target --exclude dist ./ $H:$REMOTE/native/
 rsync -a ../branding.toml $H:$REMOTE/
+# The app carries the server kit (scripts/server-kit.sh): the server, the agent and the installer.
+ssh -q $H "mkdir -p $REMOTE/agent $REMOTE/scripts"
+rsync -a --delete --exclude __pycache__ ../server $H:$REMOTE/
+rsync -a ../agent/sb.py $H:$REMOTE/agent/
+rsync -a --delete --exclude __pycache__ ../scripts/install $H:$REMOTE/scripts/
 pass=()
-for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE SB_NOTARY_KEY_ID SB_NOTARY_ISSUER SB_NOTARY_KEY_PATH SHADERS SB_BUILD \
+for v in SB_SIGN_IDENTITY SB_NOTARY_PROFILE SB_NOTARY_KEYCHAIN SB_NOTARY_KEY_ID SB_NOTARY_ISSUER SB_NOTARY_KEY_PATH SHADERS SB_BUILD \
   SB_UPDATE_PUBKEY SB_UPDATE_FEED; do
   [ -n "${!v:-}" ] && pass+=("$v=$(printf '%q' "${!v}")")
 done

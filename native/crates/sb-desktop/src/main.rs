@@ -23,12 +23,14 @@ mod library;
 mod link;
 mod logs;
 mod menu;
+mod nav;
 mod notices;
 mod palette;
 mod panics;
 mod perf;
 mod place;
 mod rename;
+mod serversetup;
 mod settings;
 mod sheet;
 mod state;
@@ -36,6 +38,7 @@ mod stop;
 mod tabgroups;
 mod term;
 mod theme;
+mod trust;
 mod ui;
 mod update;
 mod usage;
@@ -93,6 +96,10 @@ fn main() {
 
         view::bind_keys(cx);
         perf::watch(cx);
+        // The shells for Cmd+T, found off the main thread (Windows asks wsl.exe for its distros).
+        std::thread::spawn(|| {
+            let _ = state::profiles();
+        });
         cx.set_menus(vec![
             Menu::new("Switchboard").items([
                 MenuItem::action("About Switchboard", view::About),
@@ -106,6 +113,9 @@ fn main() {
                 MenuItem::action("Switch light and dark", view::ToggleTheme),
             ]),
             Menu::new("Terminal").items([
+                MenuItem::action("New terminal", view::NewTerminal),
+                MenuItem::action("Open a chat in a terminal...", view::ChatPalette),
+                MenuItem::separator(),
                 MenuItem::action("Bigger text", term::TermBigger),
                 MenuItem::action("Smaller text", term::TermSmaller),
                 MenuItem::action("Actual size", term::TermSizeReset),

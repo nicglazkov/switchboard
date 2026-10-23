@@ -19,7 +19,6 @@ use crate::theme::{NUM, Theme};
 use crate::ui;
 use crate::view::{BoardView, Ctx};
 
-pub const MODELS: [(&str, &str); 4] = [("opus", "Opus"), ("sonnet", "Sonnet"), ("haiku", "Haiku"), ("fable", "Fable")];
 pub const EFFORTS: [(&str, &str); 6] = [
     ("low", "Low"),
     ("medium", "Medium"),
@@ -128,6 +127,11 @@ pub struct Drawer {
     /// Other flags, and a folder being added. Made on the first frame (they need the window).
     pub other: Option<Entity<InputState>>,
     pub dir: Option<Entity<InputState>>,
+}
+
+/// The drawer still waits to type into chat `key`: it was not closed or switched to another chat meanwhile.
+fn still_waits(d: Option<&Drawer>, key: &str) -> bool {
+    d.is_some_and(|d| d.key == key && d.stage == Stage::WaitLive)
 }
 
 impl BoardView {
@@ -254,10 +258,8 @@ impl BoardView {
             cx.spawn(async move |this, cx| {
                 for _ in 0..300 {
                     cx.background_executor().timer(Duration::from_secs(3)).await;
-                    if this
-                        .update(cx, |v, _| v.flags.as_ref().map(|d| d.stage.clone()) != Some(Stage::WaitLive))
-                        .unwrap_or(true)
-                    {
+                    // Closed, or showing another chat now: these commands are not for it.
+                    if !this.update(cx, |v, _| still_waits(v.flags.as_ref(), &key)).unwrap_or(false) {
                         return;
                     }
                     let (c, m, s) = (core.clone(), m.clone(), sid.clone());
@@ -266,24 +268,22 @@ impl BoardView {
                         break;
                     }
                 }
-                let _ = this.update(cx, |v, cx| v.flags_type(cmds, cx));
+                let _ = this.update(cx, |v, cx| v.flags_type(key, cmds, cx));
             })
             .detach();
             cx.notify();
             return;
         }
-        let _ = key;
-        self.flags_type(cmds, cx);
+        self.flags_type(key, cmds, cx);
     }
 
-    fn flags_type(&mut self, cmds: Vec<String>, cx: &mut Context<Self>) {
-        let Some(d) = self.flags.as_ref() else { return };
-        let key = d.key.clone();
-        let tab = self.tabs.iter().find(|t| t.read(cx).key.as_deref() == Some(key.as_str())).cloned();
+    /// Types them into chat `key`'s tab, the chat they were planned for, whichever drawer shows by then.
+    fn flags_type(&mut self, key: String, cmds: Vec<String>, cx: &mut Context<Self>) {
+        let tab = self.tab_for(&key, cx).and_then(|i| self.tabs.get(i)).cloned();
         match tab {
             Some(tab) if tab.read(cx).live() => {
                 tab.update(cx, |t, cx| t.type_cmds(cmds.clone(), cx));
-                if let Some(d) = self.flags.as_mut() {
+                if let Some(d) = self.flags.as_mut().filter(|d| d.key == key) {
                     d.stage = Stage::Applied(cmds);
                 }
                 // The agent reads the new state on its next look.
@@ -296,10 +296,10 @@ impl BoardView {
             _ => {
                 // Open the terminal; the commands go in once it is attached.
                 self.open_terminal(key.clone(), false, cx);
-                if let Some(tab) = self.tabs.iter().find(|t| t.read(cx).key.as_deref() == Some(key.as_str())).cloned() {
+                if let Some(tab) = self.tab_for(&key, cx).and_then(|i| self.tabs.get(i)).cloned() {
                     tab.update(cx, |t, cx| t.type_when_open(cmds.clone(), cx));
                 }
-                if let Some(d) = self.flags.as_mut() {
+                if let Some(d) = self.flags.as_mut().filter(|d| d.key == key) {
                     d.stage = Stage::Applied(cmds);
                 }
             }
@@ -544,16 +544,18 @@ impl BoardView {
                     }),
             );
         }
-        // Four models: segmented buttons. Six efforts and five permission modes: dropdowns.
+        // The models the machines take (GET /api/models, or the built-in list): segmented buttons. Six efforts and
+        // five permission modes: dropdowns.
         let mut models = ui::seg_box(&t);
-        for (k, l) in MODELS {
-            models = models.child(
-                ui::seg_btn(&t, SharedString::from(format!("fl-m-{k}")), w.model.as_deref() == Some(k), false)
-                    .child(l)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.flags_pick(move |w| w.model = Some(k.into()), cx)
-                    })),
-            );
+        for (k, l) in self.app.read(cx).model_choices().into_iter().skip(1) {
+            let on = w.model.as_deref() == Some(k.as_str());
+            models =
+                models.child(ui::seg_btn(&t, SharedString::from(format!("fl-m-{k}")), on, false).child(l).on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let k = k.clone();
+                        this.flags_pick(move |w| w.model = Some(k), cx)
+                    }),
+                ));
         }
         let orow = |label: &str, ctl: AnyElement| {
             div()
@@ -780,7 +782,7 @@ impl BoardView {
             })
             .when(!v.complete, |e| {
                 e.child(
-                    ui::wrap("Switchboard on that machine does not report every flag yet. Update it to see them all.")
+                    ui::wrap("Switchboard on that machine doesn't report every flag yet. Update it to see them all.")
                         .mt(px(6.))
                         .text_size(px(12.))
                         .text_color(t.dim),
@@ -843,7 +845,7 @@ impl BoardView {
                 let busy = plan.is_some_and(|p| p.busy);
                 let body = plan.map(|p| p.body.clone()).unwrap_or_default();
                 let key = d.key.clone();
-                foot.child(note("Claude restarts in the same folder with the new flags, and the chat continues where it left off. A terminal open on it reconnects by itself.".into(), t.ink2))
+                foot.child(note("Claude restarts in the same folder with the new flags and picks up where it left off. An open terminal reconnects by itself.".into(), t.ink2))
                     .when(busy, |f| f.child(note("Claude is replying right now. You can wait for it to finish, or relaunch now.".into(), t.cold)))
                     .child(
                         div().flex().justify_end().gap(px(8.)).child(back).child(primary("fl-go", "Relaunch".into()).child(ui::icon("resume", 14., t.on_accent)).on_click(cx.listener(
@@ -856,7 +858,7 @@ impl BoardView {
             }
             Stage::Sent => foot
                 .child(note(
-                    "Relaunching. Its progress is in the corner, and a terminal open on it reconnects when it is done."
+                    "Relaunching. You can follow it in the corner, and an open terminal reconnects when it's done."
                         .into(),
                     t.ink2,
                 ))
@@ -902,7 +904,7 @@ impl BoardView {
                 t.warm,
             )),
             Stage::WaitLive => foot
-                .child(note("Claude is replying. The changes are typed in once it finishes.".into(), t.ink2))
+                .child(note("Claude is replying. The changes go in once it finishes.".into(), t.ink2))
                 .child(div().flex().justify_end().child(back)),
             Stage::Error(e) => foot.child(note(e.clone(), t.bad)).child(div().flex().justify_end().child(back)),
             Stage::Load | Stage::Edit if n == 0 => foot.child(
@@ -980,7 +982,7 @@ impl BoardView {
                     }))
                 };
                 let how = if mine {
-                    format!("It is open in a terminal on {}. Switchboard gives you the command to run there.", d.label)
+                    format!("It's open in a terminal on {}, so you'll get the command to run there.", d.label)
                 } else if !p.relaunch && p.running {
                     format!("Types {} into the chat. No restart.", p.cmds.join(", "))
                 } else if p.running && lives > 0 {
@@ -1059,6 +1061,33 @@ mod tests {
             text: value.unwrap_or("On").into(),
             how: "relaunch".into(),
         }
+    }
+
+    fn drawer(key: &str, stage: Stage) -> Drawer {
+        Drawer {
+            key: key.into(),
+            machine: "studio".into(),
+            sid: "s1".into(),
+            title: String::new(),
+            label: String::new(),
+            view: None,
+            want: Want::default(),
+            plan: None,
+            plan_err: None,
+            stage,
+            seq: 0,
+            adding: false,
+            other: None,
+            dir: None,
+        }
+    }
+
+    #[test]
+    fn commands_wait_only_while_the_drawer_shows_their_chat() {
+        assert!(still_waits(Some(&drawer("studio:a", Stage::WaitLive)), "studio:a"));
+        assert!(!still_waits(Some(&drawer("studio:b", Stage::WaitLive)), "studio:a"), "switched to another chat");
+        assert!(!still_waits(Some(&drawer("studio:a", Stage::Edit)), "studio:a"));
+        assert!(!still_waits(None, "studio:a"), "closed");
     }
 
     #[test]

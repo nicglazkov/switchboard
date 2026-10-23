@@ -63,7 +63,7 @@ class StartFresh(LabCase):
             self.lab.flag('fail-fresh', False)
         self.assertEqual(j['state'], 'error', j)
         self.assertIsNotNone(self.lab.session('laptop', old['sid']))
-        p = self.lab.wait(lambda: [p for p in self.lab.pushes() if p['title'] == 'Start fresh did not finish'], 5, what='the push')[-1]
+        p = self.lab.wait(lambda: [p for p in self.lab.pushes() if p['title'] == "Start fresh didn't finish"], 5, what='the push')[-1]
         self.assertEqual(p['url'], f'/s/laptop/{old["sid"]}')
         self.assertIn('The old chat is untouched', p['body'])
 
@@ -73,7 +73,7 @@ class StartFresh(LabCase):
         old = self.closed_chat()
         j = self.lab.job(self.act('fresh', 'laptop', old['sid'])['job'], watch=False)
         self.assertEqual(j['state'], 'done', j)
-        p = self.lab.wait(lambda: [p for p in self.lab.pushes() if p['title'] == 'Fresh session ready'], 5, what='the push')[-1]
+        p = self.lab.wait(lambda: [p for p in self.lab.pushes() if p['title'] == 'Fresh chat ready'], 5, what='the push')[-1]
         self.assertEqual(p['url'], f'/s/laptop/{j["sid"]}')
         self.assertTrue(p['body'].endswith('on Laptop. Tap to open it.'), p)
 

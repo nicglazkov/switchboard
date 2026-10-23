@@ -9,10 +9,10 @@ from pathlib import Path
 
 import budget as budget_mod
 import library as library_mod
+import nodes as nodes_mod
 
 SID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
 NAME_RE = re.compile(r"[A-Za-z0-9 ._,:'+#()-]{1,64}")
-HUB_OPEN = 'http://127.0.0.1:8132/internal/open'
 LIVE = ('idle', 'busy', 'waiting')  # a background session that is running (stopped ones report 'stopped' or nothing)
 
 
@@ -35,10 +35,11 @@ def jsave(p, obj):
     os.replace(tmp, p)
 
 
-def hub_open(url=HUB_OPEN, timeout=1.5):
-    """{(machine, bg)} with a terminal open on the hub right now. Empty when the hub is down or says nothing."""
+def hub_open(url=None, timeout=1.5):
+    """{(machine, bg)} with a terminal open on the hub right now. Empty when the hub is down or says nothing.
+    The hub is the one nodes.py talks to, so a hub on SWITCHBOARD_HUB_PORT or SWITCHBOARD_HUB_URL is found too."""
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        with urllib.request.urlopen(url or nodes_mod.HUB + '/internal/open', timeout=timeout) as r:
             d = json.loads(r.read() or b'[]')
     except Exception:
         return set()
@@ -105,7 +106,7 @@ def why_text(reason, s, now):
     if reason == 'idle':
         return f'Idle {span(q)}'
     if reason == 'stalled':
-        return f'Says it is working, but nothing happened for {span(q)}'
+        return f"Says it's working, but nothing's happened for {span(q)}"
     return f'Replaced by a newer chat {span(q)} ago'
 
 
@@ -225,7 +226,7 @@ class Reaper:
                 if age < ORPHAN_H or not isinstance(o.get('pid'), int) or f'{m["name"]}/pid:{o["pid"]}' in keep:
                     continue
                 out.append({'machine': m['name'], 'label': label, 'pid': o['pid'], 'title': 'Leftover Claude process',
-                            'reason': 'orphan', 'why': f'No chat owns it; started {span(age * 3600)} ago',
+                            'reason': 'orphan', 'why': f'No chat owns it. Started {span(age * 3600)} ago',
                             'since': now - age * 3600, 'idle_h': int(age), 'mb': o.get('mb') if isinstance(o.get('mb'), int) else None})
         out.sort(key=lambda d: -(d['mb'] or 0))
         return out
@@ -273,7 +274,7 @@ class Reaper:
             seen['keys'] = {k: seen.get('keys', {}).get(k, now) for k in keys}  # forget what went away
             if new and now - (seen.get('pushed') or 0) >= PUSH_EVERY:
                 seen['pushed'] = now
-                self.app._push(*self.notice(items))
+                self.app._push(*self.notice(items), 'cleanup', 'cleanup')
             jsave(self.seen_path, seen)
         except Exception:
             log('cleanup failed: ' + traceback.format_exc())
@@ -287,10 +288,10 @@ class Reaper:
     @staticmethod
     def notice(items):
         n, mb = len(items), sum(d['mb'] or 0 for d in items)
-        what = 'session isn\'t' if n == 1 else 'sessions aren\'t'
+        what = 'chat isn\'t' if n == 1 else 'chats aren\'t'
         title = f'{n} {what} in use'
-        body = (f'They hold {mb_text(mb)}. ' if mb and n > 1 else f'It holds {mb_text(mb)}. ' if mb else '') + \
-            'Tap to look; nothing stops until you say so.'
+        body = (f"They're using {mb_text(mb)}. " if mb and n > 1 else f"It's using {mb_text(mb)}. " if mb else '') + \
+            'Tap to take a look. Nothing stops unless you say so.'
         return title, body, CLEANUP_URL
 
     # ---- what a person asked for
@@ -882,9 +883,9 @@ class Threads:
     def link(self, child, to):
         chats = self.chats
         if child not in chats or to not in chats:
-            raise ValueError('That chat is not one Switchboard has seen.')
+            raise ValueError("Switchboard hasn't seen that chat.")
         if child == to:
-            raise ValueError('A chat cannot continue itself.')
+            raise ValueError("A chat can't continue itself.")
         parents = self.parents()
         cur = to
         for _ in range(500):  # the older chat must not already come after this one
@@ -1073,7 +1074,7 @@ def rules_pick(cands, prompt, folder=''):
     elif repo:
         why = f'Has {repo.rsplit("/", 1)[-1]} checked out.'
     elif needs:
-        why = f'No online machine has {and_join([NEED_NAME[k] for k in needs])}; this one has the most free memory.'
+        why = f'No online machine has {and_join([NEED_NAME[k] for k in needs])}. This one has the most free memory.'
     else:
         why = f'Most free memory right now ({mem:g} GB).' if mem else 'The only machine online.' if len(cands) == 1 else 'Most free memory right now.'
     return name, (repo or folder or ''), why
@@ -1511,7 +1512,7 @@ class Dispatch:
             if j:
                 rec['machine'] = j.get('machine') or rec['machine']
                 if j.get('state') == 'error':
-                    rec.update(state='failed', error=j.get('error') or 'It did not start.', done_at=now)
+                    rec.update(state='failed', error=j.get('error') or "It didn't start.", done_at=now)
                 elif j.get('state') == 'done' and j.get('sid'):
                     rec.update(sid=j['sid'], url=j.get('url'), launched=rec.get('launched') or j.get('finished') or now)
             if rec.get('sid') and rec['state'] not in ('done', 'failed'):
@@ -1540,7 +1541,7 @@ class Dispatch:
         rec['state'] = 'working'
         if row is None:
             if now - rec['launched'] > SHOW_LIST_S:
-                rec.update(state='failed', error=f'The chat is not in {self.app._label(rec["machine"])}\'s list any more.', done_at=now)
+                rec.update(state='failed', error=f'The chat isn\'t in {self.app._label(rec["machine"])}\'s list anymore.', done_at=now)
             else:
                 self._poll_soon(rec['machine'])
             return
@@ -1794,7 +1795,7 @@ class Features:
             self.app._machine(m.group(1))
             r = self.threads.thread(m.group(1), m.group(2))
             if not r:
-                raise self.HttpError(404, 'That chat is not one Switchboard has seen.')
+                raise self.HttpError(404, "Switchboard hasn't seen that chat.")
             return r
         if path == '/api/chats':
             ex = (query.get('exclude') or [''])[0]
@@ -1882,7 +1883,7 @@ class Features:
         if busy and when != 'idle':
             n = len(busy)
             lead = busy[0][1]['summary'] if n == 1 else f'{n} of these chats still have work running.'
-            return {'ok': False, 'need': 'busy', 'error': f'{lead} Stop them when it finishes, or now, which cuts it off.',
+            return {'ok': False, 'need': 'busy', 'error': f'{lead} Stop them when the work finishes, or now, which cuts it off.',
                     'busy': [dict(b, machine=it['machine'], sid=it['sid'], title=self.app._title(it['machine'], it['sid']))
                              for it, b in busy]}
         later = {(it['machine'], it['sid']) for it, _ in busy}
