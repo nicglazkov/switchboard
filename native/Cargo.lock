@@ -5545,7 +5545,7 @@ dependencies = [
 
 [[package]]
 name = "sb-core"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "alacritty_terminal",
  "async-tungstenite",
@@ -5565,7 +5565,7 @@ dependencies = [
 
 [[package]]
 name = "sb-desktop"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "alacritty_terminal",
  "chrono",
@@ -5587,7 +5587,7 @@ dependencies = [
 
 [[package]]
 name = "sb-hub"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "alacritty_terminal",
  "axum",
@@ -5606,7 +5606,7 @@ dependencies = [
 
 [[package]]
 name = "sb-install"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "dirs",
  "flate2",
@@ -5627,7 +5627,7 @@ dependencies = [
 
 [[package]]
 name = "sb-node"
-version = "0.8.9"
+version = "0.8.10"
 dependencies = [
  "futures-util",
  "sb-hub",

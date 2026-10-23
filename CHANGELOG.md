@@ -4,6 +4,12 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.8.10 (2026-10-22)
+
+- Copy and paste in a terminal work the same everywhere: selecting text copies it, Ctrl+C copies when text is selected, and Ctrl+V pastes on Windows and Linux.
+- A right-click in a terminal copies the selection, or pastes when nothing is selected.
+- Terminals on a Windows PC start without waiting for the app to answer the Windows console's first question.
+
 ## 0.8.9 (2026-10-22)
 
 - Updates come from Switchboard's GitHub releases, through your server. The app still checks every build's signature and SHA-256 before it installs it.

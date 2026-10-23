@@ -52,9 +52,14 @@ These work when you aren't typing in a field.
 
 ++enter++, ++esc++ and ++tab++ go to the program.
 
+Selecting text copies it, so it is ready to paste as soon as you let go of the mouse. A right-click copies the
+selection, or pastes when nothing is selected.
+
 | Mac | Windows and Linux | What it does |
 |---|---|---|
-| ++cmd+c++, ++cmd+v++ | ++ctrl+shift+c++, ++ctrl+shift+v++ or ++shift+insert++ | Copy, paste |
+| ++cmd+c++ | ++ctrl+c++ with text selected, ++ctrl+shift+c++ or ++ctrl+insert++ | Copy |
+| ++cmd+v++ | ++ctrl+v++, ++ctrl+shift+v++ or ++shift+insert++ | Paste |
+| ++ctrl+c++ with text selected | the same | Copy; with nothing selected, ++ctrl+c++ goes to the program |
 | ++shift+page-up++, ++shift+page-down++ | the same | Scroll |
 | ++cmd+up++, ++cmd+down++ | ++ctrl+home++, ++ctrl+end++ | Scroll to the top, the bottom |
 | ++cmd+left++, ++cmd+right++ | ++home++, ++end++ | Start, end of the line |

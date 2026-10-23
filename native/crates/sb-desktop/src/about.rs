@@ -19,6 +19,14 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.10",
+        &[
+            "Copy and paste in a terminal work the same everywhere: selecting text copies it, Ctrl+C copies when text is selected, and Ctrl+V pastes on Windows and Linux.",
+            "A right-click in a terminal copies the selection, or pastes when nothing is selected.",
+            "Terminals on a Windows PC start without waiting for the app to answer the Windows console's first question.",
+        ],
+    ),
+    (
         "0.8.9",
         &[
             "Updates come from Switchboard's GitHub releases, through your server. The app still checks every build's signature and SHA-256 before it installs it.",

@@ -40,6 +40,8 @@ pub const INPUT_PIECE: usize = 16 * 1024;
 const INPUT_BACKLOG: usize = 256;
 /// How long a write waits for the process to read before the terminal counts as stuck and is ended.
 pub const INPUT_PATIENCE: Duration = Duration::from_secs(60);
+/// The first thing ConPTY writes on Windows: a cursor position request (portable-pty opens it inheriting the cursor).
+const CONPTY_ASKS: &[u8] = b"\x1b[6n";
 
 fn size(cols: u16, rows: u16) -> PtySize {
     PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
@@ -65,21 +67,34 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     let killer = Arc::new(Mutex::new(Some(child.clone_killer())));
     let master = Arc::new(Mutex::new(Some(pair.master)));
 
+    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(INPUT_BACKLOG);
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
     let rate = s.rate.max(1) as f64;
+    let answer = in_tx.clone();
     std::thread::Builder::new().name("pty-read".into()).spawn(move || {
         let burst = (rate / 4.0).max(CHUNK as f64);
         let (mut tokens, mut last) = (burst, Instant::now());
         let mut buf = vec![0u8; CHUNK];
+        let mut first = cfg!(windows);
         loop {
             let n = match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break, // EOF, or EIO once the process is gone
                 Ok(n) => n,
             };
+            let mut out = &buf[..n];
+            if std::mem::take(&mut first) && out.starts_with(CONPTY_ASKS) {
+                // ConPTY asks where the cursor is and holds the process until it hears back. Nobody may be
+                // watching yet, and a viewer's answer would be a second one, so answer here and pass nothing on.
+                let _ = answer.try_send(b"\x1b[1;1R".to_vec());
+                out = &out[CONPTY_ASKS.len()..];
+                if out.is_empty() {
+                    continue;
+                }
+            }
             let now = Instant::now();
-            tokens = (tokens + now.duration_since(last).as_secs_f64() * rate).min(burst) - n as f64;
+            tokens = (tokens + now.duration_since(last).as_secs_f64() * rate).min(burst) - out.len() as f64;
             last = now;
-            if out_tx.blocking_send(buf[..n].to_vec()).is_err() {
+            if out_tx.blocking_send(out.to_vec()).is_err() {
                 break; // nobody is listening any more
             }
             if tokens < 0.0 {
@@ -88,7 +103,6 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
         }
     })?;
 
-    let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(INPUT_BACKLOG);
     std::thread::Builder::new().name("pty-write".into()).spawn(move || {
         while let Some(b) = in_rx.blocking_recv() {
             if writer.write_all(&b).and_then(|_| writer.flush()).is_err() {

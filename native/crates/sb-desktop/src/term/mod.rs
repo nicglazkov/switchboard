@@ -81,16 +81,17 @@ pub fn bind_keys(cx: &mut App) {
             None => KeyBinding::new(k, TermSizeReset, t),
         });
     }
+    // Copy and paste. Ctrl+C copies too when text is selected (`on_key`); with nothing selected it goes to the program.
     if MAC {
         b.push(KeyBinding::new("cmd-c", TermCopy, t));
         b.push(KeyBinding::new("cmd-v", TermPaste, t));
     } else {
+        b.push(KeyBinding::new("ctrl-v", TermPaste, t));
         b.push(KeyBinding::new("ctrl-shift-c", TermCopy, t));
         b.push(KeyBinding::new("ctrl-shift-v", TermPaste, t));
+        b.push(KeyBinding::new("ctrl-insert", TermCopy, t));
         b.push(KeyBinding::new("shift-insert", TermPaste, t));
-        for k in
-            ["ctrl-n", "ctrl-k", "ctrl-enter", "ctrl-q", "ctrl-w", "ctrl-t", "ctrl-o", "ctrl-b", "ctrl-c", "ctrl-v"]
-        {
+        for k in ["ctrl-n", "ctrl-k", "ctrl-enter", "ctrl-q", "ctrl-w", "ctrl-t", "ctrl-o", "ctrl-b", "ctrl-c"] {
             b.push(KeyBinding::new(k, NoAction, t));
         }
     }
@@ -1364,6 +1365,11 @@ impl TermTab {
             cx.stop_propagation();
             return;
         }
+        // Ctrl+C with text selected copies it, as in Windows Terminal; the selection goes, so the next one interrupts.
+        if m.control && !m.shift && !m.alt && !m.platform && k.key == "c" && self.copy_selection(true, cx) {
+            cx.stop_propagation();
+            return;
+        }
         if self.phase != Phase::Open {
             if k.key == "enter" && !m.modified() {
                 self.primary(cx);
@@ -1425,12 +1431,25 @@ impl TermTab {
     }
 
     fn on_copy(&mut self, _: &TermCopy, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(s) = self.term.selection_to_string().filter(|s| !s.is_empty()) {
-            crate::state::copy_text(cx, s);
+        self.copy_selection(false, cx);
+    }
+
+    /// Puts the selected text on the clipboard, and with `clear` lets go of the selection. False if none is selected.
+    fn copy_selection(&mut self, clear: bool, cx: &mut Context<Self>) -> bool {
+        let Some(s) = self.term.selection_to_string().filter(|s| !s.is_empty()) else { return false };
+        crate::state::copy_text(cx, s);
+        if clear {
+            self.term.selection = None;
+            cx.notify();
         }
+        true
     }
 
     fn on_paste(&mut self, _: &TermPaste, _: &mut Window, cx: &mut Context<Self>) {
+        self.paste(cx);
+    }
+
+    fn paste(&mut self, cx: &mut Context<Self>) {
         if self.phase != Phase::Open {
             return;
         }
@@ -1560,6 +1579,13 @@ impl TermTab {
             self.last_cell = Some((line, col));
             return;
         }
+        // Right-click copies the selection, or pastes when nothing is selected (as in Windows Terminal and PuTTY).
+        if ev.button == MouseButton::Right {
+            if !self.copy_selection(true, cx) {
+                self.paste(cx);
+            }
+            return;
+        }
         if ev.button != MouseButton::Left {
             return;
         }
@@ -1636,6 +1662,9 @@ impl TermTab {
                 {
                     self.open_target(f.target, cx);
                 }
+            } else {
+                // Selecting copies: the text is on the clipboard as soon as the mouse lets go.
+                self.copy_selection(false, cx);
             }
             cx.notify();
         }

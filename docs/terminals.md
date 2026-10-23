@@ -55,6 +55,13 @@ every computer you use the app on (which tabs are open, and folding, stay on eac
 Double-click a tab's title, type, and press ++enter++ (++esc++ puts it back). The name shows everywhere, and in
 Claude Code's own `/resume` list. [Names](chats.md#names)
 
+## Copy and paste
+
+Select text with the mouse and it is copied. ++cmd+c++ and ++cmd+v++ work on a Mac. On Windows and Linux, use
+++ctrl+v++ to paste and ++ctrl+c++ to copy while text is selected; with nothing selected, ++ctrl+c++ interrupts the
+program as usual. A right-click copies the selection, or pastes when nothing is selected. An image on the clipboard
+is sent to the chat's computer and its path pasted. [All the keys](shortcuts.md#in-a-terminal)
+
 ## Drag files in
 
 Drop files on a chat's terminal to send them to its computer: each one is uploaded there (up to 20 MB) and its
