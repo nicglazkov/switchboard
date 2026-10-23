@@ -937,7 +937,7 @@ mod tests {
         std::fs::write(d.join("native/dist/switchboard-hub-mac"), "").unwrap();
         let (prog, args) = k.command(Os::Mac);
         assert_eq!(prog, Path::new("/bin/bash"));
-        assert!(args[0].ends_with("scripts/install/install-server.sh"));
+        assert!(Path::new(&args[0]).ends_with("scripts/install/install-server.sh"));
         assert_eq!(args[3], "--hub-binary");
         let _ = std::fs::remove_dir_all(&d);
     }
