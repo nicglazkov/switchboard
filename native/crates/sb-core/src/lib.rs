@@ -342,6 +342,35 @@ impl Core {
         update::offer(&app, &key, update::platform(), mine, bad_build)
     }
 
+    /// Settings > Server: the server's version, parts and last update (404 from a server before 0.8.11).
+    pub fn server_info(&self) -> Result<api::ApiServer, CoreError> {
+        self.client.server_info()
+    }
+
+    /// Settings > Server: the newest lines of the server's, the hub's or the downloads' log.
+    pub fn server_logs(&self, part: &str, lines: u32) -> Result<String, CoreError> {
+        self.client.server_logs(part, lines)
+    }
+
+    pub fn server_restart(&self) -> Result<(), CoreError> {
+        self.client.server_restart()
+    }
+
+    pub fn server_update(&self, version: &str, sha256: &str) -> Result<(), CoreError> {
+        self.client.server_update(version, sha256)
+    }
+
+    /// A newer server kit in the signed list (where this app's own updates come from), for a server at `server_ver`.
+    /// None in a build without the update key, which can't tell a genuine list.
+    pub fn server_offer(&self, server_ver: &str) -> Result<Option<update::ServerOffer>, CoreError> {
+        let Some(key) = update::key() else { return Ok(None) };
+        let app = match update::feed_url() {
+            Some(feed) => update::fetch_feed(feed, &format!("SwitchboardDesktop/{}", version()))?,
+            None => self.client.app_latest()?,
+        };
+        update::server_offer(&app, &key, server_ver)
+    }
+
     /// v2, Settings: the machines as configured.
     pub fn machines(&self) -> Result<api::ApiMachines, CoreError> {
         self.client.machines()

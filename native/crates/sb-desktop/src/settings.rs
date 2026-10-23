@@ -15,6 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 #[path = "settings_library.rs"]
 mod library_ui;
+#[path = "settings_server.rs"]
+mod server_ui;
 
 use crate::state::AppState;
 use crate::term::colors;
@@ -32,11 +34,12 @@ pub enum Section {
     Chrome,
     Budget,
     Updates,
+    Server,
     Privacy,
 }
 
 /// About is not here: it is its own window (about.rs), from Switchboard > About Switchboard.
-const SECTIONS: [(Section, &str, &str); 10] = [
+const SECTIONS: [(Section, &str, &str); 11] = [
     (Section::Appearance, "Appearance", "sun"),
     (Section::Terminal, "Terminal", "term"),
     (Section::NewSessions, "New sessions", "plus"),
@@ -46,6 +49,7 @@ const SECTIONS: [(Section, &str, &str); 10] = [
     (Section::Chrome, "Chrome machine", "globe"),
     (Section::Budget, "Budget", "gauge"),
     (Section::Updates, "Updates", "update"),
+    (Section::Server, "Server", "tower"),
     (Section::Privacy, "AI and your Claude setup", "spark"),
 ];
 
@@ -164,6 +168,8 @@ pub struct SettingsView {
     lib_deleting: Option<(String, f64)>,
     /// The open dropdown (Terminal's default shell), if any.
     drop: ui::Drop,
+    /// Settings > Server (settings_server.rs).
+    srv: server_ui::Pane,
     _subs: Vec<Subscription>,
 }
 
@@ -239,14 +245,24 @@ impl SettingsView {
             lib_key_err: None,
             lib_deleting: None,
             drop: Default::default(),
+            srv: Default::default(),
             _subs: subs,
         };
         v.load(cx);
+        if section == Section::Server {
+            v.server_open(cx);
+        }
         v.app.update(cx, |s, cx| s.load_library(cx));
         v
     }
 
     pub fn go(&mut self, s: Section, cx: &mut Context<Self>) {
+        if self.section == Section::Server && s != Section::Server {
+            self.server_close();
+        }
+        if s == Section::Server && self.section != Section::Server {
+            self.server_open(cx);
+        }
         self.section = s;
         self.machine = None;
         self.picker = None;
@@ -2377,7 +2393,8 @@ impl SettingsView {
         // Machines list's server addresses).
         #[cfg(feature = "shots")]
         if let Some(y) = std::env::var("SB_SHOT_SCROLL").ok().and_then(|v| v.parse::<f32>().ok()) {
-            let list = self.section == Section::Machines && self.machine.is_none() && self.machines.is_some();
+            let list = (self.section == Section::Machines && self.machine.is_none() && self.machines.is_some())
+                || self.section == Section::Server;
             if list || self.machine.as_ref().is_some_and(|m| self.caps.contains_key(m) && self.mcp.contains_key(m)) {
                 self.scroll.set_offset(gpui::point(px(0.), px(-y)));
             }
@@ -2466,6 +2483,7 @@ impl SettingsView {
             Section::Chrome => self.chrome(&t, cx),
             Section::Budget => self.budget(&t, cx),
             Section::Updates => self.updates(&t, cx),
+            Section::Server => self.server(&t, cx),
             Section::Privacy => self.privacy(&t, cx),
         };
         div()

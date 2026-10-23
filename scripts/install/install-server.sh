@@ -469,6 +469,8 @@ s_server() {
   SCH=native/crates/sb-core/src/term/schemes.json
   mkdir -p "$NEW/$(dirname "$SCH")"
   cp "$REPO/$SCH" "$NEW/$SCH"
+  # What Settings > Server shows as this server's version (serverctl.py).
+  if [ -f "$REPO/VERSION" ]; then cp "$REPO/VERSION" "$NEW/VERSION"; elif [ -n "$VERSION" ]; then printf '%s\n' "$VERSION" > "$NEW/VERSION"; fi
   rm -rf "$SHARE/app.old"
   [ -d "$APP" ] && mv "$APP" "$SHARE/app.old"
   mv "$NEW" "$APP"

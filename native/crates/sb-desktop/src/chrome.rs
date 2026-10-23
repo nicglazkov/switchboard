@@ -403,7 +403,7 @@ impl BoardView {
         // past that the row scrolls sideways, with the tab that shows kept in sight.
         // (With 40 px to spare: the Week chip and the header's own padding vary, and an estimate a little short scrolls the
         // first group's chip half out of sight.)
-        let fixed = if self.solo.is_some() { 750. } else { 830. };
+        let fixed = if self.solo.is_some() { 750. } else { 830. } + if self.tabs.len() >= 2 { 52. } else { 0. };
         let n_vis = slots.iter().filter(|s| matches!(s, crate::tabgroups::Slot::Tab(_))).count();
         let chip_room = |max: f32| -> f32 {
             slots
@@ -579,26 +579,8 @@ impl BoardView {
                                 .bg(crate::tabgroups::group_color(&t, gc)),
                         )
                     })
-                    // The live state's dot (the connection's color until the chat is known), then the star. A local
-                    // shell has no chat: a terminal glyph, in the phase's color once it has ended.
-                    .child(match tb.live_state(cx) {
-                        _ if tb.local.is_some() => ui::icon(
-                            "term",
-                            12.,
-                            if tb.ended() {
-                                tb.phase.color(&t)
-                            } else if on {
-                                t.dim
-                            } else {
-                                t.faint
-                            },
-                        )
-                        .ml(px(-2.))
-                        .mr(px(-3.))
-                        .into_any_element(),
-                        Some(l) => live_dot(&t, &l, ("tab-live", i), 7.),
-                        None => div().flex_none().size(px(7.)).rounded_full().bg(tb.phase.color(&t)).into_any_element(),
-                    })
+                    // The live state's dot (tab_dot), then the star.
+                    .child(tab_dot(&t, tb, on, ("tab-live", i), cx))
                     // A starred tab shows its star once, here; clicking it unstars (no second star on hover).
                     .when(starred, |d| {
                         d.child(
@@ -742,7 +724,248 @@ impl BoardView {
             .when(scrolls, |d| d.child(self.tab_arrow(c, -1, off < -12.)))
             .child(row)
             .when(scrolls, |d| d.child(self.tab_arrow(c, 1, off > -max + 12.)));
-        strip.child(row).child(self.add_btn(c))
+        // Two or more tabs: a button before "+" that lists them all, for a row too long to look along.
+        strip.child(row).when(n_tabs >= 2, |d| d.child(self.all_tabs_btn(c, n_tabs))).child(self.add_btn(c))
+    }
+
+    /// The tab list's button: a list glyph and how many tabs are open, pressed while its menu shows.
+    fn all_tabs_btn(&self, c: &Ctx, n: usize) -> impl IntoElement {
+        let t = c.t;
+        let (hover, press) = (t.hover, t.press);
+        div()
+            .id("tab-all")
+            .flex_none()
+            .ml(px(4.))
+            .h(px(28.))
+            .px(px(7.))
+            .flex()
+            .items_center()
+            .gap(px(5.))
+            .rounded(px(ui::R_ITEM))
+            .shadow(vec![Theme::ring(t.line2)])
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .active(move |s| s.bg(press))
+            .when(self.tabs_open, |d| d.bg(press))
+            .tooltip(ui::tip("All tabs"))
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(c.cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.tabs_open = !this.tabs_open;
+                this.add_open = false;
+                this.plan_open = false;
+                this.tab_menu = None;
+                cx.notify();
+            }))
+            .child(ui::icon("list", 13., t.dim))
+            .child(div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child(n.to_string()))
+    }
+
+    /// The tab list under its button: every open tab in the row's order (starred, each group under its name, the
+    /// rest), the one that shows marked. A click shows that tab (opening its group if folded); the cross closes it.
+    pub fn all_tabs_menu(&self, c: &Ctx, win_w: f32, win_h: f32) -> Option<AnyElement> {
+        if !self.tabs_open || self.tabs.len() < 2 {
+            return None;
+        }
+        let t = c.t;
+        let cx = c.cx;
+        let (infos, groups) = self.tab_infos(cx);
+        let folded = self.folded(cx);
+        // The heading each tab falls under; headings show only when there is more than one kind.
+        #[derive(Clone, Copy, PartialEq)]
+        enum Part {
+            Star,
+            Group(usize),
+            Rest,
+        }
+        let part = |i: usize| match infos.get(i) {
+            Some(x) if x.star => Part::Star,
+            Some(x) if x.group.is_some() => Part::Group(x.group.unwrap_or(0)),
+            _ => Part::Rest,
+        };
+        let n = self.tabs.len();
+        let headed = (0..n).any(|i| part(i) != Part::Rest);
+        let head = |text: String, color: Option<gpui::Hsla>, note: Option<&'static str>, first: bool| {
+            div()
+                .px(px(10.))
+                .pt(px(if first { 4. } else { 10. }))
+                .pb(px(4.))
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .text_size(px(11.5))
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(t.faint)
+                .when_some(color, |d, c| d.child(div().flex_none().size(px(8.)).rounded_full().bg(c)))
+                .child(ui::line(text))
+                .when_some(note, |d, n| d.child(div().font_weight(FontWeight::NORMAL).child(n)))
+        };
+        let mut list = div().flex().flex_col();
+        let mut last: Option<Part> = None;
+        for i in 0..n {
+            let p = part(i);
+            if headed && last != Some(p) {
+                list = list.child(match p {
+                    Part::Star => head("Starred".into(), None, None, last.is_none()),
+                    Part::Group(g) => {
+                        let gr = &groups[g];
+                        let name = if gr.name.trim().is_empty() {
+                            format!("{} group", cap(gr.color.name()))
+                        } else {
+                            gr.name.clone()
+                        };
+                        let note = folded.contains(&gr.id).then_some("· folded");
+                        head(name, Some(crate::tabgroups::group_color(&t, gr.color)), note, last.is_none())
+                    }
+                    Part::Rest => head("Other tabs".into(), None, None, last.is_none()),
+                });
+            }
+            last = Some(p);
+            let tb = self.tabs[i].read(cx);
+            let on = self.tab == i + 1;
+            let topic = sb_core::names::split(&tb.title).0;
+            let (hover, press) = (t.hover, t.press);
+            let gid = match p {
+                Part::Group(g) if folded.contains(&groups[g].id) => Some(groups[g].id.clone()),
+                _ => None,
+            };
+            let name: gpui::SharedString = format!("all-tab-{i}").into();
+            list = list.child(
+                div()
+                    .id(("all-tab", i))
+                    .group(name.clone())
+                    .relative()
+                    .flex_none()
+                    .h(px(34.))
+                    .pl(px(10.))
+                    .pr(px(5.))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.))
+                    .rounded(px(ui::R_ITEM))
+                    .cursor_pointer()
+                    .text_size(px(13.))
+                    .text_color(if on { t.ink } else { t.ink2 })
+                    .hover(move |s| s.bg(hover))
+                    .when(on, |d| {
+                        d.bg(press).font_weight(FontWeight::SEMIBOLD).child(
+                            div()
+                                .absolute()
+                                .left(px(2.))
+                                .top(px(9.))
+                                .bottom(px(9.))
+                                .w(px(2.))
+                                .rounded(px(1.))
+                                .bg(t.accent),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.tabs_open = false;
+                        if let Some(g) = &gid {
+                            this.toggle_fold(g, cx);
+                        }
+                        this.set_tab(i + 1, cx);
+                    }))
+                    .child(div().flex_none().w(px(12.)).flex().justify_center().child(tab_dot(
+                        &t,
+                        tb,
+                        on,
+                        ("all-live", i),
+                        cx,
+                    )))
+                    .child(ui::line(topic).flex_1())
+                    .when(!tb.label.is_empty(), |d| {
+                        d.child(
+                            ui::line(tb.label.clone())
+                                .flex_none()
+                                .max_w(px(110.))
+                                .text_color(t.faint)
+                                .text_size(px(12.)),
+                        )
+                    })
+                    .when(tb.bell && !on, |d| d.child(div().flex_none().size(px(6.)).rounded_full().bg(t.need)))
+                    .child(
+                        div()
+                            .id(("all-tab-x", i))
+                            .flex_none()
+                            .size(px(22.))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .rounded(px(ui::R_CHIP))
+                            .opacity(0.)
+                            .group_hover(name, |s| s.opacity(1.))
+                            .hover(move |s| s.bg(press))
+                            .tooltip(ui::tip("Close tab"))
+                            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                cx.stop_propagation();
+                                this.close_tab(i, cx);
+                                if this.tabs.len() < 2 {
+                                    this.tabs_open = false;
+                                }
+                            }))
+                            .child(ui::icon("x", 11., t.dim)),
+                    ),
+            );
+        }
+        // Under its button (just before "+"), kept inside the window.
+        let w = 380.;
+        let x = (lead() + self.tab_strip_width() - 20. - w).min(win_w - w - 8.).max(8.);
+        let max_h = (win_h - ui::header() - 40.).max(160.);
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .occlude()
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(|this, _, _, cx| {
+                        this.tabs_open = false;
+                        cx.notify();
+                    }),
+                )
+                .child(
+                    div()
+                        .id("all-tabs")
+                        .absolute()
+                        .top(px(ui::header() + 4.))
+                        .left(px(x))
+                        .w(px(w))
+                        .max_h(px(max_h))
+                        .overflow_y_scroll()
+                        .p(px(6.))
+                        .rounded(px(ui::R_POP))
+                        .border_1()
+                        .border_color(t.line2)
+                        .bg(t.panel2)
+                        .shadow(t.drop())
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .px(px(10.))
+                                .pt(px(4.))
+                                .pb(px(6.))
+                                .flex()
+                                .items_center()
+                                .text_size(px(13.))
+                                .font_weight(FontWeight::SEMIBOLD)
+                                .text_color(t.ink)
+                                .child(div().flex_1().child("Open tabs"))
+                                .child(
+                                    div()
+                                        .text_size(px(12.))
+                                        .font_weight(FontWeight::NORMAL)
+                                        .text_color(t.faint)
+                                        .child(format!("{n}")),
+                                ),
+                        )
+                        .child(list),
+                )
+                .into_any_element(),
+        )
     }
 
     /// "+" (a new chat, as always) joined to a chevron with the rest: a shell on this computer, by profile.
@@ -1122,7 +1345,8 @@ impl BoardView {
         let brand = 16. + 7. + 92. + 10. + 1. + 10.;
         let board = 110. + if self.solo.is_some() { 60. } else { 100. };
         let tabs = self.tabs.len() as f32 * (TAB_W + 5.);
-        brand + board + tabs
+        let list = if self.tabs.len() >= 2 { 52. } else { 0. };
+        brand + board + tabs + list
     }
 }
 
@@ -1186,6 +1410,41 @@ pub fn live_dot(t: &Theme, l: &sb_core::live::Live, id: impl Into<gpui::ElementI
     } else {
         dot.into_any_element()
     }
+}
+
+/// A terminal tab's lamp: its live state's dot (the connection's color until the chat is known). A local shell has
+/// no chat: a terminal glyph, in the phase's color once it has ended.
+fn tab_dot(
+    t: &Theme,
+    tb: &crate::term::TermTab,
+    on: bool,
+    id: impl Into<gpui::ElementId>,
+    cx: &gpui::App,
+) -> AnyElement {
+    match tb.live_state(cx) {
+        _ if tb.local.is_some() => ui::icon(
+            "term",
+            12.,
+            if tb.ended() {
+                tb.phase.color(t)
+            } else if on {
+                t.dim
+            } else {
+                t.faint
+            },
+        )
+        .ml(px(-2.))
+        .mr(px(-3.))
+        .into_any_element(),
+        Some(l) => live_dot(t, &l, id, 7.),
+        None => div().flex_none().size(px(7.)).rounded_full().bg(tb.phase.color(t)).into_any_element(),
+    }
+}
+
+/// "blue" as "Blue".
+fn cap(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().chain(c).collect()).unwrap_or_default()
 }
 
 /// A big chat's cost badge, "expensive" or "re-reads 312k": a hairline pill in amber with the gauge, the same height

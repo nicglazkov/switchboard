@@ -40,7 +40,7 @@ pub const INPUT_PIECE: usize = 16 * 1024;
 const INPUT_BACKLOG: usize = 256;
 /// How long a write waits for the process to read before the terminal counts as stuck and is ended.
 pub const INPUT_PATIENCE: Duration = Duration::from_secs(60);
-/// The first thing ConPTY writes on Windows: a cursor position request (portable-pty opens it inheriting the cursor).
+/// What ConPTY writes first on Windows: a cursor position request (portable-pty opens it inheriting the cursor).
 const CONPTY_ASKS: &[u8] = b"\x1b[6n";
 
 fn size(cols: u16, rows: u16) -> PtySize {
@@ -70,27 +70,30 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(INPUT_BACKLOG);
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
     let rate = s.rate.max(1) as f64;
-    let answer = in_tx.clone();
+    // Only the first read needs to answer; the clone goes after it, so dropping the Term still closes the input.
+    let mut answer = cfg!(windows).then(|| in_tx.clone());
     std::thread::Builder::new().name("pty-read".into()).spawn(move || {
         let burst = (rate / 4.0).max(CHUNK as f64);
         let (mut tokens, mut last) = (burst, Instant::now());
         let mut buf = vec![0u8; CHUNK];
-        let mut first = cfg!(windows);
         loop {
-            let n = match reader.read(&mut buf) {
+            let mut n = match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break, // EOF, or EIO once the process is gone
                 Ok(n) => n,
             };
-            let mut out = &buf[..n];
-            if std::mem::take(&mut first) && out.starts_with(CONPTY_ASKS) {
+            if let Some(tx) = answer.take()
+                && let Some(at) = buf[..n].windows(CONPTY_ASKS.len()).position(|w| w == CONPTY_ASKS)
+            {
                 // ConPTY asks where the cursor is and holds the process until it hears back. Nobody may be
                 // watching yet, and a viewer's answer would be a second one, so answer here and pass nothing on.
-                let _ = answer.try_send(b"\x1b[1;1R".to_vec());
-                out = &out[CONPTY_ASKS.len()..];
-                if out.is_empty() {
+                let _ = tx.try_send(b"\x1b[1;1R".to_vec());
+                buf.copy_within(at + CONPTY_ASKS.len()..n, at);
+                n -= CONPTY_ASKS.len();
+                if n == 0 {
                     continue;
                 }
             }
+            let out = &buf[..n];
             let now = Instant::now();
             tokens = (tokens + now.duration_since(last).as_secs_f64() * rate).min(burst) - out.len() as f64;
             last = now;

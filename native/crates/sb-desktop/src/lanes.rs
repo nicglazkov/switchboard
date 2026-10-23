@@ -85,9 +85,28 @@ fn os_name(os: Option<&str>) -> String {
     }
 }
 
-/// Quiet rows shown per machine before "n more", and how recent a quiet chat is to stay on the board.
-const QUIET_CAP: usize = 4;
-const QUIET_RECENT: f64 = 24. * 3600.;
+/// Quiet rows shown per machine (the column grows to fit them, it never scrolls), and how recent a quiet chat is to
+/// stay there; past either it is in History.
+pub const QUIET_CAP: usize = 12;
+const QUIET_RECENT: f64 = 2. * 86400.;
+
+/// A Quiet cell's rows, newest first: the ones it shows, and how many are left to History (past QUIET_RECENT, or
+/// past QUIET_CAP). A lane in its own window shows every recent one.
+pub fn quiet_rows<'a>(
+    snap: &'a sb_core::model::Snapshot,
+    now: f64,
+    keys: &[String],
+    all: bool,
+) -> (Vec<&'a Session>, usize) {
+    let mut recent: Vec<&Session> =
+        keys.iter().filter_map(|k| snap.session(k)).filter(|s| now - s.active < QUIET_RECENT).collect();
+    recent.sort_by(|a, b| b.active.total_cmp(&a.active));
+    let rest = keys.len() - recent.len().min(if all { usize::MAX } else { QUIET_CAP });
+    if !all {
+        recent.truncate(QUIET_CAP);
+    }
+    (recent, rest)
+}
 
 impl BoardView {
     pub fn board_area(&self, c: &Ctx, g: Geo, w: f32) -> AnyElement {
@@ -739,54 +758,29 @@ impl BoardView {
             .gap(px(if col.quiet() { 2. } else { 6. }))
             .min_w_0();
         if col.quiet() {
-            // Quiet keeps only the last day's idle chats, a few at a time; everything older is in History.
-            let recent: Vec<&String> = keys
-                .iter()
-                .filter(|k| c.app.snap.session(k).is_some_and(|s| c.now - s.active < QUIET_RECENT))
-                .collect();
-            let open = self.open.contains(machine) || self.solo.is_some();
-            let shown = if open { recent.len() } else { recent.len().min(QUIET_CAP) };
-            for k in &recent[..shown] {
-                if let Some(s) = c.app.snap.session(k) {
-                    cell = cell.child(self.quiet_row(c, s));
-                }
+            // Quiet keeps the last two days' idle chats, a dozen at most, one line each; the rest are in History.
+            let (rows, rest) = quiet_rows(&c.app.snap, c.now, keys, self.solo.is_some());
+            for s in rows {
+                cell = cell.child(self.quiet_row(c, s));
             }
-            let hover = t.ink;
-            let more = |id: String, label: String| {
-                div()
-                    .id(SharedString::from(id))
-                    .px(px(6.))
-                    .py(px(4.))
-                    .text_size(px(12.5))
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(t.faint)
-                    .cursor_pointer()
-                    .hover(move |s| s.text_color(hover))
-                    .child(label)
-            };
-            if recent.len() > QUIET_CAP && self.solo.is_none() {
-                let m = machine.to_string();
+            if rest > 0 && self.solo.is_none() {
+                let hover = t.ink;
                 cell = cell.child(
-                    more(
-                        format!("q-more-{machine}"),
-                        if open {
-                            "Show fewer".to_string()
-                        } else {
-                            format!("{} more today", recent.len() - QUIET_CAP)
-                        },
-                    )
-                    .on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        if !this.open.remove(&m) {
-                            this.open.insert(m.clone());
-                        }
-                        cx.notify();
-                    })),
-                );
-            }
-            let older = keys.len() - recent.len();
-            if older > 0 && self.solo.is_none() {
-                cell = cell.child(
-                    more(format!("q-hist-{machine}"), format!("{} older in History", older))
+                    div()
+                        .id(SharedString::from(format!("q-hist-{machine}")))
+                        .mt(px(2.))
+                        .px(px(6.))
+                        .py(px(4.))
+                        .flex()
+                        .items_center()
+                        .gap(px(5.))
+                        .text_size(px(12.5))
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .text_color(t.faint)
+                        .cursor_pointer()
+                        .hover(move |s| s.text_color(hover))
+                        .child(ui::icon("history", 12., t.faint))
+                        .child(format!("{rest} more in History"))
                         .on_click(c.cx.listener(|this, _: &ClickEvent, _, cx| this.view_history(cx))),
                 );
             }
@@ -1031,29 +1025,32 @@ impl BoardView {
             .into_any_element()
     }
 
+    /// One line: the name (cut short with an ellipsis), a cold pill for a small chat gone cold, and how long ago it
+    /// was last active ("Stopped" first when the reaper stopped it). The full time is in its tooltip.
     fn quiet_row(&self, c: &Ctx, s: &Session) -> AnyElement {
         let t = c.t;
         let on = self.sel.as_deref() == Some(s.key.as_str());
         let key = s.key.clone();
         let hover = t.hover;
-        // The time sits beside the name when the Quiet column has room, under it when it does not.
-        let wide = c.card_w * 0.85 >= 240.;
-        let when = fmt::when(s.active, c.now);
+        let age = fmt::sago(s.active, c.now);
+        let full = fmt::when(s.active, c.now);
+        let tip = if s.reaped_note() { format!("Stopped, last active {full}") } else { format!("Last active {full}") };
         let live = c.app.live_of(s, c.now, None);
         let (pill, pill_c) = (live.pill, crate::chrome::pill_color(&t, &live));
         div()
             .id(SharedString::from(format!("q-{}", s.key)))
+            .h(px(26.))
             .px(px(6.))
-            .py(px(5.))
             .rounded(px(ui::R_ITEM))
             .flex()
-            .when(wide, |d| d.items_start().gap(px(8.)))
-            .when(!wide, |d| d.flex_col())
+            .items_center()
+            .gap(px(8.))
             .text_size(px(13.))
             .text_color(if on { t.ink } else { t.ink2 })
             .cursor_pointer()
             .when(on, |d| d.bg(t.sel))
             .when(!on, |d| d.hover(move |st| st.bg(hover)))
+            .tooltip(ui::tip_text(tip))
             .on_mouse_down(
                 MouseButton::Right,
                 c.cx.listener({
@@ -1068,14 +1065,14 @@ impl BoardView {
                     this.select(Some(key.clone()), cx);
                 }
             }))
-            .child(ui::wrap(s.topic.clone()).flex_1().min_w_0().line_height(relative(1.35)))
-            .child(div().flex_none().pt(px(1.)).text_size(px(12.)).text_color(t.faint).child(if s.reaped_note() {
-                format!("Stopped, {when}")
-            } else {
-                when
-            }))
+            .child(ui::line(s.topic.clone()).flex_1())
             // A small chat gone cold stays here, and says so with the same pill a card would show.
             .when(pill == Some("cold"), |d| d.child(ui::state_pill(&t, "cold", pill_c).flex_none()))
+            .child(div().flex_none().text_size(px(12.)).text_color(t.faint).child(if s.reaped_note() {
+                format!("Stopped {age}")
+            } else {
+                age
+            }))
             .into_any_element()
     }
 

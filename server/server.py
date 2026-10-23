@@ -17,6 +17,7 @@ import notes as notes_mod  # noqa: E402
 import options as options_mod  # noqa: E402
 import addresses as addresses_mod  # noqa: E402
 import releases as releases_mod  # noqa: E402
+import serverctl  # noqa: E402
 from guard import GuardTimer  # noqa: E402
 
 PORT = 8130
@@ -1477,6 +1478,14 @@ class App:
             return self.app_latest(host)
         if path == '/api/models':  # the New sheet's and flags drawer's model picker (models.py)
             return models_mod.view(self.fleet.snapshot()['machines'])
+        if path == '/api/server':  # Settings > Server (serverctl.py)
+            return serverctl.info(self.state_dir)
+        if path == '/api/server/logs':
+            q = query or {}
+            try:
+                return {'ok': True, 'text': serverctl.logs((q.get('part') or ['server'])[0], (q.get('lines') or ['200'])[0])}
+            except ValueError:
+                raise HttpError(400, 'Ask for the server, hub or downloads log.')
         if path == '/api/flags':
             q = query or {}
             return self.flags_view((q.get('machine') or [''])[0], (q.get('sid') or [''])[0])
@@ -1561,6 +1570,17 @@ class App:
                     raise HttpError(409, "That's not waiting anymore.")
                 j['cancel'] = True
             return {'ok': True}
+        if path in ('/api/server/restart', '/api/server/update'):
+            try:
+                if path.endswith('restart'):
+                    return serverctl.restart()
+                return serverctl.start_update(self.state_dir, body.get('version'), body.get('sha256'))
+            except PermissionError as e:
+                raise HttpError(409, str(e))
+            except (ValueError, RuntimeError) as e:
+                raise HttpError(400, str(e))
+            except OSError as e:
+                raise HttpError(500, f"The server couldn't start that ({e}).")
         if path == '/api/flags':
             return self.flags_plan(body)
         if path == '/api/refresh':

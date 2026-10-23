@@ -275,6 +275,46 @@ pub fn offer(
     }))
 }
 
+/// A newer server kit in the signed list: what Settings > Server offers to install on the server.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ServerOffer {
+    pub version: String,
+    pub sha256: String,
+    pub size: u64,
+    /// The release's page, for What's new.
+    pub page: Option<String>,
+}
+
+/// The server kit in a GET /api/app answer, checked against the signature, when it is newer than `server_ver` (or
+/// the server can't say its version). None when the list has no kit (releases before 0.8.11).
+pub fn server_offer(app: &ApiApp, key: &VerifyingKey, server_ver: &str) -> Result<Option<ServerOffer>, CoreError> {
+    let Some(feed) = app.feed.as_ref() else {
+        return match &app.error {
+            Some(e) => Err(CoreError::Bad(e.clone())),
+            None => Ok(None),
+        };
+    };
+    let latest = verify(key, &feed.manifest, feed.sig.as_deref()).map_err(CoreError::Bad)?;
+    Ok(server_offer_from(&latest, server_ver, app.page.as_deref()))
+}
+
+pub fn server_offer_from(latest: &Latest, server_ver: &str, page: Option<&str>) -> Option<ServerOffer> {
+    let f = latest.files.get("server")?;
+    let new = Ver::parse(&latest.version)?;
+    if Ver::parse(server_ver).is_some_and(|v| v >= new)
+        || f.sha256.len() != 64
+        || !f.sha256.bytes().all(|c| c.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some(ServerOffer {
+        version: latest.version.clone(),
+        sha256: f.sha256.to_ascii_lowercase(),
+        size: f.size,
+        page: page.filter(|p| p.starts_with("https://") && !p.contains(char::is_whitespace)).map(str::to_string),
+    })
+}
+
 fn agent(user_agent: &str, secs: u64) -> ureq::Agent {
     let cfg = ureq::Agent::config_builder()
         .timeout_global(Some(std::time::Duration::from_secs(secs)))
@@ -820,6 +860,33 @@ mod tests {
         // The key as update-key.sh prints it.
         assert_eq!(parse_key(&b64(k.verifying_key().as_bytes())), Some(k.verifying_key()));
         assert!(parse_key("AAAA").is_none());
+    }
+
+    #[test]
+    fn the_server_kit_is_offered_only_when_signed_and_newer() {
+        let k = signer();
+        let m = format!(
+            r#"{{"version": "0.8.11", "files": {{"server": {{"file": "switchboard-server-kit.tar.gz", "sha256": "{}", "size": 9}}}}}}"#,
+            "CD".repeat(32)
+        );
+        let sig = b64(&k.sign(m.as_bytes()).to_bytes());
+        let app = ApiApp {
+            feed: Some(Feed { manifest: m.clone(), sig: Some(sig.clone()) }),
+            page: Some("https://github.com/acme/board/releases/tag/v0.8.11".into()),
+            ..Default::default()
+        };
+        let o = server_offer(&app, &k.verifying_key(), "0.8.10").unwrap().unwrap();
+        assert_eq!((o.version.as_str(), o.sha256.as_str()), ("0.8.11", "cd".repeat(32).as_str()));
+        assert!(o.page.is_some());
+        assert!(server_offer(&app, &k.verifying_key(), "0.8.11").unwrap().is_none(), "already there");
+        assert!(server_offer(&app, &k.verifying_key(), "").unwrap().is_some(), "a server that can't say");
+        let forged =
+            ApiApp { feed: Some(Feed { manifest: m.replace("0.8.11", "0.9.0"), sig: Some(sig) }), ..app.clone() };
+        assert!(server_offer(&forged, &k.verifying_key(), "0.8.10").is_err(), "the signature covers the kit");
+        let none = manifest("20261013120000", "0.9.0");
+        let sig = b64(&k.sign(none.as_bytes()).to_bytes());
+        let old = ApiApp { feed: Some(Feed { manifest: none, sig: Some(sig) }), ..Default::default() };
+        assert!(server_offer(&old, &k.verifying_key(), "0.8.10").unwrap().is_none(), "a list without a kit");
     }
 
     #[test]

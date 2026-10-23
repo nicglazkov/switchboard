@@ -1834,6 +1834,7 @@ impl TermTab {
                 .cursor_pointer()
                 .hover(|d| d.border_color(t.accent))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _, _, cx| {
                     this.term.scroll_display(Scroll::Bottom);
                     cx.notify();
@@ -1956,6 +1957,7 @@ impl TermTab {
                         }])
                         .occlude()
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .child(div().flex().items_center().gap(px(10.)).child(ui::icon("term", 16., color)).child(
                             div().text_size(px(14.)).font_weight(gpui::FontWeight::BOLD).text_color(t.ink).child(title),
                         ))
@@ -2053,6 +2055,7 @@ impl TermTab {
             .child(swatch(t, pal, 30., 16.))
             .child(if wide { name } else { "Look".to_string() })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                 this.colors_open = !this.colors_open;
                 cx.notify();
@@ -2208,6 +2211,7 @@ impl TermTab {
                     .font_family(crate::theme::UI)
                     .occlude()
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                    .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                     .child(head("App"))
                     .child(modes)
                     .child(div().mx(px(12.)).my(px(6.)).h(px(1.)).bg(t.rule))
@@ -2274,6 +2278,7 @@ impl TermTab {
                 .child(ui::icon("flag", 13., t.dim))
                 .child(sum)
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(move |_, _: &gpui::ClickEvent, _, cx| cx.emit(TermEvent::Flags(key.clone()))))
                 .into_any_element(),
         )
@@ -2296,6 +2301,7 @@ impl TermTab {
             .child(ui::icon("attach", 13., t.dim))
             .when(wide, |d| d.child("Attach"))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.attach(cx)))
             .into_any_element()
     }
@@ -2332,6 +2338,7 @@ impl TermTab {
                         .hover(move |st| st.bg(hover))
                         .child("Reconnect now")
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                         .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.reconnect_now(cx))),
                 )
                 .into_any_element(),
@@ -2361,6 +2368,7 @@ impl TermTab {
                 .child(ui::icon("fit", 13., t.dim))
                 .child(ui::num(format!("{}×{} from another window", self.size.0, self.size.1), 12., t.dim))
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
                 .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| {
                     this.take_size();
                     cx.notify();

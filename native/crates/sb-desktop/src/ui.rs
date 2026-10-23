@@ -603,10 +603,18 @@ pub fn tnum() -> gpui::FontFeatures {
 
 /// A small tooltip, as `.tooltip(ui::tip("Settings"))` takes it.
 pub fn tip(text: &'static str) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
-    move |_, cx| cx.new(|_| Tip(text)).into()
+    move |_, cx| cx.new(|_| Tip(text.into())).into()
 }
 
-pub struct Tip(&'static str);
+/// `tip` for text made at run time.
+pub fn tip_text(
+    text: impl Into<SharedString>,
+) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> gpui::AnyView + 'static {
+    let text = text.into();
+    move |_, cx| cx.new(|_| Tip(text.clone())).into()
+}
+
+pub struct Tip(SharedString);
 
 // ---------- the shared pieces every window uses ----------
 
@@ -953,6 +961,6 @@ impl gpui::Render for Tip {
             .shadow(t.drop())
             .text_size(px(12.))
             .text_color(t.ink2)
-            .child(self.0)
+            .child(self.0.clone())
     }
 }

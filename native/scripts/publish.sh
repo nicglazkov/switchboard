@@ -101,7 +101,11 @@ if [ -z "$UNSIGNED" ]; then
 fi
 SIGNED="$(mktemp -d)"
 trap 'rm -rf "${SIGNED:?}"' EXIT
-python3 "$HERE/publish_render.py" manifest --dist "$DIST" --version "$VERSION" --out "$SIGNED/latest.json"
+KIT="$NATIVE/../dist/server-kit/switchboard-server-kit.tar.gz"  # scripts/install/pack-server-kit.sh
+KIT_ARG=()
+[ -f "$KIT" ] && KIT_ARG=(--kit "$KIT")
+python3 "$HERE/publish_render.py" manifest --dist "$DIST" --version "$VERSION" --out "$SIGNED/latest.json" \
+  ${KIT_ARG[@]+"${KIT_ARG[@]}"}
 FILES+=("$SIGNED/latest.json")
 if [ -n "$KEY" ]; then
   sb_host_opt SB_UPDATE_PUBKEY || true

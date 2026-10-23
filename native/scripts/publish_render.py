@@ -73,7 +73,19 @@ def size_text(n):
 PLATFORMS = (('mac', 'MAC'), ('windows', 'WIN'), ('linux', 'LINUX'))  # latest.json key, ARTIFACTS key
 
 
-def make_manifest(dist, version):
+def kit_version(kit):
+    """The version in a server kit's VERSION file ("0.8.11 (abc1234)" gives "0.8.11"), or ''."""
+    import tarfile
+    try:
+        with tarfile.open(kit, 'r:gz') as t:
+            m = next((m for m in t.getmembers() if m.name.count('/') == 1 and m.name.endswith('/VERSION')), None)
+            f = m and t.extractfile(m)
+            return f.read().decode().split()[0] if f else ''
+    except (OSError, tarfile.TarError, IndexError, UnicodeDecodeError):
+        return ''
+
+
+def make_manifest(dist, version, kit=None):
     """latest.json's bytes for the builds in `dist`: what the apps compare their own version and build with.
     A build's id comes from <file>.build, which the build scripts write next to it."""
     files, mtimes = {}, []
@@ -90,6 +102,13 @@ def make_manifest(dist, version):
         mtimes.append(os.path.getmtime(path))
     if not files:
         die(f'no builds in {dist}')
+    if kit and os.path.isfile(kit):
+        # The server kit, for Settings > Server's update: the server installs it only if it matches this SHA-256.
+        kv = kit_version(kit)
+        if kv == version:
+            files['server'] = {'file': os.path.basename(kit), 'sha256': sha256(kit), 'build': '', 'size': os.path.getsize(kit)}
+        else:
+            print(f'publish: the server kit is {kv or "of no version"}, not {version}, so it is left out', file=sys.stderr)
     return (json.dumps({'version': version, 'built': max(mtimes), 'files': files}, indent=1) + '\n').encode()
 
 
@@ -147,9 +166,10 @@ def manifest_main(argv):
     ap.add_argument('--dist', required=True)
     ap.add_argument('--version', required=True)
     ap.add_argument('--out', required=True)
+    ap.add_argument('--kit', help='the server kit (pack-server-kit.sh), listed as "server" when it is this version')
     a = ap.parse_args(argv)
     with open(a.out, 'wb') as f:
-        f.write(make_manifest(a.dist, a.version))
+        f.write(make_manifest(a.dist, a.version, a.kit))
 
 
 def sign_main(argv):

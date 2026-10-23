@@ -255,6 +255,8 @@ pub struct BoardView {
     /// The header's "+" menu (from the chevron beside "+": with the local shells first), and the update popover.
     pub add_open: bool,
     pub add_terms: bool,
+    /// The tab list under its button at the end of the tab row.
+    pub tabs_open: bool,
     /// Windows and Linux: the app menu (the Mac's menu bar) is open.
     pub app_menu_open: bool,
     pub update_open: bool,
@@ -591,6 +593,7 @@ impl BoardView {
             freed_seen: std::cell::Cell::new(0.),
             freed_from: std::cell::Cell::new((0., 0.)),
             add_open: false,
+            tabs_open: false,
             add_terms: false,
             app_menu_open: false,
             update_open: false,
@@ -736,7 +739,7 @@ impl BoardView {
     }
 
     pub fn cap_for(&self, c: Column) -> usize {
-        if c.quiet() { self.cap * 2 } else { self.cap }
+        if c.quiet() { crate::lanes::QUIET_CAP } else { self.cap }
     }
 
     fn order(&self, cx: &App) -> Vec<String> {
@@ -747,7 +750,22 @@ impl BoardView {
         } else {
             (self.open.clone(), app.settings.shut.iter().cloned().collect())
         };
-        b.order(|c| self.cap_for(c), &open, &shut)
+        // Board::order, with Quiet in the order it shows: newest first, the last two days, a dozen at most.
+        let now = AppState::now();
+        let mut keys = Vec::new();
+        for lane in b.lanes.iter().filter(|l| !shut.contains(&l.machine)) {
+            for (ci, cell) in lane.cells.iter().enumerate() {
+                let col = Column::ALL[ci];
+                if col.quiet() {
+                    let (rows, _) = crate::lanes::quiet_rows(&app.snap, now, cell, self.solo.is_some());
+                    keys.extend(rows.iter().map(|s| s.key.clone()));
+                } else {
+                    let n = if open.contains(&lane.machine) { cell.len() } else { cell.len().min(self.cap_for(col)) };
+                    keys.extend(cell[..n].iter().cloned());
+                }
+            }
+        }
+        keys
     }
 
     pub fn select(&mut self, key: Option<String>, cx: &mut Context<Self>) {
@@ -977,6 +995,8 @@ impl BoardView {
             self.cancel_group_name(cx);
         } else if self.chat_edit.is_some() {
             self.cancel_chat_name(cx);
+        } else if self.tabs_open {
+            self.tabs_open = false;
         } else if self.group_menu.is_some() || self.tab_menu.is_some() {
             self.group_menu = None;
             self.tab_menu = None;
@@ -1757,6 +1777,7 @@ impl BoardView {
                         "library" => crate::settings::Section::Library,
                         "budget" => crate::settings::Section::Budget,
                         "updates" => crate::settings::Section::Updates,
+                        "server" => crate::settings::Section::Server,
                         "privacy" => crate::settings::Section::Privacy,
                         _ => crate::settings::Section::Appearance,
                     };
@@ -1927,6 +1948,10 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                                 }
                                 Err(e) => eprintln!("sb-shot could not save {}: {e}", path.display()),
                             },
+                            // Linux: the X screen, where this window is in front.
+                            Ok(Err(_)) if cfg!(target_os = "linux") && x_screen_shot(&path) => {
+                                eprintln!("sb-shot saved {} (X screen)", path.display())
+                            }
                             Ok(Err(e)) => eprintln!("sb-shot could not render: {e:#}"),
                             Err(e) => eprintln!("sb-shot no {which} window: {e:#}"),
                         }
@@ -2432,6 +2457,7 @@ impl Render for BoardView {
         root = root.children(self.group_menu_el(&c, w));
         root = root.children(self.float_layer(&c, w, h));
         root = root.children(self.add_menu(&c, w));
+        root = root.children(self.all_tabs_menu(&c, w, h));
         root = root.children(self.app_menu(&c, decorations));
         root = root.children(self.update_pop(&c));
         root = root.children(self.flags_layer(&c, w, h));

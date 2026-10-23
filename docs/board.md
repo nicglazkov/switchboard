@@ -19,7 +19,7 @@ Each computer gets a row. Each chat sits in a column by what it needs from you, 
 | <span class="sb-pill run">Working</span> | Claude is working. A chat with no progress for 6 hours says **Stalled** |
 | <span class="sb-pill warm">Warm now</span> | Quiet, with its cache still warm, so a reply is cheap. The one about to go cold is first |
 | <span class="sb-pill cold">Gone cold</span> | Quiet, its cache has run out, and it is big (150k tokens or more), so the next message reads it all again |
-| <span class="sb-pill">Quiet</span> | Everything else from the last 24 hours: small chats gone cold (with a **cold** pill), chats whose cache isn't known yet, stopped chats. Four per computer, then **N more today**; older ones are in History |
+| <span class="sb-pill">Quiet</span> | Everything else from the last two days, one line each, newest first: small chats gone cold (with a **cold** pill), chats whose cache isn't known yet, stopped chats. Up to 12 per computer; the column grows to fit them and never scrolls. Older ones, and any past 12, are in History (**N more in History**) |
 
 The server decides each chat's state once, and the board, the terminal tabs, the details and the iPhone all show
 that same answer. [What warm and cold mean](chats.md#warm-and-cold)

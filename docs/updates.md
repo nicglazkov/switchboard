@@ -68,6 +68,21 @@ off.
 
 ## The server
 
+From 0.8.11, **Settings > Server** in the app updates it. When the release list has a newer server, the page
+says so: click **Update server**. It shows each step (Download, Check, Install, Restart) and takes about a minute.
+Your chats keep running, and open terminals reconnect by themselves.
+
+The server downloads the new version from the GitHub release, and installs it only if it matches the SHA-256 in
+the release's signed list, which the app has checked with its key. If anything goes wrong, the old server keeps
+running and the page says what happened; **Update server** tries again.
+
+The same page shows whether each part is running (the server, the hub behind terminals and linked computers, and
+the downloads for Add a machine), the free disk space, a **Restart** button, each part's logs, and **Copy
+details** for a bug report.
+
+A server from before 0.8.11, one on Windows, or one running from a copy of the code can't update itself. Update
+it once by hand:
+
 Run the install line again on the server:
 
 ```sh

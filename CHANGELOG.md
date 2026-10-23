@@ -4,6 +4,13 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.8.11 (2026-10-23)
+
+- Settings > Server shows whether your server and its parts are running, and updates it with one click when a new version is out. It can also restart it, show its logs and copy its details for a bug report.
+- Quiet keeps each chat to one line, up to 12 per computer from the last two days. Older ones are in History.
+- A button at the end of the tab row lists every open tab, by group.
+- A right-click on a pill or tip over a terminal no longer pastes into it, and Windows terminals start reliably.
+
 ## 0.8.10 (2026-10-22)
 
 - Copy and paste in a terminal work the same everywhere: selecting text copies it, Ctrl+C copies when text is selected, and Ctrl+V pastes on Windows and Linux.

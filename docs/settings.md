@@ -78,6 +78,11 @@ A daily share of your weekly limit, a 5-hour cap, and the hard limit. [Usage and
 
 Whether this build gets updates, what it last found, and **Check now**. [Updates](updates.md)
 
+## Server
+
+The computer that runs Switchboard: its version, whether each part is running, free disk space, **Update
+server** when a newer one is out, **Restart**, its logs, and **Copy details**. [Updates](updates.md#the-server)
+
 ## AI and your Claude setup
 
 Everything here is off on a new server until you turn it on. A server set up before these switches existed

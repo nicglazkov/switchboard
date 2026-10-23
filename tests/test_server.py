@@ -351,6 +351,18 @@ class HttpTest(unittest.TestCase):
         self.assertNotIn('roam', self.app.fleet.machines['desk'])
         self.assertEqual(self.req('/api/machines', {'op': 'roam', 'machine': 'desk', 'roam': 'yes'})[0], 400)
 
+    def test_server_page_routes(self):
+        st, body = self.req('/api/server')
+        self.assertEqual(st, 200)
+        i = json.loads(body)
+        self.assertEqual(i['mode'], 'checkout')        # tests run from the repository
+        self.assertFalse(i['can_manage'])
+        self.assertIn('git pull', i['why_not'])
+        self.assertEqual(self.req('/api/server/logs?part=../x')[0], 400)
+        self.assertEqual(self.req('/api/server/update', {'version': '9.9.9', 'sha256': 'a' * 64})[0], 409)
+        self.assertEqual(self.req('/api/server/restart', {})[0], 409)
+        self.assertEqual(self.req('/api/server/restart', {}, headers={'X-Switchboard': ''})[0], 403)
+
     def test_post_requires_header(self):
         st, _ = self.req('/api/action', {'machine': 'desk', 'verb': 'stop', 'sid': 'x'}, headers={'X-Switchboard': ''})
         self.assertEqual(st, 403)

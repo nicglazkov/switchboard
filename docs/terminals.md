@@ -41,7 +41,9 @@ Right-click a tab for **Star tab**, **Rename chat**, the group options, **Move t
 floating sheet** and **Close tab**. Drag a tab to reorder it, or down out of the row to give it its own window.
 ++cmd+1++ is the board, ++cmd+2++ to ++cmd+8++ the tabs in order, ++cmd+9++ the last one.
 
-With many tabs, each one shrinks to a dot before the row scrolls, and the one you're on keeps its title.
+With more tabs than fit, the row scrolls sideways, with an arrow at each end, and the one you're on stays in sight.
+The list button just before **+** (it shows how many tabs are open) lists every tab, starred first, then each
+group under its name: click one to go to it (a folded group opens), or its **x** to close it.
 
 ### Groups
 
@@ -57,10 +59,13 @@ Claude Code's own `/resume` list. [Names](chats.md#names)
 
 ## Copy and paste
 
-Select text with the mouse and it is copied. ++cmd+c++ and ++cmd+v++ work on a Mac. On Windows and Linux, use
-++ctrl+v++ to paste and ++ctrl+c++ to copy while text is selected; with nothing selected, ++ctrl+c++ interrupts the
-program as usual. A right-click copies the selection, or pastes when nothing is selected. An image on the clipboard
-is sent to the chat's computer and its path pasted. [All the keys](shortcuts.md#in-a-terminal)
+Select text with the mouse and it is copied. ++ctrl+c++ copies while text is selected, on every computer; with
+nothing selected it interrupts the program as usual. ++cmd+c++ and ++cmd+v++ work on a Mac, and ++ctrl+v++ pastes on
+Windows and Linux (so it no longer reaches the program there). A right-click copies the selection, or pastes when
+nothing is selected. An image on the clipboard is sent to the chat's computer and its path pasted.
+
+A program that uses the mouse itself gets your clicks and drags; hold ++shift++ to select and right-click as usual.
+[All the keys](shortcuts.md#in-a-terminal)
 
 ## Drag files in
 

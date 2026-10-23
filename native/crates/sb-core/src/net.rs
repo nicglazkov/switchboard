@@ -808,6 +808,29 @@ impl Client {
         self.get_json("/api/app")
     }
 
+    /// Settings > Server: GET /api/server. A server from before 0.8.11 answers 404.
+    pub fn server_info(&self) -> Result<crate::api::ApiServer, CoreError> {
+        self.get_json("/api/server")
+    }
+
+    /// GET /api/server/logs?part=server|hub|downloads&lines=N
+    pub fn server_logs(&self, part: &str, lines: u32) -> Result<String, CoreError> {
+        self.get_json::<crate::api::ApiServerLogs>(&format!("/api/server/logs?part={}&lines={lines}", enc(part)))
+            .map(|l| l.text)
+    }
+
+    /// POST /api/server/restart: the server, the hub and the downloads stop and start again.
+    pub fn server_restart(&self) -> Result<(), CoreError> {
+        self.with_base(|base| self.post_json(base, "/api/server/restart", &serde_json::json!({})).map(|_| ()))
+    }
+
+    /// POST /api/server/update {version, sha256}: the server installs that release's kit (its SHA-256 from the
+    /// signed list, see update::server_offer) and restarts.
+    pub fn server_update(&self, version: &str, sha256: &str) -> Result<(), CoreError> {
+        let body = serde_json::json!({"version": version, "sha256": sha256});
+        self.with_base(|base| self.post_json(base, "/api/server/update", &body).map(|_| ()))
+    }
+
     /// v2: GET /api/machines
     pub fn machines(&self) -> Result<crate::api::ApiMachines, CoreError> {
         self.get_json("/api/machines")

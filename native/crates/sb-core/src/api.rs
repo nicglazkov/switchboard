@@ -2258,3 +2258,76 @@ mod places_tests {
         assert!(odd.notify.is_empty());
     }
 }
+
+/// GET /api/server (server/serverctl.py): Settings > Server.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiServer {
+    /// "0.8.11"; empty when the server can't tell (an install from before it kept its version).
+    pub version: String,
+    pub commit: String,
+    /// "systemd", "launchd", "plain", "windows" or "checkout".
+    pub mode: String,
+    /// When it started (epoch seconds).
+    pub started: f64,
+    pub host: String,
+    pub os: String,
+    pub python: String,
+    pub hub: ApiServerHub,
+    pub downloads: ApiServerPart,
+    pub disk: Option<ApiDisk>,
+    /// It can restart and update itself; when not, `why_not` says why in words.
+    pub can_manage: bool,
+    pub why_not: Option<String>,
+    pub update: Option<ApiServerUpdate>,
+    /// The install line, which also updates it by hand.
+    pub install_line: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiServerHub {
+    pub installed: bool,
+    pub running: bool,
+    pub version: String,
+    /// Terminals open through it, and computers linked to it.
+    pub open: u32,
+    pub linked: u32,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiServerPart {
+    pub running: bool,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiDisk {
+    pub free: u64,
+    pub total: u64,
+}
+
+/// How far the last update got (selfupdate.py). `ok` is None while it runs.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiServerUpdate {
+    /// starting, downloading, unpacking, checking, server, hub, downloads, restarting, starting_up, done.
+    pub step: String,
+    pub version: String,
+    pub from: String,
+    pub started: f64,
+    pub at: f64,
+    pub ok: Option<bool>,
+    pub error: Option<String>,
+    pub got: u64,
+    pub total: u64,
+    pub finished: Option<f64>,
+}
+
+/// GET /api/server/logs
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ApiServerLogs {
+    pub text: String,
+}

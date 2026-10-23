@@ -26,6 +26,32 @@ import features  # noqa: E402  (tab groups: the server's own store and rules, ke
 import options as options_mod  # noqa: E402  (the opt-in switches, as the server words them)
 
 
+# SB_FIXTURE_SERVER=ok|old|updating|failed|stopped: Settings > Server. "old" is a server from before 0.8.11 (no
+# /api/server), "updating" is part way through a download, "stopped" has the hub down.
+SERVER_MODE = os.environ.get('SB_FIXTURE_SERVER') or 'ok'
+
+
+def server_info():
+    now = time.time()
+    up = None
+    if SERVER_MODE == 'updating':
+        up = {'step': 'downloading', 'version': '0.8.12', 'from': '0.8.11', 'started': now - 8, 'at': now, 'ok': None,
+              'got': 3_100_000, 'total': 7_400_000}
+    elif SERVER_MODE == 'failed':
+        up = {'step': 'downloading', 'version': '0.8.12', 'from': '0.8.11', 'started': now - 300, 'at': now - 240,
+              'ok': False, 'finished': now - 240, 'error': "the download doesn't match the release's signed list, so it was not installed"}
+    return {'ok': True, 'version': '0.8.11', 'commit': 'abc1234', 'mode': 'systemd', 'started': now - 3 * 86400 - 5000,
+            'host': 'homeserver', 'os': 'Ubuntu 24.04.1 LTS', 'python': '3.12.3',
+            'hub': {'installed': True, 'running': SERVER_MODE != 'stopped', 'version': '0.8.11', 'open': 3, 'linked': 2},
+            'downloads': {'running': True}, 'disk': {'free': 182_000_000_000, 'total': 250_000_000_000},
+            'can_manage': True, 'why_not': None, 'update': up,
+            'install_line': 'curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash'}
+
+
+SERVER_LOG = '\n'.join(f'2026-10-23T09:{m:02d}:00-0700 homeserver python3[812]: GET /api/sessions 200 ({m % 7 + 2} ms)'
+                        for m in range(0, 40))
+
+
 class HttpError(Exception):
     def __init__(self, code, msg):
         super().__init__(msg)
@@ -565,6 +591,10 @@ class H(BaseHTTPRequestHandler):
             return self._json({'ok': True, 'root': '/Users/you/Claude', 'folder': folder, 'dirs': dirs, 'files': files, 'more': False})
         if p == '/api/version':
             return self._json(dict(VERSION, ok=True))
+        if p == '/api/server' and SERVER_MODE != 'old':
+            return self._json(server_info())
+        if p == '/api/server/logs' and SERVER_MODE != 'old':
+            return self._json({'ok': True, 'text': SERVER_LOG})
         if p.startswith('/api/folders/'):
             return self._json({'ok': True, 'root': '~/Claude', 'folders': [
                 {'folder': '', 'name': 'Claude', 'kids': True}, {'folder': 'switchboard', 'name': 'switchboard', 'kids': True},
