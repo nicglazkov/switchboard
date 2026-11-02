@@ -39,6 +39,22 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(any(p.name.startswith('settings.json.bak-sb-') for p in (self.home / '.claude').iterdir()))
         self.assertTrue((self.home / '.claude' / 'switchboard' / 'statusline.prev.json').exists())
 
+    def test_statusline_refreshes_while_idle(self):
+        s = self.sb.merge_settings({}, '/h/sb.py', 'python3')
+        self.assertEqual(s['statusLine']['refreshInterval'], self.sb.SL_REFRESH)
+
+    def test_heal_statusline_adds_refresh_to_ours_only(self):
+        old = {'model': 'opus', 'statusLine': {'type': 'command', 'command': 'python3 /h/.claude/switchboard/sb.py statusline', 'padding': 0}}
+        self.settings.write_text(json.dumps(old))
+        self.assertTrue(self.sb.heal_statusline(home=self.home))
+        s = json.loads(self.settings.read_text())
+        self.assertEqual(s['statusLine']['refreshInterval'], self.sb.SL_REFRESH)
+        self.assertEqual(s['model'], 'opus')
+        self.assertFalse(self.sb.heal_statusline(home=self.home))  # once
+        self.settings.write_text(json.dumps({'statusLine': {'type': 'command', 'command': 'printf mine'}}))
+        self.assertFalse(self.sb.heal_statusline(home=self.home))  # a user's own status line is left alone
+        self.assertNotIn('refreshInterval', json.loads(self.settings.read_text())['statusLine'])
+
     def test_hook_command_uses_forward_slashes(self):
         s = self.sb.merge_settings({}, 'C:\\Users\\you\\.claude\\switchboard\\sb.py', 'python')
         self.assertEqual(s['statusLine']['command'], 'python C:/Users/you/.claude/switchboard/sb.py statusline')

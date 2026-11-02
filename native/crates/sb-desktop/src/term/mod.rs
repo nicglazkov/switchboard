@@ -589,7 +589,7 @@ impl TermTab {
 
     /// Screenshots: show the strip in a state (run, warm, warmend, cold, wait, parked) with no connection.
     pub fn shot_live(&mut self, kind: &str, cx: &mut Context<Self>) {
-        use sb_core::live::{Live, LiveKind as K, clock};
+        use sb_core::live::{CacheTag, Live, LiveKind as K, clock};
         let now = AppState::now();
         let mk = |kind, word, detail: String, left: u64| Live {
             kind,
@@ -602,6 +602,17 @@ impl TermTab {
             expensive: None,
             stale: None,
             hint: false,
+            cache: match kind {
+                K::Warm => {
+                    Some(CacheTag { kind: K::Warm, word: "Warm", detail: clock(left), urgent: left > 0 && left <= 60 })
+                }
+                K::Cold => {
+                    Some(CacheTag { kind: K::Cold, word: "Cold", detail: "re-reads 312k".into(), urgent: false })
+                }
+                K::Wait => Some(CacheTag { kind: K::Warm, word: "Warm", detail: clock(190), urgent: false }),
+                K::Run => Some(CacheTag { kind: K::Warm, word: "Warm", detail: String::new(), urgent: false }),
+                _ => Some(CacheTag { kind: K::Cold, word: "Cold", detail: "re-reads 98k".into(), urgent: false }),
+            },
         };
         let l = match kind {
             "run" => {
@@ -2559,15 +2570,30 @@ impl Render for TermTab {
             // The same chat the tab's dot reads (after /clear too), so the strip and the dot never disagree.
             let snap_s = self.chat(cx).cloned();
             let ctx_k = snap_s.as_ref().map(|s| s.ctx).unwrap_or(0);
-            let word = l.word;
+            // Two things, each in its own place: on the left what the chat is doing (Needs you, Working, Idle...),
+            // on the right its cache (Warm 4:12, Cold). A chat that needs you still says whether its cache is warm.
+            let quiet = matches!(l.kind, K::Warm | K::Cold | K::Idle) && !l.working();
+            let word = if quiet { "Idle" } else { l.word };
             // Working says for how long (this terminal saw it start); everything else is the shared detail.
             let detail = match self.work_since {
                 Some(t) if l.working() && l.stale.is_none() => {
                     format!("for {}", sb_core::live::span((now - t).max(0.) as u64))
                 }
+                _ if quiet && l.stale.is_none() => match &snap_s {
+                    Some(s) if s.active > 0. => match sb_core::fmt::sago(s.active, now).as_str() {
+                        "now" => "last reply just now".to_string(),
+                        a => format!("last reply {a} ago"),
+                    },
+                    _ => String::new(),
+                },
                 _ => l.detail.clone(),
             };
-            let c = crate::chrome::live_color(&ct, &l);
+            let c = if quiet && l.stale.is_none() { ct.ink2 } else { crate::chrome::live_color(&ct, &l) };
+            let big = ctx_k >= sb_core::model::GUARD;
+            let fresh_key = snap_s
+                .as_ref()
+                .filter(|s| s.ctx > 0 && !l.working() && !matches!(l.kind, K::Stall) && self.local.is_none())
+                .map(|s| s.key.clone());
             // The detail goes first as room runs out (an ellipsis), then the context label shortens, then the meter.
             let ctx_short = strip_w < 700.;
             let meter = strip_w >= 520.;
@@ -2578,13 +2604,7 @@ impl Render for TermTab {
                 Some(s) if s.heavy() => ct.cold,
                 _ => ct.fill,
             };
-            let detail_c = if l.stale.is_some() {
-                ct.faint
-            } else if l.kind == K::Warm && l.urgent {
-                ct.cold
-            } else {
-                ct.dim
-            };
+            let detail_c = if l.stale.is_some() { ct.faint } else { ct.dim };
             let no_detail = detail.is_empty();
             div()
                 .flex_none()
@@ -2597,7 +2617,13 @@ impl Render for TermTab {
                 .border_b_1()
                 .border_color(ct.line)
                 .bg(crate::theme::mix(ct.panel, c, if ct.dark { 0.07 } else { 0.05 }))
-                .child(crate::chrome::live_dot(&ct, &l, "term-live", 8.))
+                .map(|d| {
+                    if quiet {
+                        d.child(div().flex_none().size(px(8.)).rounded_full().border_1().border_color(ct.faint))
+                    } else {
+                        d.child(crate::chrome::live_dot(&ct, &l, "term-live", 8.))
+                    }
+                })
                 .child(
                     div()
                         .flex_none()
@@ -2613,7 +2639,45 @@ impl Render for TermTab {
                     )
                 })
                 .when(no_detail, |d| d.child(div().flex_1()))
-                .when_some(l.expensive.clone(), |d, e| d.child(crate::chrome::cost_badge(&ct, &e, l.stale.is_some())))
+                .when_some(l.cache.clone(), |d, tag| {
+                    d.child(crate::chrome::cache_chip(&ct, &tag, big, l.stale.is_some()).id("term-cache"))
+                })
+                // Start fresh, one click, beside the cache: a summary of this chat, then this tab opens the new chat.
+                // Not while Claude works (Start fresh would stop it), and not before there is anything to summarize.
+                .when_some(fresh_key.clone(), |d, k| {
+                    let busy = self.app.read(cx).busy.contains(&format!("{k}:fresh"));
+                    let hover = ct.hover;
+                    d.child(
+                        div()
+                            .id("term-fresh")
+                            .flex_none()
+                            .h(px(22.))
+                            .px(px(8.))
+                            .flex()
+                            .items_center()
+                            .gap(px(5.))
+                            .rounded(px(11.))
+                            .border_1()
+                            .border_color(ct.line)
+                            .text_size(px(12.5))
+                            .whitespace_nowrap()
+                            .text_color(if busy { ct.faint } else { ct.ink2 })
+                            .child(ui::icon("fresh", 12., if busy { ct.faint } else { ct.dim }))
+                            .child(if busy { "Starting fresh" } else { "Start fresh" })
+                            .when(!busy, |d| {
+                                d.cursor_pointer().hover(move |st| st.bg(hover)).on_click(cx.listener(
+                                    move |this, _: &gpui::ClickEvent, _, cx| {
+                                        let k = k.clone();
+                                        this.app.update(cx, |s, cx| s.ask_fresh_in_tab(&k, cx));
+                                    },
+                                ))
+                            }),
+                    )
+                })
+                // "re-reads 312k" is already on the cold chip; "expensive" still says a warm big chat costs a lot.
+                .when_some(l.expensive.clone().filter(|e| !e.starts_with("re-reads")), |d, e| {
+                    d.child(crate::chrome::cost_badge(&ct, &e, l.stale.is_some()))
+                })
                 .when(ctx_k > 0, |d| {
                     d.when(meter, |d| d.child(div().flex_none().w(px(80.)).child(ui::meter(&ct, frac, fill, None, 4.))))
                         .child(

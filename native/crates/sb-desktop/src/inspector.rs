@@ -24,7 +24,7 @@ fn state_text(s: &Session, l: &Live, now: f64) -> String {
     if let Some(a) = &l.stale {
         return format!("{}, {a}", l.word);
     }
-    match l.kind {
+    let head: String = match l.kind {
         LiveKind::Held => "Message on hold".into(),
         // What it needs is in the card under the title, in full: the head only says how long it has waited.
         LiveKind::Parked => {
@@ -37,6 +37,13 @@ fn state_text(s: &Session, l: &Live, now: f64) -> String {
         LiveKind::Cold => format!("Cold, {} to re-read", s.ctx_label()),
         LiveKind::Idle if s.reaped_note() => "Stopped".into(),
         LiveKind::Stall | LiveKind::Idle => l.text(),
+    };
+    // Needing you (or on hold, parked, stalled) never hides the cache: "Needs you, waiting 14m · Warm 4:12".
+    match (&l.cache, l.kind) {
+        (Some(c), LiveKind::Held | LiveKind::Wait | LiveKind::Parked | LiveKind::Stall) => {
+            format!("{head} · {}", c.text())
+        }
+        _ => head,
     }
 }
 

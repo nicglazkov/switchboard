@@ -65,6 +65,33 @@ pub struct Live {
     pub stale: Option<String>,
     /// A quiet chat's terminal shows output right now.
     pub hint: bool,
+    /// The cache on its own, whatever the chat is doing: a chat that needs you is still warm or cold, and the
+    /// terminal's strip and the iPhone's header keep it in one fixed place. None for a chat with nothing cached yet.
+    pub cache: Option<CacheTag>,
+}
+
+/// The cache, said on its own: "Warm 4:12", "Cold, re-reads 41k", "Cache ?".
+#[derive(Debug, Clone, PartialEq)]
+pub struct CacheTag {
+    /// Warm, Cold or Idle (not known).
+    pub kind: LiveKind,
+    /// "Warm", "Cold", "Cache ?"
+    pub word: &'static str,
+    /// "4:12" while warm (the countdown), "re-reads 41k" when cold, "" when not known.
+    pub detail: String,
+    /// The last minute of a warm cache.
+    pub urgent: bool,
+}
+
+impl CacheTag {
+    /// "Warm 4:12", "Cold, re-reads 41k", "Cache ?"
+    pub fn text(&self) -> String {
+        match (self.kind, self.detail.is_empty()) {
+            (_, true) => self.word.to_string(),
+            (LiveKind::Warm, false) => format!("{} {}", self.word, self.detail),
+            _ => format!("{}, {}", self.word, self.detail),
+        }
+    }
 }
 
 impl Live {
@@ -172,7 +199,38 @@ pub fn live(s: &Session, now: f64, link: bool, last_out: Option<f64>) -> Live {
     let busy = matches!(s.activity, Activity::Working | Activity::Stalled);
     let expensive = (s.ctx >= GUARD)
         .then(|| if cache == Cache::Cold && !busy { format!("re-reads {k}") } else { "expensive".to_string() });
-    Live { kind, word, detail, pill, pill_kind, left, urgent: left > 0 && left <= 60, expensive, stale, hint }
+    // While Claude works every call it makes refreshes the cache, so a cache the server last saw run out is warm again.
+    let cache_tag = match cache {
+        _ if s.ctx == 0 => None,
+        Cache::Warm => Some(CacheTag {
+            kind: LiveKind::Warm,
+            word: "Warm",
+            detail: if stale.is_some() { String::new() } else { clock(left) },
+            urgent: left > 0 && left <= 60,
+        }),
+        Cache::Cold if busy => {
+            Some(CacheTag { kind: LiveKind::Warm, word: "Warm", detail: String::new(), urgent: false })
+        }
+        Cache::Cold => {
+            Some(CacheTag { kind: LiveKind::Cold, word: "Cold", detail: format!("re-reads {k}"), urgent: false })
+        }
+        Cache::Unknown => {
+            Some(CacheTag { kind: LiveKind::Idle, word: "Cache ?", detail: String::new(), urgent: false })
+        }
+    };
+    Live {
+        kind,
+        word,
+        detail,
+        pill,
+        pill_kind,
+        left,
+        urgent: left > 0 && left <= 60,
+        expensive,
+        stale,
+        hint,
+        cache: cache_tag,
+    }
 }
 
 /// "45s", "2m 10s", "1h 05m"
@@ -314,6 +372,26 @@ mod tests {
         assert!(!s.is_cold(N) && !s.needs_fresh(N));
         let l = live(&s, N, true, None);
         assert_eq!((l.word, l.pill, l.expensive.as_deref()), ("Quiet", Some("cache ?"), Some("expensive")));
+    }
+
+    #[test]
+    fn the_cache_stays_said_while_a_chat_needs_you() {
+        let w = one(
+            json!({"sid": "a", "activity": "needs", "status": "waiting", "cache": "warm", "cold_at": N + 252.0, "ctx": 9000}),
+            N,
+            N,
+        );
+        let l = live(&w, N, true, None);
+        assert_eq!(l.word, "Needs you");
+        assert_eq!(l.cache.as_ref().map(|c| c.text()).as_deref(), Some("Warm 4:12"));
+        let c = one(
+            json!({"sid": "a", "activity": "needs", "status": "waiting", "cache": "cold", "cold_at": N - 60.0, "ctx": 41000}),
+            N,
+            N,
+        );
+        assert_eq!(live(&c, N, true, None).cache.map(|c| c.text()).as_deref(), Some("Cold, re-reads 41k"));
+        let fresh = one(json!({"sid": "a", "activity": "quiet", "cache": "unknown", "ctx": 0}), N, N);
+        assert_eq!(live(&fresh, N, true, None).cache, None, "nothing cached yet");
     }
 
     #[test]

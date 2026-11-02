@@ -19,6 +19,16 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.12",
+        &[
+            "Choosing a folder looks like Finder or File Explorer: places down the side, Back, Forward and Up, a path bar, and the folder's contents. It's how New chat picks its folder and adds folders Claude may also use, on the desktop and on the iPhone.",
+            "A chat's terminal shows its cache on its own, Warm or Cold, apart from whether it needs you, and Start fresh is a click away beside it. It asks first, saying what it does.",
+            "Claude Code's status line in a terminal refreshes every 15 seconds, so its warm or cold stays true while nobody types.",
+            "Quiet keeps the newest 8 chats per computer.",
+            "The iPhone app opens with no chats open after it was closed, instead of reopening old tabs.",
+        ],
+    ),
+    (
         "0.8.11",
         &[
             "Settings > Server shows whether your server and its parts are running, and updates it with one click when a new version is out. It can also restart it, show its logs and copy its details for a bug report.",

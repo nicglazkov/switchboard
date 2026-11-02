@@ -20,6 +20,23 @@ known yet says **cache ?**.
 | **60k to 150k** | reads it all again. Start fresh is cheaper if you don't need the whole history |
 | **150k or more** | reads it all again at full price, and the guard holds your message first |
 
+## In a chat's terminal
+
+The strip at the top of a terminal says two things, each in its own place:
+
+- **On the left, what the chat is doing:** Needs you (and what Claude asked), Working, Message on hold, Stalled,
+  or Idle.
+- **On the right, its cache:** **Warm 4:12** while it's warm (amber in the last minute), **Cold, re-reads 290k**
+  once it's run out, or **Cache ?** when it isn't known yet. A chat that needs you still says whether it's warm.
+
+Beside the cache, **Start fresh** does the same Start fresh as the details. A small box first says what it does
+(and what it costs, when that's known); confirm, and the terminal moves on to the new chat when it's ready. It
+isn't there while Claude is working. The iPhone shows the same: the cache chip and **Start fresh** under the
+chat's title, which asks the same way.
+
+Claude Code's own status line at the bottom of the terminal redraws every 15 seconds, so its **warm 42m** or
+**cold 3h** stays true while nobody types.
+
 ## Resume or start fresh
 
 For a quiet chat, the details compare two ways back, and mark one **Suggested**.
@@ -78,19 +95,28 @@ On the board the chat moves to **Needs you** with **Message on hold**, and its d
 | | |
 |---|---|
 | **Machine** | Any computer that's online, or **Auto** |
-| **Folder** | The computer's Claude folder, a recent one, any folder inside it, a new one, or (when the computer allows it) anywhere in its home folder |
+| **Folder** | The folder picked, with its full path; **Choose...** to browse the computer's folders (below), a recent one in one click, or a new one |
 | **Mode** | **Normal**, **Max effort** (deepest reasoning on every turn) or **UltraCode** (multi-agent workflows for big builds, on Opus at extra high effort; uses your plan faster) |
 | **Model** | **Default**, or the models your computers' Claude Code takes |
 | **Effort** | Default, Low, Medium, High, Extra high |
 | **Permissions** | Asks first, Accept edits, Plan, Auto, Bypass |
 | **Browser** | Claude in Chrome |
 | **Tools** | **Auto**, or pick tools from your [library](settings.md#library) |
-| **Folders** | Up to 8 extra folders Claude may work in |
+| **Folders** | Up to 8 extra folders Claude may work in, each added with the same chooser |
 | **Other flags** | Any other Claude Code flags |
 | **First message** | What it should work on, or empty to start idle. Your draft is kept for a week |
 
 **Save setup** keeps a combination of these by name; **Last used** brings back the last one. Leave
 **Open its terminal** checked to watch it start.
+
+### Choosing a folder
+
+**Choose...** opens the computer's folders the way Finder or File Explorer shows them: its places down the side
+(Recent, the Claude folder, Home, Desktop, Documents and the rest when the computer allows it, and places added
+there), Back, Forward and Up, a path bar to jump to any folder above, and the folder's contents with files greyed
+out. A click picks a folder and a double-click opens it; **Choose** (or Enter) takes the folder picked, or the one
+open, and Esc cancels. On the iPhone it is the same browser as Files: tap into folders, then **Choose** at the
+bottom.
 
 ### Auto
 

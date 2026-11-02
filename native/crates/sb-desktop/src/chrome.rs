@@ -1470,6 +1470,49 @@ pub fn cost_badge(t: &Theme, text: &str, stale: bool) -> gpui::Div {
         .child(text.to_string())
 }
 
+/// The cache's own chip: "Warm 4:12", "Cold, re-reads 312k", "Cache ?". It sits in one fixed place on the terminal's
+/// strip whatever the chat is doing, so needing you never hides whether a reply is cheap. Filled while warm, a hairline
+/// when cold or not known; grey with the rest when the data is old.
+pub fn cache_chip(t: &Theme, tag: &sb_core::live::CacheTag, big: bool, stale: bool) -> gpui::Div {
+    use sb_core::live::LiveKind as K;
+    let c = if stale {
+        t.faint
+    } else {
+        match tag.kind {
+            K::Warm if tag.urgent => t.cold,
+            K::Warm => t.warm,
+            K::Cold if big => t.cold,
+            K::Cold => crate::theme::mix(t.run, t.faint, 0.6),
+            _ => t.faint,
+        }
+    };
+    let warm = tag.kind == K::Warm && !stale;
+    div()
+        .flex_none()
+        .h(px(22.))
+        .px(px(9.))
+        .gap(px(6.))
+        .flex()
+        .items_center()
+        .rounded(px(11.))
+        .border_1()
+        .border_color(c.alpha(if t.dark { 0.5 } else { 0.45 }))
+        .when(warm, |d| d.bg(c.alpha(if t.dark { 0.16 } else { 0.12 })))
+        .text_size(px(12.5))
+        .font_weight(gpui::FontWeight::SEMIBOLD)
+        .font_features(ui::tnum())
+        .text_color(c)
+        .whitespace_nowrap()
+        .child(
+            div()
+                .flex_none()
+                .size(px(7.))
+                .rounded_full()
+                .map(|d| if warm { d.bg(c) } else { d.border_1().border_color(c) }),
+        )
+        .child(tag.text())
+}
+
 /// What a terminal tab carries while it is dragged: along the tab row it reorders, dropped below it becomes a window.
 /// It carries the tab's id, not its place: a tab closing during the drag moves the others.
 #[derive(Clone)]

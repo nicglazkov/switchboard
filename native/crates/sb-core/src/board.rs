@@ -117,6 +117,10 @@ pub struct Board {
     pub cold_ctx: u64,
 }
 
+/// Quiet rows per computer: the newest this many idle chats stay on the board, whatever their age; past it they are in
+/// History.
+pub const QUIET_KEEP: usize = 8;
+
 /// Current sessions on one machine (not stale, not hidden), newest first.
 pub fn current<'a>(snap: &'a Snapshot, machine: &str, hidden: &HashSet<String>) -> Vec<&'a Session> {
     snap.machine(machine)
@@ -132,6 +136,21 @@ pub fn build(snap: &Snapshot, now: f64, hidden: &HashSet<String>, only: Option<&
         let mut cells: Vec<Vec<&Session>> = vec![Vec::new(); 5];
         for s in &cur {
             cells[Column::of(s.lamp(now)).index()].push(s);
+        }
+        // Quiet keeps a computer's QUIET_KEEP newest idle chats however old they are: one last used three days ago
+        // stays until QUIET_KEEP newer ones push it to History. Older chats (stale) fill in behind the recent ones.
+        {
+            let q = &mut cells[Column::Quiet.index()];
+            q.sort_by(|a, b| b.active.total_cmp(&a.active));
+            if q.len() < QUIET_KEEP {
+                let mut old: Vec<&Session> = snap
+                    .machine(&m.name)
+                    .map(|mm| mm.sessions.iter().filter(|s| s.stale && !hidden.contains(&s.key)).collect())
+                    .unwrap_or_default();
+                old.sort_by(|a, b| b.active.total_cmp(&a.active));
+                let room = QUIET_KEEP - q.len();
+                q.extend(old.into_iter().take(room));
+            }
         }
         // Warm: the one about to go cold first.
         cells[Column::Warm.index()].sort_by_key(|s| s.cache_left(now));

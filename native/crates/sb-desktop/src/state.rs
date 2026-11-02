@@ -291,6 +291,15 @@ pub enum AppEvent {
         key: String,
         resume: bool,
     },
+    /// Start fresh clicked in a chat's terminal: the window asks first (its confirm), then `fresh_in_tab`.
+    AskFresh {
+        key: String,
+    },
+    /// Start fresh from a chat's terminal: that tab follows the job and opens the new chat when it is ready.
+    FreshHere {
+        key: String,
+        job: String,
+    },
     /// v2, from the session browser: a chat resumed by id; its terminal follows the job.
     OpenJobTerm {
         job: String,
@@ -426,6 +435,8 @@ pub struct AppState {
     pub settings: Settings,
     /// Actions in flight, "key:verb", so their buttons can say so.
     pub busy: HashSet<String>,
+    /// Chats whose Start fresh was clicked in their own terminal: that tab opens the new chat when it is ready.
+    pub fresh_here: HashSet<String>,
     /// Chats opened again while the stop from closing their tab was still on its way: the stop is called off once
     /// the server answers with its job.
     stop_off: HashSet<String>,
@@ -587,6 +598,7 @@ impl AppState {
                 toast_hover: None,
                 settings,
                 busy: HashSet::new(),
+                fresh_here: HashSet::new(),
                 stop_off: HashSet::new(),
                 close_stop: HashSet::new(),
                 close_jobs: HashSet::new(),
@@ -1595,7 +1607,12 @@ impl AppState {
                             _ => (JobKind::Handoff, None),
                         };
                         match job {
-                            Some(jid) => st.start_job(&jid, kind, Some(key), &label, &label, Some(title), name, cx),
+                            Some(jid) => {
+                                if id == ActionId::Fresh && st.fresh_here.remove(&key) {
+                                    cx.emit(AppEvent::FreshHere { key: key.clone(), job: jid.clone() });
+                                }
+                                st.start_job(&jid, kind, Some(key), &label, &label, Some(title), name, cx)
+                            }
                             None => st.toast(format!("{} was sent", kind.label()), None, false, cx),
                         }
                     }
@@ -1799,6 +1816,18 @@ impl AppState {
                 cx.notify();
             },
         );
+    }
+
+    /// Start fresh clicked in the chat's own terminal: the window shows the same confirm as the details first.
+    pub fn ask_fresh_in_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        cx.emit(AppEvent::AskFresh { key: key.to_string() });
+    }
+
+    /// Start fresh from the chat's own terminal, once confirmed: the same Start fresh as the board's, and the tab
+    /// then follows the job into the new chat.
+    pub fn fresh_in_tab(&mut self, key: &str, cx: &mut Context<Self>) {
+        self.fresh_here.insert(key.to_string());
+        self.act(ActionId::Fresh, key, cx);
     }
 
     /// v2, History: Start fresh from any chat, on the board or not (a handoff, then a new chat from it).

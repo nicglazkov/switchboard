@@ -8,10 +8,10 @@
 //! machine. Each opens in a window of its own.
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, FontWeight, Hsla, InteractiveElement,
-    IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Subscription,
-    TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations, WindowOptions, div,
-    prelude::*, px, relative, size,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, EventEmitter, FocusHandle, FontWeight, Hsla,
+    InteractiveElement, IntoElement, ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement,
+    Styled, Subscription, TitlebarOptions, Window, WindowBackgroundAppearance, WindowBounds, WindowDecorations,
+    WindowOptions, div, prelude::*, px, relative, size,
 };
 use sb_core::api::{ApiFile, ApiPair, ApiPlace};
 use sb_core::fmt;
@@ -31,7 +31,7 @@ const ROW_H: f32 = 32.;
 const SIZE_W: f32 = 76.;
 const DATE_W: f32 = 92.;
 
-gpui::actions!(files, [FxUp, FxDown, FxOpen, FxParent, FxInto, FxLook]);
+gpui::actions!(files, [FxUp, FxDown, FxOpen, FxParent, FxInto, FxLook, FxCancel, FxBack, FxFwd]);
 
 pub fn bind_keys(cx: &mut App) {
     let f = Some("Files");
@@ -45,6 +45,9 @@ pub fn bind_keys(cx: &mut App) {
         gpui::KeyBinding::new("secondary-up", FxParent, f),
         gpui::KeyBinding::new("secondary-down", FxOpen, f),
         gpui::KeyBinding::new("space", FxLook, f),
+        gpui::KeyBinding::new("escape", FxCancel, f),
+        gpui::KeyBinding::new("secondary-[", FxBack, f),
+        gpui::KeyBinding::new("secondary-]", FxFwd, f),
     ]);
 }
 
@@ -283,8 +286,37 @@ pub fn counts(dirs: usize, files: usize) -> String {
 
 // ---------- Files ----------
 
+/// Files as a folder chooser, like a Mac's Open panel (the New chat window's Choose...): the same sidebar, path bar
+/// and list, on one machine. A click picks a folder and a double-click opens it; files show greyed out; Choose and
+/// Cancel sit at the foot, and Enter and Esc answer them.
+pub struct Choose {
+    /// "Choose a folder", "Add a folder Claude may also use".
+    pub title: String,
+    /// The button: "Choose", "Add".
+    pub ok: String,
+    /// Folders chats used lately, newest first (addresses), shown as Recent at the top of the sidebar.
+    pub recent: Vec<String>,
+    /// The folder clicked in the list; None chooses the folder that is open.
+    picked: Option<String>,
+    /// Choosing an extra folder: the Claude folder itself is already the chat's, so it can't be the choice.
+    pub root_ok: bool,
+}
+
+pub enum FilesEvent {
+    /// A folder address, as the New chat window takes it ("" is the Claude folder).
+    Chosen(String),
+    Cancel,
+}
+
+impl EventEmitter<FilesEvent> for FilesView {}
+
 pub struct FilesView {
     app: Entity<AppState>,
+    /// Some when this is a folder chooser rather than the Files window.
+    choose: Option<Choose>,
+    /// Back and Forward, like Finder's: the folders left, and the ones gone back from.
+    back: Vec<String>,
+    fwd: Vec<String>,
     nav: Entity<Nav>,
     focus: FocusHandle,
     file: Option<String>,
@@ -332,21 +364,16 @@ impl FilesView {
         let nav = cx.new(|cx| Nav::new(app.clone(), machine, folder, cx));
         let subs = vec![
             cx.observe(&app, |_, _, cx| cx.notify()),
-            cx.observe(&nav, |this, nav, cx| {
-                let f = nav.read(cx).folder.clone();
-                if f != this.cur_of {
-                    this.cur_of = f;
-                    this.cur = 0;
-                    this.list.scroll_to_item(0, gpui::ScrollStrategy::Top);
-                }
-                cx.notify()
-            }),
+            cx.observe(&nav, Self::on_nav),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
         ];
         let focus = cx.focus_handle();
         window.focus(&focus, cx);
         let mut v = FilesView {
             app,
+            choose: None,
+            back: Vec::new(),
+            fwd: Vec::new(),
             nav,
             focus,
             file: None,
@@ -366,6 +393,100 @@ impl FilesView {
         v
     }
 
+    /// A folder chooser on `machine`, open at `folder`.
+    pub fn chooser(
+        app: Entity<AppState>,
+        machine: String,
+        folder: String,
+        choose: Choose,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> FilesView {
+        let nav = cx.new(|cx| Nav::new(app.clone(), machine, folder.clone(), cx));
+        let subs = vec![cx.observe(&app, |_, _, cx| cx.notify()), cx.observe(&nav, Self::on_nav)];
+        let focus = cx.focus_handle();
+        window.focus(&focus, cx);
+        FilesView {
+            app,
+            choose: Some(choose),
+            back: Vec::new(),
+            fwd: Vec::new(),
+            nav,
+            focus,
+            file: None,
+            preview: None,
+            file_seq: 0,
+            cur: 0,
+            cur_of: folder,
+            list: gpui::UniformListScrollHandle::new(),
+            drop: ui::Drop::default(),
+            pane: ScrollHandle::new(),
+            side: ScrollHandle::new(),
+            _subs: subs,
+        }
+    }
+
+    pub fn choose_parts(title: &str, ok: &str, recent: Vec<String>) -> Choose {
+        Choose { title: title.into(), ok: ok.into(), recent, picked: None, root_ok: true }
+    }
+
+    /// Another folder opened: the keyboard starts at its top, and nothing in it is picked yet.
+    fn on_nav(&mut self, nav: Entity<Nav>, cx: &mut Context<Self>) {
+        let f = nav.read(cx).folder.clone();
+        if f != self.cur_of {
+            self.cur_of = f;
+            self.cur = 0;
+            self.list.scroll_to_item(0, gpui::ScrollStrategy::Top);
+            if let Some(c) = &mut self.choose {
+                c.picked = None;
+            }
+        }
+        cx.notify()
+    }
+
+    /// Choose can't take what's showing: an open folder that can't be read with nothing in it picked, or the Claude
+    /// folder itself where it can't be the choice.
+    fn choose_blocked(&self, cx: &App) -> bool {
+        let Some(c) = &self.choose else { return true };
+        (c.picked.is_none() && self.nav.read(cx).closed().is_some()) || (!c.root_ok && self.choice(cx).is_empty())
+    }
+
+    /// What Choose takes: the folder clicked, or the one open.
+    fn choice(&self, cx: &App) -> String {
+        self.choose.as_ref().and_then(|c| c.picked.clone()).unwrap_or_else(|| self.nav.read(cx).folder.clone())
+    }
+
+    /// The choice as people read it: a full path where the machine said one.
+    fn choice_text(&self, cx: &App) -> String {
+        let nav = self.nav.read(cx);
+        let f = self.choice(cx);
+        let claude = nav.claude_name();
+        if places::is_outside(&f) {
+            return match nav.shown_listing() {
+                Some(l) if l.folder == f && !l.shown.is_empty() => l.shown.clone(),
+                _ => places::shown(&f, &claude),
+            };
+        }
+        match nav.shown_listing().map(|l| l.root.clone()).filter(|r| !r.is_empty()) {
+            Some(r) if f.is_empty() => r,
+            Some(r) => {
+                let sep = if r.contains('\\') && !r.contains('/') { "\\" } else { "/" };
+                format!("{}{sep}{}", r.trim_end_matches(['/', '\\']), f.replace('/', sep))
+            }
+            None => places::shown(&f, &claude),
+        }
+    }
+
+    /// Choose: the picked folder goes back to the window that asked. Not while the open folder can't be read and
+    /// nothing in it is picked.
+    fn choose_now(&mut self, cx: &mut Context<Self>) {
+        if self.choose_blocked(cx) {
+            return;
+        }
+        let f = self.choice(cx);
+        cx.emit(FilesEvent::Chosen(f));
+    }
+
     fn machine(&self, cx: &App) -> String {
         self.nav.read(cx).machine.clone()
     }
@@ -375,7 +496,7 @@ impl FilesView {
         l.dirs
             .iter()
             .map(|d| Row::Dir(d.folder.clone()))
-            .chain(l.files.iter().map(|f| Row::File(f.name.clone(), f.open)))
+            .chain(l.files.iter().filter(|_| self.choose.is_none()).map(|f| Row::File(f.name.clone(), f.open)))
             .collect()
     }
 
@@ -386,14 +507,24 @@ impl FilesView {
         }
         self.cur = (self.cur as i32 + d).clamp(0, rows.len() as i32 - 1) as usize;
         self.list.scroll_to_item(self.cur, gpui::ScrollStrategy::Nearest);
-        // A file under the keyboard shows in the preview, like Quick Look.
-        if let Some(Row::File(name, true)) = rows.into_iter().nth(self.cur) {
-            self.open_file(name, cx);
+        match rows.into_iter().nth(self.cur) {
+            // Choosing: the folder under the keyboard is the one Choose takes.
+            Some(Row::Dir(f)) if self.choose.is_some() => {
+                if let Some(c) = &mut self.choose {
+                    c.picked = Some(f);
+                }
+            }
+            // A file under the keyboard shows in the preview, like Quick Look.
+            Some(Row::File(name, true)) => self.open_file(name, cx),
+            _ => {}
         }
         cx.notify();
     }
 
     fn open_cur(&mut self, cx: &mut Context<Self>) {
+        if self.choose.is_some() {
+            return self.choose_now(cx);
+        }
         match self.rows(cx).into_iter().nth(self.cur) {
             Some(Row::Dir(f)) => self.go(f, cx),
             Some(Row::File(name, true)) => self.open_file(name, cx),
@@ -402,6 +533,11 @@ impl FilesView {
     }
 
     fn parent(&mut self, cx: &mut Context<Self>) {
+        let here = self.nav.read(cx).folder.clone();
+        if places::parent(&here).is_some() {
+            self.back.push(here);
+            self.fwd.clear();
+        }
         self.file = None;
         self.preview = None;
         self.nav.update(cx, |n, cx| {
@@ -440,12 +576,37 @@ impl FilesView {
     }
 
     fn go(&mut self, folder: String, cx: &mut Context<Self>) {
+        let here = self.nav.read(cx).folder.clone();
+        if here != folder {
+            self.back.push(here);
+            self.fwd.clear();
+        }
+        self.visit(folder, cx);
+    }
+
+    /// Back (or Forward, `fwd`): the folder before, as Finder's arrows go.
+    fn step_history(&mut self, fwd: bool, cx: &mut Context<Self>) {
+        let here = self.nav.read(cx).folder.clone();
+        let to = if fwd { self.fwd.pop() } else { self.back.pop() };
+        let Some(to) = to else { return };
+        if fwd {
+            self.back.push(here)
+        } else {
+            self.fwd.push(here)
+        }
+        self.visit(to, cx);
+    }
+
+    /// Opens a folder without touching Back and Forward.
+    fn visit(&mut self, folder: String, cx: &mut Context<Self>) {
         self.file = None;
         self.preview = None;
         self.nav.update(cx, |n, cx| n.go(folder, cx));
     }
 
     fn set_machine(&mut self, machine: String, cx: &mut Context<Self>) {
+        self.back.clear();
+        self.fwd.clear();
         self.file = None;
         self.preview = None;
         self.nav.update(cx, |n, cx| n.set_machine(machine, cx));
@@ -534,6 +695,27 @@ impl FilesView {
                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(to.clone(), cx)))
                 .into_any_element()
         };
+        // Choosing: the folders chats used lately, first, like Recents in a Mac's Open panel.
+        let recent = self.choose.as_ref().map(|c| c.recent.clone()).unwrap_or_default();
+        if !recent.is_empty() {
+            let claude = nav.claude_name();
+            col = col.child(group("Recent".into()));
+            for (i, f) in recent.into_iter().take(5).enumerate() {
+                let pl = ApiPlace {
+                    kind: "recent".into(),
+                    name: places::name_of(&f, &claude),
+                    folder: f.clone(),
+                    state: "ok".into(),
+                    ..Default::default()
+                };
+                let on = folder.trim_end_matches('/') == f.trim_end_matches('/');
+                col = col.child(
+                    place_row(t, SharedString::from(format!("fx-r-{i}")), &pl, on)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(f.clone(), cx))),
+                );
+            }
+            col = col.child(div().h(px(12.)));
+        }
         col = col.child(group(format!("On {label}")));
         for (i, pl) in p.usual().enumerate() {
             col = col.child(row(pl, i));
@@ -672,20 +854,36 @@ impl FilesView {
             .border_b_1()
             .border_color(t.rule)
             .child(
+                ui::icon_btn(t, "fx-back", "back", 28.)
+                    .when(self.back.is_empty(), |d| d.opacity(0.35).cursor_default())
+                    .when(!self.back.is_empty(), |d| {
+                        d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_history(false, cx)))
+                    }),
+            )
+            .child(
+                ui::icon_btn(t, "fx-fwd", "chev", 28.)
+                    .when(self.fwd.is_empty(), |d| d.opacity(0.35).cursor_default())
+                    .when(!self.fwd.is_empty(), |d| {
+                        d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.step_history(true, cx)))
+                    }),
+            )
+            .child(
                 ui::icon_btn(t, "fx-up", "up", 28.)
                     .when(!has_up, |d| d.opacity(0.35).cursor_default())
                     .when(has_up, |d| d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.parent(cx)))),
             )
             .child(row)
-            .child(
-                ui::primary_btn(t, "fx-new", 30.)
-                    .px(px(12.))
-                    .text_size(px(12.5))
-                    .when(closed, |d| d.opacity(0.45).cursor_default())
-                    .child(ui::icon("plus", 12., t.on_accent))
-                    .child("New chat here")
-                    .when(!closed, |d| d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_here(cx)))),
-            )
+            .when(self.choose.is_none(), |d| {
+                d.child(
+                    ui::primary_btn(t, "fx-new", 30.)
+                        .px(px(12.))
+                        .text_size(px(12.5))
+                        .when(closed, |d| d.opacity(0.45).cursor_default())
+                        .child(ui::icon("plus", 12., t.on_accent))
+                        .child("New chat here")
+                        .when(!closed, |d| d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.new_here(cx)))),
+                )
+            })
             .into_any_element()
     }
 
@@ -789,7 +987,12 @@ impl FilesView {
                     let e = if let Some(d) = l.dirs.get(i) {
                         let to = d.folder.clone();
                         let id = format!("fx-d-{}", d.folder);
-                        Self::entry(&t, id, "folder", t.accent, d.name.clone(), this.cur == i, true)
+                        let on = match &this.choose {
+                            Some(c) => c.picked.as_deref() == Some(d.folder.as_str()),
+                            None => this.cur == i,
+                        };
+                        let choosing = this.choose.is_some();
+                        Self::entry(&t, id, "folder", t.accent, d.name.clone(), on, true)
                             .child(meta(String::new(), SIZE_W))
                             .child(
                                 div()
@@ -799,15 +1002,27 @@ impl FilesView {
                                     .justify_end()
                                     .child(ui::icon("chev", 11., t.faint)),
                             )
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(to.clone(), cx)))
+                            .on_click(cx.listener(move |this, ev: &ClickEvent, _, cx| {
+                                // Choosing, like a Mac's Open panel: a click picks the folder, a double-click opens it.
+                                if choosing && ev.click_count() < 2 {
+                                    this.cur = i;
+                                    if let Some(c) = &mut this.choose {
+                                        c.picked = Some(to.clone());
+                                    }
+                                    return cx.notify();
+                                }
+                                this.go(to.clone(), cx)
+                            }))
                     } else if let Some(f) = i.checked_sub(nd).and_then(|j| l.files.get(j)) {
-                        let on = this.file.as_deref() == Some(f.name.as_str()) || this.cur == i;
+                        let choosing = this.choose.is_some();
+                        let on = !choosing && (this.file.as_deref() == Some(f.name.as_str()) || this.cur == i);
                         let id = format!("fx-f-{}", f.name);
                         let ic = if f.open { file_icon(&f.name) } else { "lock" };
-                        let mut e = Self::entry(&t, id, ic, t.dim, f.name.clone(), on, f.open)
+                        // Choosing a folder: files are there to recognise it by, greyed out.
+                        let mut e = Self::entry(&t, id, ic, t.dim, f.name.clone(), on, f.open && !choosing)
                             .child(meta(size_text(f.size), SIZE_W))
                             .child(meta(fmt::when(f.mtime, now), DATE_W));
-                        if f.open {
+                        if f.open && !choosing {
                             let name = f.name.clone();
                             let k = i;
                             e = e.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
@@ -1155,12 +1370,16 @@ fn size_text(bytes: f64) -> String {
 impl Render for FilesView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.body(window, cx);
-        crate::frame::framed(window, &Theme::get(cx), "Files", body)
+        if self.choose.is_some() {
+            // Drawn inside the window that asked, which has its own frame.
+            return body.into_any_element();
+        }
+        crate::frame::framed(window, &Theme::get(cx), "Files", body).into_any_element()
     }
 }
 
 impl FilesView {
-    fn body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
+    fn body(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let t = Theme::get(cx);
         let now = AppState::now();
         let cur_machine = self.machine(cx);
@@ -1212,6 +1431,9 @@ impl FilesView {
             });
             div().relative().flex_none().child(trigger).children(menu).into_any_element()
         };
+        if let Some(c) = &self.choose {
+            return self.chooser_body(&t, c.title.clone(), c.ok.clone(), cx).into_any_element();
+        }
         let header = div()
             .flex_none()
             .h(px(52.))
@@ -1251,6 +1473,8 @@ impl FilesView {
                 }
             }))
             .on_action(cx.listener(|this, _: &FxParent, _, cx| this.parent(cx)))
+            .on_action(cx.listener(|this, _: &FxBack, _, cx| this.step_history(false, cx)))
+            .on_action(cx.listener(|this, _: &FxFwd, _, cx| this.step_history(true, cx)))
             .on_action(cx.listener(|this, _: &FxLook, _, cx| this.open_cur(cx)))
             .size_full()
             .flex()
@@ -1297,6 +1521,124 @@ impl FilesView {
                             .child(self.pane(&t, now, cx)),
                     ),
             )
+            .into_any_element()
+    }
+
+    /// The chooser: a title, the sidebar and the folder's list, and Cancel and Choose at the foot.
+    fn chooser_body(&self, t: &Theme, title: String, ok: String, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let label = self.nav.read(cx).machine_label(cx);
+        let blocked = self.choose_blocked(cx);
+        let picked_name = self.choose.as_ref().and_then(|c| c.picked.as_ref()).map(|f| {
+            let claude = self.nav.read(cx).claude_name();
+            places::name_of(f, &claude)
+        });
+        let header = div()
+            .flex_none()
+            .h(px(48.))
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .border_b_1()
+            .border_color(t.rule)
+            .bg(t.bg2)
+            .child(ui::icon("folder", 15., t.accent))
+            .child(div().flex_none().text_size(px(14.)).font_weight(FontWeight::BOLD).child(title))
+            .child(div().text_size(px(12.5)).text_color(t.dim).child(format!("on {label}")))
+            .child(div().flex_1())
+            .child(
+                ui::icon_btn(t, "fx-reload", "restore", 28.)
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.nav.update(cx, |n, cx| n.reload(cx)))),
+            );
+        let foot = div()
+            .flex_none()
+            .h(px(54.))
+            .px(px(16.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .border_t_1()
+            .border_color(t.rule)
+            .bg(t.bg2)
+            .child(ui::icon("folder", 14., t.dim))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .font_family(NUM)
+                    .text_size(px(11.5))
+                    .text_color(t.ink2)
+                    .child(ui::line(self.choice_text(cx))),
+            )
+            .child(
+                ui::line_btn(t, "fx-cancel", 32.)
+                    .px(px(14.))
+                    .text_size(px(13.))
+                    .child("Cancel")
+                    .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(FilesEvent::Cancel))),
+            )
+            .child(
+                ui::primary_btn(t, "fx-choose", 32.)
+                    .px(px(16.))
+                    .text_size(px(13.))
+                    .when(blocked, |d| d.opacity(0.45).cursor_default())
+                    .child(match picked_name {
+                        Some(n) => format!("{ok} \u{201c}{n}\u{201d}"),
+                        None => format!("{ok} this folder"),
+                    })
+                    .when(!blocked, |d| d.on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.choose_now(cx)))),
+            );
+        div()
+            .id("files-choose")
+            .key_context("Files")
+            .track_focus(&self.focus)
+            .on_action(cx.listener(|this, _: &FxUp, _, cx| this.step(-1, cx)))
+            .on_action(cx.listener(|this, _: &FxDown, _, cx| this.step(1, cx)))
+            .on_action(cx.listener(|this, _: &FxOpen, _, cx| this.choose_now(cx)))
+            .on_action(cx.listener(|this, _: &FxInto, _, cx| {
+                if let Some(Row::Dir(f)) = this.rows(cx).into_iter().nth(this.cur) {
+                    this.go(f, cx)
+                }
+            }))
+            .on_action(cx.listener(|this, _: &FxParent, _, cx| this.parent(cx)))
+            .on_action(cx.listener(|this, _: &FxBack, _, cx| this.step_history(false, cx)))
+            .on_action(cx.listener(|this, _: &FxFwd, _, cx| this.step_history(true, cx)))
+            .on_action(cx.listener(|_, _: &FxCancel, _, cx| cx.emit(FilesEvent::Cancel)))
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(t.bg)
+            .font_family(crate::theme::UI)
+            .text_color(t.ink)
+            .child(header)
+            .child(
+                div()
+                    .flex_1()
+                    .min_h_0()
+                    .flex()
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(SIDEBAR_W - 20.))
+                            .h_full()
+                            .min_h_0()
+                            .border_r_1()
+                            .border_color(t.rule)
+                            .bg(t.panel)
+                            .child(self.sidebar(t, cx)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(self.path_bar(t, cx))
+                            .child(div().flex_1().min_h_0().child(self.list(t, cx))),
+                    ),
+            )
+            .child(foot)
     }
 }
 

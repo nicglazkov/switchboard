@@ -4784,6 +4784,25 @@ def heal_launcher(now):
         pass
     stamp.write_text(str(now))
     ensure_launcher()
+    try:
+        heal_statusline()
+    except (OSError, ValueError, TypeError, AttributeError):
+        pass
+
+
+def heal_statusline(home=None):
+    """A helper installed before SL_REFRESH: give Switchboard's own status line its refresh, once. Only our entry, and
+    only when it has none, so a user's own value or status line is never touched. True when it wrote."""
+    sp = (home or Path.home()) / '.claude' / 'settings.json'
+    if not sp.exists():
+        return False
+    cur = json.loads(sp.read_text())
+    sl = cur.get('statusLine') if isinstance(cur, dict) else None
+    if not isinstance(sl, dict) or 'sb.py' not in str(sl.get('command', '')) or 'refreshInterval' in sl:
+        return False
+    sl['refreshInterval'] = SL_REFRESH
+    _jput_text(sp, json.dumps(cur, indent=2))
+    return True
 
 
 LAUNCHER_BEAT, LAUNCHER_STALE = 10, 45
@@ -7965,9 +7984,16 @@ def _sb_hook(cmd):
     return bool(re.search(r'sb\.py"? hook\b', cmd or ''))
 
 
+# Claude Code redraws the status line only when something happens in the chat, so an idle chat kept saying "warm 42m"
+# for hours after its cache ran out. It also re-runs the command every refreshInterval seconds (Claude Code 2.1.x;
+# an older one ignores the key), which keeps the countdown and the warm/cold tag true while nobody types.
+SL_REFRESH = 15
+
+
 def merge_settings(settings, sb_path, python):
     s = json.loads(json.dumps(settings))
-    s['statusLine'] = {'type': 'command', 'command': _cmd(python, sb_path, 'statusline'), 'padding': 0}
+    s['statusLine'] = {'type': 'command', 'command': _cmd(python, sb_path, 'statusline'), 'padding': 0,
+                       'refreshInterval': SL_REFRESH}
     hooks = s.setdefault('hooks', {})
     hook_cmd = _cmd(python, sb_path, 'hook')
     for ev, timeout in SB_EVENTS.items():

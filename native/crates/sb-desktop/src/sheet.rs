@@ -20,6 +20,7 @@ use sb_core::api::{ApiFolder, ApiFolderCheck, ApiPrefs, ApiSetup};
 use sb_core::flags::{self, DIRS_MAX, EFFORTS, Opts, PERMS};
 use sb_core::{CoreError, NewRequest, fmt, names, places};
 
+use crate::files::{FilesEvent, FilesView};
 use crate::nav::{Closed, Nav};
 use crate::state::AppState;
 use crate::theme::{NUM, Theme};
@@ -206,6 +207,9 @@ pub struct NewSheet {
     check_seq: u64,
     /// The trust question over the sheet: the folder as shown, and whether it was once declined.
     trust_ask: Option<(String, bool)>,
+    /// Choose... over the sheet: a Finder-like folder chooser on this machine, and whether it adds an extra folder
+    /// (--add-dir) instead of picking the one to work in.
+    chooser: Option<(Entity<FilesView>, bool, Subscription)>,
     _subs: Vec<Subscription>,
 }
 
@@ -321,6 +325,7 @@ impl NewSheet {
             check: None,
             check_seq: 0,
             trust_ask: None,
+            chooser: None,
             _subs: subs,
         };
         s.set_machine(machine, cx);
@@ -631,6 +636,212 @@ impl NewSheet {
             });
         })
         .detach();
+    }
+
+    /// Choose...: the folder chooser over the sheet, open at the folder picked (or, adding, at the Claude folder).
+    pub fn open_chooser(&mut self, adding: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.is_auto() || self.machine.is_empty() {
+            return;
+        }
+        let recent: Vec<String> = self
+            .recent
+            .iter()
+            .filter(|f| f.recent.is_some_and(|r| r > 0.0) && !f.folder.is_empty())
+            .map(|f| f.folder.clone())
+            .collect();
+        let (title, ok) =
+            if adding { ("Add a folder Claude may also use", "Add") } else { ("Choose a folder", "Choose") };
+        let start = if adding { String::new() } else { self.folder.clone() };
+        let (app, machine) = (self.app.clone(), self.machine.clone());
+        let mut parts = FilesView::choose_parts(title, ok, recent);
+        parts.root_ok = !adding;
+        let view = cx.new(|cx| FilesView::chooser(app, machine, start, parts, window, cx));
+        let sub = cx.subscribe(&view, |this, _, ev: &FilesEvent, cx| {
+            let adding = this.chooser.as_ref().is_some_and(|c| c.1);
+            if let FilesEvent::Chosen(f) = ev {
+                if adding {
+                    if !this.opt.dirs.contains(f) {
+                        this.toggle_dir(f.clone(), cx);
+                    }
+                } else {
+                    this.pick_folder(f.clone(), cx);
+                    this.preview(cx);
+                }
+            }
+            this.chooser = None;
+            cx.notify();
+        });
+        self.chooser = Some((view, adding, sub));
+        cx.notify();
+    }
+
+    /// The machine can list its folders for Choose... (any Switchboard with Files; places need a newer one).
+    fn can_browse(&self, cx: &App) -> bool {
+        !self.is_auto() && self.app.read(cx).snap.machine(&self.machine).is_some_and(crate::files::files_ok)
+    }
+
+    /// The chooser over the sheet.
+    fn chooser_overlay(&self, t: &Theme) -> Option<AnyElement> {
+        let (view, _, _) = self.chooser.as_ref()?;
+        Some(
+            div()
+                .absolute()
+                .inset_0()
+                .rounded(px(ui::R_SHEET))
+                .bg(t.scrim)
+                .occlude()
+                .p(px(10.))
+                .flex()
+                .child(
+                    div()
+                        .flex_1()
+                        .rounded(px(ui::R_CARD))
+                        .border_1()
+                        .border_color(t.line)
+                        .overflow_hidden()
+                        .shadow_lg()
+                        .child(view.clone()),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// The Folder column on a machine that can browse: the folder picked, large, with its full path; Choose...
+    /// for the chooser; and the few folders used lately, one click each.
+    fn folder_card(&self, t: &Theme, well: gpui::Hsla, path: String, cx: &Context<Self>) -> gpui::Div {
+        let claude = self.nav.as_ref().map(|n| n.read(cx).claude_name()).unwrap_or_else(|| "Claude folder".into());
+        let name = if self.folder.is_empty() { claude.clone() } else { places::name_of(&self.folder, &claude) };
+        let ic = if self.folder.is_empty() { "spark" } else { "folder" };
+        let (hover, sel) = (t.hover, t.sel);
+        let mut rows = div().flex().flex_col().gap(px(1.));
+        let recent = self.recent.iter().filter(|f| f.recent.is_some_and(|r| r > 0.0) && !f.folder.is_empty()).take(5);
+        let mut any = false;
+        for (i, f) in recent.enumerate() {
+            any = true;
+            let on = self.folder == f.folder;
+            let pick = f.folder.clone();
+            let parent = places::parent(&f.folder).map(|p| places::shown(&p, &claude)).unwrap_or_default();
+            rows = rows.child(
+                div()
+                    .id(SharedString::from(format!("nw-rec-{i}")))
+                    .h(px(30.))
+                    .px(px(10.))
+                    .flex()
+                    .items_center()
+                    .gap(px(9.))
+                    .rounded(px(ui::R_CTRL))
+                    .when(on, |d| d.bg(sel))
+                    .when(!on, |d| d.cursor_pointer().hover(move |s| s.bg(hover)))
+                    .child(ui::icon("folder", 14., t.accent))
+                    .child(ui::line(places::name_of(&f.folder, &claude)).text_size(px(13.)).text_color(t.ink))
+                    .child(ui::line(parent).flex_1().min_w_0().text_size(px(11.5)).text_color(t.faint))
+                    .when_some(f.recent.filter(|r| *r > 0.0), |d, r| {
+                        d.child(
+                            div()
+                                .flex_none()
+                                .text_size(px(11.))
+                                .text_color(t.faint)
+                                .child(fmt::sago(r, AppState::now())),
+                        )
+                    })
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.pick_folder(pick.clone(), cx);
+                        this.preview(cx);
+                    })),
+            );
+        }
+        div()
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .flex_col()
+            .rounded(px(ui::R_CARD))
+            .border_1()
+            .border_color(t.line)
+            .bg(well)
+            .overflow_hidden()
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(14.))
+                    .pt(px(14.))
+                    .pb(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .child(
+                        div()
+                            .flex_none()
+                            .size(px(40.))
+                            .rounded(px(10.))
+                            .bg(t.accent.alpha(if t.dark { 0.16 } else { 0.1 }))
+                            .flex()
+                            .items_center()
+                            .justify_center()
+                            .child(ui::icon(ic, 20., t.accent)),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(3.))
+                            .child(
+                                ui::line(name).text_size(px(14.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink),
+                            )
+                            .child(ui::wrap(path).font_family(NUM).text_size(px(11.)).text_color(t.dim)),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_none()
+                    .px(px(14.))
+                    .pb(px(12.))
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .border_b_1()
+                    .border_color(t.rule)
+                    .child(
+                        ui::line_btn(t, "nw-choose", 30.)
+                            .px(px(12.))
+                            .text_size(px(12.5))
+                            .child(ui::icon("folder", 13., t.dim))
+                            .child("Choose\u{2026}")
+                            .on_click(
+                                cx.listener(|this, _: &ClickEvent, window, cx| this.open_chooser(false, window, cx)),
+                            ),
+                    )
+                    .when(!self.folder.is_empty(), |d| {
+                        d.child(Self::link(t, "nw-claude", "Use the Claude folder").on_click(cx.listener(
+                            |this, _: &ClickEvent, _, cx| {
+                                this.pick_folder(String::new(), cx);
+                                this.preview(cx);
+                            },
+                        )))
+                    }),
+            )
+            .child(
+                div()
+                    .id("nw-recent")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .px(px(6.))
+                    .pt(px(8.))
+                    .pb(px(6.))
+                    .when(any, |d| d.child(div().px(px(8.)).pb(px(5.)).child(ui::lbl("Recent", t.faint))).child(rows))
+                    .when(!any, |d| {
+                        d.child(
+                            ui::wrap("Folders your chats use show here. Choose\u{2026} browses the whole machine.")
+                                .px(px(8.))
+                                .text_size(px(12.))
+                                .text_color(t.faint),
+                        )
+                    }),
+            )
+            .children(self.check_line(t))
     }
 
     /// Opens the browser at a place (or the folder it was on).
@@ -1546,7 +1757,10 @@ impl NewSheet {
                     .when(self.adding, |d| d.bg(t.sel))
                     .child(ui::icon("plus", 12., t.dim))
                     .child(if self.opt.dirs.is_empty() { "Add a folder" } else { "Add" })
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                    .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                        if this.can_browse(cx) {
+                            return this.open_chooser(true, window, cx);
+                        }
                         this.adding = !this.adding;
                         cx.notify();
                     })),
@@ -2340,7 +2554,9 @@ impl Render for NewSheet {
             .flex_col()
             .gap(px(7.))
             .child(ui::lbl("Folder", t.label))
-            .child(
+            .child(if !auto && !self.adding && self.can_browse(cx) {
+                self.folder_card(&t, well, path, cx).into_any_element()
+            } else {
                 div()
                     .flex_1()
                     .min_h_0()
@@ -2393,8 +2609,9 @@ impl Render for NewSheet {
                     } else {
                         self.picker(&t, cx).into_any_element()
                     })
-                    .when(!auto, |d| d.children(self.check_line(&t))),
-            )
+                    .when(!auto, |d| d.children(self.check_line(&t)))
+                    .into_any_element()
+            })
             .child(
                 div()
                     .flex_none()
@@ -2596,6 +2813,7 @@ impl Render for NewSheet {
                     .child(start),
             )
             .children(trust)
+            .children(self.chooser_overlay(&t))
     }
 }
 

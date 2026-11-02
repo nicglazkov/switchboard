@@ -4,6 +4,14 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.8.12 (2026-11-02)
+
+- Choosing a folder looks like Finder or File Explorer: places down the side, Back, Forward and Up, a path bar, and the folder's contents. It's how New chat picks its folder and adds folders Claude may also use, on the desktop and on the iPhone.
+- A chat's terminal shows its cache on its own, Warm or Cold, apart from whether it needs you, and Start fresh is a click away beside it. It asks first, saying what it does.
+- Claude Code's status line in a terminal refreshes every 15 seconds, so its warm or cold stays true while nobody types.
+- Quiet keeps the newest 8 chats per computer.
+- The iPhone app opens with no chats open after it was closed, instead of reopening old tabs.
+
 ## 0.8.11 (2026-10-23)
 
 - Settings > Server shows whether your server and its parts are running, and updates it with one click when a new version is out. It can also restart it, show its logs and copy its details for a bug report.

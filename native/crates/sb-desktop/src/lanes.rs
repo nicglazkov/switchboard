@@ -85,27 +85,25 @@ fn os_name(os: Option<&str>) -> String {
     }
 }
 
-/// Quiet rows shown per machine (the column grows to fit them, it never scrolls), and how recent a quiet chat is to
-/// stay there; past either it is in History.
-pub const QUIET_CAP: usize = 12;
-const QUIET_RECENT: f64 = 2. * 86400.;
+/// Quiet rows shown per machine (the column grows to fit them, it never scrolls): the newest QUIET_KEEP idle chats,
+/// however old. Past that they are in History.
+pub const QUIET_CAP: usize = sb_core::board::QUIET_KEEP;
 
-/// A Quiet cell's rows, newest first: the ones it shows, and how many are left to History (past QUIET_RECENT, or
-/// past QUIET_CAP). A lane in its own window shows every recent one.
+/// A Quiet cell's rows, newest first: the ones it shows, and how many are left to History (past QUIET_CAP). A lane in
+/// its own window shows them all.
 pub fn quiet_rows<'a>(
     snap: &'a sb_core::model::Snapshot,
-    now: f64,
+    _now: f64,
     keys: &[String],
     all: bool,
 ) -> (Vec<&'a Session>, usize) {
-    let mut recent: Vec<&Session> =
-        keys.iter().filter_map(|k| snap.session(k)).filter(|s| now - s.active < QUIET_RECENT).collect();
-    recent.sort_by(|a, b| b.active.total_cmp(&a.active));
-    let rest = keys.len() - recent.len().min(if all { usize::MAX } else { QUIET_CAP });
+    let mut rows: Vec<&Session> = keys.iter().filter_map(|k| snap.session(k)).collect();
+    rows.sort_by(|a, b| b.active.total_cmp(&a.active));
+    let rest = if all { 0 } else { rows.len().saturating_sub(QUIET_CAP) };
     if !all {
-        recent.truncate(QUIET_CAP);
+        rows.truncate(QUIET_CAP);
     }
-    (recent, rest)
+    (rows, rest)
 }
 
 impl BoardView {
@@ -758,7 +756,7 @@ impl BoardView {
             .gap(px(if col.quiet() { 2. } else { 6. }))
             .min_w_0();
         if col.quiet() {
-            // Quiet keeps the last two days' idle chats, a dozen at most, one line each; the rest are in History.
+            // Quiet keeps a computer's newest idle chats (QUIET_CAP), however old, one line each; the rest are in History.
             let (rows, rest) = quiet_rows(&c.app.snap, c.now, keys, self.solo.is_some());
             for s in rows {
                 cell = cell.child(self.quiet_row(c, s));

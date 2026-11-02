@@ -101,7 +101,7 @@ fn hand_fixture_normalizes() {
 fn board_columns_and_order() {
     let s = hand();
     let b = board::build(&s, NOW, &HashSet::new(), None);
-    assert_eq!(b.column_counts, vec![2, 2, 3, 2, 2]);
+    assert_eq!(b.column_counts, vec![2, 2, 3, 2, 3], "Quiet takes an older chat too (QUIET_KEEP)");
     assert_eq!(b.cold_ctx, 570_000);
     let studio = b.lane("studio").unwrap();
     assert_eq!(studio.tally.n, 7);
@@ -128,6 +128,30 @@ fn board_columns_and_order() {
     let right = b.across(Some(&first), 1).unwrap();
     assert_eq!(b.locate(&right).unwrap().1, Column::Run);
     assert_eq!(b.across(Some(&first), -1), None);
+}
+
+#[test]
+fn quiet_keeps_the_newest_chats_however_old() {
+    // Days-old chats (stale) stay in Quiet until QUIET_KEEP newer ones push them to History.
+    let mut s = hand();
+    let m = s.machines.iter_mut().find(|m| m.name == "studio").unwrap();
+    let base = m.sessions[0].clone();
+    for i in 0..12 {
+        let mut o = base.clone();
+        o.key = format!("studio:old-{i}");
+        o.sid = format!("old-{i}");
+        o.stale = true;
+        o.active = NOW - 3. * 86400. - i as f64 * 60.;
+        m.sessions.push(o);
+    }
+    let b = board::build(&s, NOW, &HashSet::new(), None);
+    let q = &b.lane("studio").unwrap().cells[Column::Quiet.index()];
+    assert_eq!(q.len(), board::QUIET_KEEP, "filled up to QUIET_KEEP with the newest old chats");
+    assert!(q.contains(&"studio:old-0".to_string()), "the newest old chat is there");
+    assert!(!q.contains(&"studio:old-11".to_string()), "the oldest is in History");
+    let hidden: HashSet<String> = ["studio:old-0".to_string()].into();
+    let b2 = board::build(&s, NOW, &hidden, None);
+    assert!(!b2.lane("studio").unwrap().cells[Column::Quiet.index()].contains(&"studio:old-0".to_string()));
 }
 
 #[test]
@@ -228,7 +252,7 @@ fn design_lab_sample_parses() {
     assert_eq!(s.sessions().len(), 76);
     let b = board::build(&s, now, &HashSet::new(), None);
     let total: u32 = b.column_counts.iter().sum();
-    assert_eq!(total, 76 - 52, "stale chats stay out of the board");
+    assert_eq!(total, 76 - 52 + 12, "older chats only fill Quiet up to QUIET_KEEP per computer");
     // list-form flags still produce chips
     let first = s.session("studio:c03ef0d9-fb19-40d7-ba39-eca0294f5d87").unwrap();
     assert_eq!(first.flags.effort.as_deref(), Some("ultracode"));

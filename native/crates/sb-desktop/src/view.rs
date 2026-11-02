@@ -340,6 +340,8 @@ pub struct BoardView {
     pub confirm: Option<(String, Confirm)>,
     /// The confirm is the fix "Restart with Chrome" (not Start fresh).
     pub confirm_chrome: bool,
+    /// The confirm is Start fresh from a terminal's strip: OK starts it there, so the tab follows into the new chat.
+    pub confirm_here: bool,
     /// The confirm is closing this local terminal, which still runs a program (not Start fresh).
     pub confirm_close: Option<Entity<TermTab>>,
     /// The details sheet's "Needs you" card: its picks and text fields (askcard.rs), and whether one is typing.
@@ -477,12 +479,23 @@ impl BoardView {
                     window.activate_window();
                 }
                 AppEvent::PasteInto { .. } => {}
+                AppEvent::AskFresh { key } => {
+                    if let Some(c) = this.app.read(cx).fresh_confirm(key) {
+                        this.confirm = Some((key.clone(), c));
+                        this.confirm_chrome = false;
+                        this.confirm_here = true;
+                        this.confirm_close = None;
+                        // The keyboard leaves the terminal, so Enter and Esc answer the question.
+                        this.focus_tab = true;
+                        cx.notify();
+                    }
+                }
                 AppEvent::Relaunching { key } => {
                     this.ask_relaunch_news(key, None, cx);
                     this.flags_relaunching(key, cx);
                 }
                 // Not while it waits for the chat's reply to end: the terminal stays live, and a Cancel leaves it so.
-                AppEvent::RelaunchStarted { key, job } => {
+                AppEvent::RelaunchStarted { key, job } | AppEvent::FreshHere { key, job } => {
                     for tab in this.tabs.clone() {
                         if tab.read(cx).key.as_deref() == Some(key.as_str()) {
                             let j = job.clone();
@@ -645,6 +658,7 @@ impl BoardView {
             menu: None,
             confirm: None,
             confirm_chrome: false,
+            confirm_here: false,
             confirm_close: None,
             ask: None,
             ask_focus: false,
@@ -750,7 +764,7 @@ impl BoardView {
         } else {
             (self.open.clone(), app.settings.shut.iter().cloned().collect())
         };
-        // Board::order, with Quiet in the order it shows: newest first, the last two days, a dozen at most.
+        // Board::order, with Quiet in the order it shows: newest first, QUIET_CAP at most.
         let now = AppState::now();
         let mut keys = Vec::new();
         for lane in b.lanes.iter().filter(|l| !shut.contains(&l.machine)) {
@@ -1511,6 +1525,7 @@ impl BoardView {
                 if let Some(c) = app.fresh_confirm(&key) {
                     self.confirm = Some((key, c));
                     self.confirm_chrome = false;
+                    self.confirm_here = false;
                 }
             }
             ActionId::Continue => {
@@ -1785,6 +1800,12 @@ impl BoardView {
                 }
                 // about: the About window.
                 "about" => cx.defer(crate::about::open),
+                // choose: the New sheet's folder chooser; choose=add, adding an extra folder.
+                "choose" => {
+                    if let Overlay::New(s) = &self.overlay {
+                        s.update(cx, |s, cx| s.open_chooser(arg == "add", window, cx));
+                    }
+                }
                 // pick: the New sheet's tools on Pick.
                 "pick" => {
                     if let Overlay::New(s) = &self.overlay {
@@ -2710,6 +2731,7 @@ impl BoardView {
     fn drop_confirm(&mut self) {
         self.confirm = None;
         self.confirm_chrome = false;
+        self.confirm_here = false;
         self.confirm_close = None;
         self.focus_tab = true;
     }
@@ -2725,6 +2747,8 @@ impl BoardView {
         } else if let Some((key, _)) = self.confirm.take() {
             if std::mem::take(&mut self.confirm_chrome) {
                 self.relaunch_chrome(key, cx);
+            } else if std::mem::take(&mut self.confirm_here) {
+                self.app.update(cx, |s, cx| s.fresh_in_tab(&key, cx));
             } else {
                 self.app.update(cx, |s, cx| s.act(ActionId::Fresh, &key, cx));
             }
