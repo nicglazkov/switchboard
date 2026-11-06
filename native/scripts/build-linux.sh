@@ -51,7 +51,7 @@ tar -czf dist/Switchboard-linux-x86_64.tar.gz -C dist/pkg Switchboard switchboar
 echo \"symbols: \$SYM (\$(du -sk \$SYM | cut -f1) KB)\"
 echo \"linux: build=\${secs}s binary=\$(stat -c %s dist/Switchboard-linux-x86_64) bytes tar.gz=\$(stat -c %s dist/Switchboard-linux-x86_64.tar.gz) bytes\""
 mkdir -p dist
-scp -q $H:$REMOTE/dist/Switchboard-linux-x86_64 $H:$REMOTE/dist/Switchboard-linux-x86_64.build $H:$REMOTE/dist/Switchboard-linux-x86_64.tar.gz $H:$REMOTE/dist/switchboard-node-linux dist/
+scp -q $H:$REMOTE/dist/Switchboard-linux-x86_64 $H:$REMOTE/dist/Switchboard-linux-x86_64.build $H:$REMOTE/dist/Switchboard-linux-x86_64.tar.gz $H:$REMOTE/dist/switchboard-node-linux $H:$REMOTE/dist/switchboard-hub-linux dist/
 rsync -a $H:$REMOTE/dist/symbols/ dist/symbols/
-chmod +x dist/Switchboard-linux-x86_64 dist/switchboard-node-linux
+chmod +x dist/Switchboard-linux-x86_64 dist/switchboard-node-linux dist/switchboard-hub-linux
 ls -l dist/Switchboard-linux-x86_64 dist/Switchboard-linux-x86_64.tar.gz

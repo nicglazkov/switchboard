@@ -8,6 +8,11 @@ use crate::theme::{NUM, Theme};
 pub const MAC: bool = cfg!(target_os = "macos");
 /// Windows draws no title bar of its own: the board's header holds the caption buttons, like Zed and the Office apps.
 /// `shots` builds draw that header anywhere with SB_AS_WINDOWS=1, so it can be checked on a Linux display.
+/// Endless animations (breathing dots, pulses, spinners) redraw the whole window each frame; a few frames a second
+/// look the same and leave the CPU alone (the resource audit, 2026-11-06).
+pub const PULSE_FPS: f32 = 12.;
+pub const SPIN_FPS: f32 = 30.;
+
 pub fn win() -> bool {
     #[cfg(feature = "shots")]
     if std::env::var_os("SB_AS_WINDOWS").is_some() {
@@ -77,6 +82,7 @@ pub fn pulse_icon(id: impl Into<gpui::ElementId>, name: &str, size: f32, color: 
             id,
             gpui::Animation::new(std::time::Duration::from_millis(1600))
                 .repeat()
+                .with_max_fps(PULSE_FPS)
                 .with_easing(gpui::pulsating_between(0.35, 1.0)),
             |s, k| s.opacity(k),
         )
@@ -101,7 +107,7 @@ pub fn spinner(id: impl Into<gpui::ElementId>, size: f32, color: Hsla) -> gpui::
     let arc =
         svg().path("icons/spinner.svg").absolute().top_0().left_0().size(px(size)).text_color(color).with_animation(
             id,
-            gpui::Animation::new(std::time::Duration::from_millis(800)).repeat(),
+            gpui::Animation::new(std::time::Duration::from_millis(800)).repeat().with_max_fps(SPIN_FPS),
             |s, k| s.with_transformation(gpui::Transformation::rotate(gpui::percentage(k))),
         );
     div()

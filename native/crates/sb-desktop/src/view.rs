@@ -2424,12 +2424,9 @@ impl Render for BoardView {
         };
         // Narrow windows: details float in a sheet over the board, which stays usable underneath; popped out, they
         // live in their own window.
-        if on_board
-            && !docked
-            && self.main == Main::Board
-            && self.detached.is_none()
-            && let Some(k) = &selected
-        {
+        let sheet_open =
+            on_board && !docked && self.main == Main::Board && self.detached.is_none() && selected.is_some();
+        if sheet_open && let Some(k) = &selected {
             root = root.child(
                 div()
                     .id("detail-sheet")
@@ -2506,7 +2503,19 @@ impl Render for BoardView {
             root = root.child(self.setup_box(&c, s));
         }
         // Jobs and toasts stay above every layer, so an error from the New sheet is readable while it stays open.
-        root = root.child(self.corner(&c));
+        // ...and beside whatever holds the right side (the flags drawer, docked details, the details sheet), never on
+        // top of its bottom, where they would hide each other. A window too narrow for both keeps them on screen.
+        let beside = if self.flags.is_some() {
+            crate::flagsui::FLAGS_W + 24.
+        } else if docked {
+            ins_w + INS_HANDLE + 12.
+        } else if sheet_open {
+            sheet_w + 24.
+        } else {
+            12.
+        };
+        let corner_right = beside.min(w - CORNER_W - 12.).max(12.);
+        root = root.child(self.corner(&c, corner_right));
         root = root.children(self.notices_popover(&c));
         // Linux, when the window draws its own frame: the edges it is resized by, over everything.
         if let Decorations::Client { tiling } = decorations {
@@ -2846,7 +2855,7 @@ impl BoardView {
     }
 
     /// Bottom right: running jobs, then toasts.
-    fn corner(&self, c: &Ctx) -> impl IntoElement {
+    fn corner(&self, c: &Ctx, right: f32) -> impl IntoElement {
         let t = c.t;
         let cx = c.cx;
         let now = c.now;
@@ -3282,7 +3291,7 @@ impl BoardView {
             .collect();
         div()
             .absolute()
-            .right(px(12.))
+            .right(px(right))
             .bottom(px(34.))
             .flex()
             .flex_col()

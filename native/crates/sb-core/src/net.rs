@@ -880,8 +880,13 @@ impl Client {
 
     /// v2: POST /api/relaunch. A need "terminal" comes back as the reply (its command), a need "busy" as CoreError::Busy.
     pub fn relaunch(&self, body: &serde_json::Value) -> Result<crate::api::ApiRelaunch, CoreError> {
+        self.relaunch_at("/api/relaunch", body)
+    }
+
+    /// The same, at another path: POST /api/action with verb relaunch takes only what changes.
+    pub fn relaunch_at(&self, path: &str, body: &serde_json::Value) -> Result<crate::api::ApiRelaunch, CoreError> {
         self.with_base(|base| {
-            let (status, raw) = self.post_raw(base, "/api/relaunch", body)?;
+            let (status, raw) = self.post_raw(base, path, body)?;
             let r: crate::api::ApiRelaunch = serde_json::from_slice(&raw).unwrap_or_default();
             if r.need.as_deref() == Some("terminal") {
                 return Ok(r);

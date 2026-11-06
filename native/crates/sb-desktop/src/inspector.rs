@@ -368,6 +368,7 @@ impl BoardView {
             .child(self.ins_flags(c, s))
             .children(self.ins_tools(c, s))
             .children(self.ins_chrome(c, s))
+            .child(self.ins_computer(c, s))
             .child(self.ins_more(c, s, offline))
             .when(!rest.is_empty(), |d| d.child(self.ins_actions(c, &s.key, &rest)))
             .children(self.ins_history(c, s));
@@ -815,6 +816,59 @@ impl BoardView {
         self.tools_pick =
             Some(ToolsPick { key: key.to_string(), sel: Vec::new(), confirm: false, cmd: Some((cmd, err)) });
         cx.notify();
+    }
+
+    /// Computer use, one click: on a Mac it is turned on for the chat's folder and the chat relaunches (it waits for
+    /// Claude to finish first, and a chat open in a terminal gets the command to run there). Elsewhere it says why not.
+    fn ins_computer(&self, c: &Ctx, s: &Session) -> AnyElement {
+        let t = c.t;
+        let on = s.flags.computer;
+        let why = crate::flagsui::computer_use_blocker(c.app.snap.machine(&s.machine));
+        let working = c.app.busy.contains(&format!("{}:relaunch", s.key));
+        let head = div().text_size(px(12.)).font_weight(FontWeight::SEMIBOLD).text_color(t.dim).child("Computer use");
+        let line = |text: String| ui::wrap(text).text_size(px(12.)).line_height(relative(1.45)).text_color(t.faint);
+        let card = div().mt(px(16.)).flex().flex_col().gap(px(8.)).child(head);
+        if let Some(why) = why.filter(|_| !on) {
+            return card.child(line(why)).into_any_element();
+        }
+        let k = s.key.clone();
+        let btn = if on {
+            ui::line_btn(&t, "ins-computer", 30.).px(px(12.)).text_size(px(12.5)).child(ui::icon("desktop", 13., t.dim))
+        } else {
+            ui::primary_btn(&t, "ins-computer", 30.).px(px(12.)).text_size(px(12.5)).child(ui::icon(
+                "desktop",
+                13.,
+                t.on_accent,
+            ))
+        }
+        .child(if working {
+            if on { "Turning off\u{2026}" } else { "Turning on\u{2026}" }
+        } else if on {
+            "Turn off"
+        } else {
+            "Turn on computer use"
+        })
+        .when(!working, |b| {
+            b.on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| {
+                let edit = if on {
+                    serde_json::json!({"edit": {"remove": ["computer"]}})
+                } else {
+                    serde_json::json!({"edit": {"computer": ["on"]}})
+                };
+                let k = k.clone();
+                this.app.update(cx, |st, cx| st.relaunch(&k, edit, None, cx));
+            }))
+        });
+        card.child(line(if on {
+            "On for this chat's folder. Claude can see the Mac's screen and use its apps, asking you first for each app."
+                .into()
+        } else {
+            "Lets Claude see the Mac's screen and use its apps. The chat relaunches with it once Claude is free, and \
+             carries on where it was. The first time, macOS asks that Mac to allow Accessibility and Screen Recording."
+                .into()
+        }))
+        .child(div().flex().child(btn))
+        .into_any_element()
     }
 
     /// Tools: the library tools this chat runs with, and Attach tool. A running chat restarts to load them, so that

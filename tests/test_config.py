@@ -352,6 +352,18 @@ class RelaunchTest(unittest.TestCase):
         self.assertEqual((r['ok'], r['need']), (False, 'terminal'))
         self.assertIn('claude --resume ' + self.SID, r['command'])
 
+    def test_computer_use_in_a_terminal_chat_turns_its_folder_on_and_gives_the_command(self):
+        self.kind = 'interactive'
+        self.fleet.poll()
+        self.fleet.state['studio']['features'] = ['relaunch', 'computer_use']
+        self.app.feat.caps = lambda name: {'computer_use': {'supported': True}}
+        r = self.app.post('/api/relaunch', self.body(computer=True))
+        self.assertEqual((r['ok'], r['need']), (False, 'terminal'))
+        self.assertIn({'verb': 'computer_use', 'sid': self.SID, 'on': True}, self.calls)
+        self.app.feat.caps = lambda name: {'computer_use': {'supported': False, 'why': 'Macs only'}}
+        with self.assertRaises(server.HttpError):
+            self.app.post('/api/relaunch', self.body(computer=True))
+
     def test_bad_flags_are_refused(self):
         with self.assertRaises(server.HttpError):
             self.app.post('/api/relaunch', self.body(flags=[['--print']]))
@@ -392,6 +404,22 @@ class FlagsDrawerTest(unittest.TestCase):
         p = flags.plan(self.S, {'flags': [['--add-dir', 'proj'], ['--verbose']], 'other': '--brief'})
         self.assertEqual([(c['name'], c['to'], c['how']) for c in p['changes']], [('--brief', 'On', 'relaunch')])
         self.assertEqual(flags.view(self.S)['short'], 'Opus \u00b7 High')
+
+    def test_computer_use_relaunches_and_says_so_in_the_body(self):
+        import flags
+        keep = [['--add-dir', 'proj'], ['--verbose']]
+        p = flags.plan(self.S, {'flags': keep, 'computer': True})
+        self.assertTrue(p['relaunch'])
+        self.assertEqual([(c['name'], c['to']) for c in p['changes']], [('--computer-use', 'On')])
+        self.assertIs(p['body']['computer'], True)
+        self.assertNotIn(['--computer-use'], p['body']['flags'], 'not a claude flag')
+        on = dict(self.S, now=dict(self.S['now'], computer=True))
+        self.assertIn('--computer-use', [x['name'] for x in flags.view(on)['active']])
+        self.assertEqual(flags.plan(on, {'flags': keep})['changes'], [], 'untouched stays on')
+        p = flags.plan(on, {'flags': keep, 'computer': False})
+        self.assertEqual([(c['name'], c['to']) for c in p['changes']], [('--computer-use', 'Off')])
+        self.assertIs(p['body']['computer'], False)
+        self.assertNotIn('computer', flags.plan(self.S, {'flags': keep, 'computer': False})['body'])
 
 
 class AgentIdentityTest(unittest.TestCase):

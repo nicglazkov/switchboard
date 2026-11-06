@@ -24,5 +24,6 @@ ssh -q $H "SHADERS=${SHADERS:-auto} SB_UPDATE_PUBKEY='$SB_UPDATE_PUBKEY' SB_UPDA
 mkdir -p dist
 scp -q $H:$REMOTE/dist/Switchboard-mac.zip $H:$REMOTE/dist/Switchboard-mac.zip.build dist/
 scp -q $H:$REMOTE/dist/switchboard-node-mac dist/switchboard-node-mac
+scp -q $H:$REMOTE/dist/switchboard-hub-mac dist/switchboard-hub-mac
 rsync -a $H:$REMOTE/dist/symbols/ dist/symbols/
 ls -l dist/Switchboard-mac.zip

@@ -1091,6 +1091,9 @@ pub struct ApiFlagObject {
     pub agent: Option<String>,
     #[serde(default)]
     pub remote: Option<bool>,
+    /// Computer use is on for the chat's folder (Macs).
+    #[serde(default)]
+    pub computer: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

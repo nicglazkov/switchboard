@@ -54,7 +54,10 @@ LABELS = {
     '--restricted': 'Restricted', '--disable-slash-commands': 'No skills', '--strict-mcp-config': 'Only listed MCP',
     '--exclude-dynamic-system-prompt-sections': 'Static prompt', '--model': 'Model', '--effort': 'Effort',
     '--remote-control': 'Remote Control', '--dangerously-skip-permissions': 'Skips permissions',
+    '--computer-use': 'Computer use',
 }
+# Not a claude flag: the name the drawer shows computer use under (Claude Code turns it on per folder, not by a flag)
+COMPUTER = '--computer-use'
 
 
 class FlagError(ValueError):
@@ -178,8 +181,8 @@ def model_word(m):
 EFFORT_WORD = {'low': 'Low', 'medium': 'Medium', 'high': 'High', 'xhigh': 'Extra high', 'max': 'Max', 'ultracode': 'UltraCode'}
 PERM_WORD = {'default': 'Asks first', 'manual': 'Asks first', 'acceptEdits': 'Accept edits', 'plan': 'Plan', 'auto': 'Auto',
              'bypassPermissions': 'Bypass', 'dontAsk': 'Never asks'}
-CHIPS = ('--model', '--effort', '--permission-mode', '--chrome', '--no-chrome')
-HEAD = ('--model', '--effort', '--permission-mode', '--chrome')
+CHIPS = ('--model', '--effort', '--permission-mode', '--chrome', '--no-chrome', '--computer-use')
+HEAD = ('--model', '--effort', '--permission-mode', '--chrome', '--computer-use')
 SWITCHBOARD_OWN = ('--remote-control',)  # every background chat Switchboard starts has it; not the user's to drop
 
 
@@ -200,6 +203,8 @@ def view(s):
     out.append(_item('--permission-mode', perm, PERM_WORD.get(perm, perm), 'live' if perm == 'plan' else 'relaunch'))
     if now.get('chrome'):
         out.append(_item('--chrome', None, 'On', 'relaunch', brief='Chrome'))
+    if now.get('computer'):  # Switchboard's, not a claude flag: computer use is on for the chat's folder
+        out.append(_item(COMPUTER, None, 'On', 'relaunch', brief='Computer use'))
     own = False
     for f in launch.get('flags') or []:
         name = f[0]
@@ -239,6 +244,7 @@ def plan(s, want, root=None):
     effort = want.get('effort') if want.get('effort') in EFFORT_WORD else hv('--effort')
     perm = want.get('perm') if want.get('perm') in PERM_WORD else hv('--permission-mode') or 'default'
     chrome = bool(want.get('chrome')) if 'chrome' in want else '--chrome' in have
+    computer = bool(want.get('computer')) if isinstance(want.get('computer'), bool) else COMPUTER in have
     changes, cmds = [], []
 
     def change(name, frm, to, how, cmd=None):
@@ -259,6 +265,8 @@ def plan(s, want, root=None):
                '/plan' if perm == 'plan' else None)
     if chrome != ('--chrome' in have):
         change('--chrome', 'Off' if chrome else 'On', 'On' if chrome else 'Off', 'relaunch')
+    if computer != (COMPUTER in have):
+        change(COMPUTER, 'Off' if computer else 'On', 'On' if computer else 'Off', 'relaunch')
     old = [[x['name']] + ([x['value']] if x['value'] is not None else []) for x in cur['active']
            if x['name'] not in CHIPS and x['name'] not in SWITCHBOARD_OWN]
     new = checked['flags']
@@ -277,4 +285,5 @@ def plan(s, want, root=None):
     flags = list(new) + ([['--permission-mode', perm]] if perm not in ('default', 'manual') else []) + ([['--chrome']] if chrome else [])
     return {'changes': changes, 'cmds': [] if relaunch else cmds, 'relaunch': relaunch, 'running': running,
             'busy': s.get('status') == 'busy', 'dropped': cur['other'],
-            'body': {'model': model, 'effort': effort, 'flags': flags}}
+            'body': dict({'model': model, 'effort': effort, 'flags': flags},
+                         **({'computer': computer} if computer != (COMPUTER in have) else {}))}

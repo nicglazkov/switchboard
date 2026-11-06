@@ -420,8 +420,17 @@ impl Core {
         when: Option<&str>,
     ) -> Result<api::ApiRelaunch, CoreError> {
         let mut b = serde_json::json!({"machine": machine, "sid": sid});
+        // {"edit": {...}}: only what changes (POST /api/action relaunch, the server keeps the rest of its flags)
+        if let Some(edit) = body.get("edit").filter(|e| e.is_object()) {
+            b["verb"] = serde_json::json!("relaunch");
+            b["flags"] = edit.clone();
+            if let Some(w) = when {
+                b["when"] = serde_json::json!(w);
+            }
+            return self.client.relaunch_at("/api/action", &b);
+        }
         if let Some(o) = body.as_object() {
-            for k in ["model", "effort", "flags"] {
+            for k in ["model", "effort", "flags", "computer"] {
                 if let Some(v) = o.get(k) {
                     b[k] = v.clone();
                 }

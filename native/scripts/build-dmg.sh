@@ -51,4 +51,9 @@ fi
 VER=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 mkdir -p dist
 scp -q "$H:$REMOTE/native/dist/Switchboard-$VER.dmg" dist/
+if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
+  # The Developer ID signed node and hub replace build-mac.sh's ad hoc ones, for publish.sh and the server kit.
+  scp -q "$H:$REMOTE/native/dist/switchboard-node-mac" "$H:$REMOTE/native/dist/switchboard-hub-mac" dist/
+  codesign -dv dist/switchboard-node-mac 2>&1 | grep -E '^(Identifier|TeamIdentifier)='
+fi
 ls -l "dist/Switchboard-$VER.dmg"

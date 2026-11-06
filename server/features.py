@@ -1257,6 +1257,9 @@ class Auto:
             m['caps'], m['can'] = c, can_line(c)
             m['chrome'] = self.chrome(m['name'])
             m['chrome_pref'] = False  # no machine is everyone's Chrome machine: each chat picks its own (chrome_machine)
+            cu = (c or {}).get('computer_use') if isinstance(c, dict) else None
+            m['computer_use'] = {'supported': bool(cu.get('supported')), 'why': cu.get('why') if isinstance(cu.get('why'), str) else None} \
+                if isinstance(cu, dict) else None  # None: its agent predates computer use
 
     def chrome(self, name):
         """Claude in Chrome on a machine: {'installed', 'connector', 'connected'}, or None before its agent says.

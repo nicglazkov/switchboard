@@ -34,7 +34,7 @@ class StatsTest(unittest.TestCase):
         s = self.sb.transcript_stats('/nonexistent/x.jsonl')
         self.assertEqual(s, {'last_prompt': None, 'ctx_tokens': 0, 'last_assistant_ts': None, 'model': None, 'title': None, 'cwd': None,
                              'bridge': None, 'custom_title': None, 'entrypoint': None, 'effort': None, 'speed': None, 'perm': None,
-                             'chrome_used': False, 'chrome_loaded': None, 'ultra': None, 'compacted_ts': None, 'last_ts': None, 'archived_ts': None})
+                             'chrome_used': False, 'chrome_loaded': None, 'mcp_ts': None, 'ultra': None, 'compacted_ts': None, 'last_ts': None, 'archived_ts': None})
 
     def test_reads_only_tail_of_huge_file(self):
         rows = [user('2026-10-10T10:00:00Z', 'x' * 5000) for _ in range(6000)]  # ~30 MB

@@ -589,7 +589,7 @@ pub fn sonar(t: &Theme, moving: bool) -> AnyElement {
         for (i, phase) in [0.0f32, 0.5].into_iter().enumerate() {
             d = d.child(ring(BOX, 0.).with_animation(
                 gpui::ElementId::from(format!("sonar-{i}")),
-                gpui::Animation::new(Duration::from_millis(2400)).repeat(),
+                gpui::Animation::new(Duration::from_millis(2400)).repeat().with_max_fps(crate::ui::SPIN_FPS),
                 move |r, k| {
                     let k = (k + phase) % 1.0;
                     let size = MARK + 14. + (BOX - MARK - 14.) * k;

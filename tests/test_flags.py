@@ -73,6 +73,47 @@ class SessionFlagsTest(RpcBase):
         (self.cdir / 'daemon' / 'roster.json').write_text('{"workers": {}}')   # it finished; the chip stays
         self.assertTrue(self.flags()['chrome'])
 
+    def test_a_relaunched_chat_keeps_its_flags(self):
+        # Claude Code keeps a resumed worker's command line in flagArgs, its message after "--" (2.1.319)
+        self.write(SID_A, [assistant('2026-10-01T00:00:05Z', 'ok')])
+        (self.cdir / 'daemon').mkdir()
+        roster = {'workers': {'aaaaaaaa': {'sessionId': SID_A, 'dispatch': {'sessionId': SID_A, 'launch': {
+            'mode': 'resume', 'sessionId': SID_A, 'fork': False,
+            'flagArgs': ['--remote-control', '--name', 'x', '--effort', 'high', '--chrome', '--', '--model is not a flag here']},
+            'respawnFlags': ['--remote-control', '--name', 'x', '--effort', 'high', '--chrome', '--', 'hi']}}}}
+        (self.cdir / 'daemon' / 'roster.json').write_text(json.dumps(roster))
+        f = self.flags()
+        self.assertTrue(f['chrome'])
+        self.assertEqual(f['effort'], 'high')
+        self.assertNotIn('model', f)
+        r = self.sb.rpc({'verb': 'list'}, NOW, agents=[])
+        s = next(s for s in r['sessions'] if s['sid'] == SID_A)
+        self.assertTrue(s['now']['chrome'])
+        self.assertIn(['--chrome'], s['launch']['flags'])                      # what the next relaunch carries over
+        self.assertEqual(s['launch']['flags'].count(['--chrome']), 1, 'respawnFlags repeats them: read once')
+
+    def test_chrome_is_unknown_until_a_relaunched_copy_has_had_a_turn(self):
+        # the old copy said "no Chrome"; the copy running now was started with --chrome and has not been asked yet
+        delta = entry('attachment', '2026-10-01T00:00:03Z',
+                      attachment={'type': 'mcp_instructions_delta', 'addedNames': ['filmcraft']})
+        self.write(SID_A, [delta, assistant('2026-10-01T00:00:05Z', 'ok')])
+        (self.cdir / 'daemon').mkdir()
+        roster = {'workers': {'aaaaaaaa': {'sessionId': SID_A, 'dispatch': {'sessionId': SID_A, 'launch': {
+            'mode': 'resume', 'flagArgs': ['--remote-control', '--chrome']}}}}}
+        (self.cdir / 'daemon' / 'roster.json').write_text(json.dumps(roster))
+        import datetime as dt
+        later = dt.datetime(2026, 10, 1, 1, tzinfo=dt.timezone.utc).timestamp() * 1000
+        running = [{'sessionId': SID_A, 'kind': 'background', 'status': 'idle', 'id': 'aaaaaaaa', 'startedAt': later}]
+        r = self.sb.rpc({'verb': 'list'}, NOW, agents=running)
+        s = next(s for s in r['sessions'] if s['sid'] == SID_A)
+        self.assertTrue(s['flags'].get('chrome'))
+        self.assertNotIn('chrome_missing', s)
+        # the same chat whose running copy said "no Chrome" itself is still missing it
+        early = [dict(running[0], startedAt=later / 1000 - 3600 * 2)]
+        r = self.sb.rpc({'verb': 'list'}, NOW, agents=early)
+        s = next(s for s in r['sessions'] if s['sid'] == SID_A)
+        self.assertTrue(s.get('chrome_missing'))
+
     def test_terminal_flags_come_from_the_command_line_once(self):
         self.write(SID_A, [assistant('2026-10-01T00:00:05Z', 'ok')])
         asked = []
@@ -88,6 +129,78 @@ class SessionFlagsTest(RpcBase):
         (self.cdir / 'daemon' / 'roster.json').write_text('{"workers": [1, 2]}')
         (self.cdir / 'settings.json').write_text('[]')
         self.assertIsInstance(self.flags(), dict)
+
+
+class ComputerUseTest(RpcBase):
+    def setUp(self):
+        super().setUp()
+        self.sb.sys.platform = 'darwin'   # fresh_sb gives each test its own module
+        self.folder = str(self.root / 'proj')
+
+    def cj(self):
+        return json.loads(self.cjson.read_text())
+
+    def test_on_and_off_for_a_folder_like_mcp_does(self):
+        self.cjson.write_text(json.dumps({'projects': {self.folder: {'enabledMcpServers': ['other'],
+                                                                     'disabledMcpServers': ['computer-use']}}, 'keep': 1}))
+        self.assertTrue(self.sb.set_computer_use(self.folder, True))
+        e = self.cj()['projects'][self.folder]
+        self.assertEqual(e['enabledMcpServers'], ['other', 'computer-use'])
+        self.assertEqual(e['disabledMcpServers'], [])
+        self.assertEqual(self.cj()['keep'], 1)
+        self.assertTrue(self.sb.computer_use_on(self.folder))
+        self.assertFalse(self.sb.set_computer_use(self.folder, True), 'already on: nothing written')
+        self.assertTrue((self.tmp / 'claude.json.bak-sb-computer-use').exists())
+        self.assertTrue(self.sb.set_computer_use(self.folder, False))
+        self.assertEqual(self.cj()['projects'][self.folder]['enabledMcpServers'], ['other'])
+        self.assertFalse(self.sb.computer_use_on(self.folder))
+
+    def test_never_on_windows(self):
+        self.cjson.write_text('{}')
+        self.sb.sys.platform = 'win32'
+        self.assertFalse(self.sb.set_computer_use(self.folder, True))
+        self.assertEqual(self.cj(), {})
+        self.assertFalse(self.sb._computer_use()['supported'])
+
+    def test_a_half_written_claude_json_is_left_alone(self):
+        self.cjson.write_text('{"projects": ')
+        self.assertFalse(self.sb.set_computer_use(self.folder, True))
+        self.assertEqual(self.cjson.read_text(), '{"projects": ')
+
+    def test_the_list_shows_it_on_the_chat(self):
+        rows = [entry('bridge-session', '2026-10-01T00:00:00Z', bridgeSessionId='cse_X', sessionId=SID_A),
+                dict(user('2026-10-01T00:00:01Z', 'hi'), cwd=self.folder), assistant('2026-10-01T00:00:05Z', 'ok')]
+        p = write_transcript(self.cdir / 'projects' / 'p1', rows, name=f'{SID_A}.jsonl')
+        os.utime(p, (NOW - 60, NOW - 60))
+        self.cjson.write_text(json.dumps({'projects': {self.folder: {'enabledMcpServers': ['computer-use']}}}))
+        s = next(s for s in self.sb.rpc({'verb': 'list'}, NOW, agents=[])['sessions'] if s['sid'] == SID_A)
+        self.assertTrue(s['flags']['computer'])
+        self.assertTrue(s['now']['computer'])
+        self.cjson.write_text('{}')
+        s = next(s for s in self.sb.rpc({'verb': 'list'}, NOW, agents=[])['sessions'] if s['sid'] == SID_A)
+        self.assertNotIn('computer', s['flags'])
+
+    def test_one_call_turns_it_on_for_a_running_chats_folder(self):
+        rows = [dict(user('2026-10-01T00:00:01Z', 'hi'), cwd=self.folder), assistant('2026-10-01T00:00:05Z', 'ok')]
+        p = write_transcript(self.cdir / 'projects' / 'p1', rows, name=f'{SID_A}.jsonl')
+        os.utime(p, (NOW - 60, NOW - 60))
+        self.cjson.write_text('{}')
+        r = self.sb.rpc({'verb': 'computer_use', 'sid': SID_A, 'on': True}, NOW, agents=[])
+        self.assertEqual((r['ok'], r['on'], r['changed']), (True, True, True))
+        self.assertTrue(self.sb.computer_use_on(self.folder))
+        r = self.sb.rpc({'verb': 'computer_use', 'sid': SID_A, 'on': False}, NOW, agents=[])
+        self.assertFalse(r['on'])
+        self.sb.sys.platform = 'win32'
+        r = self.sb.rpc({'verb': 'computer_use', 'sid': SID_A, 'on': True}, NOW, agents=[])
+        self.assertFalse(r['ok'])
+        self.assertIn('Macs only', r['error'])
+
+    def test_the_gate_off_says_why(self):
+        self.cjson.write_text(json.dumps({'cachedGrowthBookFeatures': {'tengu_malort_pedway': {'enabled': False}}}))
+        c = self.sb._computer_use()
+        self.assertFalse(c['supported'])
+        self.assertIn('Pro, Max or Ultra', c['why'])
+        self.assertIn('computer_use', self.sb.AGENT_FEATURES)
 
 
 class ReplacedLinkTest(RpcBase):

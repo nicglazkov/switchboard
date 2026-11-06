@@ -35,6 +35,9 @@ pub const PERMS: [(&str, &str); 6] = [
     ("bypassPermissions", "Bypass"),
     ("dontAsk", "Never asks"),
 ];
+/// The drawer's width; the corner's jobs and toasts sit just left of it.
+pub const FLAGS_W: f32 = 460.;
+
 /// Never removable from the drawer: the model, effort and permissions always have a value; Remote Control is Switchboard's.
 const FIXED: [&str; 4] = ["--model", "--effort", "--permission-mode", "--remote-control"];
 const DIRS_MAX: usize = 8;
@@ -46,6 +49,8 @@ pub struct Want {
     pub effort: Option<String>,
     pub perm: String,
     pub chrome: bool,
+    /// Computer use for the chat's folder (Claude Code's built-in computer-use server; Macs only).
+    pub computer: bool,
     pub dirs: Vec<String>,
     pub extra: Vec<Vec<String>>,
     pub other: String,
@@ -66,6 +71,7 @@ impl Want {
                     }
                 }
                 "--chrome" => w.chrome = true,
+                "--computer-use" => w.computer = true,
                 "--add-dir" => w.dirs.extend(x.value.clone()),
                 "--remote-control" => {}
                 n => w.extra.push(std::iter::once(n.to_string()).chain(x.value.clone()).collect()),
@@ -77,13 +83,14 @@ impl Want {
     pub fn body(&self) -> serde_json::Value {
         let mut flags: Vec<serde_json::Value> = self.dirs.iter().map(|d| serde_json::json!(["--add-dir", d])).collect();
         flags.extend(self.extra.iter().map(|f| serde_json::json!(f)));
-        serde_json::json!({"model": self.model, "effort": self.effort, "perm": self.perm, "chrome": self.chrome, "other": self.other.trim(), "flags": flags})
+        serde_json::json!({"model": self.model, "effort": self.effort, "perm": self.perm, "chrome": self.chrome, "computer": self.computer, "other": self.other.trim(), "flags": flags})
     }
 
     /// Is this "Active now" row still in what the user wants?
     pub fn keeps(&self, name: &str, value: Option<&str>) -> bool {
         match name {
             "--chrome" => self.chrome,
+            "--computer-use" => self.computer,
             "--add-dir" => value.is_some_and(|v| self.dirs.iter().any(|d| d == v)),
             n if FIXED.contains(&n) => true,
             n => self.extra.iter().any(|f| f[0] == n && f.get(1).map(String::as_str) == value),
@@ -329,7 +336,7 @@ impl BoardView {
                         .top(px(ui::header() + 8.))
                         .right(px(12.))
                         .bottom(px(ui::FOOTER + 8.))
-                        .w(px(460.))
+                        .w(px(FLAGS_W))
                         .rounded(px(ui::R_SHEET))
                         .border_1()
                         .border_color(c.t.line2)
@@ -522,6 +529,7 @@ impl BoardView {
                                         let kept = w.keeps(&name, val.as_deref());
                                         match name.as_str() {
                                             "--chrome" => w.chrome = !kept,
+                                            "--computer-use" => w.computer = !kept,
                                             "--add-dir" => {
                                                 let v = val.clone().unwrap_or_default();
                                                 if kept { w.dirs.retain(|d| *d != v) } else { w.dirs.push(v) }
@@ -694,6 +702,26 @@ impl BoardView {
                     ))
                     .into_any_element(),
             ))
+            .child(orow("Computer", {
+                // Claude Code's computer use: on a Mac it is turned on for the chat's folder and the chat relaunches;
+                // elsewhere the row says why it can't be.
+                let why = computer_use_blocker(c.app.snap.machine(&d.machine));
+                let row = div().flex().flex_col().gap(px(4.));
+                match why {
+                    None => row
+                        .child(div().flex().child(chip(&t, "fl-computer", w.computer, "Computer use").on_click(
+                            cx.listener(|this, _: &ClickEvent, _, cx| this.flags_pick(|w| w.computer = !w.computer, cx)),
+                        )))
+                        .when(w.computer, |r| {
+                            r.child(ui::wrap(
+                                "For this chat's folder. The first time, macOS asks that Mac to allow Accessibility and \
+                                 Screen Recording for Claude Code.",
+                            ).text_size(px(11.5)).text_color(t.dim))
+                        })
+                        .into_any_element(),
+                    Some(why) => row.child(ui::wrap(why).text_size(px(11.5)).text_color(t.dim)).into_any_element(),
+                }
+            }))
             .children(d.other.as_ref().map(|inp| orow("Other flags", field(&t, inp, 0.).into_any_element())));
         let can = div()
             .flex()
@@ -1046,6 +1074,18 @@ fn field(t: &Theme, inp: &Entity<InputState>, w: f32) -> gpui::Div {
         .text_size(px(12.5))
         .text_color(t.ink)
         .child(gpui_base::Input::new(inp))
+}
+
+/// Why a chat on this machine can't have computer use, or None when it can.
+pub fn computer_use_blocker(m: Option<&sb_core::model::Machine>) -> Option<String> {
+    let m = m?;
+    if m.os.as_deref() != Some("mac") {
+        return Some("Claude Code has computer use on Macs only. On Windows it is in the Claude desktop app.".into());
+    }
+    if !m.features.iter().any(|f| f == "computer_use") {
+        return Some(format!("Update Switchboard on {} to turn computer use on from here.", m.label));
+    }
+    None
 }
 
 #[cfg(test)]

@@ -189,6 +189,11 @@ where the PE header says the signature starts.
   change list shown in About.
 - A release is two commits: `Switchboard X.Y.Z` with the code, then `Packaging for X.Y.Z` with the installers'
   changes. Installers are written to `dist/`.
+- Build the disk image after `build-mac.sh` and before packing the server kit and publishing. With
+  `SB_SIGN_IDENTITY` set, `build-dmg.sh` replaces the ad hoc `switchboard-node-mac` and `switchboard-hub-mac` in
+  `dist/` with copies signed by the Developer ID as `com.switchboard.node` and `com.switchboard.hub`. A Mac keeps
+  the node's Local Network permission across updates only that way; an ad hoc node can't reach the hub after an
+  update ("No route to host") until it is allowed again.
 - Updates never go backwards: the app ignores a build that is not newer than the one running, in version and in
   build id.
 

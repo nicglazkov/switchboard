@@ -550,7 +550,16 @@ class App:
         label = m.get('label') or name
         if 'relaunch' not in ((self.fleet.state.get(name) or {}).get('features') or []):  # an older agent would just resume
             raise HttpError(409, f'Update Switchboard on {label} to relaunch with new flags.')
+        computer = body.get('computer') if isinstance(body.get('computer'), bool) else None
+        if computer is not None:  # computer use for its folder, on or off, set before it starts
+            if 'computer_use' not in ((self.fleet.state.get(name) or {}).get('features') or []):
+                raise HttpError(409, f'Update Switchboard on {label} to turn computer use on or off from here.')
+            cu = (self.feat.caps(name) or {}).get('computer_use') or {}
+            if computer and cu.get('supported') is False:
+                raise HttpError(400, cu.get('why') or f'Computer use is not available on {label}.')
         if s.get('kind') == 'interactive' and s.get('status') not in (None, 'stopped'):
+            if computer is not None:  # the folder changes now; the command below starts the chat again with it
+                self._call(name, {'verb': 'computer_use', 'sid': sid, 'on': computer}, timeout=20)
             # Switchboard does not own that terminal: it says what to run there instead
             words = ['claude', '--resume', sid] + (['--model', model] if model else []) + (['--effort', effort] if effort else [])
             cmd = ' '.join(words + ([flags_mod.command_line(f['flags'] + ([['--chrome']] if f['chrome'] else []))] if f['flags'] or f['chrome'] else []))
@@ -562,6 +571,8 @@ class App:
             return need
         req = {'verb': 'resume', 'sid': sid, 'relaunch': True, 'flags': f['flags'] + ([['--chrome']] if f['chrome'] else []),
                'model': model, 'effort': effort}
+        if computer is not None:
+            req['computer'] = computer
         return self._submit('relaunch', name, {'req': req, 'wait_idle': when == 'idle'}, self._title(name, sid))
 
     EDIT_FLAGS = {'perm': '--permission-mode', 'agent': '--agent', 'dirs': '--add-dir', 'chrome': '--chrome'}
@@ -581,7 +592,7 @@ class App:
         if not isinstance(remove, list) or not all(isinstance(k, str) for k in remove):
             raise HttpError(400, 'remove must be a list of names')
         keys = set(remove) | {k for k in edit if k != 'remove'}
-        known = set(self.EDIT_FLAGS) | {'model', 'effort'}
+        known = set(self.EDIT_FLAGS) | {'model', 'effort', 'computer'}
         if keys - known:
             raise HttpError(400, f'{sorted(keys - known)[0][:40]!r} is not a flag the app can change')
         vals = {}
@@ -615,8 +626,11 @@ class App:
             elif vals[k][0] and not (k == 'perm' and vals[k][0] == 'default'):
                 flags.append([flag, vals[k][0]])
         pick = lambda k: None if k in remove else (vals[k][0] or None) if k in vals else now.get(k)
-        return self.relaunch({'machine': name, 'sid': sid, 'flags': flags, 'model': pick('model'), 'effort': pick('effort'),
-                              'when': body.get('when') or 'idle'})
+        out = {'machine': name, 'sid': sid, 'flags': flags, 'model': pick('model'), 'effort': pick('effort'),
+               'when': body.get('when') or 'idle'}
+        if 'computer' in keys:  # on or off for its folder; untouched, the folder keeps what it has
+            out['computer'] = 'computer' not in remove and vals.get('computer', [''])[0].lower() not in ('', 'off', 'false', '0')
+        return self.relaunch(out)
 
     # ---- what a relaunch, stop, move or fresh start would cut off (the agent's busy verb)
     def busy(self, name, sid):
@@ -1648,6 +1662,8 @@ class App:
                 req['effort'] = effort
             if fl['chrome'] or body.get('chrome') is True:
                 req['chrome'] = True
+            if body.get('computer') is True:  # computer use for the chat's folder (Macs; the agent turns it on)
+                req['computer'] = True
             cm = body.get('chrome_machine') or None  # this chat's own Chrome machine (Auto sends it there)
             if cm is not None and cm not in self.fleet.machines:
                 raise HttpError(400, 'unknown machine')

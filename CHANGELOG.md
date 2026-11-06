@@ -4,6 +4,13 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.8.13 (2026-11-06)
+
+- A chat relaunched with Claude in Chrome keeps it: the chat shows Chrome on, and the next relaunch, from the iPhone or the desktop, carries it over instead of dropping it.
+- Computer use for any chat in one click: Turn on computer use in the chat's details on the desktop, or at the top of its flags on the iPhone. On a Mac Switchboard turns it on for the chat's folder and relaunches the chat once Claude is free, and it carries on where it was; a chat open in a terminal gets the command to run there. The first time, macOS asks to allow Accessibility and Screen Recording. On Windows it says why it isn't there.
+- Jobs and messages in the bottom right corner move beside the flags drawer and the chat's details instead of hiding under them.
+- The desktop app uses less CPU: its breathing dots and spinners draw a few frames a second instead of every frame.
+
 ## 0.8.12 (2026-11-02)
 
 - Choosing a folder looks like Finder or File Explorer: places down the side, Back, Forward and Up, a path bar, and the folder's contents. It's how New chat picks its folder and adds folders Claude may also use, on the desktop and on the iPhone.

@@ -70,6 +70,16 @@ if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
     codesign --force --deep --options runtime --timestamp -s "$SB_SIGN_IDENTITY" "$app"
     codesign --verify --deep --strict "$app"
   done
+  # The node and hub that Add a machine and the server kit hand out. macOS keeps a program's Local Network
+  # permission across updates only when it is signed by the same team under the same identifier; ad hoc, each
+  # build is a new program and a Mac's node loses the hub ("No route to host") until someone allows it again.
+  for n in node hub; do
+    b=dist/switchboard-$n-mac
+    if [ -f "$b" ]; then
+      codesign --force --options runtime --timestamp --identifier com.switchboard.$n -s "$SB_SIGN_IDENTITY" "$b"
+      codesign --verify --strict "$b"
+    fi
+  done
 else
   echo "signing: skipped (SB_SIGN_IDENTITY is not set), ad hoc only"
 fi

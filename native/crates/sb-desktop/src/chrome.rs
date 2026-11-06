@@ -1403,6 +1403,7 @@ pub fn live_dot(t: &Theme, l: &sb_core::live::Live, id: impl Into<gpui::ElementI
             id,
             gpui::Animation::new(std::time::Duration::from_millis(1600))
                 .repeat()
+                .with_max_fps(crate::ui::PULSE_FPS)
                 .with_easing(gpui::pulsating_between(0.35, 1.0)),
             |d, k| d.opacity(k),
         )

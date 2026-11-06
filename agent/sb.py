@@ -72,7 +72,7 @@ def _read_tail_lines(path, nbytes=TAIL_BYTES):
 def transcript_stats(path, nbytes=TAIL_BYTES):
     out = {'last_prompt': None, 'ctx_tokens': 0, 'last_assistant_ts': None, 'model': None, 'title': None, 'cwd': None, 'bridge': None,
            'custom_title': None, 'entrypoint': None, 'effort': None, 'speed': None, 'perm': None, 'chrome_used': False,
-           'chrome_loaded': None, 'ultra': None, 'compacted_ts': None, 'last_ts': None, 'archived_ts': None}
+           'chrome_loaded': None, 'mcp_ts': None, 'ultra': None, 'compacted_ts': None, 'last_ts': None, 'archived_ts': None}
     try:
         lines = _read_tail_lines(path, nbytes)
     except OSError:
@@ -100,11 +100,12 @@ def transcript_stats(path, nbytes=TAIL_BYTES):
                     out['archived_ts'] = None  # used again after it was archived
         if d.get('type') == 'attachment' and (d.get('attachment') or {}).get('type') == 'mcp_instructions_delta':
             # Did Claude Code connect Claude in Chrome? A --chrome launch can come up without it (2.1.300 background chats)
-            added = (d.get('attachment') or {}).get('addedNames') or []
-            if 'claude-in-chrome' in added:
+            att = d.get('attachment') or {}
+            if 'claude-in-chrome' in (att.get('addedNames') or []):
                 out['chrome_loaded'] = True
-            elif out['chrome_loaded'] is None:
+            elif 'claude-in-chrome' in (att.get('removedNames') or []) or out['chrome_loaded'] is None:
                 out['chrome_loaded'] = False
+            out['mcp_ts'] = _ts(d.get('timestamp')) or out['mcp_ts']  # when the running copy last said what it has
         if d.get('permissionMode') and d.get('type') in ('permission-mode', 'user'):
             out['perm'] = d['permissionMode']
         if d.get('type') == 'ai-title':
@@ -2854,9 +2855,15 @@ def _roster_args():
             continue
         d = w.get('dispatch') or {}
         sid = d.get('sessionId') or w.get('sessionId')
-        args = (d.get('launch') or {}).get('args')
+        launch = d.get('launch') or {}
+        # a new chat keeps its command line in args; a resumed or relaunched one in flagArgs, its message after "--".
+        # respawnFlags repeats the same flags, so it is read only when neither is there (never both: --chrome twice
+        # would make the next relaunch's flags fail the server's check)
+        args = next((x for x in (launch.get('args'), launch.get('flagArgs'), d.get('respawnFlags')) if isinstance(x, list)), None)
+        if isinstance(args, list) and '--' in args:
+            args = args[:args.index('--')]
         if sid and isinstance(args, list):
-            out[sid] = args + (d.get('respawnFlags') if isinstance(d.get('respawnFlags'), list) else [])
+            out[sid] = args
     return out
 
 
@@ -2943,6 +2950,16 @@ def session_now(c, launch, base):
     return {'model': fam, 'effort': effort, 'perm': c.get('perm') or launch.get('perm') or base.get('perm') or 'default',
             'chrome': bool((launch.get('chrome') and c.get('chrome_loaded') is not False) or c.get('chrome_used')),
             'fast': c.get('speed') == 'fast'}
+
+
+def chrome_since_start(c, a):
+    """A relaunched chat's transcript still ends with what its old copy had: until the running copy's first turn says
+    otherwise, an old "no Claude in Chrome" is not known for the copy that runs now."""
+    started = a.get('startedAt') if isinstance(a.get('startedAt'), (int, float)) else None
+    if c.get('chrome_loaded') is False and started and a.get('status') not in (None, 'stopped') \
+            and started / 1000 > (c.get('mcp_ts') or 0) + 1:
+        return dict(c, chrome_loaded=None)
+    return c
 
 
 def session_flags(c, launch, base):
@@ -3036,6 +3053,7 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
     model = summary_model()
     ttls = _jget(state_dir / TTL_FILE) or {}
     ttls_before = dict(ttls)
+    cu_cj = (_jget(claude_json_path()) or {}) if sys.platform == 'darwin' else None  # computer use, per folder
     for r in show[:LIST_MAX]:
         sid, f, c, a, active = r['sid'], r['f'], r['c'], r['a'], r['active']
         turn_open = None  # only read where Claude Code's own word is in doubt: the server trusts status otherwise
@@ -3051,6 +3069,7 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
         if ttl:
             ttls[sid] = ttl
         exp = cache_expiry(cur, c, ttls.get(sid))
+        c = chrome_since_start(c, a)
         s = {
             'sid': sid, 'title': r['title'], 'cwd': c.get('cwd'), 'folder': folder(c), 'mtime': r['mtime'], 'active': active,
             'ctx': max(c.get('ctx_tokens') or 0, cur.get('ctx_tokens') or 0),
@@ -3065,6 +3084,8 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
             'handoff_of': c.get('handoff_of'),
             'last_ts': c.get('last_ts'), 'archived': c.get('archived_ts'),
         }
+        if cu_cj is not None and c.get('cwd') and computer_use_on(c['cwd'], cu_cj):
+            s['flags']['computer'] = s['now']['computer'] = True  # its folder has computer use: the chat gets it at start
         if (launched.get(sid) or {}).get('chrome') and c.get('chrome_loaded') is False and not c.get('chrome_used'):
             s['chrome_missing'] = True  # asked for Claude in Chrome, but Claude Code started the chat without it
         elif (launched.get(sid) or {}).get('chrome') and c.get('chrome_loaded'):
@@ -4109,6 +4130,7 @@ def rpc_jobs(verb, req, now, get_agents):
             chrome, flags = True, [f for f in flags if f != '--chrome']
         return _queue({'verb': 'start', 'cwd': str(cwd), 'name': name, 'model': model, 'prompt': prompt, 'handoff_text': htext,
                        'mode': mode, 'tag': start_tag(mode, origin, via), 'topic': topic, 'chrome': chrome, 'effort': effort,
+                       'computer': req['computer'] if isinstance(req.get('computer'), bool) else None,
                        'flags': flags, 'tools': check_tools(req['tools']) if req.get('tools') is not None else None, **tools_extra(req)}, now)
     if verb in ('resume', 'fresh', 'handoff'):
         sid = _need_sid(req)
@@ -4131,6 +4153,7 @@ def rpc_jobs(verb, req, now, get_agents):
                 raise ValueError('This chat is open in a terminal. Close it there first, then relaunch.')
             flags = check_flags(req.get('flags'), None, claude_flags() if req.get('flags') else None)
             job.update(relaunch=True, model=model, effort=effort, chrome='--chrome' in flags,
+                       computer=req['computer'] if isinstance(req.get('computer'), bool) else None,
                        flags=[f for f in flags if f != '--chrome'], stop=a.get('id') if a.get('kind') == 'background' else None,
                        name=given_name(sid) or a.get('name') or job['name'])  # the same chat again: its own name
         elif verb == 'resume':
@@ -4375,6 +4398,91 @@ def _chrome():
     return {'installed': bool(installed), 'connector': bool(connector), 'connected': bool(connected)}
 
 
+# ---- computer use: Claude Code's built-in `computer-use` MCP server (code.claude.com/docs/en/computer-use). Off until
+# enabled for a folder (what /mcp > computer-use > Enable writes: projects[<folder>].enabledMcpServers in ~/.claude.json).
+# macOS only in Claude Code (Windows has it in the Claude desktop app only), on Pro, Max and Ultra. A background chat
+# gets it like a terminal one once its folder is enabled; macOS then asks once for Accessibility and Screen Recording.
+CU_SERVER = 'computer-use'
+
+
+def _computer_use():
+    """{'supported', 'why'}: can a chat here use computer use? Never asks macOS for anything."""
+    if sys.platform != 'darwin':
+        return {'supported': False, 'why': 'Claude Code has computer use on Macs only. On Windows it is in the Claude '
+                                            'desktop app.' if IS_WIN else 'Claude Code has computer use on Macs only.'}
+    cj = _jget(claude_json_path()) or {}
+    gate = ((cj.get('cachedGrowthBookFeatures') or {}).get('tengu_malort_pedway') or {})
+    if isinstance(gate, dict) and gate.get('enabled') is False:
+        return {'supported': False, 'why': 'Computer use is not turned on for this Claude account yet (it needs a Pro, '
+                                            'Max or Ultra plan signed in through claude.ai).'}
+    return {'supported': True, 'why': None}
+
+
+def _cu_keys(cwd):
+    """The ~/.claude.json project keys that decide a folder's servers: the folder, and its git top when inside one."""
+    keys = [trust_key(Path(cwd))]
+    top = _git_top(str(cwd))
+    if top and trust_key(Path(top)) not in keys:
+        keys.append(trust_key(Path(top)))
+    return keys
+
+
+_GIT_TOPS = {}
+
+
+def _git_top(cwd):
+    """The git top of a folder, or None; asked once per folder for as long as this process runs."""
+    if cwd not in _GIT_TOPS:
+        top = None
+        git = _which('git')
+        if git and Path(cwd).is_dir():
+            try:
+                r = subprocess.run([git, '-C', cwd, 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
+                                   timeout=PROBE_S, stdin=subprocess.DEVNULL,
+                                   **({'creationflags': 0x08000000} if IS_WIN else {}))
+                top = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
+            except (OSError, subprocess.SubprocessError, ValueError):
+                top = None
+        _GIT_TOPS[cwd] = top
+    return _GIT_TOPS[cwd]
+
+
+def computer_use_on(cwd, cj=None):
+    """Is computer use enabled for this folder?"""
+    projects = ((cj if cj is not None else _jget(claude_json_path())) or {}).get('projects') or {}
+    return any(CU_SERVER in ((projects.get(k) or {}).get('enabledMcpServers') or []) for k in _cu_keys(cwd))
+
+
+def set_computer_use(cwd, on):
+    """Enable or disable computer use for a folder the way /mcp does. True when ~/.claude.json changed."""
+    if sys.platform != 'darwin':
+        return False
+    cj = claude_json_path()
+    try:
+        data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    except ValueError:
+        return False  # Claude Code is mid-write; leave it alone
+    projects = data.setdefault('projects', {})
+    changed = False
+    for k in _cu_keys(cwd)[:1 if on else None]:  # on: the chat's own folder; off: wherever it is on for it
+        e = projects.setdefault(k, {})
+        en = [x for x in (e.get('enabledMcpServers') or []) if isinstance(x, str)]
+        dis = [x for x in (e.get('disabledMcpServers') or []) if isinstance(x, str)]
+        want_en = (en + [CU_SERVER]) if on and CU_SERVER not in en else [x for x in en if x != CU_SERVER] if not on else en
+        want_dis = [x for x in dis if x != CU_SERVER] if on else dis
+        if want_en != en or want_dis != dis:
+            e['enabledMcpServers'], changed = want_en, True
+            if 'disabledMcpServers' in e or want_dis:
+                e['disabledMcpServers'] = want_dis
+    if changed:
+        bak = cj.with_name(cj.name + '.bak-sb-computer-use')
+        if not bak.exists():
+            shutil.copy2(cj, bak)
+        _jput_text(cj, json.dumps(data, indent=2))
+        log(f'computer use {"on" if on else "off"} for {cwd}')
+    return changed
+
+
 EFFORTS = ('low', 'medium', 'high', 'xhigh', 'max')
 CHROME_RE = re.compile(rb'"name":\s*"mcp__claude-in-chrome__')  # a tool call, not a chat that only mentions it
 ULTRA_RE = re.compile(rb'"type":\s*"ultra_effort_(enter|exit)"')
@@ -4599,6 +4707,11 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
         launch['tools'] = tools or []
         if tools is not None:
             pending = tools_pending_put(cwd, tools_rec(tools, versions, tmode, skipped, tmeta, cands), now)
+    if isinstance(job.get('computer'), bool) and Path(cwd).is_dir():
+        try:  # computer use is per folder in Claude Code: on (or off) for this chat's folder before it starts
+            set_computer_use(cwd, job['computer'])
+        except (OSError, ValueError):
+            log(f'computer use change failed: {traceback.format_exc(limit=2)}')
     if not _is_home(cwd) and Path(cwd).is_dir():
         try:  # a folder inside a trusted one gets its own entry first, so the launch does not stop on the prompt
             inherit_trust(Path(cwd))
@@ -4886,8 +4999,8 @@ def _retire_launch_agent(home=None):
 
 def ensure_launcher(spawn=None):
     """macOS: make sure a launcher is running. Called from hooks (GUI context), never from SSH."""
-    if IS_WIN or (spawn is None and os.environ.get('SB_ROOT')):
-        return
+    if IS_WIN or (spawn is None and (os.environ.get('SB_ROOT') or os.environ.get('SB_HOME'))):
+        return  # a test's or a second copy's own folders: never leave a resident launcher behind for them
     _retire_launch_agent()
     if not launcher_status(time.time())['alive']:
         (spawn or _spawn_launcher)()
@@ -5546,7 +5659,7 @@ def rpc_upload(req, now=None):
 
 
 # ---------------------------------------------------------------- v2 verbs (reaper, threads, caps, ask, dispatch)
-FEAT_VERBS = ('reap_orphans', 'caps', 'ask', 'report', 'browse', 'summary', 'rename')
+FEAT_VERBS = ('reap_orphans', 'caps', 'ask', 'report', 'browse', 'summary', 'rename', 'computer_use')
 # ---------------------------------------------------------------- The Claude folder, one per machine
 # Every session starts in the machine's Claude folder or a folder under it (machine_root). Clients only ever name a
 # folder relative to it (safe_path: no '..', no absolute paths, no symlinks out); the folder itself is picked in
@@ -5944,7 +6057,7 @@ def mcp_servers():
 
 
 AGENT_FEATURES = ('places', 'setup', 'flags', 'ping', 'cleanup', 'browse', 'rename', 'summary', 'files', 'upload', 'busy', 'relaunch', 'tail', 'compact', 'mcp', 'root_dirs',
-                  'library', 'budget_stop', 'tools_auto')  # the server checks before it uses one
+                  'library', 'budget_stop', 'tools_auto', 'computer_use')  # the server checks before it uses one
 
 
 def rpc_feat(verb, req, now, get_agents):
@@ -5966,6 +6079,17 @@ def rpc_feat(verb, req, now, get_agents):
         return rpc_summary(req)
     if verb == 'rename':
         return rpc_rename(req, get_agents)
+    if verb == 'computer_use':  # on or off for a chat's folder, now; a running chat gets it when it next starts
+        sid, on = _need_sid(req), req.get('on')
+        if not isinstance(on, bool):
+            raise ValueError('on must be true or false')
+        if on and not (_computer_use() or {}).get('supported'):
+            raise ValueError((_computer_use() or {}).get('why') or 'computer use is not available here')
+        _, meta = find_session(sid)
+        if not meta.get('cwd') or not Path(meta['cwd']).is_dir():
+            raise ValueError('session folder unknown')
+        changed = set_computer_use(meta['cwd'], on)
+        return {'ok': True, 'changed': changed, 'on': computer_use_on(meta['cwd']), 'folder': meta['cwd']}
     raise ValueError(f'unknown verb {verb!r}')
 
 # ---------------------------------------------------------------- v2: what this machine can do (caps), and asking Claude
@@ -6274,7 +6398,7 @@ def probe_caps(root=None):
             'rust': lambda: _ver(_out(['rustc', '--version'])), 'node': lambda: _ver(_out(['node', '--version']), r'v?(\d+)'),
             'python': _python, 'go': lambda: _ver(_out(['go', 'version']), r'go(\d+\.\d+)'),
             'docker': lambda: _ver(_out(['docker', '--version']), r'(\d+)\.\d+'), 'dotnet': _dotnet, 'msvc': _msvc,
-            'tailscale': _tailscale, 'repos': lambda: _repos(root), 'chrome': _chrome}
+            'tailscale': _tailscale, 'repos': lambda: _repos(root), 'chrome': _chrome, 'computer_use': _computer_use}
     got = {}
     with cf.ThreadPoolExecutor(max_workers=len(jobs)) as ex:
         futs = {ex.submit(fn): k for k, fn in jobs.items()}
@@ -6292,7 +6416,7 @@ def probe_caps(root=None):
                       'android_sdk': andr['android_sdk'], 'adb_devices': andr['adb_devices'], 'emulator': bool(andr['emulator']),
                       'java': got['java'], 'rust': got['rust'], 'node': got['node'], 'python': got['python'], 'go': got['go'],
                       'docker': got['docker'], 'dotnet': got['dotnet'], 'msvc': got['msvc'], 'cuda': cuda, 'tailscale': bool(got['tailscale'])},
-            'repos': got['repos'] or [], 'chrome': got['chrome']}
+            'repos': got['repos'] or [], 'chrome': got['chrome'], 'computer_use': got['computer_use']}
 
 
 def _disk_free(root):

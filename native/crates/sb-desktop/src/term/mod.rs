@@ -2324,7 +2324,10 @@ impl TermTab {
         let hover = t.hover;
         let dot = div().flex_none().size(px(8.)).rounded_full().bg(t.cold).with_animation(
             "term-reconnect-dot",
-            gpui::Animation::new(Duration::from_millis(1400)).repeat().with_easing(gpui::pulsating_between(0.35, 1.0)),
+            gpui::Animation::new(Duration::from_millis(1400))
+                .repeat()
+                .with_max_fps(crate::ui::PULSE_FPS)
+                .with_easing(gpui::pulsating_between(0.35, 1.0)),
             |d, a| d.opacity(a),
         );
         Some(

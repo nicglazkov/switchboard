@@ -181,6 +181,9 @@ pub struct Flags {
     pub perm: Option<String>,
     pub agent: Option<String>,
     pub remote: bool,
+    /// Computer use is on for the chat's folder (Claude Code's built-in computer-use server; Macs only).
+    #[serde(default)]
+    pub computer: bool,
 }
 
 impl Flags {
@@ -202,6 +205,7 @@ impl Flags {
                 perm: o.perm.clone().filter(|s| !s.is_empty()),
                 agent: o.agent.clone().filter(|s| !s.is_empty()),
                 remote: o.remote.unwrap_or(false),
+                computer: o.computer.unwrap_or(false),
             },
             Some(ApiFlags::List(ids)) => {
                 let mut f = Flags::default();
@@ -701,6 +705,9 @@ impl Session {
         }
         if f.chrome {
             out.push(chip("chrome", "Chrome", "Claude in Chrome", "globe"));
+        }
+        if f.computer {
+            out.push(chip("computer", "Computer", "Computer use", "monitor"));
         }
         if full && f.remote {
             out.push(chip("remote", "Remote", "Remote control", "remote"));
