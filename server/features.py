@@ -1258,7 +1258,8 @@ class Auto:
             m['chrome'] = self.chrome(m['name'])
             m['chrome_pref'] = False  # no machine is everyone's Chrome machine: each chat picks its own (chrome_machine)
             cu = (self.detected(m['name']) or {}).get('computer_use')  # what the machine is, whatever Auto may use
-            m['computer_use'] = {'supported': bool(cu.get('supported')), 'why': cu.get('why') if isinstance(cu.get('why'), str) else None} \
+            m['computer_use'] = dict({'supported': bool(cu.get('supported'))},
+                                     **{k: cu.get(k) if isinstance(cu.get(k), str) else None for k in ('why', 'note', 'via')}) \
                 if isinstance(cu, dict) else None  # None: its agent predates computer use
 
     def chrome(self, name):

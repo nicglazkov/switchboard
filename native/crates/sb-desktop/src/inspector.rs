@@ -859,14 +859,26 @@ impl BoardView {
                 this.app.update(cx, |st, cx| st.relaunch(&k, edit, None, cx));
             }))
         });
+        let m = c.app.snap.machine(&s.machine);
+        let pc = m.is_some_and(|m| m.os.as_deref() == Some("windows"));
+        let note = m.and_then(|m| m.computer_use.as_ref()).and_then(|cu| cu.note.clone());
+        let what = if pc { "the PC's screen" } else { "the Mac's screen" };
         card.child(line(if on {
-            "On for this chat's folder. Claude can see the Mac's screen and use its apps, asking you first for each app."
-                .into()
+            format!("On for this chat's folder. Claude can see {what} and use its apps.")
+                + if pc { "" } else { " It asks you first for each app." }
+        } else if pc {
+            format!(
+                "Lets Claude see {what} and click and type in its apps, through Windows-MCP (set up the first time). \
+                 The chat relaunches with it once Claude is free, and carries on where it was."
+            )
         } else {
-            "Lets Claude see the Mac's screen and use its apps. The chat relaunches with it once Claude is free, and \
-             carries on where it was. The first time, macOS asks that Mac to allow Accessibility and Screen Recording."
-                .into()
+            format!(
+                "Lets Claude see {what} and use its apps. The chat relaunches with it once Claude is free, and \
+                 carries on where it was. The first time, macOS asks that Mac to allow Accessibility and Screen \
+                 Recording."
+            )
         }))
+        .children(note.map(|n| ui::wrap(n).text_size(px(12.)).line_height(relative(1.45)).text_color(t.need)))
         .child(div().flex().child(btn))
         .into_any_element()
     }

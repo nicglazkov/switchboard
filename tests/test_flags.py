@@ -1,4 +1,5 @@
-import json, os, unittest
+import json
+import sys, os, unittest
 from tests.helpers import user, assistant, entry, write_transcript
 from tests.test_rpc import RpcBase, NOW, SID_A, SID_B
 
@@ -131,10 +132,21 @@ class SessionFlagsTest(RpcBase):
         self.assertIsInstance(self.flags(), dict)
 
 
+class _Sys:
+    """The real sys with a platform of its own: setting sb.sys.platform must not leak into other tests."""
+    def __init__(self, real):
+        self.__dict__['_real'] = real
+
+    def __getattr__(self, n):
+        return getattr(self._real, n)
+
+
 class ComputerUseTest(RpcBase):
     def setUp(self):
         super().setUp()
-        self.sb.sys.platform = 'darwin'   # fresh_sb gives each test its own module
+        self.sb.sys = _Sys(sys)
+        self.sb.sys.platform = 'darwin'
+        self.sb._git_top = lambda cwd: None
         self.folder = str(self.root / 'proj')
 
     def cj(self):
@@ -155,12 +167,54 @@ class ComputerUseTest(RpcBase):
         self.assertEqual(self.cj()['projects'][self.folder]['enabledMcpServers'], ['other'])
         self.assertFalse(self.sb.computer_use_on(self.folder))
 
-    def test_never_on_windows(self):
+    def test_linux_has_none(self):
         self.cjson.write_text('{}')
-        self.sb.sys.platform = 'win32'
+        self.sb.sys.platform = 'linux'
         self.assertFalse(self.sb.set_computer_use(self.folder, True))
         self.assertEqual(self.cj(), {})
         self.assertFalse(self.sb._computer_use()['supported'])
+
+    def test_windows_gets_windows_mcp_in_the_folders_own_servers(self):
+        sb = self.sb
+        sb.sys.platform, sb.IS_WIN = 'win32', True
+        installs = []
+        sb._win_cu_install = lambda: installs.append(1) or r'C:\u\.local\bin\windows-mcp.exe'
+        sb._win_desktop = lambda: 'active'
+        self.cjson.write_text(json.dumps({'projects': {self.folder: {'mcpServers': {'mine': {'command': 'x'}},
+                                                                     'disabledMcpServers': ['windows-mcp']}}}))
+        self.assertTrue(sb.set_computer_use(self.folder, True))
+        e = self.cj()['projects'][self.folder]
+        self.assertEqual(set(e['mcpServers']), {'mine', 'windows-mcp'})
+        self.assertEqual(e['mcpServers']['windows-mcp']['args'][0], 'serve')
+        self.assertIn('PowerShell', e['mcpServers']['windows-mcp']['args'][2], 'Claude Code has its own shell')
+        self.assertEqual(e['disabledMcpServers'], [])
+        self.assertTrue(sb.computer_use_on(self.folder))
+        self.assertFalse(sb.set_computer_use(self.folder, True), 'already on')
+        self.assertTrue(sb.set_computer_use(self.folder, False))
+        self.assertEqual(self.cj()['projects'][self.folder]['mcpServers'], {'mine': {'command': 'x'}})
+        self.assertFalse(sb.computer_use_on(self.folder))
+        sb._win_cu_install = lambda: None
+        with self.assertRaises(ValueError):
+            sb.set_computer_use(self.folder, True)
+
+    def test_windows_says_when_its_desktop_is_disconnected(self):
+        sb = self.sb
+        sb.sys.platform, sb.IS_WIN = 'win32', True
+        sb._win_cu_exe = lambda: 'windows-mcp.exe'
+        real = sb._win_desktop
+        sb._win_desktop = lambda: 'active'
+        self.assertEqual((sb._computer_use()['supported'], sb._computer_use()['note']), (True, None))
+        sb._win_desktop = lambda: 'disconnected'
+        self.assertIn('disconnected', sb._computer_use()['note'])
+        head = ' USERNAME              SESSIONNAME        ID  STATE   IDLE TIME  LOGON TIME\n'
+        self.addCleanup(os.environ.pop, 'USERNAME', None) if 'USERNAME' not in os.environ else None
+        sb.os.environ['USERNAME'] = 'live'
+        sb._out = lambda argv, timeout=0: head + '>live                                      1  Disc        10:25  10/16/2026 2:54 PM\n'
+        self.assertEqual(real(), 'disconnected')
+        sb._out = lambda argv, timeout=0: head + '>live                  console             1  Active          .  10/16/2026 2:54 PM\n'
+        self.assertEqual(real(), 'active')
+        sb._out = lambda argv, timeout=0: ''
+        self.assertIsNone(real())
 
     def test_a_half_written_claude_json_is_left_alone(self):
         self.cjson.write_text('{"projects": ')
@@ -193,7 +247,6 @@ class ComputerUseTest(RpcBase):
         self.sb.sys.platform = 'win32'
         r = self.sb.rpc({'verb': 'computer_use', 'sid': SID_A, 'on': True}, NOW, agents=[])
         self.assertFalse(r['ok'])
-        self.assertIn('Macs only', r['error'])
 
     def test_the_gate_off_says_why(self):
         self.cjson.write_text(json.dumps({'cachedGrowthBookFeatures': {'tengu_malort_pedway': {'enabled': False}}}))

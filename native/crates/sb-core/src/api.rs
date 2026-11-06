@@ -192,6 +192,9 @@ pub struct ApiMachine {
     /// v2: the machine Chrome sessions go to first.
     #[serde(default)]
     pub chrome_pref: Option<bool>,
+    /// Whether its chats can have computer use (built in on a Mac, Windows-MCP on a PC); None from an older agent.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub computer_use: Option<ApiComputerUse>,
     /// Problems with its Claude Code setup that would bite a chat later (agent setup_issues).
     #[serde(default, deserialize_with = "lenient_vec")]
     pub setup: Vec<ApiSetupIssue>,
@@ -209,6 +212,20 @@ pub struct ApiSetupIssue {
     pub text: String,
     #[serde(default)]
     pub fix: Option<String>,
+}
+
+/// Computer use on a machine: `why` when it can't, `note` when it can but something is in the way (a Windows desktop
+/// left disconnected), `via` how ("windows-mcp" on Windows).
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct ApiComputerUse {
+    #[serde(default)]
+    pub supported: bool,
+    #[serde(default)]
+    pub why: Option<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub via: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]

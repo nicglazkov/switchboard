@@ -1079,13 +1079,16 @@ fn field(t: &Theme, inp: &Entity<InputState>, w: f32) -> gpui::Div {
 /// Why a chat on this machine can't have computer use, or None when it can.
 pub fn computer_use_blocker(m: Option<&sb_core::model::Machine>) -> Option<String> {
     let m = m?;
-    if m.os.as_deref() != Some("mac") {
-        return Some("Claude Code has computer use on Macs only. On Windows it is in the Claude desktop app.".into());
-    }
     if !m.features.iter().any(|f| f == "computer_use") {
         return Some(format!("Update Switchboard on {} to turn computer use on from here.", m.label));
     }
-    None
+    match &m.computer_use {
+        Some(cu) if cu.supported => None,
+        Some(cu) => Some(cu.why.clone().unwrap_or_else(|| format!("Computer use isn't available on {}.", m.label))),
+        // Not measured yet: a Mac has it built in; a PC says once its agent has looked.
+        None if m.os.as_deref() == Some("mac") => None,
+        None => Some(format!("Update Switchboard on {} to turn computer use on from here.", m.label)),
+    }
 }
 
 #[cfg(test)]

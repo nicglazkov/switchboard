@@ -3053,7 +3053,7 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
     model = summary_model()
     ttls = _jget(state_dir / TTL_FILE) or {}
     ttls_before = dict(ttls)
-    cu_cj = (_jget(claude_json_path()) or {}) if sys.platform == 'darwin' else None  # computer use, per folder
+    cu_cj = (_jget(claude_json_path()) or {}) if sys.platform == 'darwin' or IS_WIN else None  # computer use, per folder
     for r in show[:LIST_MAX]:
         sid, f, c, a, active = r['sid'], r['f'], r['c'], r['a'], r['active']
         turn_open = None  # only read where Claude Code's own word is in doubt: the server trusts status otherwise
@@ -4400,22 +4400,80 @@ def _chrome():
 
 # ---- computer use: Claude Code's built-in `computer-use` MCP server (code.claude.com/docs/en/computer-use). Off until
 # enabled for a folder (what /mcp > computer-use > Enable writes: projects[<folder>].enabledMcpServers in ~/.claude.json).
-# macOS only in Claude Code (Windows has it in the Claude desktop app only), on Pro, Max and Ultra. A background chat
-# gets it like a terminal one once its folder is enabled; macOS then asks once for Accessibility and Screen Recording.
+# macOS only in Claude Code, on Pro, Max and Ultra. A background chat gets it like a terminal one once its folder is
+# enabled; macOS then asks once for Accessibility and Screen Recording.
+# Windows: Claude Code has no computer use there, so a folder gets Windows-MCP instead (github.com/CursorTouch/Windows-MCP,
+# MIT): screenshots, clicks, typing and the UI Automation tree, as a local-scope server in the folder's mcpServers (what
+# `claude mcp add --scope local` writes; no approval asked). It is installed with uv the first time it is turned on. Its
+# own PowerShell, FileSystem and Registry tools are left out: Claude Code has its own.
 CU_SERVER = 'computer-use'
+WIN_CU_SERVER = 'windows-mcp'
+WIN_CU_PKG = 'windows-mcp==0.8.8'
+WIN_CU_ARGS = ['serve', '--exclude-tools', 'PowerShell,FileSystem,Registry']
+WIN_CONSOLE_TASK = 'SwitchboardConsole'  # optional, made by an admin: puts a disconnected desktop back on the screen
+
+
+def _win_cu_exe():
+    """Windows-MCP's command, when installed (uv tool install puts it in ~/.local/bin)."""
+    p = Path.home() / '.local' / 'bin' / 'windows-mcp.exe'
+    return str(p) if p.is_file() else _which('windows-mcp')
+
+
+def _win_desktop():
+    """'active', 'disconnected' or None (not known): this user's Windows session. A disconnected one (a Remote Desktop
+    window closed without signing out) has no screen: nothing can see or click it until it is back on the console."""
+    out = _out(['query', 'user']) or ''
+    me = (os.environ.get('USERNAME') or '').lower()
+    for line in out.splitlines()[1:]:
+        f = line.lstrip('> ').split()
+        if f and f[0].lower() == me:
+            return 'disconnected' if 'Disc' in f else 'active' if 'Active' in f else None
+    return None
+
+
+def _win_reconnect():
+    """Puts a disconnected desktop back on the screen through the admin-made task, if there is one. True when asked."""
+    try:
+        r = subprocess.run(['schtasks', '/Run', '/TN', WIN_CONSOLE_TASK], capture_output=True, text=True, timeout=15,
+                           stdin=subprocess.DEVNULL, creationflags=0x08000000)
+        return r.returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
+def _win_cu_install():
+    """Installs Windows-MCP with uv (about a minute the first time: it brings its own Python). Its command, or None."""
+    if _win_cu_exe():
+        return _win_cu_exe()
+    uv = _which('uv') or str(Path.home() / '.local' / 'bin' / 'uv.exe')
+    try:
+        subprocess.run([uv, 'tool', 'install', '--python', '3.14', WIN_CU_PKG], capture_output=True, text=True,
+                       timeout=600, stdin=subprocess.DEVNULL, creationflags=0x08000000)
+    except (OSError, subprocess.SubprocessError) as e:
+        log(f'windows-mcp install: {e}')
+    return _win_cu_exe()
 
 
 def _computer_use():
-    """{'supported', 'why'}: can a chat here use computer use? Never asks macOS for anything."""
+    """{'supported', 'why', 'note'}: can a chat here use computer use? Never asks macOS for anything."""
+    if IS_WIN:
+        if not (_win_cu_exe() or _which('uv') or (Path.home() / '.local' / 'bin' / 'uv.exe').is_file()):
+            return {'supported': False, 'why': 'Computer use on Windows needs uv to install Windows-MCP: winget install '
+                                                'astral-sh.uv, then try again.', 'note': None}
+        desk = _win_desktop()
+        note = ('This PC\'s desktop is disconnected (a Remote Desktop window was closed without signing out), so nothing '
+                'can see it. Sign in at the PC or connect with Parsec, or have an admin add the SwitchboardConsole task.'
+                if desk == 'disconnected' else None)
+        return {'supported': True, 'why': None, 'note': note, 'via': 'windows-mcp'}
     if sys.platform != 'darwin':
-        return {'supported': False, 'why': 'Claude Code has computer use on Macs only. On Windows it is in the Claude '
-                                            'desktop app.' if IS_WIN else 'Claude Code has computer use on Macs only.'}
+        return {'supported': False, 'why': 'Claude Code has computer use on Macs and, through Windows-MCP, Windows PCs.',
+                'note': None}
     cj = _jget(claude_json_path()) or {}
     gate = ((cj.get('cachedGrowthBookFeatures') or {}).get('tengu_malort_pedway') or {})
     if isinstance(gate, dict) and gate.get('enabled') is False:
         return {'supported': False, 'why': 'Computer use is not turned on for this Claude account yet (it needs a Pro, '
-                                            'Max or Ultra plan signed in through claude.ai).'}
-    return {'supported': True, 'why': None}
+                                            'Max or Ultra plan signed in through claude.ai).', 'note': None}
+    return {'supported': True, 'why': None, 'note': None}
 
 
 def _cu_keys(cwd):
@@ -4450,11 +4508,15 @@ def _git_top(cwd):
 def computer_use_on(cwd, cj=None):
     """Is computer use enabled for this folder?"""
     projects = ((cj if cj is not None else _jget(claude_json_path())) or {}).get('projects') or {}
+    if IS_WIN:
+        return any(WIN_CU_SERVER in ((projects.get(k) or {}).get('mcpServers') or {}) for k in _cu_keys(cwd))
     return any(CU_SERVER in ((projects.get(k) or {}).get('enabledMcpServers') or []) for k in _cu_keys(cwd))
 
 
 def set_computer_use(cwd, on):
     """Enable or disable computer use for a folder the way /mcp does. True when ~/.claude.json changed."""
+    if IS_WIN:
+        return _set_win_computer_use(cwd, on)
     if sys.platform != 'darwin':
         return False
     cj = claude_json_path()
@@ -4480,6 +4542,42 @@ def set_computer_use(cwd, on):
             shutil.copy2(cj, bak)
         _jput_text(cj, json.dumps(data, indent=2))
         log(f'computer use {"on" if on else "off"} for {cwd}')
+    return changed
+
+
+def _set_win_computer_use(cwd, on):
+    """Windows: Windows-MCP in (or out of) the folder's own servers, installed first when it is missing. A disconnected
+    desktop is put back on the screen when the admin-made task is there."""
+    exe = _win_cu_install() if on else None
+    if on and not exe:
+        raise ValueError('Windows-MCP could not be installed (uv tool install windows-mcp). Try again, or install it '
+                         'by hand.')
+    if on and _win_desktop() == 'disconnected':
+        _win_reconnect()
+    cj = claude_json_path()
+    try:
+        data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    except ValueError:
+        return False  # Claude Code is mid-write; leave it alone
+    projects = data.setdefault('projects', {})
+    want = {'type': 'stdio', 'command': exe, 'args': list(WIN_CU_ARGS), 'env': {'ANONYMIZED_TELEMETRY': 'false'}}
+    changed = False
+    for k in _cu_keys(cwd)[:1 if on else None]:
+        e = projects.setdefault(k, {})
+        servers = e.get('mcpServers') if isinstance(e.get('mcpServers'), dict) else {}
+        if on and servers.get(WIN_CU_SERVER) != want:
+            e['mcpServers'], changed = dict(servers, **{WIN_CU_SERVER: want}), True
+        elif not on and WIN_CU_SERVER in servers:
+            e['mcpServers'], changed = {n: v for n, v in servers.items() if n != WIN_CU_SERVER}, True
+        dis = [x for x in (e.get('disabledMcpServers') or []) if isinstance(x, str)]
+        if on and WIN_CU_SERVER in dis:
+            e['disabledMcpServers'], changed = [x for x in dis if x != WIN_CU_SERVER], True
+    if changed:
+        bak = cj.with_name(cj.name + '.bak-sb-computer-use')
+        if not bak.exists() and cj.exists():
+            shutil.copy2(cj, bak)
+        _jput_text(cj, json.dumps(data, indent=2))
+        log(f'computer use (windows-mcp) {"on" if on else "off"} for {cwd}')
     return changed
 
 

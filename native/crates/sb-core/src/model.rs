@@ -841,6 +841,9 @@ pub struct Machine {
     /// v2: Claude in Chrome there.
     #[serde(default)]
     pub chrome: Option<crate::api::ApiChrome>,
+    /// Computer use there, as its agent says; None from an older agent or server.
+    #[serde(default)]
+    pub computer_use: Option<crate::api::ApiComputerUse>,
     /// v2: the machine Chrome sessions go to first.
     #[serde(default)]
     pub chrome_pref: bool,
@@ -1347,6 +1350,7 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
                 has_caps: m.caps.as_ref().is_some_and(|c| c.is_object()),
                 features: m.features.clone(),
                 chrome: m.chrome.clone(),
+                computer_use: m.computer_use.clone(),
                 chrome_pref: m.chrome_pref == Some(true),
                 setup: m.setup.clone(),
             }
