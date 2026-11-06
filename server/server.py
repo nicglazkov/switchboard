@@ -554,7 +554,7 @@ class App:
         if computer is not None:  # computer use for its folder, on or off, set before it starts
             if 'computer_use' not in ((self.fleet.state.get(name) or {}).get('features') or []):
                 raise HttpError(409, f'Update Switchboard on {label} to turn computer use on or off from here.')
-            cu = (self.feat.caps(name) or {}).get('computer_use') or {}
+            cu = (self.feat.auto.detected(name) or {}).get('computer_use') or {}
             if computer and cu.get('supported') is False:
                 raise HttpError(400, cu.get('why') or f'Computer use is not available on {label}.')
         if s.get('kind') == 'interactive' and s.get('status') not in (None, 'stopped'):

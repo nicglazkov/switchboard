@@ -19,6 +19,12 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.14",
+        &[
+            "Turn on computer use works from the chat's details: in 0.8.13 the server stopped it with an error before the chat relaunched.",
+        ],
+    ),
+    (
         "0.8.13",
         &[
             "A chat relaunched with Claude in Chrome keeps it: the chat shows Chrome on, and the next relaunch, from the iPhone or the desktop, carries it over instead of dropping it.",

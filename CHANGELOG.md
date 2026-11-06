@@ -4,6 +4,10 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.8.14 (2026-11-06)
+
+- Turn on computer use works from the chat's details: in 0.8.13 the server stopped it with an error before the chat relaunched.
+
 ## 0.8.13 (2026-11-06)
 
 - A chat relaunched with Claude in Chrome keeps it: the chat shows Chrome on, and the next relaunch, from the iPhone or the desktop, carries it over instead of dropping it.

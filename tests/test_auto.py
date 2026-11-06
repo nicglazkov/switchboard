@@ -317,7 +317,8 @@ class CapsProbe(unittest.TestCase):
     def test_cached_six_hours_with_live_bits_fresh(self):
         sb = self.sb
         calls = []
-        sb.probe_caps = lambda root=None: calls.append(1) or {'tools': {'xcode': None, 'android_sdk': None, 'iphone': 'none'}, 'repos': []}
+        sb.probe_caps = lambda root=None: calls.append(1) or {'tools': {'xcode': None, 'android_sdk': None, 'iphone': 'none'}, 'repos': [],
+                                                               'computer_use': None}
         sb._ram = lambda: (64, 33.3)
         a = sb.machine_caps(1000.0)
         b = sb.machine_caps(1000.0 + 5 * 3600)
@@ -327,6 +328,11 @@ class CapsProbe(unittest.TestCase):
         self.assertEqual(len(calls), 2)
         sb.machine_caps(1000.0 + 7 * 3600, force=True)
         self.assertEqual(len(calls), 3)
+        old = sb._jget(sb.paths()['state'] / 'caps.json')
+        old['caps'].pop('computer_use')  # a copy from an older helper is measured again at once
+        sb._jput(sb.paths()['state'] / 'caps.json', old)
+        sb.machine_caps(1000.0 + 7 * 3600)
+        self.assertEqual(len(calls), 4)
 
     def test_adb_devices_are_read_from_its_socket(self):
         srv = socket.socket()

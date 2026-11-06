@@ -356,13 +356,22 @@ class RelaunchTest(unittest.TestCase):
         self.kind = 'interactive'
         self.fleet.poll()
         self.fleet.state['studio']['features'] = ['relaunch', 'computer_use']
-        self.app.feat.caps = lambda name: {'computer_use': {'supported': True}}
+        self.app.feat.auto.detected = lambda name: {'computer_use': {'supported': True}}
         r = self.app.post('/api/relaunch', self.body(computer=True))
         self.assertEqual((r['ok'], r['need']), (False, 'terminal'))
         self.assertIn({'verb': 'computer_use', 'sid': self.SID, 'on': True}, self.calls)
-        self.app.feat.caps = lambda name: {'computer_use': {'supported': False, 'why': 'Macs only'}}
+        self.app.feat.auto.detected = lambda name: {'computer_use': {'supported': False, 'why': 'Macs only'}}
         with self.assertRaises(server.HttpError):
             self.app.post('/api/relaunch', self.body(computer=True))
+
+    def test_computer_use_reads_the_machines_real_caps(self):
+        self.fleet.state['studio']['features'] = ['relaunch', 'computer_use']
+        self.app.feat.auto.data['studio'] = {'at': NOW, 'caps': {'computer_use': {'supported': False, 'why': 'Macs only'}}, 'error': None}
+        with self.assertRaises(server.HttpError) as e:
+            self.app.post('/api/relaunch', self.body(computer=True))
+        self.assertIn('Macs only', str(e.exception))
+        r = self.app.post('/api/action', {'verb': 'relaunch', 'machine': 'studio', 'sid': self.SID, 'flags': {'remove': ['computer']}})
+        self.assertTrue(r['ok'])
 
     def test_bad_flags_are_refused(self):
         with self.assertRaises(server.HttpError):

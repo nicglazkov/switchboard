@@ -6446,7 +6446,8 @@ def live_caps(caps, root=None):
 def machine_caps(now, force=False):
     p = paths()['state'] / 'caps.json'
     d = _jget(p) or {}
-    if not force and isinstance(d.get('caps'), dict) and 0 <= now - (d.get('at') or 0) < CAPS_TTL:
+    # A copy from an older helper lacks what this one measures: measure again rather than wait out CAPS_TTL.
+    if not force and isinstance(d.get('caps'), dict) and 'computer_use' in d['caps'] and 0 <= now - (d.get('at') or 0) < CAPS_TTL:
         return dict(live_caps(d['caps']), measured=d['at'])
     t0 = time.time()
     caps = probe_caps()
