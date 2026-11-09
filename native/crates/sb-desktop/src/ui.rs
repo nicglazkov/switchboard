@@ -778,6 +778,8 @@ pub fn setup_note(t: &Theme, ic: &str, text: impl Into<SharedString>, btn: gpui:
 pub struct Drop {
     open: Option<SharedString>,
     closed: Option<(SharedString, std::time::Instant)>,
+    /// A menu's collapsed section ("More models") is shown; folds again when the menu next opens.
+    pub more: bool,
 }
 
 impl Drop {
@@ -788,6 +790,7 @@ impl Drop {
     pub fn toggle(&mut self, id: &str) {
         let just = self.closed.take().is_some_and(|(c, at)| c.as_ref() == id && at.elapsed().as_millis() < 400);
         self.open = if self.is_open(id) || just { None } else { Some(SharedString::from(id.to_string())) };
+        self.more = false;
     }
 
     /// The click outside the menu: closes it, and remembers which one, for its trigger's click right after.
@@ -857,6 +860,8 @@ pub fn choice<V: 'static>(
                     pick(v, value, cx);
                     cx.notify();
                 })),
+                sub: None,
+                fold: None,
             })
             .collect();
         drop_menu(
@@ -872,6 +877,88 @@ pub fn choice<V: 'static>(
     div().relative().flex_none().child(trigger).children(menu).into_any_element()
 }
 
+/// The model picker: a dropdown whose trigger names the model in use ("Fable 5.2") and whose menu lists Default and
+/// the current models, each with its line from the catalog, then a folded "More models" with the older versions
+/// (open when the model in use is one of them, or `more`: the view's Drop::more). `locked` shows that one model,
+/// greyed, with a lock (UltraCode).
+#[allow(clippy::too_many_arguments)]
+pub fn model_pick<V: 'static>(
+    t: &Theme,
+    cx: &gpui::Context<V>,
+    id: &'static str,
+    open: bool,
+    more: bool,
+    menu: &[sb_core::actions::ModelChoice],
+    cur: &str,
+    locked: Option<&str>,
+    drop: fn(&mut V) -> &mut Drop,
+    pick: fn(&mut V, String, &mut gpui::Context<V>),
+) -> gpui::AnyElement {
+    let shown = sb_core::actions::model_menu_name(menu, locked.unwrap_or(cur));
+    let open = open && locked.is_none();
+    let mut trigger = dropdown(t, id, locked.map(|_| "lock"), shown, open);
+    if locked.is_some() {
+        trigger = trigger.opacity(0.7).cursor_default();
+    } else {
+        trigger = trigger.on_click(cx.listener(move |v, _: &gpui::ClickEvent, _, cx| {
+            drop(v).toggle(id);
+            cx.notify();
+        }));
+    }
+    let list = open.then(|| {
+        let in_more = menu.iter().any(|c| c.more && c.id == cur);
+        let unfolded = in_more || more;
+        let mut items = Vec::new();
+        let row = |c: &sb_core::actions::ModelChoice| {
+            let value = c.id.clone();
+            DropItem {
+                label: c.name.clone().into(),
+                on: c.id == cur,
+                off: false,
+                pick: Box::new(cx.listener(move |v, _: &gpui::ClickEvent, _, cx| {
+                    drop(v).close();
+                    pick(v, value.clone(), cx);
+                    cx.notify();
+                })),
+                sub: (!c.desc.is_empty()).then(|| c.desc.clone().into()),
+                fold: None,
+            }
+        };
+        for c in menu.iter().filter(|c| !c.more) {
+            items.push(row(c));
+        }
+        if menu.iter().any(|c| c.more) {
+            items.push(DropItem {
+                label: "More models".into(),
+                on: false,
+                off: in_more,
+                pick: Box::new(cx.listener(move |v, _: &gpui::ClickEvent, _, cx| {
+                    let d = drop(v);
+                    d.more = !d.more;
+                    cx.notify();
+                })),
+                sub: None,
+                fold: Some(unfolded),
+            });
+            if unfolded {
+                for c in menu.iter().filter(|c| c.more) {
+                    items.push(row(c));
+                }
+            }
+        }
+        drop_menu(
+            t,
+            id,
+            items,
+            cx.listener(move |v, _: &gpui::MouseDownEvent, _, cx| {
+                drop(v).close_out();
+                cx.notify();
+            }),
+        )
+    });
+    div().relative().flex_none().child(trigger).children(list).into_any_element()
+}
+
 /// What a dropdown choice does when picked.
 pub type PickFn = Box<dyn Fn(&gpui::ClickEvent, &mut gpui::Window, &mut gpui::App)>;
 
@@ -881,6 +968,10 @@ pub struct DropItem {
     pub on: bool,
     pub off: bool,
     pub pick: PickFn,
+    /// A second, quieter line under the label ("For your toughest challenges").
+    pub sub: Option<SharedString>,
+    /// A row that folds a section open or shut, with its chevron: Some(open).
+    pub fold: Option<bool>,
 }
 
 /// A dropdown's menu, drawn above everything just under its trigger: put the trigger and this in one `relative()`
@@ -912,6 +1003,7 @@ pub fn drop_menu(
     for (i, it) in items.into_iter().enumerate() {
         let row = div()
             .id(SharedString::from(format!("{id}-{i}")))
+            .flex_none() // a long menu scrolls; its rows keep their height
             .min_h(px(30.))
             .px(px(8.))
             .py(px(5.))
@@ -928,8 +1020,29 @@ pub fn drop_menu(
                 t.ink2
             })
             .when(it.on, |d| d.font_weight(FontWeight::SEMIBOLD))
-            .child(wrap(it.label).flex_1())
-            .child(div().flex_none().w(px(13.)).when(it.on, |d| d.child(icon("check", 13., t.accent))));
+            .when(it.fold.is_some(), |d| d.mt(px(2.)).text_size(px(12.)).text_color(t.dim))
+            .child(match it.sub {
+                Some(sub) => div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(1.))
+                    .child(wrap(it.label))
+                    .child(
+                        wrap(sub)
+                            .text_size(px(11.5))
+                            .font_weight(FontWeight::NORMAL)
+                            .line_height(relative(1.3))
+                            .text_color(t.dim),
+                    )
+                    .into_any_element(),
+                None => wrap(it.label).flex_1().into_any_element(),
+            })
+            .child(div().flex_none().w(px(13.)).map(|d| match it.fold {
+                Some(open) => d.child(icon(if open { "up" } else { "down" }, 11., t.faint)),
+                None => d.when(it.on, |d| d.child(icon("check", 13., t.accent))),
+            }));
         let pick = it.pick;
         menu = menu.child(if it.off {
             row

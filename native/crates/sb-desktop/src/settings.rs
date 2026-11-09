@@ -624,6 +624,8 @@ impl SettingsView {
                             });
                             cx.notify();
                         })),
+                        sub: None,
+                        fold: None,
                     }
                 })
                 .collect();

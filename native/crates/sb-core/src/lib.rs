@@ -522,8 +522,8 @@ impl Core {
     }
 
     /// The model picker's list from the server; None when it has none (an older server, or offline).
-    pub fn models(&self) -> Option<Vec<api::ApiModel>> {
-        self.client.models().ok().filter(|m| !m.is_empty())
+    pub fn models(&self) -> Option<api::ApiModels> {
+        self.client.models().ok().filter(|m| !m.models.is_empty())
     }
 
     pub fn set_prefs(&self, body: &serde_json::Value) -> Result<(), CoreError> {

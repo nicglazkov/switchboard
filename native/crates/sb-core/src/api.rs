@@ -449,7 +449,8 @@ pub struct ApiPush {
 }
 
 /// One model the picker offers (GET /api/models): `id` goes to --model ("opus", or a full id for a family no alias
-/// covers), `detail` is the newest version of it the chats ran on ("Opus 5.5"), or empty.
+/// covers, or a pinned older version), `detail` is the version the alias points at today ("Fable 5.2", from Claude
+/// Code's own model catalog) or empty, `description` the catalog's line for it, `version` the full id behind it.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ApiModel {
     pub id: String,
@@ -457,12 +458,19 @@ pub struct ApiModel {
     pub label: String,
     #[serde(default)]
     pub detail: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub version: String,
 }
 
+/// GET /api/models: the main list, and `more`, the other versions the catalog offers (an older server sends none).
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ApiModels {
     #[serde(default)]
     pub models: Vec<ApiModel>,
+    #[serde(default)]
+    pub more: Vec<ApiModel>,
 }
 
 /// A New sheet setup: the last one used, or a preset.

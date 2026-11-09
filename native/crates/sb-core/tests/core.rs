@@ -853,3 +853,35 @@ fn model_picker_list() {
     assert_eq!(actions::model_word("claude-opus-4-7[1m]"), "Opus 4.7");
     assert_eq!(actions::model_word("sonnet"), "Sonnet");
 }
+
+#[test]
+fn model_menu_from_the_catalog() {
+    let list: sb_core::api::ApiModels = serde_json::from_str(
+        r#"{"ok": true, "models": [{"id": "fable", "label": "Fable", "detail": "Fable 5.2", "description": "For your toughest challenges",
+              "version": "claude-fable-5-2"}, {"id": "opus", "label": "Opus", "detail": "Opus 5.5", "version": "claude-opus-5-5"}],
+            "more": [{"id": "claude-fable-5-1", "label": "Fable 5.1"}, {"id": "claude-opus-4-8"}, {"id": "opus"}]}"#,
+    )
+    .unwrap();
+    let menu = actions::model_menu(Some(&list));
+    let rows: Vec<(&str, &str, &str, bool)> =
+        menu.iter().map(|c| (c.id.as_str(), c.name.as_str(), c.desc.as_str(), c.more)).collect();
+    assert_eq!(
+        rows,
+        [
+            ("", "Default", "", false),
+            ("fable", "Fable 5.2", "For your toughest challenges", false),
+            ("opus", "Opus 5.5", "", false),
+            ("claude-fable-5-1", "Fable 5.1", "", true),
+            ("claude-opus-4-8", "Opus 4.8", "", true),
+        ]
+    );
+    assert_eq!(actions::model_menu_name(&menu, "fable"), "Fable 5.2");
+    assert_eq!(actions::model_menu_name(&menu, "claude-opus-5-5"), "Opus 5.5");
+    assert_eq!(actions::model_menu_name(&menu, "claude-sonnet-4-6"), "Sonnet 4.6");
+    assert_eq!(actions::model_menu_name(&menu, ""), "Default");
+    // an older server: no more, no descriptions
+    let old: sb_core::api::ApiModels =
+        serde_json::from_str(r#"{"models": [{"id": "opus", "label": "Opus"}]}"#).unwrap();
+    assert_eq!(actions::model_menu(Some(&old)).len(), 2);
+    assert_eq!(actions::model_menu(None).len(), 5);
+}

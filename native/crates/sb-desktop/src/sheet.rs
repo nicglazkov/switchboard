@@ -459,6 +459,13 @@ impl NewSheet {
         cx.notify();
     }
 
+    /// A screenshot state (SB_SHOT=model): the model menu open, with its older versions or not.
+    pub fn shot_model_menu(&mut self, more: bool, cx: &mut Context<Self>) {
+        self.drop.toggle("nw-model");
+        self.drop.more = more;
+        cx.notify();
+    }
+
     fn locked(&self) -> bool {
         self.mode == "ultracode"
     }
@@ -2452,24 +2459,20 @@ impl Render for NewSheet {
             );
         }
         let mode_hint = MODES.iter().find(|m| m.0 == self.mode).map(|m| m.2).unwrap_or("");
-        // Model
-        let mut models = ui::seg_box(&t);
-        for (v, label) in self.app.read(cx).model_choices() {
-            let on = if locked { v == "opus" } else { self.model == v };
-            let dis = locked && v != "opus";
-            let b = ui::seg_btn(&t, SharedString::from(format!("model-{v}")), on, dis)
-                .when(locked && v == "opus", |d| d.child(ui::icon("lock", 13., t.cold)))
-                .child(label);
-            models = models.child(if dis {
-                b.into_any_element()
-            } else {
-                b.on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.model = v.clone();
-                    cx.notify();
-                }))
-                .into_any_element()
-            });
-        }
+        // Model: a menu, from what the machines' Claude Code offers today (GET /api/models)
+        let menu = self.app.read(cx).model_menu();
+        let models = ui::model_pick(
+            &t,
+            cx,
+            "nw-model",
+            self.drop.is_open("nw-model"),
+            self.drop.more,
+            &menu,
+            &self.model,
+            locked.then_some("opus"),
+            |v| &mut v.drop,
+            |v, k, _| v.model = k,
+        );
         let warn = if locked { ultra_warn(&snap.plan, AppState::now()) } else { None };
         let ultra = locked.then(|| {
             div()

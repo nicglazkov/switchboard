@@ -1417,6 +1417,8 @@ impl FilesView {
                             this.drop.close();
                             this.set_machine(name.clone(), cx);
                         })),
+                        sub: None,
+                        fold: None,
                     })
                     .collect();
                 ui::drop_menu(

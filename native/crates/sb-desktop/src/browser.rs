@@ -358,6 +358,8 @@ impl BrowserView {
                         pick(this, value.clone(), cx);
                         cx.notify();
                     })),
+                    sub: None,
+                    fold: None,
                 })
                 .collect();
             ui::drop_menu(

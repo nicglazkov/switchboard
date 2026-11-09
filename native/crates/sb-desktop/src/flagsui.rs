@@ -552,19 +552,21 @@ impl BoardView {
                     }),
             );
         }
-        // The models the machines take (GET /api/models, or the built-in list): segmented buttons. Six efforts and
-        // five permission modes: dropdowns.
-        let mut models = ui::seg_box(&t);
-        for (k, l) in self.app.read(cx).model_choices().into_iter().skip(1) {
-            let on = w.model.as_deref() == Some(k.as_str());
-            models =
-                models.child(ui::seg_btn(&t, SharedString::from(format!("fl-m-{k}")), on, false).child(l).on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        let k = k.clone();
-                        this.flags_pick(move |w| w.model = Some(k), cx)
-                    }),
-                ));
-        }
+        // The models the machines take (GET /api/models, or the built-in list), six efforts and five permission
+        // modes: dropdowns. The model menu has no Default: a running chat has a model.
+        let menu: Vec<_> = self.app.read(cx).model_menu().into_iter().filter(|c| !c.id.is_empty()).collect();
+        let models = ui::model_pick(
+            &t,
+            cx,
+            "fl-model",
+            self.drop.is_open("fl-model"),
+            self.drop.more,
+            &menu,
+            w.model.as_deref().unwrap_or(""),
+            None,
+            |v| &mut v.drop,
+            |v, k, cx| v.flags_pick(move |w| w.model = Some(k), cx),
+        );
         let orow = |label: &str, ctl: AnyElement| {
             div()
                 .flex()

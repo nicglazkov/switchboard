@@ -24,6 +24,18 @@ import sb  # noqa: E402  (the agent's cost model, so every chat carries the cost
 LIMITS_AGE = float(os.environ.get('SB_FIXTURE_LIMITS_AGE') or 60)
 import features  # noqa: E402  (tab groups: the server's own store and rules, kept in a scratch file)
 import options as options_mod  # noqa: E402  (the opt-in switches, as the server words them)
+import models as models_mod  # noqa: E402  (the model menu, as the server builds it)
+
+# The model catalog an agent reports (agent model_catalog), for GET /api/models: a new Fable the chats have not run on.
+CATALOG = {'fetched': 1, 'targets': {'fable': 'claude-fable-5-2', 'opus': 'claude-opus-5-5', 'sonnet': 'claude-sonnet-5-5',
+                                     'haiku': 'claude-haiku-5-5'},
+           'models': [{'id': 'claude-opus-5-5', 'name': 'Opus 5.5', 'desc': 'For complex work and everyday tasks', 'main': True},
+                      {'id': 'claude-fable-5-2', 'name': 'Fable 5.2', 'desc': 'For your toughest challenges', 'main': True},
+                      {'id': 'claude-sonnet-5-5', 'name': 'Sonnet 5.5', 'desc': 'Most efficient for simpler tasks', 'main': True},
+                      {'id': 'claude-haiku-5-5', 'name': 'Haiku 5.5', 'desc': 'Fastest for quick answers', 'main': True}]
+           + [{'id': f'claude-{m}', 'name': n, 'main': False} for m, n in
+              [('fable-5-1', 'Fable 5.1'), ('fable-5', 'Fable 5'), ('opus-5', 'Opus 5'), ('opus-4-8', 'Opus 4.8'),
+               ('sonnet-5', 'Sonnet 5'), ('sonnet-4-6', 'Sonnet 4.6'), ('haiku-4-5-20251001', 'Haiku 4.5')]]}
 
 
 # SB_FIXTURE_SERVER=ok|old|updating|failed|stopped: Settings > Server. "old" is a server from before 0.8.11 (no
@@ -543,6 +555,10 @@ class H(BaseHTTPRequestHandler):
             return self._json(library())
         if p == '/api/summary':
             return self._json(shifted()['summary'])
+        if p == '/api/models':
+            ms = [dict(m, models={'aliases': ['fable', 'opus', 'sonnet'], 'allowed': None, 'catalog': CATALOG})
+                  for m in shifted().get('machines') or []]
+            return self._json(models_mod.view(ms))
         if p == '/api/prefs':
             return self._json(dict(PREFS, ok=True, **options_mod.view(OPTIONS, PUSH_READY, PREFS.get('notify'))))
         if PLACES and p.startswith('/api/places/'):

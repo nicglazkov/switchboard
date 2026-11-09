@@ -19,6 +19,12 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.16",
+        &[
+            "Model menu: the model picker is now one menu, built from Claude Code's own model catalog, so a new Claude model (Fable 5.2, out today) shows up the day it ships, with a line on what each is for. Older versions you can still pin sit under More models. Same menu in the desktop app, on the iPhone and on Android.",
+        ],
+    ),
+    (
         "0.8.15",
         &[
             "Computer use on Windows: Turn on computer use now works for a chat on a PC too. Switchboard sets up Windows-MCP for the chat's folder (installing it with uv the first time), so Claude can see the screen and click and type in its apps. If the PC's desktop is disconnected (a Remote Desktop window closed without signing out), the chat's details say so.",

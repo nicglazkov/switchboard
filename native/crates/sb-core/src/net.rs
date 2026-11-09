@@ -902,8 +902,8 @@ impl Client {
     }
 
     /// GET /api/models: the models the machines' Claude Code takes (an older server answers 404).
-    pub fn models(&self) -> Result<Vec<crate::api::ApiModel>, CoreError> {
-        self.get_json::<crate::api::ApiModels>("/api/models").map(|m| m.models)
+    pub fn models(&self) -> Result<crate::api::ApiModels, CoreError> {
+        self.get_json::<crate::api::ApiModels>("/api/models")
     }
 
     /// v2: POST /api/prefs with only the fields that change (chrome_machine, presets, last).

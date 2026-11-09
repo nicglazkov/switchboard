@@ -4354,7 +4354,55 @@ def claude_models():
     allowed = s.get('availableModels')
     allowed = [a[:80] for a in allowed if isinstance(a, str)][:40] if isinstance(allowed, list) else None
     return {'aliases': (d or {}).get('models') or [], 'allowed': allowed,
-            'default': s['model'][:80] if isinstance(s.get('model'), str) else None}
+            'default': s['model'][:80] if isinstance(s.get('model'), str) else None, 'catalog': model_catalog()}
+
+
+MODEL_ID_OK = re.compile(r'claude-[a-z0-9]+(?:-[a-z0-9]+){1,6}')
+_catalog_memo = {}
+
+
+def model_catalog(cache_dir=None):
+    """The model list Claude Code itself keeps (~/.claude/cache/model-catalog, refreshed by Claude Code as it runs):
+    what each alias points at today ({'fable': 'claude-fable-5-2'}) and each model's name, so the picker names a new
+    version the day it ships rather than after a chat has run on it. The newest file wins; None when there is none.
+    Only model names and ids are read."""
+    root = Path(cache_dir) if cache_dir else claude_dir() / 'cache' / 'model-catalog'
+    try:
+        files = [(f.stat().st_mtime, f) for f in root.glob('*.json')]
+    except OSError:
+        return None
+    key = tuple(sorted((str(f), mt) for mt, f in files))
+    if key in _catalog_memo:
+        return _catalog_memo[key]
+    best = None
+    for _, f in files:
+        d = _jget(f)
+        cfg = ((d.get('catalog') or {}).get('config') or {}) if isinstance(d, dict) and isinstance(d.get('catalog'), dict) else {}
+        models = cfg.get('models') if isinstance(cfg, dict) else None
+        if not isinstance(models, list) or not models:
+            continue
+        fetched = d.get('fetchedAt') if isinstance(d.get('fetchedAt'), (int, float)) else 0
+        if best and fetched <= best['fetched']:
+            continue
+        out = []
+        for m in models[:60]:
+            if isinstance(m, dict) and isinstance(m.get('id'), str) and MODEL_ID_OK.fullmatch(m['id']):
+                fam = (m.get('runtime') or {}).get('family') if isinstance(m.get('runtime'), dict) else None
+                desc = m.get('description')
+                out.append({'id': m['id'], 'name': m['name'][:40] if isinstance(m.get('name'), str) else '',
+                            'desc': desc[:120] if isinstance(desc, str) else '',
+                            'family': fam if isinstance(fam, str) and MODEL_ALIAS_RE.fullmatch(f"'{fam}'") else '',
+                            'main': m.get('section') == 'main'})
+        targets = {}
+        for a, t in (cfg.get('provider_alias_targets') or {}).items() if isinstance(cfg.get('provider_alias_targets'), dict) else []:
+            tid = t.get('default') if isinstance(t, dict) else None
+            if MODEL_ALIAS_RE.fullmatch(f"'{a}'") and isinstance(tid, str) and MODEL_ID_OK.fullmatch(tid):
+                targets[a] = tid
+        if out:
+            best = {'fetched': int(fetched), 'targets': targets, 'models': out}
+    _catalog_memo.clear()
+    _catalog_memo[key] = best
+    return best
 
 
 def models_or_none():

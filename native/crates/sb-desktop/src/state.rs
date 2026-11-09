@@ -474,7 +474,7 @@ pub struct AppState {
     /// v2: the New sheet's memory (last used, presets) and the flags the server passes; fetched when the sheet opens.
     pub prefs: Option<ApiPrefs>,
     /// The models the machines' Claude Code takes (GET /api/models), read with the prefs; None from an older server.
-    pub models: Option<Vec<sb_core::api::ApiModel>>,
+    pub models: Option<sb_core::api::ApiModels>,
     /// v2: the session browser's window, while it is open.
     pub browser_win: Option<gpui::AnyWindowHandle>,
     pub files_win: Option<gpui::AnyWindowHandle>,
@@ -1928,9 +1928,9 @@ impl AppState {
         );
     }
 
-    /// The model picker: Default and what the server says the machines take, or the built-in list.
-    pub fn model_choices(&self) -> Vec<(String, String)> {
-        sb_core::actions::model_choices(self.models.as_deref())
+    /// The model menu: Default, what the server says the machines take, and older versions; or the built-in list.
+    pub fn model_menu(&self) -> Vec<sb_core::actions::ModelChoice> {
+        sb_core::actions::model_menu(self.models.as_ref())
     }
 
     pub fn load_prefs(

@@ -352,6 +352,60 @@ pub fn model_choices(list: Option<&[crate::api::ApiModel]>) -> Vec<(String, Stri
     }
 }
 
+/// One row of the model menu: `id` goes to --model ("" is Default), `name` is how it reads ("Fable 5.2"), `desc` the
+/// catalog's line for it, `more` puts it under the menu's collapsed "More models", `version` the full id behind it.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct ModelChoice {
+    pub id: String,
+    pub name: String,
+    pub desc: String,
+    pub version: String,
+    pub more: bool,
+}
+
+/// The model menu from GET /api/models: Default, the main list with descriptions, then the older versions the
+/// catalog offers (under "More models"). Nothing from the server: the built-in list.
+pub fn model_menu(list: Option<&crate::api::ApiModels>) -> Vec<ModelChoice> {
+    let main = model_choices(list.map(|l| l.models.as_slice()));
+    let find = |id: &str| list.and_then(|l| l.models.iter().find(|m| m.id == id));
+    let mut out: Vec<ModelChoice> = main
+        .into_iter()
+        .map(|(id, name)| {
+            let m = find(&id);
+            ModelChoice {
+                desc: m.map(|m| m.description.clone()).unwrap_or_default(),
+                version: m.map(|m| m.version.clone()).unwrap_or_default(),
+                id,
+                name,
+                more: false,
+            }
+        })
+        .collect();
+    for m in list.map(|l| l.more.as_slice()).unwrap_or_default() {
+        if m.id.is_empty() || out.iter().any(|c| c.id == m.id) {
+            continue;
+        }
+        let name = if m.label.is_empty() { model_word(&m.id) } else { m.label.clone() };
+        out.push(ModelChoice {
+            id: m.id.clone(),
+            name,
+            desc: m.description.clone(),
+            version: m.version.clone(),
+            more: true,
+        });
+    }
+    out
+}
+
+/// How the menu's trigger names the model `cur`: its row, the row whose version it is, or its own words.
+pub fn model_menu_name(menu: &[ModelChoice], cur: &str) -> String {
+    menu.iter()
+        .find(|c| c.id == cur)
+        .or_else(|| menu.iter().find(|c| !cur.is_empty() && c.version == cur))
+        .map(|c| c.name.clone())
+        .unwrap_or_else(|| if cur.is_empty() { "Default".into() } else { model_word(cur) })
+}
+
 /// "Opus" for opus, "Opus 5.5" for claude-opus-5-5: a model as a chip says it.
 pub fn model_word(v: &str) -> String {
     let cap = |s: &str| {

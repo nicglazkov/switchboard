@@ -1564,7 +1564,7 @@ impl BoardView {
         cx.notify();
     }
 
-    /// Screenshot states for visual checks (SB_SHOT=inspector,palette,new,archive,plan,confirm).
+    /// Screenshot states for visual checks (SB_SHOT=inspector,palette,new,model[=more],archive,plan,confirm).
     /// "Board", plus "keys" when single-letter shortcuts are safe (nothing open that takes typing).
     fn key_context(&self) -> gpui::KeyContext {
         let mut kc = gpui::KeyContext::new_with_defaults();
@@ -1611,6 +1611,12 @@ impl BoardView {
                 "ultra" => {
                     if let Overlay::New(s) = &self.overlay {
                         s.update(cx, |s, cx| s.set_mode("ultracode", cx));
+                    }
+                }
+                "model" => {
+                    // The New sheet's model menu open, "model=more" with its older versions shown.
+                    if let Overlay::New(s) = &self.overlay {
+                        s.update(cx, |s, cx| s.shot_model_menu(arg == "more", cx));
                     }
                 }
                 "archive" => {
