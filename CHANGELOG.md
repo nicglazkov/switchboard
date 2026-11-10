@@ -4,6 +4,14 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.8.18 (2026-11-10)
+
+- Tabs come back at once: when Switchboard opens, your chat tabs reopen right away from what it saved last time, instead of staying away until the server answers. If the server is slow or away, they keep trying and connect when it is back.
+- A silent server shows: if the server stops answering while you type, the terminal says so within a few seconds and reconnects by itself. Before, the keys could look dead for up to a minute, as if the app had frozen.
+- Typing never waits on output: a chat printing a lot at once no longer holds back what you type into it.
+- Screens that fall behind are redrawn: if a terminal ever has output it has not drawn, it draws it and notes it in the log.
+- Better freeze notes: the log now says when the window stops drawing while you use it, and what each tab was doing when the app quit, so a quit because it looked frozen leaves its reason behind.
+
 ## 0.8.17 (2026-11-10)
 
 - Computer use, asked for in the chat: a chat that has no screen tools can now turn computer use on for itself. Switchboard sets it up for the chat's folder, relaunches the chat with it, and the chat carries on with what it was doing.

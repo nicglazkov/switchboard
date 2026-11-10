@@ -371,12 +371,21 @@ pub struct BoardView {
     pub tabs: Vec<Entity<TermTab>>,
     /// Set while the last launch's tabs reopen, so each one opening does not save a half-built list.
     restoring: bool,
-    /// The last launch's tabs reopen once live data is in (the saved snapshot can miss newer chats), or after a few
-    /// seconds without it.
+    /// The last launch's tabs are still to reopen. They reopen at once from the saved snapshot when it knows any of
+    /// them (a slow or absent server does not leave the window without its tabs), otherwise once live data is in, or
+    /// after a few seconds without it.
     restore_due: bool,
     /// Saved tabs the snapshot did not know when they reopened without live data: they stay saved, and open once the
     /// server answers.
     restore_left: Vec<String>,
+    /// Tabs reopened on the saved snapshot's word that their chat runs: looked at again once the server answers (a
+    /// chat that stopped meanwhile loses its tab, as on a launch with live data).
+    restore_check: Vec<String>,
+    /// A frame is asked for since then and has not been drawn (None: nothing is waiting), and whether the window was
+    /// the active one at its last frame. A window that takes clicks but draws nothing looks frozen; the log says so.
+    frame_wanted: Option<std::time::Instant>,
+    frame_active: bool,
+    frame_late: bool,
     /// Moves and resizes of the window: its frame is saved once it has been still for a moment, or on the way out.
     bounds: Debounce,
     pub tab: usize,
@@ -413,10 +422,11 @@ impl BoardView {
         let server_field = cx.new(|cx| InputState::new(window, cx).placeholder("192.0.2.10:8130"));
         let mut subs = vec![
             cx.observe(&app, |this, app, cx| {
+                this.watch_frames();
                 if this.restore_due && app.read(cx).live {
                     this.restore_due = false;
                     this.restore_tabs(cx);
-                } else if !this.restore_left.is_empty() && app.read(cx).live {
+                } else if !(this.restore_left.is_empty() && this.restore_check.is_empty()) && app.read(cx).live {
                     this.restore_late(cx);
                 }
                 // a chat renamed anywhere: its tab says the new name; after /clear, its key follows the chat
@@ -586,6 +596,12 @@ impl BoardView {
                 if this.bounds.flush() {
                     this.app.read(cx).save_settings();
                 }
+                // What every terminal was doing as the app goes: a quit because it "froze" leaves its reason here.
+                let late = this.frame_wanted.map_or(0.0, |t| t.elapsed().as_secs_f32());
+                log::info!("quit: tab {} of {} showing, frame waiting {late:.1}s", this.tab, this.tabs.len());
+                for t in this.tabs.iter().chain(this.float.iter()) {
+                    log::info!("quit: {}", t.read(cx).state_line(cx));
+                }
                 async {}
             }));
             subs.push(cx.on_release(|this, cx| {
@@ -681,6 +697,10 @@ impl BoardView {
             restoring: false,
             restore_due: false,
             restore_left: Vec::new(),
+            restore_check: Vec::new(),
+            frame_wanted: None,
+            frame_active: false,
+            frame_late: false,
             bounds: Debounce::default(),
             focus_tab: false,
             pal_chats: false,
@@ -716,6 +736,18 @@ impl BoardView {
             if v.shot.is_none() && std::env::var("SB_SIZE").is_err() {
                 v.restore_due = true;
                 cx.spawn(async move |this, cx| {
+                    // Right away when the saved snapshot knows the tabs' chats: the server may take a while to answer
+                    // (or be away), and the tabs must not wait for it.
+                    let _ = this.update(cx, |this, cx| {
+                        let known = {
+                            let s = this.app.read(cx);
+                            s.settings.tabs.iter().any(|k| s.snap.session(&s.snap.latest_key(k)).is_some())
+                        };
+                        if this.restore_due && known {
+                            this.restore_due = false;
+                            this.restore_tabs(cx);
+                        }
+                    });
                     cx.background_executor().timer(std::time::Duration::from_secs(8)).await;
                     let _ = this.update(cx, |this, cx| {
                         if this.restore_due {
@@ -1324,6 +1356,28 @@ impl BoardView {
         });
     }
 
+    /// The board changed and a frame is due: notes it, and says in the log when the window has not drawn one for a
+    /// while although it is the active window (and when it draws again).
+    fn watch_frames(&mut self) {
+        let now = std::time::Instant::now();
+        let since = *self.frame_wanted.get_or_insert(now);
+        let late = now.saturating_duration_since(since);
+        if self.frame_active && !self.frame_late && late >= FRAME_LATE {
+            self.frame_late = true;
+            log::warn!("window: no frame drawn for {:.0}s while it is the active window", late.as_secs_f32());
+        }
+    }
+
+    /// A frame is being drawn.
+    fn frame_drawn(&mut self, active: bool) {
+        if std::mem::take(&mut self.frame_late) {
+            let late = self.frame_wanted.map_or(0.0, |t| t.elapsed().as_secs_f32());
+            log::warn!("window: drawing again after {late:.0}s");
+        }
+        self.frame_wanted = None;
+        self.frame_active = active;
+    }
+
     /// Reopens the tabs that were open when Switchboard last closed. A chat that has since stopped or left the board
     /// is skipped (reopening it would mean resuming it, which costs tokens; that stays a click), except a starred
     /// one: its tab comes back saying it stopped, with Resume.
@@ -1348,30 +1402,67 @@ impl BoardView {
                 continue;
             }
             let known = self.app.read(cx).snap.session(key).map(|s| (s.alive, s.star));
-            if known.is_none() && !live {
-                self.restore_left.push(key.clone());
-                continue;
-            }
-            let (alive, star) = known.unwrap_or_default();
-            if alive {
-                self.open_terminal(key.clone(), false, cx);
-            } else if star {
-                let tab = cx.new(|cx| TermTab::new(Start::Stopped(key.clone()), cx));
-                self.add_tab(tab, cx);
-            } else {
-                continue;
+            match reopen(known, live) {
+                Reopen::Wait => {
+                    self.restore_left.push(key.clone());
+                    continue;
+                }
+                Reopen::Skip => continue,
+                Reopen::Open => {
+                    self.open_terminal(key.clone(), false, cx);
+                    if !live {
+                        // the server has not said so yet: it keeps trying while the server is away, and is looked at
+                        // again once the server answers
+                        self.restore_check.push(key.clone());
+                        if let Some(tab) = self.tabs.last() {
+                            tab.update(cx, |t, _| t.keep_trying());
+                        }
+                    }
+                }
+                Reopen::Stopped => {
+                    let tab = cx.new(|cx| TermTab::new(Start::Stopped(key.clone()), cx));
+                    self.add_tab(tab, cx);
+                }
             }
             if i + 1 == at {
                 show = self.tabs.len();
             }
         }
         self.restoring = false;
+        log::info!(
+            "tabs: {} reopened {}, {} wait for the server",
+            self.tabs.len(),
+            if live { "with the server's list" } else { "from the saved snapshot" },
+            self.restore_left.len()
+        );
         self.set_tab(show, cx);
     }
 
     /// The saved tabs that waited for the server open now, after the others, as on a launch with live data (a chat
     /// that stopped meanwhile stays closed unless starred). The tab showing stays.
     fn restore_late(&mut self, cx: &mut Context<Self>) {
+        // Tabs reopened on the saved snapshot's word: a chat that has stopped since (and is not starred) or left the
+        // board loses its tab, unless its terminal is attached after all.
+        for key in std::mem::take(&mut self.restore_check) {
+            let key = self.app.read(cx).snap.latest_key(&key);
+            let known = self.app.read(cx).snap.session(&key).map(|s| (s.alive, s.star));
+            let Some(i) = self.tabs.iter().position(|t| t.read(cx).key.as_deref() == Some(key.as_str())) else {
+                continue;
+            };
+            let attached = self.tabs[i].read(cx).live();
+            if keeps_tab(known, attached) {
+                continue;
+            }
+            log::info!("tabs: the chat of a reopened tab has stopped since; its tab goes");
+            let tab = self.tabs.remove(i);
+            tab.update(cx, |t, _| t.detach());
+            self.unwatch_tab(&tab);
+            if self.tab > i {
+                self.tab -= 1;
+            }
+            self.tab = self.tab.min(self.tabs.len());
+            self.focus_tab = true;
+        }
         for key in std::mem::take(&mut self.restore_left) {
             let key = self.app.read(cx).snap.latest_key(&key);
             if self.tabs.iter().any(|t| t.read(cx).key.as_deref() == Some(key.as_str())) {
@@ -2165,6 +2256,7 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
 
 impl Render for BoardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.frame_drawn(window.is_window_active());
         if let Some(shot) = self.shot.clone()
             && let Some((what, arg)) = shot.split_once('=').filter(|(w, _)| *w == "find" || *w == "setup")
         {
@@ -3324,6 +3416,39 @@ pub fn grid_row(label: Option<AnyElement>, cells: Vec<AnyElement>) -> gpui::Div 
     row
 }
 
+/// A frame asked for and not drawn for this long, in the active window, is worth a line in the log.
+const FRAME_LATE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// What a saved tab does when the tabs reopen.
+#[derive(Debug, PartialEq, Eq)]
+enum Reopen {
+    /// Its chat runs: the terminal opens.
+    Open,
+    /// Its chat stopped and is starred: the tab comes back saying so, with Resume.
+    Stopped,
+    /// Its chat stopped or left the board: no tab (reopening would mean resuming it, which costs tokens).
+    Skip,
+    /// The saved snapshot does not know it and the server has not answered yet: it waits for the server.
+    Wait,
+}
+
+/// `known`: the chat as the board has it (running, starred), or None when it is not there. `live`: the board is the
+/// server's own, not the snapshot saved by the last launch.
+fn reopen(known: Option<(bool, bool)>, live: bool) -> Reopen {
+    match known {
+        Some((true, _)) => Reopen::Open,
+        Some((false, true)) => Reopen::Stopped,
+        Some((false, false)) => Reopen::Skip,
+        None if live => Reopen::Skip,
+        None => Reopen::Wait,
+    }
+}
+
+/// A tab reopened from the saved snapshot, once the server has answered: whether it stays.
+fn keeps_tab(known: Option<(bool, bool)>, attached: bool) -> bool {
+    attached || matches!(known, Some((alive, star)) if alive || star)
+}
+
 /// The tabs to save: those that know their chat, in order, then the saved ones still waiting for the server (a launch
 /// without live data keeps them rather than forgetting them).
 fn saved_keys(open: Vec<Option<String>>, waiting: &[String]) -> Vec<String> {
@@ -3367,7 +3492,29 @@ impl Debounce {
 
 #[cfg(test)]
 mod tests {
-    use super::{Debounce, saved_keys};
+    use super::{Debounce, Reopen, keeps_tab, reopen, saved_keys};
+
+    #[test]
+    fn saved_tabs_reopen_from_the_snapshot_without_waiting_for_the_server() {
+        // the server has not answered: a chat the snapshot has as running opens at once
+        assert_eq!(reopen(Some((true, false)), false), Reopen::Open);
+        assert_eq!(reopen(Some((false, true)), false), Reopen::Stopped);
+        assert_eq!(reopen(Some((false, false)), false), Reopen::Skip);
+        // one the snapshot does not know may be newer than it: it waits
+        assert_eq!(reopen(None, false), Reopen::Wait);
+        // with the server's own list, an unknown chat is gone
+        assert_eq!(reopen(None, true), Reopen::Skip);
+        assert_eq!(reopen(Some((true, true)), true), Reopen::Open);
+    }
+
+    #[test]
+    fn a_tab_reopened_from_the_snapshot_goes_if_its_chat_stopped_meanwhile() {
+        assert!(keeps_tab(Some((true, false)), false));
+        assert!(keeps_tab(Some((false, true)), false), "starred: it says Stopped, with Resume");
+        assert!(!keeps_tab(Some((false, false)), false));
+        assert!(!keeps_tab(None, false), "left the board");
+        assert!(keeps_tab(Some((false, false)), true), "attached after all: the snapshot is behind, not the tab");
+    }
 
     #[test]
     fn a_drag_is_written_once_and_a_quick_quit_still_writes_it() {

@@ -17,6 +17,7 @@ pub mod grid;
 pub mod links;
 pub mod local;
 pub mod settle;
+pub mod stale;
 pub mod upload;
 
 use std::cell::RefCell;
@@ -360,6 +361,18 @@ pub struct TermTab {
     pending: std::collections::VecDeque<FromHub>,
     /// The link dropped and it is coming back by itself: the screen stays, the bar says so.
     pub(crate) reconnect: Option<Reconnect>,
+    /// The hub has not answered what was typed for a few seconds: the bar says so. The link is given up and comes
+    /// back by itself if the silence lasts (sb-core term/ws.rs).
+    pub(crate) quiet: bool,
+    /// Output parsed so far (a count), against the count the grid view last drew (stale.rs).
+    content: u64,
+    stale: stale::Stale,
+    /// When the hub last sent output, and how many times the view had to be drawn again because it missed some.
+    last_in: Option<Instant>,
+    healed: u32,
+    /// Reopened at launch before the server had answered: a first failure to connect (the server or the hub away)
+    /// is tried again like a dropped link, instead of ending on a card.
+    patient: bool,
     /// The waits between tries at coming back. A link that opens and drops again at once does not start them over.
     backoff: Backoff,
     has_output: bool,
@@ -457,6 +470,12 @@ impl TermTab {
             in_snapshot: false,
             pending: Default::default(),
             reconnect: None,
+            quiet: false,
+            patient: false,
+            content: 0,
+            stale: Default::default(),
+            last_in: None,
+            healed: 0,
             backoff: Backoff::default(),
             has_output: false,
             last_out: None,
@@ -666,6 +685,7 @@ impl TermTab {
 
     /// Asks for a ticket, then dials. Also Reconnect and Try again.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
+        self.patient = false;
         self.reconnect = None;
         self.backoff = Backoff::default();
         if self.local.is_some() {
@@ -711,9 +731,50 @@ impl TermTab {
         self.pty.as_ref().filter(|_| self.phase == Phase::Open).and_then(|p| p.busy())
     }
 
+    /// A tab reopened at launch before the server has answered: if the server or the hub is away, it keeps trying as
+    /// a dropped link does (the bar says Reconnecting) instead of stopping at the first failure.
+    pub fn keep_trying(&mut self) {
+        self.patient = self.local.is_none() && self.phase.connecting();
+    }
+
+    /// The server has gone quiet and the person does not want to wait for the link to be given up: a new one now.
+    fn reconnect_quiet(&mut self, cx: &mut Context<Self>) {
+        log::warn!("terminal {}: reconnecting at the person's ask, the hub was not answering", self.log_name());
+        self.reconnect.get_or_insert_with(Reconnect::default).wait_id += 1;
+        self.dial_again(cx);
+    }
+
+    /// One line for the log about where this terminal stands: what a "frozen" tab was doing when the app was quit.
+    pub fn state_line(&self, cx: &App) -> String {
+        let ago =
+            |t: Option<Instant>| t.map_or("never".to_string(), |t| format!("{:.0}s ago", t.elapsed().as_secs_f32()));
+        let key = self.last_key.get();
+        let typed = if key > 0.0 { format!("{:.0}s ago", (AppState::now() - key).max(0.0)) } else { "never".into() };
+        format!(
+            "{}: {:?}{}{}, output {}, typed {}, {} waiting, drawn {} of {}, redrawn late {}",
+            self.log_name(),
+            self.phase,
+            if self.quiet { ", hub quiet" } else { "" },
+            if self.reconnect.is_some() { ", reconnecting" } else { "" },
+            ago(self.last_in),
+            typed,
+            self.pending.len(),
+            self.grid_view.read(cx).drawn,
+            self.content,
+            self.healed
+        )
+    }
+
+    /// The chat for the log: its machine and background id, never its title.
+    fn log_name(&self) -> String {
+        let bg: String = self.bg.as_deref().unwrap_or("-").chars().take(8).collect();
+        format!("{} {bg}", self.machine)
+    }
+
     fn dial_again(&mut self, cx: &mut Context<Self>) {
         self.epoch += 1;
         let epoch = self.epoch;
+        self.quiet = false;
         self.drop_conn();
         self.pending.clear();
         self.phase = Phase::Ticket;
@@ -749,7 +810,7 @@ impl TermTab {
                 }
                 self.dial(&ticket, cx);
             }
-            Err(e) if self.reconnect.is_some() && reconnect::ticket_retry(&e) => {
+            Err(e) if (self.reconnect.is_some() || self.patient) && reconnect::ticket_retry(&e) => {
                 // the server or the machine is away for a moment: wait and try again
                 if !self.retry_later(cx) {
                     self.phase = match e {
@@ -912,6 +973,7 @@ impl TermTab {
                     if !self.in_snapshot && now >= self.quiet_until && now - self.last_key.get() > 0.6 {
                         self.last_out = Some(now);
                     }
+                    self.last_in = Some(Instant::now());
                     crate::perf::bytes(bytes.len());
                     crate::perf::time(crate::perf::Kind::Hub, || self.parser.advance(&mut self.term, &bytes));
                     self.has_output = true;
@@ -928,7 +990,21 @@ impl TermTab {
                     }));
                 }
                 FromHub::Error(e) => self.exit_note = Some(e),
+                FromHub::Quiet(q) => {
+                    if q != self.quiet {
+                        log::warn!(
+                            "terminal {}: the hub {}",
+                            self.log_name(),
+                            if q { "has not answered what was typed" } else { "answers again" }
+                        );
+                    }
+                    self.quiet = q;
+                }
                 FromHub::Closed(c) => {
+                    if !matches!(c, Closed::Normal | Closed::ByClient) {
+                        log::warn!("terminal {}: link closed: {}", self.log_name(), c.message());
+                    }
+                    self.quiet = false;
                     self.conn = None;
                     self.mouse_held = None;
                     self.pending.clear();
@@ -952,7 +1028,7 @@ impl TermTab {
                         continue;
                     }
                     let asked = end_asked(std::mem::take(&mut self.leaving), self.quit_key.take(), Instant::now());
-                    let attached = self.has_output || self.reconnect.is_some();
+                    let attached = self.has_output || self.reconnect.is_some() || self.patient;
                     if !asked && reconnect::after_close(&c, exit, attached) && self.retry_later(cx) {
                         // the link dropped: back by itself, the screen kept
                         self.exit_note = None;
@@ -981,6 +1057,7 @@ impl TermTab {
         if self.phase != before {
             cx.emit(TermEvent::Changed);
         }
+        self.content += 1;
         cx.notify();
         !self.pending.is_empty()
     }
@@ -1008,6 +1085,7 @@ impl TermTab {
 
     fn opened(&mut self) {
         self.phase = Phase::Open;
+        self.patient = false;
         self.reconnect = None;
         self.backoff.opened(Instant::now());
         self.quiet_until = AppState::now() + 2.0;
@@ -1343,6 +1421,7 @@ impl TermTab {
                         t.parser.stop_sync(&mut t.term);
                         t.drain(cx);
                         t.sync_armed = false;
+                        t.content += 1;
                         cx.notify();
                         None
                     }
@@ -2335,7 +2414,11 @@ impl TermTab {
 
     /// The bar while the link is coming back: a breathing amber dot, "Reconnecting…", and a way to skip the wait.
     fn reconnecting(&self, t: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
-        self.reconnect.as_ref()?;
+        // Open but silent: what is typed is not getting through. Said here, so it does not look like a frozen app.
+        let quiet = self.reconnect.is_none() && self.quiet && self.phase == Phase::Open;
+        if self.reconnect.is_none() && !quiet {
+            return None;
+        }
         let hover = t.hover;
         let dot = self.reconnect_anim.clone();
         Some(
@@ -2345,7 +2428,11 @@ impl TermTab {
                 .items_center()
                 .gap(px(8.))
                 .child(dot)
-                .child(div().flex_none().text_color(t.ink2).child("Reconnecting…"))
+                .child(div().flex_none().text_color(t.ink2).child(if quiet {
+                    "The server isn't answering…"
+                } else {
+                    "Reconnecting…"
+                }))
                 .child(
                     div()
                         .id("term-reconnect-now")
@@ -2361,7 +2448,11 @@ impl TermTab {
                         .child("Reconnect now")
                         .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                         .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _: &gpui::ClickEvent, _, cx| this.reconnect_now(cx))),
+                        .on_click(cx.listener(
+                            move |this, _: &gpui::ClickEvent, _, cx| {
+                                if quiet { this.reconnect_quiet(cx) } else { this.reconnect_now(cx) }
+                            },
+                        )),
                 )
                 .into_any_element(),
         )
@@ -2580,7 +2671,7 @@ impl Render for TermTab {
             let dot = crate::chrome::live_dot(&ct, l, "term-live", 8.);
             self.live_anim.update(cx, |a, _| a.0 = Some(dot));
         }
-        if self.reconnect.is_some() {
+        if self.reconnect.is_some() || self.quiet {
             let dot = reconnect_dot(&ct);
             self.reconnect_anim.update(cx, |a, _| a.0 = Some(dot));
         }
@@ -2728,6 +2819,22 @@ impl Render for TermTab {
         };
         let font = colors::font_size(cx);
         self.grid_view.update(cx, |g, cx| g.set(pal, cursor_look, font, cx));
+        // The view has output it never drew (stale.rs): draw it, and say so, since it should not happen.
+        let drawn = self.grid_view.read(cx).drawn;
+        if self.stale.check(self.content, drawn, Instant::now()) {
+            self.healed += 1;
+            if self.healed <= 20 || self.healed.is_multiple_of(100) {
+                log::warn!(
+                    "terminal {}: the screen was behind its output ({} drawn of {}); drawn again ({} so far)",
+                    self.log_name(),
+                    drawn,
+                    self.content,
+                    self.healed
+                );
+            }
+            self.grid_view.update(cx, |_, cx| cx.notify());
+            window.refresh();
+        }
         let grid =
             self.grid_view.clone().cached(gpui::StyleRefinement::default().absolute().top_0().left_0().size_full());
         div()
@@ -2843,13 +2950,15 @@ impl Render for Anim {
 pub struct GridView {
     tab: gpui::WeakEntity<TermTab>,
     look: Option<(colors::Palette, grid::CursorLook, f32)>,
+    /// The tab's output count (`TermTab::content`) this view last drew.
+    drawn: u64,
     _sub: Subscription,
 }
 
 impl GridView {
     fn new(tab: Entity<TermTab>, cx: &mut Context<Self>) -> GridView {
         let _sub = cx.observe(&tab, |_, _, cx| cx.notify());
-        GridView { tab: tab.downgrade(), look: None, _sub }
+        GridView { tab: tab.downgrade(), look: None, drawn: 0, _sub }
     }
 
     /// What the grid paints with; a change re-renders it.
@@ -2868,6 +2977,7 @@ impl Render for GridView {
             return div().into_any_element();
         };
         let focus = this.read(cx).focus.clone();
+        self.drawn = this.read(cx).content;
         canvas(
             {
                 let this = this.clone();

@@ -10,6 +10,11 @@
 //!
 //! Output reaches the UI through a bounded channel: when the UI falls behind, this thread stops reading the socket,
 //! and the hub, seeing this viewer fall behind, sends it the screen again once it catches up instead of every byte.
+//! It goes on sending what is typed meanwhile: a busy screen never holds the keys back.
+//!
+//! A hub that stops answering shows within seconds, not at the next ping: typing into a silent link asks the hub
+//! for a sign of life (`ASK_AFTER`), the UI hears `Quiet` if none comes (`QUIET_AFTER`), and the link counts as lost
+//! after `GONE_AFTER`, so the tab comes back by itself.
 
 use std::net::{SocketAddr, TcpStream};
 use std::thread;
@@ -36,6 +41,15 @@ const NEXT_ADDR: Duration = Duration::from_millis(250);
 const HANDSHAKE: Duration = if cfg!(test) { Duration::from_secs(1) } else { Duration::from_secs(10) };
 /// Events waiting for the UI before this thread stops reading the socket.
 pub const UI_BACKLOG: usize = 256;
+/// Typing when the hub has said nothing for this long asks it for a sign of life (a ping).
+const ASK_AFTER: Duration = if cfg!(test) { Duration::from_millis(50) } else { Duration::from_secs(1) };
+/// Asked and still silent for this long: the UI is told (`Quiet`), so the tab can say the server is not answering.
+pub const QUIET_AFTER: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(3) };
+/// Asked and still silent for this long: the link is lost. A big paste into a slow program can keep the hub busy for
+/// a while, so this is well past anything a working hub takes.
+pub const GONE_AFTER: Duration = if cfg!(test) { Duration::from_millis(700) } else { Duration::from_secs(12) };
+/// While the UI is behind, how often this thread looks for room again.
+const ROOM_EVERY: Duration = Duration::from_millis(5);
 /// Input goes out in frames of at most this much (the hub takes frames up to 1 MiB).
 pub const INPUT_FRAME: usize = 64 * 1024;
 
@@ -79,6 +93,8 @@ pub enum FromHub {
         note: Option<String>,
     },
     Error(String),
+    /// The hub has not answered what was typed for `QUIET_AFTER` (true), or it answers again (false).
+    Quiet(bool),
     /// Always last, exactly once.
     Closed(Closed),
 }
@@ -224,6 +240,22 @@ enum Ev {
     Out(Option<ToHub>),
     In(Option<Result<Message, WsError>>),
     Tick,
+    /// The UI was behind: time to look for room again.
+    Room,
+}
+
+/// Asking a silent hub for a sign of life: when it was asked, and whether the UI has been told it is quiet.
+#[derive(Default)]
+struct Ask {
+    since: Option<Instant>,
+    told: bool,
+}
+
+impl Ask {
+    /// When to look at it next.
+    fn due(&self) -> Option<Instant> {
+        self.since.map(|t| t + if self.told { GONE_AFTER } else { QUIET_AFTER })
+    }
 }
 
 async fn dial(host: &str, port: u16) -> Result<Async<TcpStream>, String> {
@@ -328,13 +360,30 @@ async fn run(
     let (mut sink, mut stream) = ws.split();
     let mut last_in = Instant::now();
     let mut next_ping = Instant::now() + PING_EVERY;
+    let mut ask = Ask::default();
+    // One event the UI had no room for. While it waits, the socket is not read (the hub sees this viewer fall behind),
+    // but typing, pings and a close still go out.
+    let mut held: Option<FromHub> = None;
+    let lost = || Closed::Lost("The connection to the terminal hub dropped.".into());
     loop {
+        let wake = ask.due().map_or(next_ping, |d| d.min(next_ping));
+        let waiting = held.is_some();
         let ev = smol::future::or(
             async { Ev::Out(to_rx.recv().await.ok()) },
-            smol::future::or(async { Ev::In(stream.next().await) }, async {
-                Timer::at(next_ping).await;
-                Ev::Tick
-            }),
+            smol::future::or(
+                async {
+                    if waiting {
+                        Timer::after(ROOM_EVERY).await;
+                        Ev::Room
+                    } else {
+                        Ev::In(stream.next().await)
+                    }
+                },
+                async {
+                    Timer::at(wake).await;
+                    Ev::Tick
+                },
+            ),
         )
         .await;
         match ev {
@@ -354,8 +403,16 @@ async fn run(
                 for piece in bytes.chunks(INPUT_FRAME) {
                     note(Kind::Input, piece);
                     if sink.send(Message::binary(piece.to_vec())).await.is_err() {
-                        return Closed::Lost("The connection to the terminal hub dropped.".into());
+                        return lost();
                     }
+                }
+                // typed into a silent link: is the hub there? (Not while the UI is behind: its answer would wait
+                // unread, and the silence would be this side's.)
+                if ask.since.is_none() && held.is_none() && last_in.elapsed() > ASK_AFTER {
+                    if sink.send(Message::text(PING_FRAME)).await.is_err() {
+                        return lost();
+                    }
+                    ask.since = Some(Instant::now());
                 }
             }
             Ev::Out(Some(control @ (ToHub::Resize { .. } | ToHub::Focus | ToHub::Redraw))) => {
@@ -366,43 +423,91 @@ async fn run(
                 };
                 note(Kind::TextOut, text.as_bytes());
                 if sink.send(Message::text(text)).await.is_err() {
-                    return Closed::Lost("The connection to the terminal hub dropped.".into());
+                    return lost();
+                }
+            }
+            Ev::Room => {
+                if let Some(ev) = held.take() {
+                    hand(from_tx, ev, &mut held);
+                }
+                if held.is_none() {
+                    // the silence was the UI's, not the hub's
+                    last_in = Instant::now();
                 }
             }
             Ev::Tick => {
-                if last_in.elapsed() > SILENCE {
-                    return Closed::Lost("The terminal hub stopped answering.".into());
+                let now = Instant::now();
+                if held.is_some() {
+                    // not reading the socket: nothing to judge the hub by
+                    ask = Ask::default();
+                    next_ping = now + PING_EVERY;
+                    continue;
                 }
-                next_ping = Instant::now() + PING_EVERY;
-                if sink.send(Message::text(PING_FRAME)).await.is_err() {
-                    return Closed::Lost("The connection to the terminal hub dropped.".into());
+                if let Some(since) = ask.since {
+                    let silent = now.saturating_duration_since(since);
+                    if silent >= GONE_AFTER {
+                        return Closed::Lost("The terminal hub stopped answering.".into());
+                    }
+                    if silent >= QUIET_AFTER && !ask.told {
+                        ask.told = true;
+                        let _ = from_tx.try_send(FromHub::Quiet(true));
+                    }
+                }
+                if now >= next_ping {
+                    if last_in.elapsed() > SILENCE {
+                        return Closed::Lost("The terminal hub stopped answering.".into());
+                    }
+                    next_ping = now + PING_EVERY;
+                    if sink.send(Message::text(PING_FRAME)).await.is_err() {
+                        return lost();
+                    }
                 }
             }
-            Ev::In(None) => return Closed::Lost("The connection to the terminal hub dropped.".into()),
-            Ev::In(Some(Err(_))) => return Closed::Lost("The connection to the terminal hub dropped.".into()),
+            Ev::In(None) | Ev::In(Some(Err(_))) => return lost(),
             Ev::In(Some(Ok(msg))) => {
                 last_in = Instant::now();
-                match msg {
+                if std::mem::take(&mut ask).told {
+                    hand(from_tx, FromHub::Quiet(false), &mut held);
+                }
+                let ev = match msg {
                     Message::Binary(b) => {
                         note(Kind::Out, &b);
-                        let _ = from_tx.send(FromHub::Data(b.to_vec())).await;
+                        Some(FromHub::Data(b.to_vec()))
                     }
                     Message::Text(t) => {
                         note(Kind::TextIn, t.as_bytes());
-                        if let Some(ev) = parse_control(t.as_str()) {
-                            let _ = from_tx.send(ev).await;
-                        }
+                        parse_control(t.as_str())
                     }
                     Message::Close(frame) => {
+                        // what the UI had no room for comes first
+                        if let Some(ev) = held.take() {
+                            let _ = from_tx.send(ev).await;
+                        }
                         return match frame {
                             Some(f) => Closed::from_code(u16::from(f.code), f.reason.as_str()),
                             None => Closed::Normal,
                         };
                     }
-                    _ => {}
+                    _ => None,
+                };
+                if let Some(ev) = ev {
+                    if held.is_some() {
+                        // only after `Quiet(false)` found no room: keep the order, waiting like the UI's reader does
+                        if let Some(first) = held.take() {
+                            let _ = from_tx.send(first).await;
+                        }
+                    }
+                    hand(from_tx, ev, &mut held);
                 }
             }
         }
+    }
+}
+
+/// Hands the UI an event, or keeps it in `held` when the UI has no room for it yet.
+fn hand(from_tx: &Sender<FromHub>, ev: FromHub, held: &mut Option<FromHub>) {
+    if let Err(smol::channel::TrySendError::Full(ev)) = from_tx.try_send(ev) {
+        *held = Some(ev);
     }
 }
 
@@ -618,6 +723,136 @@ mod tests {
         );
         assert!(start.elapsed() < HANDSHAKE * 2, "{:?}", start.elapsed());
         h.join().unwrap();
+    }
+
+    /// A hub that opens the terminal, then does `then` with the socket.
+    fn hub_that<T: Send + 'static>(
+        then: impl FnOnce(async_tungstenite::tungstenite::WebSocket<std::net::TcpStream>) -> T + Send + 'static,
+    ) -> (String, thread::JoinHandle<T>) {
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = l.local_addr().unwrap().port();
+        let h = thread::spawn(move || {
+            let (s, _) = l.accept().unwrap();
+            let mut ws = async_tungstenite::tungstenite::accept(s).unwrap();
+            ws.send(Message::text(r#"{"type":"status","state":"open"}"#)).unwrap();
+            then(ws)
+        });
+        (format!("ws://127.0.0.1:{port}/term?t=abc&cols=80&rows=24"), h)
+    }
+
+    #[test]
+    fn typing_into_a_silent_hub_says_so_then_gives_the_link_up() {
+        // takes what is typed and never says a word again
+        let (url, hub) = hub_that(|mut ws| while ws.read().is_ok() {});
+        let c = connect(url, "t".into());
+        thread::sleep(ASK_AFTER * 3);
+        let start = Instant::now();
+        c.tx.try_send(ToHub::Input(b"hello".to_vec())).unwrap();
+        let evs = collect(&c.rx);
+        assert!(evs.contains(&FromHub::Quiet(true)), "{evs:?}");
+        assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::Lost("The terminal hub stopped answering.".into()))));
+        let took = start.elapsed();
+        assert!(took >= GONE_AFTER && took < GONE_AFTER * 3, "{took:?}");
+        drop(c);
+        hub.join().unwrap();
+    }
+
+    #[test]
+    fn a_hub_that_answers_late_is_quiet_then_back() {
+        // answers what is typed only after a while (a stall), then goes on as before
+        let (url, hub) = hub_that(|mut ws| {
+            let (mut pings, mut closing) = (0, false);
+            loop {
+                match ws.read() {
+                    Ok(Message::Binary(b)) if b.as_ref() == b"q" => {
+                        closing = true;
+                        let _ = ws.close(Some(CloseFrame { code: CloseCode::Normal, reason: "".into() }));
+                        let _ = ws.flush();
+                    }
+                    Ok(Message::Binary(_)) => {}
+                    Ok(Message::Text(t)) if t.as_str() == PING_FRAME && !closing => {
+                        pings += 1;
+                        thread::sleep(QUIET_AFTER + QUIET_AFTER / 2);
+                        ws.send(Message::text(r#"{"type":"pong"}"#)).unwrap();
+                    }
+                    Ok(_) => {}
+                    Err(_) => return pings,
+                }
+            }
+        });
+        let c = connect(url, "t".into());
+        thread::sleep(ASK_AFTER * 3);
+        c.tx.try_send(ToHub::Input(b"a".to_vec())).unwrap();
+        // typed again while it waits: one question is enough
+        c.tx.try_send(ToHub::Input(b"b".to_vec())).unwrap();
+        thread::sleep(QUIET_AFTER * 2);
+        c.tx.try_send(ToHub::Input(b"q".to_vec())).unwrap();
+        let evs = collect(&c.rx);
+        let quiet: Vec<&FromHub> = evs.iter().filter(|e| matches!(e, FromHub::Quiet(_))).collect();
+        assert_eq!(quiet, [&FromHub::Quiet(true), &FromHub::Quiet(false)], "{evs:?}");
+        assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::Normal)), "{evs:?}");
+        assert_eq!(hub.join().unwrap(), 1, "asked once");
+    }
+
+    #[test]
+    fn a_hub_that_echoes_is_never_quiet() {
+        let (url, hub) = fake_hub(None);
+        let c = connect(url, "t".into());
+        for _ in 0..6 {
+            thread::sleep(ASK_AFTER * 2);
+            c.tx.try_send(ToHub::Input(b"k".to_vec())).unwrap();
+        }
+        thread::sleep(QUIET_AFTER * 2);
+        c.tx.try_send(ToHub::Input(b"q".to_vec())).unwrap();
+        let evs = collect(&c.rx);
+        assert!(!evs.iter().any(|e| matches!(e, FromHub::Quiet(_))), "{evs:?}");
+        assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::Normal)), "{evs:?}");
+        hub.join().unwrap();
+    }
+
+    #[test]
+    fn typing_goes_out_while_the_ui_is_behind() {
+        // floods more than the UI's backlog, then reports what it was sent
+        let (url, hub) = hub_that(|mut ws| {
+            for i in 0..UI_BACKLOG * 2 {
+                ws.send(Message::binary(format!("line {i}\r\n").into_bytes())).unwrap();
+            }
+            let (tx, rx) = std::sync::mpsc::channel();
+            let t = thread::spawn(move || {
+                while let Ok(m) = ws.read() {
+                    if let Message::Binary(b) = m {
+                        let _ = tx.send(String::from_utf8_lossy(&b).to_string());
+                    }
+                }
+            });
+            (rx, t)
+        });
+        let c = connect(url, "t".into());
+        // nobody reads: the channel fills and stays full
+        let start = Instant::now();
+        while c.rx.len() < UI_BACKLOG && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(c.rx.len(), UI_BACKLOG);
+        c.tx.try_send(ToHub::Input(b"typed".to_vec())).unwrap();
+        let (seen, reader) = hub.join().unwrap();
+        assert_eq!(seen.recv_timeout(Duration::from_secs(2)).as_deref(), Ok("typed"), "held back by the full UI queue");
+        // and a silent hub is not blamed for this side's backlog
+        thread::sleep(GONE_AFTER * 2);
+        assert_eq!(c.rx.len(), UI_BACKLOG);
+        // once the UI reads again, everything arrives in order and the detach still works
+        c.tx.try_send(ToHub::Close).unwrap();
+        let evs = collect(&c.rx);
+        let lines: Vec<String> = evs
+            .iter()
+            .filter_map(|e| if let FromHub::Data(b) = e { Some(String::from_utf8_lossy(b).to_string()) } else { None })
+            .collect();
+        assert!(lines.len() >= UI_BACKLOG - 2, "{}", lines.len());
+        for (i, l) in lines.iter().enumerate() {
+            assert_eq!(l, &format!("line {i}\r\n"));
+        }
+        assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::ByClient)), "{evs:?}");
+        reader.join().unwrap();
     }
 
     #[test]
