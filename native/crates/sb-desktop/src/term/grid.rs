@@ -276,10 +276,12 @@ impl<'a> Rows<'a> {
 /// Builds the frame for `t` laid out from `origin`.
 /// How the cursor looks: the user's style (used while the program leaves the shape alone) and whether the blink has it
 /// showing right now.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct CursorLook {
     pub shape: CursorShape,
     pub visible: bool,
+    /// Off while a Windows terminal's cursor has not stayed shown long enough to draw (settle.rs).
+    pub settled: bool,
 }
 
 pub fn build(
@@ -408,6 +410,7 @@ pub fn build(
     let show = t.phase == Phase::Open
         && cursor.shape != CursorShape::Hidden
         && mode.contains(TermMode::SHOW_CURSOR)
+        && look.settled
         && (look.visible || !t.focused);
     if show && let Some(vp) = term::point_to_viewport(offset, cursor.point) {
         let cc = &t.term.grid()[cursor.point];

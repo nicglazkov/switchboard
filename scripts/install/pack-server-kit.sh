@@ -42,6 +42,24 @@ while [ $# -gt 0 ]; do
   shift
 done
 case "$BASE" in ""|http://*|https://*) ;; *) echo "pack-server-kit.sh: --base must start with http:// or https://" >&2; exit 2 ;; esac
+
+# With Developer ID signing set up, refuse an ad hoc Mac node or hub: build-dmg.sh re-signs them, and a kit packed
+# before it finishes ships the ad hoc copy. macOS ties privacy grants (Local Network, files) to the signature, so an
+# ad hoc node is a new app to it on every update and its grants are lost.
+if [ "$BINARIES" = 1 ] && command -v codesign >/dev/null 2>&1; then
+  if [ -f "$REPO/native/scripts/hosts.sh" ]; then . "$REPO/native/scripts/hosts.sh"; sb_host_opt SB_SIGN_IDENTITY || true; fi
+  if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
+    for n in switchboard-node-mac switchboard-hub-mac; do
+      p="$REPO/native/dist/$n"
+      [ -s "$p" ] || continue
+      sig="$(codesign -dv "$p" 2>&1 || true)"  # captured first: grep -q under pipefail can fail on SIGPIPE
+      if ! grep -q '^TeamIdentifier=[A-Z0-9]\{10\}$' <<<"$sig"; then
+        echo "pack-server-kit.sh: native/dist/$n is not Developer ID signed; run native/scripts/build-dmg.sh first" >&2
+        exit 1
+      fi
+    done
+  fi
+fi
 BASE="${BASE%/}"
 
 [ -f "$REPO/server/server.py" ] && [ -f "$REPO/agent/sb.py" ] || { echo "pack-server-kit.sh: run this in a copy of the repository" >&2; exit 1; }

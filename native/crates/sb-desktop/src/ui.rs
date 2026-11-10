@@ -140,16 +140,17 @@ pub fn set_machine_os(list: Vec<(String, String)>) {
     }
 }
 
+/// A machine's OS from the latest snapshot ("mac", "windows", "linux"), or "" when unknown.
+pub fn machine_os(name: &str) -> String {
+    MACHINE_OS.read().ok().and_then(|l| l.iter().find(|(n, _)| n == name).map(|(_, o)| o.clone())).unwrap_or_default()
+}
+
 /// A machine's icon, by its OS: a Mac, or a PC tower for Windows and Linux. "auto" is the Auto pick.
 pub fn machine_icon(name: &str, size: f32, color: Hsla) -> Svg {
     if name == "auto" {
         return icon("auto", size, color);
     }
-    let os = MACHINE_OS
-        .read()
-        .ok()
-        .and_then(|l| l.iter().find(|(n, _)| n == name).map(|(_, o)| o.clone()))
-        .unwrap_or_default();
+    let os = machine_os(name);
     icon(if os == "windows" || os == "linux" { "tower" } else { "mac" }, size, color)
 }
 

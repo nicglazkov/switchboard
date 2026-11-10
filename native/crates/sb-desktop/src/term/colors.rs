@@ -8,7 +8,7 @@ use gpui::{App, Hsla, Rgba};
 
 use crate::theme::{Theme, mix};
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct Palette {
     pub dark: bool,
     pub fg: Hsla,

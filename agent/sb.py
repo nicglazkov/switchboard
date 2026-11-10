@@ -1132,7 +1132,15 @@ def busy_report(sid, now, agents=None, procs=None, transcript=None):
         t_mtime = Path(tp).stat().st_mtime if tp else 0
     except OSError:
         t_mtime = 0
-    seen = set()
+    seen, whole = set(), []
+
+    def launched(ident):  # Claude Code names a background command's id when it starts it; a foreground call's spill
+        if not whole:     # file (an app it opened keeps writing there) never gets a notification, so it is not waited on
+            try:
+                whole.append(Path(tp).read_bytes() if tp else b'')
+            except OSError:
+                whole.append(raw)
+        return ident.encode() in whole[0]
     for d in sorted(_task_dirs(sid), key=lambda d: d.name != 'subagents'):  # subagents first: their output file
         sub = d.name == 'subagents'                                           # under tasks/ is the same transcript
         try:
@@ -1151,7 +1159,8 @@ def busy_report(sid, now, agents=None, procs=None, transcript=None):
             label = _subagent_label(f) if sub else 'background command'
             if now - mt <= CHILD_LIVE:
                 (subs if sub else cmds).append(label)
-            elif mt > t_mtime and now - mt <= PENDING_KEEP and f'<task-id>{ident}</task-id>'.encode() not in raw:
+            elif mt > t_mtime and now - mt <= PENDING_KEEP and f'<task-id>{ident}</task-id>'.encode() not in raw \
+                    and (sub or launched(ident)):
                 # finished after the chat last wrote anything, and no task notification for it reached the chat
                 pending.append(label)
     a = _agent_for(sid, agents or [])
@@ -1236,6 +1245,28 @@ def held_clear(sid):
         (paths()['state'] / f'{sid}.held.json').unlink()
     except OSError:
         pass
+
+
+CARRY_TTL = 30 * 60  # the server waits up to 15 minutes for the reply to end before it relaunches
+
+
+def carry_set(sid, prompt, now):
+    """What a chat is told when it comes back from a relaunch it asked for itself (the computer_use tool). Kept here,
+    on the chat's own machine, so a server that predates it still relaunches the chat and the message still arrives."""
+    _jput(paths()['state'] / f'{sid}.carry.json', {'prompt': prompt, 'ts': now})
+
+
+def carry_take(sid, now):
+    """That message, once: None when there is none or it is older than CARRY_TTL."""
+    p = paths()['state'] / f'{sid}.carry.json'
+    rec = _jget(p)
+    try:
+        p.unlink()
+    except OSError:
+        pass
+    if not isinstance(rec, dict) or not isinstance(rec.get('prompt'), str) or not isinstance(rec.get('ts'), (int, float)):
+        return None
+    return rec['prompt'] if 0 <= now - rec['ts'] <= CARRY_TTL else None
 
 
 def pass_take(sid, now):
@@ -4152,6 +4183,12 @@ def rpc_jobs(verb, req, now, get_agents):
             if a.get('kind') == 'interactive' and a.get('status') not in (None, 'stopped'):
                 raise ValueError('This chat is open in a terminal. Close it there first, then relaunch.')
             flags = check_flags(req.get('flags'), None, claude_flags() if req.get('flags') else None)
+            prompt = req.get('prompt')
+            if prompt is not None and (not isinstance(prompt, str) or len(prompt) > 20_000):
+                raise ValueError('message too long')
+            prompt = prompt or carry_take(sid, now)
+            if prompt and prompt.strip():  # sent as it comes back, so the chat carries on (the computer_use tool)
+                job['prompt'] = ' '.join(prompt.split())
             job.update(relaunch=True, model=model, effort=effort, chrome='--chrome' in flags,
                        computer=req['computer'] if isinstance(req.get('computer'), bool) else None,
                        flags=[f for f in flags if f != '--chrome'], stop=a.get('id') if a.get('kind') == 'background' else None,
@@ -6802,6 +6839,15 @@ MCP_TOOLS = [
      'inputSchema': {'type': 'object', 'required': ['machine'], 'additionalProperties': False, 'properties': {
          'machine': {'type': 'string', 'description': 'Machine name from machines().'}}},
      'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': True}},
+    {'name': 'computer_use', 'title': 'Turn on computer use',
+     'description': "Turn on computer use for this chat, so Claude can see and use this machine's screen (Windows-MCP "
+                    "on a PC, Claude Code's own computer use on a Mac). Use it when the user wants something done on "
+                    'the screen and this chat has no computer-use tools (no mcp__windows-mcp__* or mcp__computer-use__* '
+                    'tools). Switchboard turns it on for this folder and restarts this chat with it when this reply '
+                    'ends; the chat keeps its history and is told to carry on with `next`. End your turn right after.',
+     'inputSchema': {'type': 'object', 'additionalProperties': False, 'properties': {
+         'next': {'type': 'string', 'description': 'What to do once computer use is on, in a sentence or two. Optional.'}}},
+     'annotations': {'readOnlyHint': False, 'destructiveHint': True, 'openWorldHint': False}},  # restarts this chat: Claude Code asks
     {'name': 'publish_tool', 'title': 'Publish a tool to the library',
      'description': "Publish a folder to Switchboard's tool library as a new version of a tool, so chats on any machine can "
                     'use it. The folder is a Claude Code plugin folder (.claude-plugin/plugin.json, skills/<name>/SKILL.md, '
@@ -6893,6 +6939,31 @@ def mcp_tool(name, args, call=None, sleep=time.sleep, clock=time.time, me=None, 
         return {'job': r.get('job'), 'folder': folder or "that machine's Claude folder",
                 'note': 'A handoff of this chat is being written here, then a new chat with it starts there (a minute or '
                         'two). Switchboard sends a notification when it is ready. Stop here: the work continues there.'}, False
+    if name == 'computer_use':
+        mine = sid if sid is not None else my_session()
+        if not mine:
+            return {'error': 'Could not tell which chat this is. Turn on computer use from the chat in the Switchboard '
+                             'app instead.'}, True
+        nxt = args.get('next')
+        if nxt is not None and not isinstance(nxt, str):
+            return {'error': 'next is text.'}, True
+        nxt = re.sub(r'[\x00-\x1f"%&|<>^]', ' ', ' '.join((nxt or '').split()))[:1500].strip()  # one plain line
+        prompt = ('[switchboard] Computer use is on in this chat now: its screen tools are loaded. '
+                  + (f'Carry on with what you were doing: {nxt}' if nxt else 'Carry on with what you were doing.'))
+        carry_set(mine, prompt, time.time())  # the relaunch here picks it up, whatever the server's version
+        try:
+            r = call('POST', '/api/action', {'verb': 'relaunch', 'machine': me, 'sid': mine, 'when': 'idle',
+                                             'flags': {'computer': ['on']}})
+        except RpcError as e:
+            carry_take(mine, time.time())
+            return {'error': str(e)}, True
+        if r.get('ok') is False:  # a chat open in a terminal: Switchboard says what to run there
+            carry_take(mine, time.time())
+            return {'error': r.get('error') or 'Switchboard could not restart this chat.', 'command': r.get('command')}, True
+        return {'job': r.get('job'),
+                'note': 'Computer use is being turned on. This chat restarts with it as soon as this reply ends, keeps '
+                        'its history, and gets a message to carry on. End your turn now: say in one line that the '
+                        'chat restarts with computer use and continues by itself.'}, False
     if name == 'publish_tool':
         return publish_tool(args, call, me, cwd)
     if name == 'usage':  # plain text: one short paragraph
@@ -6986,6 +7057,7 @@ def mcp_handle(msg, tool=None):
                    'serverInfo': {'name': 'switchboard', 'title': 'Switchboard', 'version': '2'},
                    'instructions': "Switchboard runs Claude Code on the user's other machines. machines() lists them; "
                                    'run_on() sends a task and check() gets its report; continue_on() moves this chat. '
+                                   'computer_use() gives this chat computer use when it has no screen tools. '
                                    "library() lists the user's shared tools; publish_tool() adds a folder to them. "
                                    "usage() says where the user's plan usage stands against their daily budget."})
     if method == 'ping':

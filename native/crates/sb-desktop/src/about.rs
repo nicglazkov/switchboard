@@ -19,6 +19,16 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.17",
+        &[
+            "Computer use, asked for in the chat: a chat that has no screen tools can now turn computer use on for itself. Switchboard sets it up for the chat's folder, relaunches the chat with it, and the chat carries on with what it was doing.",
+            "Smoother chats: the terminal no longer redraws every row each time a status dot pulses, so an open chat uses much less of the computer while chats work.",
+            "Far fewer disk writes: the saved copy of the board is written at most once a minute instead of every second (macOS had flagged the app for writing about 2 GB a day).",
+            "Steady cursor on Windows chats: a chat running on a PC no longer flashes its cursor several times a second while Claude works.",
+            "Freeze reports: if the app's window stops responding for 8 seconds or more, it notes it in its log and, on a Mac, saves where it was stuck, so a freeze can be found and fixed.",
+        ],
+    ),
+    (
         "0.8.16",
         &[
             "Model menu: the model picker is now one menu, built from Claude Code's own model catalog, so a new Claude model (Fable 5.2, out today) shows up the day it ships, with a line on what each is for. Older versions you can still pin sit under More models. Same menu in the desktop app, on the iPhone and on Android.",

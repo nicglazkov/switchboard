@@ -16,6 +16,7 @@ pub mod exitline;
 pub mod grid;
 pub mod links;
 pub mod local;
+pub mod settle;
 pub mod upload;
 
 use std::cell::RefCell;
@@ -378,6 +379,13 @@ pub struct TermTab {
     work_since: Option<f64>,
     /// Screenshots only: a live state to show without a connection.
     pub fake_live: Option<sb_core::live::Live>,
+    /// The grid, drawn as its own cached view (GridView), and the strip's breathing dots, each a view of its own (Anim).
+    grid_view: Entity<GridView>,
+    /// The cursor's settle on a Windows terminal (settle.rs), and the wake for when it settles.
+    settle: settle::CursorSettle,
+    settle_wake: Option<gpui::Task<()>>,
+    live_anim: Entity<Anim>,
+    reconnect_anim: Entity<Anim>,
     /// A local terminal's profile, and its PTY while the shell runs. The tab's title is the shell's own (OSC 0 or 2)
     /// when it sets one, else the profile's name.
     pub local: Option<Profile>,
@@ -459,6 +467,14 @@ impl TermTab {
             quit_key: None,
             work_since: None,
             fake_live: None,
+            grid_view: {
+                let me = cx.entity();
+                cx.new(|cx| GridView::new(me, cx))
+            },
+            settle: Default::default(),
+            settle_wake: None,
+            live_anim: cx.new(|_| Anim(None)),
+            reconnect_anim: cx.new(|_| Anim(None)),
             local: None,
             pty: None,
             colors_open: false,
@@ -2319,17 +2335,9 @@ impl TermTab {
 
     /// The bar while the link is coming back: a breathing amber dot, "Reconnecting…", and a way to skip the wait.
     fn reconnecting(&self, t: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
-        use gpui::AnimationExt;
         self.reconnect.as_ref()?;
         let hover = t.hover;
-        let dot = div().flex_none().size(px(8.)).rounded_full().bg(t.cold).with_animation(
-            "term-reconnect-dot",
-            gpui::Animation::new(Duration::from_millis(1400))
-                .repeat()
-                .with_max_fps(crate::ui::PULSE_FPS)
-                .with_easing(gpui::pulsating_between(0.35, 1.0)),
-            |d, a| d.opacity(a),
-        );
+        let dot = self.reconnect_anim.clone();
         Some(
             div()
                 .flex_none()
@@ -2568,6 +2576,14 @@ impl Render for TermTab {
             _ => self.work_since = None,
         }
         let strip_w = f32::from(window.viewport_size().width);
+        if let Some(l) = &live {
+            let dot = crate::chrome::live_dot(&ct, l, "term-live", 8.);
+            self.live_anim.update(cx, |a, _| a.0 = Some(dot));
+        }
+        if self.reconnect.is_some() {
+            let dot = reconnect_dot(&ct);
+            self.reconnect_anim.update(cx, |a, _| a.0 = Some(dot));
+        }
         let strip = live.map(|l| {
             use sb_core::live::LiveKind as K;
             // The same chat the tab's dot reads (after /clear too), so the strip and the dot never disagree.
@@ -2624,7 +2640,7 @@ impl Render for TermTab {
                     if quiet {
                         d.child(div().flex_none().size(px(8.)).rounded_full().border_1().border_color(ct.faint))
                     } else {
-                        d.child(crate::chrome::live_dot(&ct, &l, "term-live", 8.))
+                        d.child(self.live_anim.clone())
                     }
                 })
                 .child(
@@ -2708,29 +2724,12 @@ impl Render for TermTab {
                 _ => alacritty_terminal::vte::ansi::CursorShape::Block,
             },
             visible: !look.blink || self.blink_on,
+            settled: self.cursor_settled(window, cx),
         };
-        let this = cx.entity();
-        let focus = self.focus.clone();
-        let grid = canvas(
-            {
-                let this = this.clone();
-                move |bounds, window, cx| {
-                    let m = Metrics::new(window, colors::font_size(cx));
-                    this.update(cx, |tab, cx| tab.layout(m, bounds, cx));
-                    crate::perf::time(crate::perf::Kind::Build, || {
-                        grid::build(this.read(cx), &m, &pal, cursor_look, bounds, window)
-                    })
-                }
-            },
-            move |bounds, frame, window, cx| {
-                window.handle_input(&focus, ElementInputHandler::new(bounds, this), cx);
-                crate::perf::time(crate::perf::Kind::Paint, || grid::paint(frame, window, cx));
-            },
-        )
-        .absolute()
-        .top_0()
-        .left_0()
-        .size_full();
+        let font = colors::font_size(cx);
+        self.grid_view.update(cx, |g, cx| g.set(pal, cursor_look, font, cx));
+        let grid =
+            self.grid_view.clone().cached(gpui::StyleRefinement::default().absolute().top_0().left_0().size_full());
         div()
             .id("term-tab")
             .key_context("Terminal")
@@ -2808,7 +2807,118 @@ pub(crate) fn step_size(up: Option<bool>, cx: &mut App) {
     crate::theme::save_look(cx, |s| s.term_size = next);
 }
 
+/// The reconnecting bar's breathing amber dot.
+fn reconnect_dot(t: &Theme) -> AnyElement {
+    use gpui::AnimationExt;
+    div()
+        .flex_none()
+        .size(px(8.))
+        .rounded_full()
+        .bg(t.cold)
+        .with_animation(
+            "term-reconnect-dot",
+            gpui::Animation::new(Duration::from_millis(1400))
+                .repeat()
+                .with_max_fps(crate::ui::PULSE_FPS)
+                .with_easing(gpui::pulsating_between(0.35, 1.0)),
+            |d, a| d.opacity(a),
+        )
+        .into_any_element()
+}
+
+/// One animated element (a breathing dot) as a view of its own. An animation asks its view for the next frame; as part
+/// of the tab, each of those frames notified the whole tab and rebuilt its grid. The tab puts the element in on render.
+pub struct Anim(Option<AnyElement>);
+
+impl Render for Anim {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        self.0.take().unwrap_or_else(|| div().into_any_element())
+    }
+}
+
+/// The grid alone, as a cached view. The board's pulsing dots, the strip's and the second tick re-render the tab many
+/// times a second, and rebuilding and repainting every row each time was most of the app's CPU with a chat open. The
+/// grid now re-renders only when the tab itself notifies (output, scrolling, selection, blink, keys, resizes), when the
+/// palette, cursor or text size it paints with change, or when the window refreshes (focus, activation, theme).
+pub struct GridView {
+    tab: gpui::WeakEntity<TermTab>,
+    look: Option<(colors::Palette, grid::CursorLook, f32)>,
+    _sub: Subscription,
+}
+
+impl GridView {
+    fn new(tab: Entity<TermTab>, cx: &mut Context<Self>) -> GridView {
+        let _sub = cx.observe(&tab, |_, _, cx| cx.notify());
+        GridView { tab: tab.downgrade(), look: None, _sub }
+    }
+
+    /// What the grid paints with; a change re-renders it.
+    fn set(&mut self, pal: colors::Palette, cursor: grid::CursorLook, font: f32, cx: &mut Context<Self>) {
+        let look = Some((pal, cursor, font));
+        if self.look != look {
+            self.look = look;
+            cx.notify();
+        }
+    }
+}
+
+impl Render for GridView {
+    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let (Some(this), Some((pal, cursor_look, _))) = (self.tab.upgrade(), self.look) else {
+            return div().into_any_element();
+        };
+        let focus = this.read(cx).focus.clone();
+        canvas(
+            {
+                let this = this.clone();
+                move |bounds, window, cx| {
+                    let m = Metrics::new(window, colors::font_size(cx));
+                    this.update(cx, |tab, cx| tab.layout(m, bounds, cx));
+                    crate::perf::time(crate::perf::Kind::Build, || {
+                        grid::build(this.read(cx), &m, &pal, cursor_look, bounds, window)
+                    })
+                }
+            },
+            move |bounds, frame, window, cx| {
+                window.handle_input(&focus, ElementInputHandler::new(bounds, this), cx);
+                crate::perf::time(crate::perf::Kind::Paint, || grid::paint(frame, window, cx));
+            },
+        )
+        .size_full()
+        .into_any_element()
+    }
+}
+
 impl TermTab {
+    /// The terminal runs through ConPTY: a chat on a Windows machine, or a local shell in the Windows app.
+    fn conpty(&self) -> bool {
+        if self.local.is_some() { cfg!(windows) } else { ui::machine_os(&self.machine) == "windows" }
+    }
+
+    /// Whether the cursor may be drawn as far as ConPTY's repaint flicker goes (settle.rs); elsewhere always. Not yet
+    /// settled, it looks again when it would be.
+    fn cursor_settled(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if !self.conpty() {
+            return true;
+        }
+        let shown = self.term.mode().contains(TermMode::SHOW_CURSOR);
+        let (draw, wake) = self.settle.see(shown, Instant::now());
+        match wake {
+            Some(d) if self.settle_wake.is_none() => {
+                self.settle_wake = Some(cx.spawn_in(window, async move |this, cx| {
+                    cx.background_executor().timer(d).await;
+                    let _ = this.update(cx, |t, cx| {
+                        t.settle_wake = None;
+                        cx.notify();
+                    });
+                }));
+            }
+            Some(_) => {}
+            None => self.settle_wake = None,
+        }
+        draw
+    }
+
     /// Starts or stops the cursor's blink (530 ms, like most terminals). Only the focused tab blinks.
     fn run_blink(&mut self, on: bool, window: &mut Window, cx: &mut Context<Self>) {
         if !on {

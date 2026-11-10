@@ -16,6 +16,7 @@ mod files;
 mod firstrun;
 mod flagsui;
 mod frame;
+mod hang;
 mod history;
 mod inspector;
 mod lanes;
@@ -96,6 +97,7 @@ fn main() {
 
         view::bind_keys(cx);
         perf::watch(cx);
+        hang::start(cx);
         // The shells for Cmd+T, found off the main thread (Windows asks wsl.exe for its distros).
         std::thread::spawn(|| {
             let _ = state::profiles();

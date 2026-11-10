@@ -885,3 +885,20 @@ fn model_menu_from_the_catalog() {
     assert_eq!(actions::model_menu(Some(&old)).len(), 2);
     assert_eq!(actions::model_menu(None).len(), 5);
 }
+
+#[test]
+fn back_to_back_refreshes_save_the_snapshot_once() {
+    // The board changes about once a second while chats work; rewriting the 400 KB snapshot each time was ~2 GB of
+    // disk writes a day (macOS flags it). The first refresh saves it; one right after leaves the file alone.
+    let (base, _) = switchboard();
+    let dir = temp_dir("save-once");
+    let core =
+        Core::new(CoreConfig { servers: vec![base], cache_dir: Some(dir.display().to_string()), user_agent: None });
+    core.refresh().unwrap();
+    let path = dir.join("sessions.json");
+    assert!(path.exists(), "the first refresh saves the snapshot");
+    std::fs::write(&path, b"marker").unwrap();
+    core.refresh().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), b"marker", "a refresh right after the last save does not write");
+    let _ = std::fs::remove_dir_all(&dir);
+}

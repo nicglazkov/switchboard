@@ -113,14 +113,26 @@ pub struct Core {
     ua: String,
     dir: Option<PathBuf>,
     folders: Mutex<cache::FolderCache>,
+    /// When the snapshot was last saved, and from which server.
+    saved: Mutex<Option<(f64, String)>>,
 }
+
+/// How often a refresh rewrites the saved snapshot. The board changes about once a second while chats work, and the
+/// snapshot only paints the first frame of the next start, so a minute old is plenty.
+pub const SAVE_EVERY: f64 = 60.0;
 
 impl Core {
     pub fn new(config: CoreConfig) -> Core {
         let ua = config.user_agent.unwrap_or_else(|| format!("SwitchboardDesktop/{}", version()));
         let dir = config.cache_dir.map(PathBuf::from).or_else(cache::default_dir);
         let folders = dir.as_deref().map(cache::FolderCache::load).unwrap_or_default();
-        Core { client: net::Client::new(config.servers, &ua), ua, dir, folders: Mutex::new(folders) }
+        Core {
+            client: net::Client::new(config.servers, &ua),
+            ua,
+            dir,
+            folders: Mutex::new(folders),
+            saved: Mutex::new(None),
+        }
     }
 
     pub fn cache_dir(&self) -> Option<String> {
@@ -139,11 +151,22 @@ impl Core {
         let (raw, bytes, base) = self.client.sessions()?;
         let now = fmt::now_epoch();
         if let Some(dir) = &self.dir
-            && let Err(e) = cache::save_sessions(dir, &bytes, now, &base)
+            && self.save_due(now, &base)
         {
-            log::warn!("could not save the snapshot: {e}");
+            match cache::save_sessions(dir, &bytes, now, &base) {
+                Ok(()) => *self.saved.lock().unwrap_or_else(|e| e.into_inner()) = Some((now, base)),
+                Err(e) => log::warn!("could not save the snapshot: {e}"),
+            }
         }
         Ok(model::normalize(&raw, now))
+    }
+
+    /// Whether a refresh at `now` from `base` should save: the first, a new server, or `SAVE_EVERY` since the last.
+    fn save_due(&self, now: f64, base: &str) -> bool {
+        match &*self.saved.lock().unwrap_or_else(|e| e.into_inner()) {
+            Some((at, b)) => b != base || now - at >= SAVE_EVERY || now < *at,
+            None => true,
+        }
     }
 
     /// The server in use ("http://192.0.2.10:8130"), once one has answered.

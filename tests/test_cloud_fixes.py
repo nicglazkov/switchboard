@@ -379,7 +379,7 @@ class McpToolsAskFirstTest(AgentCase):
     """Security M4: run_on and continue_on let one prompt-injected chat start work on every machine without asking."""
     def test_tools_that_start_work_are_marked_destructive(self):
         tools = {t['name']: t.get('annotations') or {} for t in self.sb.MCP_TOOLS}
-        for name in ('run_on', 'continue_on'):
+        for name in ('run_on', 'continue_on', 'computer_use'):
             self.assertTrue(tools[name].get('destructiveHint'), name)
             self.assertFalse(tools[name].get('readOnlyHint'), name)
         self.assertTrue(tools['machines']['readOnlyHint'])

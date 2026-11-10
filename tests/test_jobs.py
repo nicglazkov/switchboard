@@ -550,6 +550,30 @@ class StoppedBackgroundTest(JobBase):
         sids = [x['sid'] for x in self.sb.rpc({'verb': 'list'}, NOW + 10, agents=[running])['sessions']]
         self.assertIn(SID_A, sids)
 
+    def test_a_relaunch_with_a_message_resumes_and_sends_it(self):
+        # the in-chat computer_use tool: the chat comes back and is told to carry on, with no one typing
+        self.transcript(SID_A, str(self.root / 'proj'), NOW - 60)
+        running = dict(self.STOPPED, state='blocked', status='idle')
+        r = self.sb.rpc({'verb': 'resume', 'sid': SID_A, 'relaunch': True, 'prompt': 'Computer use is on. Carry on.'},
+                        NOW, agents=[running])
+        self.assertTrue(r['ok'], r)
+        with mock.patch.object(self.sb, 'claude_agents', lambda: [running]), \
+                mock.patch.object(self.sb, 'run_claude_cmd', lambda *a, **k: (0, '')):
+            self.drain()
+        a = self.launched[0]['argv']
+        self.assertEqual(a[a.index('--resume') + 1:], [SID_A, 'Computer use is on. Carry on.'])
+        # from the chat's own computer_use call, left on this machine: a server that predates it sends no prompt
+        self.sb.carry_set(SID_A, 'From the tool.', NOW)
+        self.assertTrue(self.sb.rpc({'verb': 'resume', 'sid': SID_A, 'relaunch': True}, NOW + 60, agents=[running])['ok'])
+        with mock.patch.object(self.sb, 'claude_agents', lambda: [running]), \
+                mock.patch.object(self.sb, 'run_claude_cmd', lambda *a, **k: (0, '')):
+            self.drain()
+        a = self.launched[-1]['argv']
+        self.assertEqual(a[a.index('--resume') + 1:], [SID_A, 'From the tool.'])
+        for bad in (5, 'x' * 30_000):
+            self.assertFalse(self.sb.rpc({'verb': 'resume', 'sid': SID_A, 'relaunch': True, 'prompt': bad}, NOW,
+                                         agents=[running])['ok'])
+
     def test_a_copy_never_marks_its_source_as_replaced_by_itself(self):
         self.transcript(SID_A, str(self.root / 'proj'), NOW - 60)
         self.job({'verb': 'resume', 'sid': SID_A})

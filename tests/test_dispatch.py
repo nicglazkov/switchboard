@@ -181,7 +181,7 @@ class Mcp(unittest.TestCase):
         self.assertIn('tools', r['result']['capabilities'])
         self.assertIsNone(self.sb.mcp_handle({'jsonrpc': '2.0', 'method': 'notifications/initialized'}))
         names = [t['name'] for t in self.rpc('tools/list')['result']['tools']]
-        self.assertEqual(names, ['machines', 'run_on', 'check', 'continue_on', 'publish_tool', 'library', 'usage'])
+        self.assertEqual(names, ['machines', 'run_on', 'check', 'continue_on', 'computer_use', 'publish_tool', 'library', 'usage'])
         self.assertEqual(self.rpc('ping')['result'], {})
         self.assertEqual(self.rpc('nope')['error']['code'], -32601)
         self.assertEqual(self.rpc('tools/call', {'name': 'rm_rf'})['error']['code'], -32602)
@@ -225,6 +225,40 @@ class Mcp(unittest.TestCase):
         self.assertEqual((out['state'], out['report'], bad), ('done', 'R', False))
         self.assertEqual(slept, [5, 5, 5])
         out, bad = self.sb.mcp_tool('check', {'id': 'bad'}, call=call)
+        self.assertTrue(bad)
+
+    def test_computer_use_relaunches_this_chat_with_it_on_and_carries_on(self):
+        sent = []
+
+        def call(method, path, body=None):
+            sent.append((method, path, body))
+            return {'ok': True, 'job': 's-1'}
+        out, bad = self.sb.mcp_tool('computer_use', {'next': 'Install SlimeVR\nthen pair'}, call=call, me='tower', sid=FROM)
+        self.assertFalse(bad)
+        method, path, body = sent[0]
+        self.assertEqual((method, path, body), ('POST', '/api/action', {
+            'verb': 'relaunch', 'machine': 'tower', 'sid': FROM, 'when': 'idle', 'flags': {'computer': ['on']}}))
+        self.assertIn('end your turn', out['note'].lower())
+        # the message waits here, for the relaunch this machine runs (a 0.8.16 server knows nothing of it)
+        now = self.sb.time.time()
+        msg = self.sb.carry_take(FROM, now + 1)
+        self.assertIn('Install SlimeVR then pair', msg, 'one line, so it is safe on any command line')
+        self.assertIn('computer use', msg.lower())
+        self.assertIsNone(self.sb.carry_take(FROM, now + 1), 'used once')
+        self.sb.mcp_tool('computer_use', {}, call=call, me='tower', sid=FROM)
+        self.assertIsNone(self.sb.carry_take(FROM, now + self.sb.CARRY_TTL + 60), 'a stale one is dropped')
+        self.sb.mcp_tool('computer_use', {}, call=call, me='tower', sid=FROM)
+        self.assertIn('carry on', self.sb.carry_take(FROM, self.sb.time.time()).lower(), 'without a next step it still picks up')
+
+    def test_computer_use_says_why_when_it_cannot(self):
+        def call(method, path, body=None):
+            raise self.sb.RpcError('Computer use is not available on Linux box.')
+        out, bad = self.sb.mcp_tool('computer_use', {}, call=call, me='tower', sid=FROM)
+        self.assertTrue(bad)
+        self.assertIn('not available', out['error'])
+        self.assertIsNone(self.sb.carry_take(FROM, self.sb.time.time()), 'nothing left behind for a later relaunch')
+        self.sb.my_session = lambda *a, **k: None
+        out, bad = self.sb.mcp_tool('computer_use', {}, call=call, me='tower')
         self.assertTrue(bad)
 
     def test_check_gives_up_at_the_wait(self):
@@ -315,7 +349,7 @@ class Mcp(unittest.TestCase):
         got = {r['id']: r for r in map(json.loads, p.stdout.splitlines())}
         self.assertEqual(sorted(got), [1, 2, 3])
         self.assertEqual(got[1]['result']['protocolVersion'], '2025-06-18')
-        self.assertEqual(len(got[2]['result']['tools']), 7)
+        self.assertEqual(len(got[2]['result']['tools']), 8)
         self.assertTrue(got[3]['result']['isError'])
         self.assertEqual(p.stderr, '')
 

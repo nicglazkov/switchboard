@@ -126,6 +126,18 @@ class BusyReportTest(unittest.TestCase):
         self.age(f, 7200)
         self.assertEqual(self.report()['pending'], [])  # finished before the chat's last write: it got the result
 
+    def test_output_of_a_command_that_was_never_in_the_background_is_not_pending(self):
+        # 2026-11-09, on a Windows PC: a foreground PowerShell call opened Chrome, Chrome kept writing USB errors to the call's
+        # output file, and a relaunch waited on a "finished result" that no notification would ever bring
+        self.task('b9cvebiye', 600)
+        self.assertEqual(self.report()['pending'], [])
+        self.t = self.chat([user('2026-10-10T01:00:00Z', 'go'),
+                            entry('user', '2026-10-10T01:00:02Z', message={'role': 'user', 'content': [
+                                {'type': 'tool_result', 'tool_use_id': 't1', 'content': 'Command running in background with ID: b9cvebiye.'}]}),
+                            dict(assistant('2026-10-10T01:00:05Z', 'Started.'), message={'role': 'assistant', 'content': [], 'stop_reason': 'end_turn'})])
+        self.age(self.t, 3600)
+        self.assertEqual(self.report()['pending'], ['background command'], 'a real background command still counts')
+
     def test_summary_wording(self):
         s = self.sb.busy_summary
         self.assertEqual(s(['x'], [], True, []), '1 subagent is still running, and Claude is still replying.')
