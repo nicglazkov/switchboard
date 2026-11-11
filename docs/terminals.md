@@ -17,7 +17,9 @@ floating sheet over the board. Your own shells open the same way.
 | ++cmd+o++, then type a few letters | A tab, for any chat |
 
 A stopped chat is resumed into the tab. The terminal is the chat itself (Claude Code's `claude attach`), so
-closing a window only detaches it, while closing a **tab** stops the chat unless you marked it **Keep running**.
+closing a window or a tab only detaches it: the chat keeps running, and **Stop** on its card ends it. To have a
+chat stop with its tab, turn on **Settings > Terminal > Stop a chat when its tab closes** (chats marked
+**Keep running** are still left alone).
 Typing `exit` (or `/exit`) closes its tab.
 
 !!! info "Behind another router"

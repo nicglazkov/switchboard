@@ -311,6 +311,16 @@ fn task_xml(user: &str, vbs: &str) -> String {
     )
 }
 
+/// Whether the logon task, as `schtasks /Query /XML` prints it, already runs this launcher. An update then leaves
+/// the task and the launcher alone and only swaps the program: registering a logon task that starts a script is
+/// what malware does too, and an antivirus that sees a program do it again with every update can take the node
+/// for one and remove it.
+fn task_runs(xml: &str, vbs: &str) -> bool {
+    let x = |s: &str| s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").to_lowercase();
+    let xml = xml.to_lowercase().replace("&quot;", "\"");
+    xml.contains("<command>wscript.exe</command>") && xml.contains(&format!("<arguments>\"{}\"</arguments>", x(vbs)))
+}
+
 /// UTF-16 with a byte order mark, as schtasks /XML reads it.
 fn utf16(s: &str) -> Vec<u8> {
     [0xFF, 0xFE].into_iter().chain(s.encode_utf16().flat_map(|u| u.to_le_bytes())).collect()
@@ -358,20 +368,39 @@ fn install() -> i32 {
             std::fs::write(&plist, text).map_err(|e| e.to_string())?;
             let uid = sh("id", &["-u"])?;
             let _ = sh("launchctl", &["bootout", &format!("gui/{uid}/{LABEL}")]);
-            sh("launchctl", &["bootstrap", &format!("gui/{uid}"), &plist.display().to_string()])?;
+            // The old node may still be on its way out, and until it is gone launchd refuses the new one
+            // ("Bootstrap failed: 5"), which would leave no node running: ask again for a few seconds.
+            let mut up = Err(String::new());
+            for _ in 0..20 {
+                up = sh("launchctl", &["bootstrap", &format!("gui/{uid}"), &plist.display().to_string()]);
+                if up.is_ok() {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(500));
+            }
+            up?;
             Ok(format!("Runs at login (LaunchAgent {LABEL}); log in ~/Library/Logs/switchboard-node.log."))
         } else if cfg!(windows) {
             let vbs = dest.with_file_name("switchboard-node.vbs");
-            std::fs::write(&vbs, text).map_err(|e| e.to_string())?;
-            // "/SC ONLOGON" means any user's logon, which only an administrator may set: from a plain PowerShell
-            // window it is "Access is denied". A task whose logon trigger names this user needs no rights.
-            let user = sh("whoami", &[])?;
-            let xml = dest.with_file_name("switchboard-node-task.xml");
-            std::fs::write(&xml, utf16(&task_xml(&user, &vbs.display().to_string())))
-                .map_err(|e| format!("could not write {} ({e})", xml.display()))?;
-            let made = sh("schtasks", &["/Create", "/F", "/TN", "SwitchboardNode", "/XML", &xml.display().to_string()]);
-            let _ = std::fs::remove_file(&xml);
-            made?;
+            let vbs_s = vbs.display().to_string();
+            // An update finds the launcher and the task as the first install left them, and leaves them alone
+            // (see `task_runs`).
+            let set = std::fs::read_to_string(&vbs).is_ok_and(|t| t == text)
+                && sh("schtasks", &["/Query", "/TN", "SwitchboardNode", "/XML"]).is_ok_and(|x| task_runs(&x, &vbs_s));
+            if !set {
+                std::fs::write(&vbs, text).map_err(|e| e.to_string())?;
+                // "/SC ONLOGON" means any user's logon, which only an administrator may set: from a plain
+                // PowerShell window it is "Access is denied". A task whose logon trigger names this user needs no
+                // rights.
+                let user = sh("whoami", &[])?;
+                let xml = dest.with_file_name("switchboard-node-task.xml");
+                std::fs::write(&xml, utf16(&task_xml(&user, &vbs_s)))
+                    .map_err(|e| format!("could not write {} ({e})", xml.display()))?;
+                let made =
+                    sh("schtasks", &["/Create", "/F", "/TN", "SwitchboardNode", "/XML", &xml.display().to_string()]);
+                let _ = std::fs::remove_file(&xml);
+                made?;
+            }
             sh("schtasks", &["/Run", "/TN", "SwitchboardNode"])?;
             Ok("Runs at logon (task SwitchboardNode), with no window.".into())
         } else {
@@ -485,6 +514,22 @@ mod tests {
         assert!(t.contains("<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>"));
         assert!(t.contains(r#"<Arguments>"C:\Users\you\AppData\Local\Switchboard\switchboard-node.vbs"</Arguments>"#));
         assert_eq!(&utf16("<T")[..], &[0xFF, 0xFE, b'<', 0, b'T', 0]);
+    }
+
+    #[test]
+    fn an_update_knows_the_logon_task_it_made() {
+        let vbs = r"C:\Users\you\AppData\Local\R&D\Switchboard\switchboard-node.vbs";
+        // what install registers
+        assert!(task_runs(&task_xml(r"DESKTOP-1\Pat & Co", vbs), vbs));
+        // as schtasks prints it back: its own layout and letter case
+        let printed = "<Task version=\"1.2\">\r\n  <Actions Context=\"Author\">\r\n    <Exec>\r\n      \
+                       <Command>wscript.exe</Command>\r\n      <Arguments>\"c:\\users\\you\\appdata\\local\\r&amp;d\\\
+                       Switchboard\\switchboard-node.vbs\"</Arguments>\r\n    </Exec>\r\n  </Actions>\r\n</Task>";
+        assert!(task_runs(printed, vbs));
+        // a task that starts something else, or none, is made again
+        assert!(!task_runs(printed, r"D:\Apps\Switchboard\switchboard-node.vbs"));
+        assert!(!task_runs(&printed.replace("wscript.exe", "cmd.exe"), vbs));
+        assert!(!task_runs("", vbs));
     }
 
     fn scratch(tag: &str) -> PathBuf {

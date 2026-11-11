@@ -593,6 +593,7 @@ impl SettingsView {
             ));
         }
         let blink = look.blink;
+        let close_stops = self.app.read(cx).close_stops_on();
         // The shell a new local terminal runs (Cmd+T, the "+" chevron's default).
         let profiles = crate::state::profiles();
         let saved = self.app.read(cx).settings.term_profile.clone();
@@ -663,6 +664,20 @@ impl SettingsView {
                 None,
                 ui::switch(t, "st-blink", blink, false)
                     .on_click(cx.listener(move |_, _: &ClickEvent, _, cx| crate::theme::save_look(cx, |s| s.term_blink = Some(!blink))))
+                    .into_any_element(),
+            ))
+            .child(Self::row(
+                t,
+                "Stop a chat when its tab closes",
+                Some("Off: closing a tab leaves its chat running, and Stop on the chat's card ends it. On: the chat stops with its tab, once its reply is done. Chats set to Keep running are never stopped this way."),
+                ui::switch(t, "st-close-stops", close_stops, false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.app.update(cx, |s, cx| {
+                            s.settings.close_stops = Some(!close_stops);
+                            s.save_settings();
+                            cx.notify();
+                        })
+                    }))
                     .into_any_element(),
             ))
             .into_any_element()

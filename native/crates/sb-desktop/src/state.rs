@@ -96,6 +96,12 @@ fn overtaken(edits_then: u64, edits_now: u64) -> bool {
     edits_then != edits_now
 }
 
+/// What closing a chat's tab does to the chat, from the saved setting: it stops only when that was turned on. Left
+/// alone, a closed tab detaches and the chat keeps running, so looking in on a background chat never ends it.
+fn tab_close_stops(setting: Option<bool>) -> bool {
+    setting == Some(true)
+}
+
 /// The stops of chat `key` that closing its tab queued and that have not started yet.
 fn stops_from_close(jobs: &[Job], from_close: &HashSet<String>, key: &str) -> Vec<String> {
     jobs.iter().filter(|j| from_close.contains(&j.id) && j.stop_waits_for(key)).map(|j| j.id.clone()).collect()
@@ -163,6 +169,9 @@ pub struct Settings {
     /// Needs-you notifications (on unless turned off).
     #[serde(default)]
     pub notify: Option<bool>,
+    /// Closing a chat's tab also stops the chat (off unless turned on: the chat keeps running in the background).
+    #[serde(default)]
+    pub close_stops: Option<bool>,
     /// Machines Settings has already asked about their Claude folder (it asks once per machine).
     #[serde(default)]
     pub root_asked: Vec<String>,
@@ -1000,6 +1009,11 @@ impl AppState {
 
     pub fn notify_on(&self) -> bool {
         self.settings.notify != Some(false)
+    }
+
+    /// Closing a chat's tab also stops the chat: only when the person turned it on (Settings > Terminal).
+    pub fn close_stops_on(&self) -> bool {
+        tab_close_stops(self.settings.close_stops)
     }
 
     // ---------- toasts ----------
@@ -2853,6 +2867,16 @@ mod tests {
         assert_eq!(s.theme.as_deref(), Some("light"));
         assert!(!super::load_settings(&dir.join("missing.json")).1, "no file yet is not a problem");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn closing_a_tab_stops_its_chat_only_when_asked_to() {
+        use super::tab_close_stops;
+        assert!(!tab_close_stops(None), "never set: the chat keeps running");
+        assert!(!tab_close_stops(Some(false)));
+        assert!(tab_close_stops(Some(true)));
+        let s: super::Settings = serde_json::from_str("{}").unwrap();
+        assert_eq!(s.close_stops, None, "settings saved by an older version");
     }
 
     #[test]

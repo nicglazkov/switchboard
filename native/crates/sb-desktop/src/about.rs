@@ -19,6 +19,14 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.19",
+        &[
+            "Closing a tab leaves its chat running: closing a chat's tab (X, Cmd+W, closing its group) no longer stops the chat, so looking in on a background chat never ends it. Stop on the chat's card still ends it. To have chats stop with their tabs as before, turn on Settings > Terminal > Stop a chat when its tab closes.",
+            "Windows: updating the node no longer sets up its logon task again. Windows Defender could take that for malware and remove the node, leaving the PC offline. An update now only swaps the program.",
+            "Mac: updating the node no longer leaves it stopped when the old one is slow to quit.",
+        ],
+    ),
+    (
         "0.8.18",
         &[
             "Tabs come back at once: when Switchboard opens, your chat tabs reopen right away from what it saved last time, instead of staying away until the server answers. If the server is slow or away, they keep trying and connect when it is back.",

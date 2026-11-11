@@ -1219,10 +1219,13 @@ impl BoardView {
             || crate::place::window_shows(key, bg.as_deref(), cx)
     }
 
-    /// Closing tab `tab`, which holds this chat, stops it: a background chat that runs, unless Keep running is on or
-    /// it still shows somewhere else (force_close_tab).
+    /// Closing tab `tab`, which holds this chat, stops it: only when the person turned that on in Settings, and then
+    /// a background chat that runs, unless Keep running is on or it still shows somewhere else (force_close_tab).
+    /// Otherwise a closed tab only detaches and the chat keeps running.
     pub fn close_stops(&self, key: &str, tab: gpui::EntityId, cx: &App) -> bool {
-        self.app.read(cx).snap.session(key).is_some_and(|s| s.background() && s.alive && !s.keep)
+        let app = self.app.read(cx);
+        app.close_stops_on()
+            && app.snap.session(key).is_some_and(|s| s.background() && s.alive && !s.keep)
             && !self.shown_elsewhere(key, tab, cx)
     }
 
@@ -1266,10 +1269,10 @@ impl BoardView {
         let key = tab.read(cx).key.clone();
         tab.update(cx, |t, _| t.detach());
         self.unwatch_tab(&tab);
-        // Closing a chat's tab ends the chat, so nothing piles up in the background (Resume brings it back). One
+        // The chat keeps running, unless Settings says a closed tab stops its chat (Resume brings it back). Then one
         // that is working stops once its reply is done; Keep running, a chat open on its machine and one still
         // showing here (the floating sheet, a window) stay.
-        if let Some(key) = key.filter(|k| !self.shown_elsewhere(k, tab.entity_id(), cx)) {
+        if let Some(key) = key.filter(|k| self.close_stops(k, tab.entity_id(), cx)) {
             let now = crate::state::AppState::now();
             let stop = self
                 .app
