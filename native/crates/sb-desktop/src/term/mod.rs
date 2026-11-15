@@ -16,8 +16,10 @@ pub mod exitline;
 pub mod grid;
 pub mod links;
 pub mod local;
+pub mod pace;
 pub mod settle;
 pub mod stale;
+pub mod typeahead;
 pub mod upload;
 
 use std::cell::RefCell;
@@ -176,6 +178,32 @@ fn quit_asked(at: Option<Instant>, now: Instant) -> bool {
 /// took to come), or pressed Ctrl-D or Ctrl-Z just before.
 fn end_asked(leaving: bool, quit_key: Option<Instant>, now: Instant) -> bool {
     leaving || quit_asked(quit_key, now)
+}
+
+/// Commands being typed one by one go on only into the connection they started on (its `epoch`), while it is open.
+fn same_link(started: u64, epoch: u64, open: bool) -> bool {
+    started == epoch && open
+}
+
+/// A program's clipboard write (OSC 52) is taken only from the tab that has the focus in the active window: the one
+/// on screen and typed in.
+fn clipboard_ok(focused: bool) -> bool {
+    focused
+}
+
+/// Enter waits with the keys typed before it only while the link is away and coming back by itself. On a Failed or
+/// "Not running" screen it is always the card's button.
+fn enter_waits(link_away: bool, held: typeahead::Held) -> bool {
+    link_away && held == typeahead::Held::Waiting
+}
+
+/// The reconnecting bar's words, with what becomes of keys typed meanwhile.
+fn reconnecting_text(held: typeahead::Held) -> &'static str {
+    match held {
+        typeahead::Held::Nothing => "Reconnecting…",
+        typeahead::Held::Waiting => "Reconnecting… what you typed is sent when it's back",
+        typeahead::Held::Dropped => "Reconnecting… what you typed was not sent",
+    }
 }
 
 /// A job's tab asks by background id only when the job reported one: one that did not leaves an ordinary chat.
@@ -397,6 +425,10 @@ pub struct TermTab {
     /// The cursor's settle on a Windows terminal (settle.rs), and the wake for when it settles.
     settle: settle::CursorSettle,
     settle_wake: Option<gpui::Task<()>>,
+    /// Repaints for output, one a frame at most (pace.rs).
+    pace: pace::Pace,
+    /// Keys typed while the link is coming back, sent when it is (typeahead.rs).
+    ahead: typeahead::Typeahead,
     live_anim: Entity<Anim>,
     reconnect_anim: Entity<Anim>,
     /// A local terminal's profile, and its PTY while the shell runs. The tab's title is the shell's own (OSC 0 or 2)
@@ -492,6 +524,8 @@ impl TermTab {
             },
             settle: Default::default(),
             settle_wake: None,
+            pace: Default::default(),
+            ahead: Default::default(),
             live_anim: cx.new(|_| Anim(None)),
             reconnect_anim: cx.new(|_| Anim(None)),
             local: None,
@@ -686,7 +720,7 @@ impl TermTab {
     /// Asks for a ticket, then dials. Also Reconnect and Try again.
     pub fn connect(&mut self, cx: &mut Context<Self>) {
         self.patient = false;
-        self.reconnect = None;
+        self.stop_reconnect();
         self.backoff = Backoff::default();
         if self.local.is_some() {
             return self.start_local(cx);
@@ -820,7 +854,7 @@ impl TermTab {
                 }
             }
             Err(e) => {
-                self.reconnect = None;
+                self.stop_reconnect();
                 self.phase = match e {
                     TermError::Need { need, message } => Phase::Need { need, message },
                     TermError::Core(e) => Phase::Failed(e.to_string()),
@@ -834,7 +868,7 @@ impl TermTab {
     fn retry_later(&mut self, cx: &mut Context<Self>) -> bool {
         self.backoff.dropped(Instant::now());
         let Some(wait) = self.backoff.wait() else {
-            self.reconnect = None;
+            self.stop_reconnect();
             return false;
         };
         let r = self.reconnect.get_or_insert_with(Reconnect::default);
@@ -853,6 +887,13 @@ impl TermTab {
         })
         .detach();
         true
+    }
+
+    /// The automatic reconnect is over (given up, or another attach takes its place): keys that waited for it are
+    /// dropped with it, never sent into whatever is attached next.
+    fn stop_reconnect(&mut self) {
+        self.reconnect = None;
+        self.ahead.clear();
     }
 
     /// "Reconnect now" while it is coming back by itself: skip the rest of the wait.
@@ -933,8 +974,10 @@ impl TermTab {
         }
         let start = Instant::now();
         let before = self.phase.clone();
+        let mut seen = 0;
         while start.elapsed() < PARSE_BUDGET {
             let Some(ev) = self.pending.pop_front() else { break };
+            seen += 1;
             match ev {
                 FromHub::Connected => {
                     if self.phase == Phase::Dial {
@@ -957,6 +1000,7 @@ impl TermTab {
                 FromHub::SnapshotBegin => {
                     // the screen follows, for a clean grid: this view's scrollback stays above it
                     self.rebuild();
+                    crate::perf::term(|t| t.snapshots += 1);
                     self.in_snapshot = true;
                     self.quiet_until = self.quiet_until.max(AppState::now() + 1.0);
                 }
@@ -975,6 +1019,10 @@ impl TermTab {
                     }
                     self.last_in = Some(Instant::now());
                     crate::perf::bytes(bytes.len());
+                    crate::perf::term(|t| {
+                        t.chunks += 1;
+                        t.bytes += bytes.len();
+                    });
                     crate::perf::time(crate::perf::Kind::Hub, || self.parser.advance(&mut self.term, &bytes));
                     self.has_output = true;
                 }
@@ -1054,23 +1102,64 @@ impl TermTab {
         }
         self.drain(cx);
         self.arm_sync(cx);
-        if self.phase != before {
-            cx.emit(TermEvent::Changed);
+        crate::perf::term(|t| t.slices += 1);
+        if self.conpty() {
+            // every slice, not only every frame drawn: a hide between two frames counts (settle.rs)
+            let shown = self.term.mode().contains(TermMode::SHOW_CURSOR);
+            self.settle.see(shown, Instant::now());
         }
-        self.content += 1;
-        cx.notify();
+        if self.phase != before {
+            // the bars change with it: at once
+            cx.emit(TermEvent::Changed);
+            cx.notify();
+        }
+        if seen > 0 {
+            self.content += 1;
+            self.repaint(cx);
+        }
         !self.pending.is_empty()
     }
 
-    /// A clean grid at the current size for a new screen, with this view's scrollback carried over.
-    fn rebuild(&mut self) {
-        let mut fresh = new_term(self.size.0, self.size.1, &self.events);
-        if self.has_output {
-            sb_core::term::screen::carry_history(&mut self.term, &mut fresh);
+    /// Output changed the screen: a repaint now, or with the others of this frame (pace.rs).
+    fn repaint(&mut self, cx: &mut Context<Self>) {
+        match self.pace.changed(Instant::now()) {
+            pace::Step::Now => {
+                crate::perf::term(|t| t.notifies += 1);
+                cx.notify();
+            }
+            pace::Step::Later(wait) => {
+                cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(wait).await;
+                    let _ = this.update(cx, |t, cx| {
+                        t.pace.fire(Instant::now());
+                        crate::perf::term(|t| t.notifies += 1);
+                        cx.notify();
+                    });
+                })
+                .detach();
+            }
+            pace::Step::Waiting => crate::perf::term(|t| t.shared += 1),
         }
-        self.term = fresh;
+    }
+
+    /// A clean grid at the current size for a new screen, with this view's scrollback above it. The scrollback
+    /// stays where it is (writing all of it into a new grid held the window up for as long as it took); only a
+    /// grid of another size than the one coming is built anew.
+    fn rebuild(&mut self) {
+        let start = Instant::now();
+        let same = (self.term.columns(), self.term.screen_lines()) == (self.size.0 as usize, self.size.1 as usize);
+        if self.has_output && same {
+            sb_core::term::screen::keep_history(&mut self.term);
+        } else {
+            let mut fresh = new_term(self.size.0, self.size.1, &self.events);
+            if self.has_output {
+                sb_core::term::screen::carry_history(&mut self.term, &mut fresh);
+            }
+            self.term = fresh;
+        }
         self.parser = Processor::new();
         self.fresh = false;
+        crate::perf::term(|t| t.rebuild += start.elapsed());
     }
 
     /// The grid takes the size the hub says the terminal has now.
@@ -1101,6 +1190,10 @@ impl TermTab {
             if self.focused {
                 let _ = tx.try_send(ToHub::Focus);
             }
+        }
+        // what was typed while the link was away, if that was a moment ago (typeahead.rs)
+        if let Some(bytes) = self.ahead.open(Instant::now()) {
+            self.send(bytes);
         }
     }
 
@@ -1134,7 +1227,7 @@ impl TermTab {
     /// Detach: close the connection. The chat keeps running on its machine.
     pub fn detach(&mut self) {
         self.epoch += 1;
-        self.reconnect = None;
+        self.stop_reconnect();
         self.drop_conn();
     }
 
@@ -1142,7 +1235,7 @@ impl TermTab {
     pub fn resume(&mut self, cx: &mut Context<Self>) {
         let Some(key) = self.key.clone() else { return };
         self.epoch += 1;
-        self.reconnect = None;
+        self.stop_reconnect();
         self.drop_conn();
         self.phase = Phase::Job(String::new());
         let epoch = self.epoch;
@@ -1171,7 +1264,7 @@ impl TermTab {
     /// A relaunch of this chat started: wait for its job, then attach to the chat's new background session.
     pub fn follow_job(&mut self, job: String, cx: &mut Context<Self>) {
         self.epoch += 1;
-        self.reconnect = None;
+        self.stop_reconnect();
         self.drop_conn();
         self.phase = Phase::Job(job);
         self.changed(cx);
@@ -1199,15 +1292,25 @@ impl TermTab {
     }
 
     /// Types slash commands into the chat one at a time, as if from the keyboard (the flags drawer's live changes).
+    /// They go to the connection that is open now: after a reconnect (or a restart onto another session) the rest
+    /// are not typed into whatever is attached then.
     pub fn type_cmds(&mut self, cmds: Vec<String>, cx: &mut Context<Self>) {
+        let link = self.epoch;
         cx.spawn(async move |this, cx| {
             for c in cmds {
-                if this.update(cx, |t, _| t.send(c.clone().into_bytes())).is_err() {
-                    return;
+                for (bytes, pause) in [(c.into_bytes(), 160), (b"\r".to_vec(), 900)] {
+                    let sent = this.update(cx, |t, _| {
+                        let ok = same_link(link, t.epoch, t.live());
+                        if ok {
+                            t.send(bytes);
+                        }
+                        ok
+                    });
+                    if !matches!(sent, Ok(true)) {
+                        return;
+                    }
+                    cx.background_executor().timer(Duration::from_millis(pause)).await;
                 }
-                cx.background_executor().timer(Duration::from_millis(160)).await;
-                let _ = this.update(cx, |t, _| t.send(b"\r".to_vec()));
-                cx.background_executor().timer(Duration::from_millis(900)).await;
             }
         })
         .detach();
@@ -1376,7 +1479,15 @@ impl TermTab {
                     };
                     self.send(f(ws).into_bytes());
                 }
-                TermEv::ClipboardStore(_, text) => crate::state::copy_text(cx, text),
+                // A program may set the clipboard (OSC 52) only in the tab one is looking at and typing in: output in
+                // a tab in the background must not replace what was copied, unseen.
+                TermEv::ClipboardStore(_, text) if clipboard_ok(self.focused) => crate::state::copy_text(cx, text),
+                TermEv::ClipboardStore(..) => {
+                    log::info!(
+                        "terminal {}: a program set the clipboard while its tab was not in use; ignored",
+                        self.log_name()
+                    );
+                }
                 // A local shell names its tab (the folder, the program running); a chat's tab keeps the chat's name.
                 TermEv::Title(s) if self.local.is_some() => {
                     let s = s.trim().to_string();
@@ -1452,11 +1563,34 @@ impl TermTab {
     pub(crate) fn typed(&mut self, bytes: Vec<u8>, cx: &mut Context<Self>) {
         // Typing shows the cursor at once, then the blink carries on.
         self.blink_on = true;
+        self.settle.typed(Instant::now());
         if self.term.grid().display_offset() != 0 {
             self.term.scroll_display(Scroll::Bottom);
         }
         self.term.selection = None;
         self.send(bytes);
+        cx.notify();
+    }
+
+    /// A chat's link dropped and is coming back by itself: what is typed now waits for it.
+    fn link_away(&self) -> bool {
+        self.local.is_none() && self.reconnect.is_some() && self.phase != Phase::Open
+    }
+
+    /// Keeps a key typed while the link is away, and has the bar say what becomes of it.
+    fn hold(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
+        let now = Instant::now();
+        let first = self.ahead.state(now) == typeahead::Held::Nothing;
+        // "exit" typed across a drop is not followed: it goes out as typed
+        self.line.unknown();
+        if self.ahead.key(bytes, now) && first {
+            // when the wait is up the bar says the keys were not sent
+            cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(typeahead::KEEP + Duration::from_millis(50)).await;
+                let _ = this.update(cx, |_, cx| cx.notify());
+            })
+            .detach();
+        }
         cx.notify();
     }
 
@@ -1477,12 +1611,22 @@ impl TermTab {
             return;
         }
         if self.phase != Phase::Open {
-            if k.key == "enter" && !m.modified() {
+            let holding = enter_waits(self.link_away(), self.ahead.state(Instant::now()));
+            if k.key == "enter" && !m.modified() && !holding {
                 self.primary(cx);
                 cx.stop_propagation();
             } else if !MAC && m.control && !m.shift && !m.alt && k.key == "w" {
                 cx.emit(TermEvent::Close);
                 cx.stop_propagation();
+            } else if self.link_away() && self.marked.is_none() && !m.platform && !ev.prefer_character_input {
+                // The link is coming back: the key waits for it (typeahead.rs). Enter too, once something is typed;
+                // with nothing typed it is still "Reconnect now".
+                let mods = Mods { ctrl: m.control, alt: m.alt, shift: m.shift, platform: false };
+                let app_cursor = self.term.mode().contains(TermMode::APP_CURSOR);
+                if let Some(bytes) = keys::encode(&k.key, mods, app_cursor) {
+                    self.hold(&bytes, cx);
+                    cx.stop_propagation();
+                }
             }
             return;
         }
@@ -2431,7 +2575,7 @@ impl TermTab {
                 .child(div().flex_none().text_color(t.ink2).child(if quiet {
                     "The server isn't answering…"
                 } else {
-                    "Reconnecting…"
+                    reconnecting_text(self.ahead.state(Instant::now()))
                 }))
                 .child(
                     div()
@@ -2808,6 +2952,7 @@ impl Render for TermTab {
         }
         let look = colors::look(cx);
         self.run_blink(look.blink && focused, window, cx);
+        let settled = self.cursor_settled(window, cx);
         let cursor_look = grid::CursorLook {
             shape: match look.cursor.as_str() {
                 "bar" => alacritty_terminal::vte::ansi::CursorShape::Beam,
@@ -2815,7 +2960,8 @@ impl Render for TermTab {
                 _ => alacritty_terminal::vte::ansi::CursorShape::Block,
             },
             visible: !look.blink || self.blink_on,
-            settled: self.cursor_settled(window, cx),
+            settled: settled.drawn(),
+            held: settled == settle::Draw::Held,
         };
         let font = colors::font_size(cx);
         self.grid_view.update(cx, |g, cx| g.set(pal, cursor_look, font, cx));
@@ -2907,11 +3053,11 @@ impl Render for TermTab {
     }
 }
 
-/// Cmd+Plus (Some(true)), Cmd+Minus (Some(false)) or Cmd+0 (None): the text size for every terminal, synced.
+/// Cmd+Plus (Some(true)), Cmd+Minus (Some(false)) or Cmd+0 (None): the text size for every terminal on this computer.
 pub(crate) fn step_size(up: Option<bool>, cx: &mut App) {
     let cur = colors::look(cx).size;
     let next = up.map(|u| sb_core::term::scheme::step_size(cur, u));
-    crate::theme::save_look(cx, |s| s.term_size = next);
+    crate::theme::save_look_here(cx, |s| s.term_size = next);
 }
 
 /// The reconnecting bar's breathing amber dot.
@@ -3002,14 +3148,14 @@ impl Render for GridView {
 impl TermTab {
     /// The terminal runs through ConPTY: a chat on a Windows machine, or a local shell in the Windows app.
     fn conpty(&self) -> bool {
-        if self.local.is_some() { cfg!(windows) } else { ui::machine_os(&self.machine) == "windows" }
+        settle::on(self.local.is_some(), &ui::machine_os(&self.machine))
     }
 
     /// Whether the cursor may be drawn as far as ConPTY's repaint flicker goes (settle.rs); elsewhere always. Not yet
     /// settled, it looks again when it would be.
-    fn cursor_settled(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+    fn cursor_settled(&mut self, window: &mut Window, cx: &mut Context<Self>) -> settle::Draw {
         if !self.conpty() {
-            return true;
+            return settle::Draw::Yes;
         }
         let shown = self.term.mode().contains(TermMode::SHOW_CURSOR);
         let (draw, wake) = self.settle.see(shown, Instant::now());
@@ -3085,6 +3231,8 @@ impl EntityInputHandler for TermTab {
         if self.phase == Phase::Open && !text.is_empty() {
             self.line.text(text);
             self.typed(text.as_bytes().to_vec(), cx);
+        } else if self.link_away() && !text.is_empty() {
+            self.hold(text.as_bytes(), cx);
         }
         cx.notify();
     }
@@ -3129,7 +3277,46 @@ impl EntityInputHandler for TermTab {
     }
 
     fn accepts_text_input(&self, _: &mut Window, _: &mut Context<Self>) -> bool {
-        self.phase == Phase::Open
+        self.phase == Phase::Open || self.link_away()
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::*;
+
+    #[test]
+    fn commands_stop_when_the_connection_they_started_on_is_gone() {
+        assert!(same_link(4, 4, true));
+        assert!(!same_link(4, 5, true), "reconnected: the rest is not typed into the new attach");
+        assert!(!same_link(4, 4, false), "dropped and not back yet");
+    }
+
+    #[test]
+    fn only_the_tab_in_use_sets_the_clipboard() {
+        assert!(clipboard_ok(true));
+        assert!(!clipboard_ok(false), "a tab in the background, or the app behind another");
+    }
+
+    #[test]
+    fn the_bar_says_what_becomes_of_keys_typed_while_reconnecting() {
+        use typeahead::{Held, KEEP, Typeahead};
+        let mut ahead = Typeahead::default();
+        let t0 = Instant::now();
+        assert_eq!(reconnecting_text(ahead.state(t0)), "Reconnecting…");
+        ahead.key(b"y\r", t0);
+        assert_eq!(reconnecting_text(ahead.state(t0)), "Reconnecting… what you typed is sent when it's back");
+        assert_eq!(reconnecting_text(ahead.state(t0 + KEEP)), "Reconnecting… what you typed was not sent");
+        assert_eq!(ahead.state(t0 + KEEP), Held::Dropped);
+    }
+
+    #[test]
+    fn enter_is_the_cards_button_once_the_reconnect_is_over() {
+        use typeahead::Held;
+        assert!(enter_waits(true, Held::Waiting), "coming back, something typed: Enter waits with it");
+        assert!(!enter_waits(true, Held::Nothing), "nothing typed: Reconnect now");
+        assert!(!enter_waits(true, Held::Dropped));
+        assert!(!enter_waits(false, Held::Waiting), "gave up: Enter is Try again, never swallowed");
     }
 }
 

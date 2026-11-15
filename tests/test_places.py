@@ -201,5 +201,187 @@ class PlacesCliTest(PlacesBase):
         self.assertNotIn('places', self.sb.agent_conf())
 
 
+
+def case_blind(d):
+    """This folder's file system takes Library and library for one name (macOS and Windows as they come)."""
+    (d / 'CaseProbe').mkdir(exist_ok=True)
+    return (d / 'caseprobe').is_dir()
+
+
+class PrivateByAnyNameTest(PlacesBase):
+    """What is private stays private however it is asked for: another letter case, a symlink on the way, the Claude
+    folder being the home folder. The check runs on the real path."""
+
+    def setUp(self):
+        super().setUp()
+        (self.home / 'Library' / 'Keychains' / 'login.txt').write_text('private')
+        (self.home / 'AppData' / 'Roaming' / 'app.txt').write_text('private')
+        self.blind = case_blind(self.tmp)
+
+    def refused(self, **req):
+        r = self.rpc(**req)
+        self.assertFalse(r['ok'], req)
+        self.assertNotIn('private"', json.dumps(r.get('file') or {}))
+        return r
+
+    def test_another_letter_case(self):
+        if not self.blind:
+            self.skipTest('this file system tells Library from library')
+        for bad in ('~/library', '~/LIBRARY/Keychains', '~/library/keychains', '~/appdata/Roaming', '~/APPDATA',
+                    '~/Library/mobile documents', '~/library/Mobile Documents'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.sb.resolve_folder(bad)
+                self.refused(verb='files', folder=bad)
+                self.refused(verb='folder_check', folder=bad)
+        self.refused(verb='files', folder='~/library/Keychains', name='login.txt')
+        self.refused(verb='start', folder='~/library/Keychains', prompt='read it', trust=True)
+        self.refused(verb='mkdir', folder='~/library/New')
+        self.assertFalse((self.home / 'Library' / 'New').exists())
+        self.assertIsNone(self.sb.folder_of(str(self.home / 'library' / 'Keychains')))
+        # iCloud Drive is the one folder in Library that is shown, by any spelling of it
+        self.assertTrue(self.rpc(verb='files', folder='~/library/mobile documents/com~apple~clouddocs')['ok'])
+
+    def test_the_names_are_compared_as_the_file_system_does(self):
+        with mock.patch.object(self.sb, 'IS_WIN', True):
+            self.assertTrue(self.sb._private(('appdata', 'Roaming')))
+            self.assertTrue(self.sb._private(('LOCAL SETTINGS',)))
+            self.assertFalse(self.sb._private(('library', 'mobile documents', 'COM~APPLE~CLOUDDOCS', 'Notes')))
+            self.assertEqual(self.sb._below('/Users/You', '/users/you/AppData'), ('AppData',))
+        with mock.patch.object(self.sb, 'IS_WIN', False), mock.patch.object(self.sb.sys, 'platform', 'linux'):
+            self.assertFalse(self.sb._private(('library',)), 'on Linux that is a folder of its own')
+            self.assertTrue(self.sb._private(('Library',)))
+            self.assertIsNone(self.sb._below('/home/you', '/home/You/x'))
+
+    def test_a_symlink_into_a_private_folder(self):
+        os.symlink(self.home / '.ssh', self.home / 'Documents' / 'keys')
+        os.symlink(self.home / 'Library' / 'Keychains', self.home / 'Documents' / 'chains')
+        os.symlink(self.home / 'Library' / 'Mobile Documents' / 'com~apple~CloudDocs', self.home / 'Documents' / 'cloud')
+        for bad in ('~/Documents/keys', '~/Documents/chains'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(ValueError):
+                    self.sb.resolve_folder(bad)
+                self.refused(verb='files', folder=bad)
+        self.refused(verb='files', folder='~/Documents/keys', name='id_ed25519')
+        self.refused(verb='files', folder='~/Documents/chains', name='login.txt')
+        self.refused(verb='start', folder='~/Documents/keys', prompt='read it', trust=True)
+        self.assertEqual(self.sb.resolve_folder('~/Documents/cloud'), self.home.joinpath(*self.sb.ICLOUD_REL))
+        self.assertNotIn('keys', [d['name'] for d in self.rpc(verb='files', folder='~/Documents')['dirs']])
+
+    def test_a_place_the_owner_made_inside_a_private_folder_is_shown(self):
+        inside = self.home / 'Library' / 'CloudStorage' / 'Drive'
+        (inside / 'work' / '.git').mkdir(parents=True)
+        (inside / 'work' / 'notes.txt').write_text('hello')
+        with self.conf(places=[{'name': 'Drive', 'path': str(inside)}, {'name': 'Home', 'path': str(self.home)}]):
+            self.assertFalse(self.sb._files_hidden(inside / 'work'))
+            self.assertTrue(self.sb._files_hidden(inside / 'work' / '.git'))
+            self.assertEqual(self.rpc(verb='files', folder='@Drive/work', name='notes.txt')['file']['text'], 'hello')
+            # home named as a place opens nothing home keeps private
+            for p in ('Library', 'Library/Keychains', '.ssh', 'AppData/Roaming'):
+                self.assertTrue(self.sb._files_hidden(self.home / p), p)
+            self.assertFalse(self.sb._files_hidden(self.home / 'Documents' / 'site'))
+        self.assertTrue(self.sb._files_hidden(inside / 'work'), 'not a place: private as before')
+
+    def test_a_symlink_inside_a_place_into_its_dot_folder(self):
+        drive = (self.tmp / 'drive').resolve()
+        (drive / '.secrets').mkdir(parents=True)
+        (drive / '.secrets' / 'k.txt').write_text('private')
+        os.symlink(drive / '.secrets', drive / 'plain')
+        with self.conf(places=[{'name': 'Data', 'path': str(drive)}]):
+            with self.assertRaises(ValueError):
+                self.sb.resolve_folder('@Data/plain')
+            self.refused(verb='files', folder='@Data/plain', name='k.txt')
+            self.assertTrue(self.rpc(verb='files', folder='@Data')['ok'])
+
+    def test_a_file_reached_by_a_name_that_is_not_its_own(self):
+        d = self.home / 'Documents' / 'site'
+        (d / 'CREDEN~1.JSO').write_text('private')
+        real = Path.resolve
+
+        def resolve(p, *a, **kw):  # as Windows does for a short name: CREDEN~1.JSO is credentials.json
+            r = real(p, *a, **kw)
+            return r.with_name('credentials.json') if r.name == 'CREDEN~1.JSO' else r
+        with mock.patch.object(Path, 'resolve', resolve):
+            f = self.rpc(verb='files', folder='~/Documents/site', name='CREDEN~1.JSO')['file']
+        self.assertTrue(f['secret'])
+        self.assertNotIn('text', f)
+
+
+class HomeIsTheClaudeFolderTest(PlacesBase):
+    """A machine whose Claude folder was never picked uses the home folder: its private folders are as private by
+    their plain names as by their '~/' names."""
+
+    def setUp(self):
+        super().setUp()
+        os.environ['SB_ROOT'] = str(self.home)
+        (self.home / 'Library' / 'Keychains' / 'login.txt').write_text('private')
+        (self.home / 'Library' / 'Mobile Documents' / 'com~apple~CloudDocs' / 'Notes' / 'a.txt').write_text('a note')
+        (self.home / 'Documents' / 'site' / '.git').mkdir()
+
+    def test_files_never_lists_or_opens_them(self):
+        r = self.rpc(verb='files', folder='')
+        self.assertTrue(r['ok'], r)
+        self.assertEqual([d['name'] for d in r['dirs']], ['Desktop', 'Documents', 'Downloads'])
+        for bad in ('Library', 'Library/Keychains', 'AppData', 'AppData/Roaming', '.ssh', 'Library/Mobile Documents'):
+            with self.subTest(bad=bad):
+                self.assertFalse(self.rpc(verb='files', folder=bad)['ok'])
+                self.assertFalse(self.rpc(verb='folder_check', folder=bad)['ok'])
+                with self.assertRaises(ValueError):
+                    self.sb.resolve_folder(bad)
+        r = self.rpc(verb='files', folder='Library/Keychains', name='login.txt')
+        self.assertFalse(r['ok'])
+        self.assertNotIn('private"', json.dumps(r))
+        self.assertFalse(self.rpc(verb='files', folder='', name='.ssh')['ok'])
+
+    def test_no_chat_or_new_folder_goes_there(self):
+        for bad in ('Library/Keychains', '.ssh', 'AppData/Roaming'):
+            self.assertFalse(self.rpc(verb='start', folder=bad, prompt='read it')['ok'], bad)
+        self.assertFalse(self.rpc(verb='mkdir', folder='Library/New')['ok'])
+        self.assertFalse((self.home / 'Library' / 'New').exists())
+        self.assertEqual(list(self.sb.paths_q()['queue'].glob('*.json')), [])
+
+    def test_the_pickers_leave_them_out(self):
+        names = [d['name'] for d in self.rpc(verb='folders', parent='')['folders']]
+        self.assertEqual(names, ['Desktop', 'Documents', 'Downloads'])
+        self.assertFalse(self.rpc(verb='folders', parent='Library')['ok'])
+        self.assertNotIn('AppData', [d['folder'] for d in self.rpc(verb='folders')['folders']])
+
+    def test_a_chat_that_ran_there_has_no_folder_to_name(self):
+        f = self.sb.folder_of
+        self.assertIsNone(f(str(self.home / 'Library' / 'Keychains')))
+        self.assertIsNone(f(str(self.home / '.ssh')))
+        self.assertIsNone(f(str(self.home / 'AppData' / 'Roaming')))
+        self.assertEqual(f(str(self.home / 'Documents' / 'site')), 'Documents/site')
+        self.assertEqual(f(str(self.home)), '')
+
+    def test_what_is_not_private_still_works(self):
+        icloud = '~/Library/Mobile Documents/com~apple~CloudDocs/Notes'  # as the places list names iCloud Drive
+        self.assertEqual(self.sb.resolve_folder(icloud), self.home.joinpath(*icloud[2:].split('/')))
+        self.assertEqual(self.rpc(verb='files', folder=icloud, name='a.txt')['file']['text'], 'a note')
+        self.assertEqual(self.rpc(verb='files', folder='Documents/site', name='README.md')['file']['text'], 'hi')
+        # a dot folder inside a project is where a chat may run (a worktree), though Files never shows it
+        self.assertEqual(self.sb.resolve_folder('Documents/site/.git'), self.home / 'Documents' / 'site' / '.git')
+        self.assertFalse(self.rpc(verb='files', folder='Documents/site/.git')['ok'])
+
+    def test_a_symlink_in_home_into_a_private_folder(self):
+        os.symlink(self.home / 'Library' / 'Keychains', self.home / 'chains')
+        with self.assertRaises(ValueError):
+            self.sb.resolve_folder('chains')
+        r = self.rpc(verb='files', folder='chains', name='login.txt')
+        self.assertFalse(r['ok'])
+        self.assertNotIn('private"', json.dumps(r))
+
+
+class ClaudeFolderInsideAPrivateFolderTest(PlacesBase):
+    def test_an_owner_who_put_it_there_still_has_it(self):
+        root = self.home / '.work' / 'Claude'
+        (root / 'proj').mkdir(parents=True)
+        (root / 'proj' / 'a.txt').write_text('mine')
+        os.environ['SB_ROOT'] = str(root)
+        self.assertEqual(self.sb.resolve_folder('proj'), root / 'proj')
+        self.assertEqual(self.sb.folder_of(str(root / 'proj')), 'proj')
+        self.assertEqual(self.rpc(verb='files', folder='proj', name='a.txt')['file']['text'], 'mine')
+
+
 if __name__ == '__main__':
     unittest.main()

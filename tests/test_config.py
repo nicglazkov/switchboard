@@ -414,6 +414,107 @@ class FlagsDrawerTest(unittest.TestCase):
         self.assertEqual([(c['name'], c['to'], c['how']) for c in p['changes']], [('--brief', 'On', 'relaunch')])
         self.assertEqual(flags.view(self.S)['short'], 'Opus \u00b7 High')
 
+    def test_what_the_drawer_shows_can_be_sent_back(self):
+        # an app echoes every row it is shown: a flag the chat has that Switchboard never sets must not fail Apply
+        import flags
+        s = dict(self.S, now=dict(self.S['now'], perm='bypassPermissions'),
+                 launch={'flags': [['--remote-control'], ['--dangerously-skip-permissions'], ['--ide'], ['--worktree', 'fix'],
+                                   ['--add-dir', 'proj'], ['--verbose']], 'other': [], 'from': 'ps'})
+        v = flags.view(s)
+        rows = {x['name']: x for x in v['active']}
+        self.assertEqual(rows['--worktree']['how'], 'locked')
+        self.assertIn('same worktree', rows['--worktree']['note'])
+        self.assertNotIn('--ide', rows)
+        self.assertNotIn('--dangerously-skip-permissions', rows)  # the Permissions row already says Bypass
+        self.assertEqual(v['other'], ['--ide'])
+        echo = [[x['name']] + ([x['value']] if x.get('value') else []) for x in v['active']] + [['--ide'], ['--dangerously-skip-permissions']]
+        p = flags.plan(s, {'effort': 'max', 'flags': echo})
+        self.assertEqual([c['name'] for c in p['changes']], ['--effort'])
+        p = flags.plan(s, {'chrome': True, 'flags': echo})
+        self.assertEqual(p['body']['flags'], [['--add-dir', 'proj'], ['--verbose'], ['--permission-mode', 'bypassPermissions'],
+                                              ['--chrome']])  # no worktree: the relaunch runs inside it already
+        with self.assertRaises(flags.FlagError) as e:
+            flags.plan(s, {'flags': echo, 'other': '--worktree other'})
+        self.assertIn('when the chat starts', str(e.exception))
+
+    def test_a_long_instruction_round_trips(self):
+        import flags
+        text = 'Be brief, and kind. ' * 75  # 1500 characters
+        s = dict(self.S, launch={'flags': [['--append-system-prompt', text]], 'other': [], 'from': 'roster'})
+        row = next(x for x in flags.view(s)['active'] if x['name'] == '--append-system-prompt')
+        self.assertEqual(row['value'], text)
+        p = flags.plan(s, {'chrome': True, 'flags': [['--append-system-prompt', row['value']]]})
+        self.assertIn(['--append-system-prompt', text], p['body']['flags'])
+
+    def test_asks_first_is_said_by_name_where_the_machine_lists_it(self):
+        import flags
+        s = dict(self.S, now=dict(self.S['now'], perm='auto'))
+        keep = [['--add-dir', 'proj'], ['--verbose']]
+        p = flags.plan(s, {'perm': 'default', 'chrome': True, 'flags': keep}, None, 'manual')
+        self.assertIn(['--permission-mode', 'manual'], p['body']['flags'])
+        self.assertEqual(next(c['to'] for c in p['changes'] if c['name'] == '--permission-mode'), 'Asks first')
+        p = flags.plan(s, {'perm': 'manual', 'chrome': True, 'flags': keep}, None, 'default')
+        self.assertIn(['--permission-mode', 'default'], p['body']['flags'])
+        # an older Switchboard on that machine: the mode cannot be named, and the change says what it will get
+        p = flags.plan(s, {'perm': 'default', 'chrome': True, 'flags': keep}, None, None)
+        self.assertFalse([f for f in p['body']['flags'] if f[0] == '--permission-mode'])
+        self.assertEqual(next(c['to'] for c in p['changes'] if c['name'] == '--permission-mode'), 'Machine default')
+        self.assertEqual(flags.fit_perm([['--permission-mode', 'default'], ['--brief']], 'manual'),
+                         [['--permission-mode', 'manual'], ['--brief']])
+        self.assertEqual(flags.fit_perm([['--permission-mode', 'manual'], ['--brief']], None), [['--brief']])
+        self.assertEqual(flags.fit_perm([['--permission-mode', 'plan']], None), [['--permission-mode', 'plan']])
+        self.assertEqual((flags.ask_mode(['auto', 'manual']), flags.ask_mode(['default']), flags.ask_mode(None)),
+                         ('manual', 'default', None))
+
+    def test_a_pinned_model_stays_pinned(self):
+        import flags
+        s = dict(self.S, launch={'flags': [['--model', 'claude-opus-4-8'], ['--verbose']], 'other': [], 'from': 'roster'})
+        self.assertEqual(flags.launch_model(s), 'claude-opus-4-8')
+        self.assertEqual(flags.plan(s, {'chrome': True, 'flags': [['--verbose']]})['body']['model'], 'claude-opus-4-8')
+        self.assertEqual(flags.plan(s, {'model': 'sonnet', 'chrome': True, 'flags': [['--verbose']]})['body']['model'], 'sonnet')
+        moved = dict(s, now=dict(s['now'], model='sonnet'))  # /model since: the launch flag no longer says what runs
+        self.assertEqual(flags.launch_model(moved), 'sonnet')
+        wide = dict(s, launch={'flags': [['--model', 'opus[1m]']], 'other': [], 'from': 'roster'})
+        self.assertEqual(flags.launch_model(wide), 'opus[1m]')
+        self.assertEqual(flags.view(wide)['active'][0]['text'], 'Opus (1M)')
+
+    def test_the_terminal_command_names_folders_in_full(self):
+        import flags
+        f = [['--add-dir', 'proj/My Docs'], ['--append-system-prompt', "Don't stop"], ['--brief']]
+        self.assertEqual(flags.command_line(f, '/Users/you/Claude'),
+                         "--add-dir '/Users/you/Claude/proj/My Docs' --append-system-prompt 'Don'\"'\"'t stop' --brief")
+        self.assertEqual(flags.command_line(f, 'C:\\Users\\you\\Claude', win=True),
+                         '--add-dir "C:\\Users\\you\\Claude\\proj\\My Docs" --append-system-prompt "Don\'t stop" --brief')
+        self.assertEqual(flags.command_line([['--add-dir', '~/Documents/x']], '/Users/you/Claude'), '--add-dir ~/Documents/x')
+        self.assertEqual(flags.command_line([['--add-dir', '~/My Docs']]), "--add-dir ~/'My Docs'")
+
+    def test_what_the_catalog_takes(self):
+        import flags
+        ok = [['--add-dir', '~/Documents/x'], ['--add-dir', '@iCloud/Notes'], ['--add-dir', '~'], ['--autocompact', '500k'],
+              ['--autocompact', '1M'], ['--autocompact', 'auto'], ['--fallback-model', 'claude-sonnet-5-5'],
+              ['--fallback-model', 'sonnet,haiku'], ['--worktree'], ['--worktree', 'fix'], ['--permission-mode', 'manual'],
+              ['--permission-mode', 'default']]
+        for f in ok:
+            with self.subTest(ok=f):
+                self.assertEqual(flags.parse([f])['flags'], [f])
+        for f in ([['--add-dir', '~/.ssh']], [['--add-dir', '~/../x']], [['--add-dir', '/etc']], [['--autocompact', '50k']],
+                  [['--autocompact', '2000k']], [['--fallback-model', 'gpt']], [['--brief', 'x']]):
+            with self.subTest(bad=f), self.assertRaises(flags.FlagError):
+                flags.parse(f)
+        self.assertEqual(flags.parse([], '--worktree --brief')['flags'], [['--worktree'], ['--brief']])
+        self.assertEqual(flags.parse([], '-w fix')['flags'], [['--worktree', 'fix']])
+
+    def test_no_chrome_stays_until_chrome_is_turned_on(self):
+        import flags
+        s = dict(self.S, launch={'flags': [['--no-chrome'], ['--verbose']], 'other': [], 'from': 'roster'})
+        rows = {x['name']: x['how'] for x in flags.view(s)['active']}
+        self.assertEqual(rows['--no-chrome'], 'relaunch')
+        p = flags.plan(s, {'flags': [['--no-chrome'], ['--verbose']], 'other': '--brief'})
+        self.assertIn(['--no-chrome'], p['body']['flags'])
+        p = flags.plan(s, {'chrome': True, 'flags': [['--no-chrome'], ['--verbose']]})
+        self.assertEqual(p['body']['flags'], [['--verbose'], ['--chrome']])
+        self.assertEqual([(c['name'], c['to']) for c in p['changes']], [('--chrome', 'On'), ('--no-chrome', None)])
+
     def test_computer_use_relaunches_and_says_so_in_the_body(self):
         import flags
         keep = [['--add-dir', 'proj'], ['--verbose']]

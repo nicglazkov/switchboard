@@ -201,8 +201,8 @@ picked in setup, such as `192.0.2.10` or a Tailscale name.
 
 Once connected, the server tells the app every address it has: its network addresses, its `.local` name and, when
 Tailscale is running on the server, its Tailscale address and name. The app keeps them, so if you connect once at
-home, it also works away from home over Tailscale, with nothing to type. Settings, Machines, Server addresses lists
-what it keeps and lets you remove any of them.
+home, it also works away from home over Tailscale, with nothing to type. Settings, Server, Server addresses lists
+what it keeps, lets you remove any of them and has a field to type one more. Addresses start with `http://`.
 
 !!! note "Finding the server on Linux"
     A server installed from the kit announces itself on the network with what the kit carries. One installed from

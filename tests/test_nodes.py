@@ -107,12 +107,73 @@ class NodesTest(unittest.TestCase):
         self.assertIsNone(nodes.sync(self.fleet, hub='http://127.0.0.1:9'))
         self.assertIn('lab', self.fleet.machines)
 
-        # unpaired: it leaves the list
+    def test_a_machine_the_hub_stops_listing_keeps_its_settings(self):
+        # The hub answers with no machines when it lost its own file. Dropping them here threw away each one's name,
+        # Claude folder and place in the list; linked again, they came back as new machines.
+        nodes.sync(self.fleet, hub=self.hub.url)
+        self.fleet.poll()
+        self.fleet.rename('lab', 'The lab')
+        self.fleet.set_root('lab', '~/Work')
+        self.fleet.set_roam('lab', False)
+        self.fleet.reorder(['lab', 'desk'])
+        told = []
+        self.fleet.on_change = told.append
         self.hub.nodes = []
+        self.assertFalse(nodes.sync(self.fleet, hub=self.hub.url))
+        self.assertEqual(self.fleet.order, ['lab', 'desk'])
+        lab = self.fleet.snapshot()['machines'][0]
+        self.assertEqual((lab['name'], lab['label'], lab['online']), ('lab', 'The lab', False))
+        self.assertIn('not linked to the hub any more', lab['error'])
+        self.assertEqual(told, ['lab'], 'said once')
+        nodes.sync(self.fleet, hub=self.hub.url)
+        self.assertEqual(told, ['lab'], 'and not again at every poll')
+        # the polls that follow do not swap what to do about it for the hub's "No linked machine is named lab."
+        asked = len(self.hub.seen)
+        self.fleet.poll()
+        nodes.sync(self.fleet, hub=self.hub.url)
+        self.assertIn('Link it again from Add a machine', self.fleet.snapshot()['machines'][0]['error'])
+        self.assertEqual(told, ['lab'])
+        self.assertEqual([p for _, p, _ in self.hub.seen[asked:] if 'rpc/lab' in p], [], 'nobody there to ask')
+
+        # linked again: the same machine, as it was set up, and it shows at once
+        self.hub.nodes = [{'name': 'lab', 'label': 'Lab box', 'os': 'linux', 'online': True, 'since': 7}]
+        nodes.sync(self.fleet, hub=self.hub.url)
+        m = self.fleet.machines['lab']
+        self.assertEqual((m['label'], m.get('root'), m.get('roam')), ('The lab', '~/Work', False))
+        self.assertTrue(self.fleet.snapshot()['machines'][0]['online'])
+
+    def test_one_odd_machine_or_answer_never_stops_the_sync(self):
+        self.hub.nodes = [{'name': 'Not A Name!', 'label': 7, 'os': None}, None, {'name': 5}, {'name': 'lab', 'label': ['x'], 'os': 'linux'}]
         self.assertTrue(nodes.sync(self.fleet, hub=self.hub.url))
-        self.assertEqual(self.fleet.order, ['desk'])
-        self.assertEqual([m['name'] for m in self.fleet.snapshot()['machines']], ['desk'])
-        self.assertEqual(self.fleet.summary()['machines'], 1)
+        self.assertEqual(self.fleet.order, ['desk', 'lab'])
+        self.assertEqual(self.fleet.machines['lab']['label'], 'lab')
+        for odd in ('x', None, {'a': 1}):
+            self.hub.nodes = odd
+            self.assertIsNone(nodes.sync(self.fleet, hub=self.hub.url), 'an answer that is no list changes nothing')
+        self.assertEqual(self.fleet.order, ['desk', 'lab'])
+
+    def test_a_call_that_may_have_arrived_is_told_apart_from_one_that_never_left(self):
+        said = {}
+        hub = self.hub
+
+        class Odd(hub.httpd.RequestHandlerClass):
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                self._send(*said['now'])
+        hub.httpd.RequestHandlerClass = Odd
+        ask = lambda: nodes.transport('node:lab', {'verb': 'start'}, 5, hub=hub.url)
+        for code, msg, maybe in ((504, 'Lab box did not answer in 40 s.', True),
+                                 (503, 'The link to Lab box dropped before it answered.', True),
+                                 (503, 'Lab box is not linked to the hub right now.', False),
+                                 (404, 'No linked machine is named lab.', False)):
+            said['now'] = (code, {'ok': False, 'error': msg})
+            with self.assertRaises(OSError) as e:
+                ask()
+            self.assertEqual(isinstance(e.exception, fleet.MaybeDelivered), maybe, msg)
+            self.assertEqual(str(e.exception), msg)
+        with self.assertRaises(OSError) as e:
+            nodes.transport('node:lab', {'verb': 'start'}, 1, hub='http://127.0.0.1:9')
+        self.assertNotIsInstance(e.exception, fleet.MaybeDelivered, 'nothing listens there: it never left')
 
     def test_an_empty_fleet_polls(self):
         f = fleet.Fleet([], lambda t, r, to: nodes.transport(t, r, to, hub=self.hub.url))
@@ -120,6 +181,30 @@ class NodesTest(unittest.TestCase):
         nodes.sync(f, hub=self.hub.url)
         f.poll()
         self.assertTrue(f.snapshot()['machines'][0]['online'])
+
+    def test_removing_a_machine_the_hub_forgot(self):
+        # Audit, server 5: unlinked at the hub, it stays in the list until it is removed; the hub's "no such machine"
+        # must not stand in the way of that.
+        nodes.sync(self.fleet, hub=self.hub.url)
+        app = server.App(self.fleet, state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()))
+        old = nodes.HUB
+        self.addCleanup(setattr, nodes, 'HUB', old)
+        nodes.HUB = 'http://127.0.0.1:9'
+        with self.assertRaises(server.HttpError) as e:
+            app.post('/api/machines', {'op': 'remove', 'machine': 'lab'})
+        self.assertEqual(e.exception.code, 502)
+        self.assertIn('lab', self.fleet.machines, 'the hub would bring it back: it stays')
+        nodes.HUB, said = self.hub.url, []
+        real = nodes.hub_call
+
+        def forgot(method, path, body=None, **kw):
+            said.append(path)
+            raise OSError('No linked machine is named lab.')
+        nodes.hub_call = forgot
+        self.addCleanup(setattr, nodes, 'hub_call', real)
+        self.assertTrue(app.post('/api/machines', {'op': 'remove', 'machine': 'lab'})['ok'])
+        self.assertEqual(said, ['/internal/unpair/lab'])
+        self.assertNotIn('lab', self.fleet.machines)
 
     def test_add_a_machine(self):
         state = Path(mkdtemp())

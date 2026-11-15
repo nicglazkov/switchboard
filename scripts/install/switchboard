@@ -24,18 +24,54 @@ mode() {
 unit() { [ "$1" = server ] && echo switchboard || echo "switchboard-$1"; }
 label() { echo "com.switchboard.$1"; }
 
-# What each part runs, for plain mode. Kept in step with the units install-server.sh writes.
-cmd_of() {
+# Runs one part in place of this shell, for plain mode. Kept in step with the units install-server.sh writes.
+run_part() {
   case "$1" in
-    server) echo "$PY -u $APP/server/server.py" ;;
-    hub) [ -x "$HOME/.local/bin/switchboard-hub" ] && echo "$HOME/.local/bin/switchboard-hub" ;;
-    downloads) echo "$PY -m http.server 8131 --directory $SHARE/downloads" ;;
+    server) exec nohup "$PY" -u "$APP/server/server.py" ;;
+    hub) exec nohup "$HOME/.local/bin/switchboard-hub" ;;
+    downloads) exec nohup "$PY" -m http.server 8131 --directory "$SHARE/downloads" ;;
+  esac
+}
+has_part() { [ "$1" != hub ] || [ -x "$HOME/.local/bin/switchboard-hub" ]; }
+
+# What tells a part's process from any other, in its command line.
+mark_of() {
+  case "$1" in
+    server) echo "server/server.py" ;;
+    hub) echo "switchboard-hub" ;;
+    downloads) echo "http.server 8131" ;;
   esac
 }
 
+# The pid of a part started in plain mode, if it is still running. A pid file outlives its process (a reboot, a
+# crash), and the number is then given to something else: without the look at the command line, `start` took that
+# for the part and started nothing, and `stop` killed it.
 plain_pid() {
-  local f="$RUN/$1.pid"
-  [ -f "$f" ] && kill -0 "$(cat "$f")" 2>/dev/null && cat "$f"
+  local f="$RUN/$1.pid" pid c
+  [ -f "$f" ] || return 1
+  pid=$(cat "$f" 2>/dev/null)
+  case "$pid" in ''|*[!0-9]*) return 1 ;; esac
+  kill -0 "$pid" 2>/dev/null || return 1
+  c=$(ps -p "$pid" -o command= 2>/dev/null)
+  # (a ps that cannot say leaves the pid file's word for it, as before)
+  if [ -n "$c" ]; then
+    case "$c" in *"$(mark_of "$1")"*) ;; *) return 1 ;; esac
+  fi
+  echo "$pid"
+}
+
+# Loads one LaunchAgent. The part just stopped may still be on its way out, and until it is gone launchd refuses
+# the new one ("Bootstrap failed: 5"), which left that part not running: ask again for a few seconds. If it is
+# still refused, the old service never left, and starting that one again beats leaving nothing running.
+load_agent() {  # $1 = uid, $2 = label, $3 = plist
+  local err="" i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
+    err=$(launchctl bootstrap "gui/$1" "$3" 2>&1) && return 0
+    sleep "${SWITCHBOARD_RETRY_SLEEP:-0.5}"
+  done
+  launchctl kickstart -k "gui/$1/$2" 2>/dev/null && return 0
+  echo "switchboard: could not start $2: $err" >&2
+  return 1
 }
 
 start() {
@@ -48,15 +84,14 @@ start() {
                local f="$HOME/Library/LaunchAgents/$(label "$p").plist"
                [ -f "$f" ] || continue
                launchctl bootout "gui/$uid/$(label "$p")" 2>/dev/null
-               launchctl bootstrap "gui/$uid" "$f"
+               load_agent "$uid" "$(label "$p")" "$f"
              done ;;
     plain)   mkdir -p "$RUN" "$LOGS"
              [ -f "$SHARE/env" ] && . "$SHARE/env"
              for p in $PARTS; do
-               local c; c=$(cmd_of "$p")
-               [ -n "$c" ] || continue
+               has_part "$p" || continue
                if plain_pid "$p" >/dev/null; then continue; fi
-               ( cd "$APP" && exec nohup $c >>"$LOGS/$p.log" 2>&1 ) &
+               ( cd "$APP" && run_part "$p" >>"$LOGS/$p.log" 2>&1 ) &
                echo $! >"$RUN/$p.pid"
              done ;;
   esac

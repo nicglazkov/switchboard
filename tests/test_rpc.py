@@ -14,7 +14,7 @@ def _iso(t):
 
 class RpcBase(unittest.TestCase):
     def setUp(self):
-        self.tmp = Path(tempfile.mkdtemp())
+        self.tmp = Path(tempfile.mkdtemp()).resolve()  # as Claude Code records folders (macOS: /private/var, not /var)
         self.root = self.tmp / 'root'
         (self.root / 'proj').mkdir(parents=True)
         self.cdir = self.tmp / 'dotclaude'
@@ -23,7 +23,8 @@ class RpcBase(unittest.TestCase):
         os.environ.update(SB_ROOT=str(self.root), SB_CLAUDE_DIR=str(self.cdir), SB_CLAUDE_JSON=str(self.cjson))
         self.sb = fresh_sb(self.tmp)
         self.calls = []
-        self.sb.run_claude_cmd = lambda args, **kw: self.calls.append(args) or (f'stopped {args[1]}\n' if args[0] == 'stop' else '')
+        self.sb.run_claude_cmd = lambda args, **kw: self.calls.append(args) or (
+            f'stopped {args[1]}\n' if args[0] == 'stop' else '[]' if args[0] == 'agents' else '')  # agents: nothing runs
 
     def tearDown(self):
         for k in ('SB_ROOT', 'SB_CLAUDE_DIR', 'SB_CLAUDE_JSON'):
@@ -275,7 +276,7 @@ class GlanceFieldsTest(RpcBase):
     def test_limits_carry_reset_times(self):
         self.sb.write_state({'session_id': SID_A, 'rate_limits': {'five_hour': {'used_percentage': 16, 'resets_at': NOW + 3600},
                                                                   'seven_day': {'used_percentage': 49, 'resets_at': NOW + 86400}}}, NOW)
-        lim = self.sb.latest_limits()
+        lim = self.sb.latest_limits(NOW)  # on the test's clock: a week that ends months from today is no reading
         self.assertEqual((lim['five_hour_reset'], lim['seven_day_reset']), (NOW + 3600, NOW + 86400))
 
     def test_session_reports_cache_time_left(self):

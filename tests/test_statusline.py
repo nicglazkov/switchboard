@@ -116,6 +116,19 @@ class StatusTest(unittest.TestCase):
         self.assertRegex(out, r'5h . 0%')
         self.assertRegex(out, r'wk ▇ 78%')
 
+    def test_a_chats_own_numbers_from_a_window_that_reset_read_zero(self):
+        d = self.data(ctx=40_000, five=86)
+        d['rate_limits']['five_hour']['resets_at'] = 999_000      # an idle chat, hours after its last reply
+        import os
+        os.environ['COLUMNS'] = '120'
+        try:
+            out = strip(self.sb.render_statusline(d, now=1_000_000, compact_window=300_000))
+        finally:
+            os.environ.pop('COLUMNS', None)
+        self.assertRegex(out, r'5h . 0%')
+        self.assertNotIn('go easy', out)
+        self.assertEqual(len(out.splitlines()), 1)
+
     def test_one_row_that_fills_the_width(self):
         for cols in (80, 120, 200):
             out = self.render(cols, ctx=40_000)
@@ -183,6 +196,123 @@ class StatusTest(unittest.TestCase):
         self.assertEqual(s['cache_expires_at'], 1_001_800)
         self.assertEqual(s['seven_day'], 49)
         self.assertEqual(self.sb.read_state('nope'), {})
+
+
+SID = ['aaaaaaa%d-bbbb-cccc-dddd-eeeeeeeeeeee' % i for i in range(5)]
+T0 = 1_000_000
+WEEK_END, FIVE_END = T0 + 3 * 86400, T0 + 2 * 3600
+
+
+def line(sid, week=None, five=None, api_ms=1000, week_end=WEEK_END, five_end=FIVE_END):
+    """What Claude Code hands the status line: the plan numbers as the chat's last reply saw them."""
+    rl = {}
+    if week is not None:
+        rl['seven_day'] = {'used_percentage': week, 'resets_at': week_end}
+    if five is not None:
+        rl['five_hour'] = {'used_percentage': five, 'resets_at': five_end}
+    return {'session_id': sid, 'cost': {'total_api_duration_ms': api_ms}, 'prompt_cache': {'expires_at': T0 + api_ms},
+            'transcript_path': '/tmp/none.jsonl', **({'rate_limits': rl} if rl else {})}
+
+
+class LimitsTest(unittest.TestCase):
+    """The plan numbers across chats: every open chat redraws its status line every 15 seconds with the numbers of
+    its own last reply, so the newest drawing is not the newest number."""
+    def setUp(self):
+        self.sb = fresh_sb(tempfile.mkdtemp())
+
+    def state(self, sid, **d):
+        (self.sb.paths()['state'] / f'{sid}.json').write_text(json.dumps(d))
+
+    def test_a_redraw_keeps_when_the_numbers_were_seen(self):
+        self.sb.write_state(line(SID[0], 60, 12), T0)
+        self.assertEqual(self.sb.read_state(SID[0])['limits_at'], T0)
+        self.sb.write_state(line(SID[0], 60, 12), T0 + 15)            # the same reply, drawn again
+        s = self.sb.read_state(SID[0])
+        self.assertEqual((s['limits_at'], s['updated']), (T0, T0 + 15))
+        self.sb.write_state(line(SID[0], 60, 12, api_ms=2000), T0 + 30)   # a reply that moved no number still counts
+        self.assertEqual(self.sb.read_state(SID[0])['limits_at'], T0 + 30)
+        self.sb.write_state(line(SID[0], 61, 12, api_ms=2000), T0 + 45)   # and so does a number that moved
+        self.assertEqual(self.sb.read_state(SID[0])['limits_at'], T0 + 45)
+
+    def test_the_highest_number_in_the_open_window_wins_not_the_last_redraw(self):
+        self.sb.write_state(line(SID[0], 60), T0)                     # replied just now
+        self.sb.write_state(line(SID[1], 33), T0 - 2 * 86400)         # last replied two days ago, still open
+        for k in range(1, 4):
+            self.sb.write_state(line(SID[1], 33), T0 + 15 * k)        # ...and drawn again after it
+        lim = self.sb.latest_limits(T0 + 60)
+        self.assertEqual((lim['seven_day'], lim['seven_day_reset'], lim['updated']), (60, WEEK_END, T0))
+        self.assertTrue(lim['merged'])
+        self.assertEqual(self.sb.latest_limits(T0 + 61), lim, 'nothing in it moves between polls')
+
+    def test_a_new_week_beats_a_higher_number_from_the_old_one(self):
+        self.sb.write_state(line(SID[0], 91, week_end=T0 - 60), T0 - 3600)     # idle since before the reset
+        self.sb.write_state(line(SID[1], 2, week_end=T0 + 7 * 86400), T0)
+        self.assertEqual(self.sb.latest_limits(T0 + 5)['seven_day'], 2)
+        # Nobody has replied since the reset: the old number stands, and its reset time says it is over.
+        (self.sb.paths()['state'] / f'{SID[1]}.json').unlink()
+        lim = self.sb.latest_limits(T0 + 5)
+        self.assertEqual((lim['seven_day'], lim['seven_day_reset']), (91, T0 - 60))
+
+    def test_the_five_hour_window_is_read_by_itself(self):
+        self.sb.write_state(line(SID[0], 60, 40), T0 - 600)
+        self.sb.write_state(line(SID[1], 58, 44), T0 - 900)           # an older weekly number, a higher 5-hour one
+        lim = self.sb.latest_limits(T0)
+        self.assertEqual((lim['seven_day'], lim['five_hour'], lim['five_hour_reset']), (60, 44, FIVE_END))
+        # The window is over and no reply has opened a new one: the last number, with the reset that says so.
+        lim = self.sb.latest_limits(FIVE_END + 60)
+        self.assertEqual((lim['five_hour'], lim['five_hour_reset']), (40, FIVE_END))
+        # A newer reply that carries no 5-hour window: none is open, but the plan had one this week.
+        self.sb.write_state(line(SID[2], 61), FIVE_END + 90)
+        lim = self.sb.latest_limits(FIVE_END + 120)
+        self.assertEqual((lim['seven_day'], lim['five_hour'], lim['five_hour_reset']), (61, 40, FIVE_END))
+        # Nobody has seen one for a week: the plan does not report one.
+        self.sb.write_state(line(SID[2], 61, api_ms=9), FIVE_END + 8 * 86400)
+        lim = self.sb.latest_limits(FIVE_END + 8 * 86400 + 5)
+        self.assertEqual((lim['five_hour'], lim['five_hour_reset']), (None, None))
+
+    def test_a_reading_that_cannot_be_true_is_left_out(self):
+        self.sb.write_state(line(SID[0], 60, 40), T0 - 600)
+        for k, odd in enumerate(({'seven_day': 97, 'seven_day_reset': T0 + 30 * 86400}, {'seven_day': 5000, 'seven_day_reset': WEEK_END},
+                                 {'seven_day': -1, 'seven_day_reset': WEEK_END}, {'five_hour': 99, 'five_hour_reset': T0 + 2 * 86400})):
+            self.state(SID[1], updated=T0 - 5, limits_at=T0 - 5, **odd)
+            lim = self.sb.latest_limits(T0)
+            self.assertEqual((lim['seven_day'], lim['seven_day_reset'], lim['five_hour'], lim['five_hour_reset']),
+                             (60, WEEK_END, 40, FIVE_END), odd)
+        self.state(SID[1], updated=T0 - 5, limits_at=T0 - 5, seven_day=102.5, seven_day_reset=WEEK_END)
+        self.assertEqual(self.sb.latest_limits(T0)['seven_day'], 100, 'a little over is all of it')
+
+    def test_a_window_claude_code_dropped_without_a_reply_is_kept_as_last_seen(self):
+        self.sb.write_state(line(SID[0], 60, 85), T0)
+        self.sb.write_state(line(SID[0], 60), FIVE_END + 30)          # an idle redraw after the window closed
+        s = self.sb.read_state(SID[0])
+        self.assertEqual((s['five_hour'], s['five_hour_reset'], s['limits_at']), (85, FIVE_END, T0))
+        self.sb.write_state(line(SID[0]), WEEK_END + 30)              # and after the week did
+        s = self.sb.read_state(SID[0])
+        self.assertEqual((s['seven_day'], s['seven_day_reset'], s['limits_at']), (60, WEEK_END, T0))
+        self.sb.write_state(line(SID[0], 1, api_ms=5000, week_end=WEEK_END + 7 * 86400), WEEK_END + 60)   # a reply
+        s = self.sb.read_state(SID[0])
+        self.assertEqual((s['seven_day'], s['five_hour'], s['limits_at']), (1, None, WEEK_END + 60))
+
+    def test_state_files_from_before_limits_at_still_count(self):
+        self.state(SID[0], seven_day=60, seven_day_reset=WEEK_END, updated=T0 - 50)
+        self.state(SID[1], seven_day=33, seven_day_reset=WEEK_END, updated=T0 - 5)
+        lim = self.sb.latest_limits(T0)
+        self.assertEqual((lim['seven_day'], lim['updated']), (60, T0 - 50))
+        # The first redraw by this version does not pass an old number off as just seen.
+        d = line(SID[1], 33)
+        d.pop('cost')
+        d['prompt_cache'] = {}
+        self.state(SID[1], seven_day=33, seven_day_reset=WEEK_END, updated=T0 - 5, cache_expires_at=None, ctx_tokens=0)
+        self.sb.write_state(d, T0 + 10)
+        self.assertEqual(self.sb.read_state(SID[1])['limits_at'], T0 - 5)
+
+    def test_no_numbers_anywhere(self):
+        self.assertIsNone(self.sb.latest_limits(T0))
+        self.sb.write_state(line(SID[0]), T0)
+        self.assertIsNone(self.sb.read_state(SID[0])['limits_at'])
+        self.assertIsNone(self.sb.latest_limits(T0))
+        self.state(SID[1], seven_day='x', seven_day_reset=True, updated=None)
+        self.assertIsNone(self.sb.latest_limits(T0))
 
 
 class StatusEncodingTest(unittest.TestCase):

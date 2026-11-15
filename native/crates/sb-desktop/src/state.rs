@@ -122,6 +122,33 @@ fn relaunch_started(kind: JobKind, was: JobState, now: JobState) -> bool {
     kind == JobKind::Relaunch && was == JobState::Queued && matches!(now, JobState::Running | JobState::Done)
 }
 
+/// When a finished job's new chat is looked for on the board, counted from the job's end: 1.5, 3, 6, 12 and 20 s.
+/// The snapshot that has it may be late (a slow machine, a poll that left before the chat was listed).
+const JOB_READY_WAITS: [Duration; 5] = [
+    Duration::from_millis(1500),
+    Duration::from_millis(1500),
+    Duration::from_secs(3),
+    Duration::from_secs(6),
+    Duration::from_secs(8),
+];
+
+/// When the board is told about the new chat, given when a snapshot first had it (both counted from the job's
+/// end). None: it never showed up in time, and the board stays where it is.
+#[cfg(test)]
+fn job_ready_at(seen: Option<Duration>) -> Option<Duration> {
+    let seen = seen?;
+    let mut at = Duration::ZERO;
+    JOB_READY_WAITS.iter().find_map(|w| {
+        at += *w;
+        (at >= seen).then_some(at)
+    })
+}
+
+/// The chats a snapshot lists, by key.
+fn chat_keys(snap: &Snapshot) -> HashSet<String> {
+    snap.machines.iter().flat_map(|m| m.sessions.iter().map(|s| s.key.clone())).collect()
+}
+
 pub struct Shared(pub Entity<AppState>);
 impl Global for Shared {}
 
@@ -295,6 +322,12 @@ fn toast_ok(title: &str) -> bool {
 #[derive(Debug, Clone)]
 pub enum AppEvent {
     Select(String),
+    /// A job's new chat is on the board (the job began at `started`). A window idle on the board selects it; nothing
+    /// comes forward and nothing being typed is cut off.
+    JobReady {
+        key: String,
+        started: f64,
+    },
     /// v2, from the session browser: open a chat's terminal in the board window (`resume` when it is stopped).
     OpenTerm {
         key: String,
@@ -431,6 +464,9 @@ pub struct AppState {
     pub snap: Snapshot,
     /// True once live data arrived in this run (before that, the board shows the saved snapshot).
     pub live: bool,
+    /// The chats of the snapshot before the one on screen: a chat missing from one snapshot only (a row can drop
+    /// out for a poll) is not treated as gone.
+    pub before: HashSet<String>,
     /// When the data on screen was fetched (epoch seconds, 0 when there is none).
     pub synced: f64,
     /// The last refresh failed with this.
@@ -502,6 +538,8 @@ pub struct AppState {
     /// "needs you" and back, or is held again with nothing new, is not notified twice.
     notified: HashMap<String, i64>,
     inflight: bool,
+    /// The address typed on the empty board whose first try has not come back yet (`use_server`).
+    pub trying: Option<String>,
     again: bool,
     /// Bumped by each change made here that the snapshot shows at once (a rename, Keep running, the budget): a
     /// refresh that was already on its way has the old value, so it is read again instead.
@@ -512,6 +550,12 @@ pub struct AppState {
     minute: i64,
     /// When /api/prefs was last read (the synced look is checked every half minute).
     prefs_at: f64,
+    /// Changes to the look made here, and how many of them the server has: while it is behind (the server could
+    /// not be reached), its copy is not taken over this one.
+    look_edits: u64,
+    look_sent: u64,
+    /// A new version that didn't start and was put back (its number, "" when not known), until Try it again.
+    pub rolled_back: Option<String>,
     /// A newer build on the download page, the download under way, when it was last looked for (None: not since
     /// launch, which was at `update_started`) and whether a look is under way.
     pub update: Option<sb_core::update::Offer>,
@@ -599,6 +643,7 @@ impl AppState {
                 core,
                 snap,
                 live: false,
+                before: HashSet::new(),
                 synced,
                 error: None,
                 hidden: HashMap::new(),
@@ -638,12 +683,16 @@ impl AppState {
                 needs: None,
                 notified: HashMap::new(),
                 inflight: false,
+                trying: None,
                 again: false,
                 edits: 0,
                 seq: 0,
                 settings_path,
                 minute: 0,
                 prefs_at: 0.0,
+                look_edits: 0,
+                look_sent: 0,
+                rolled_back: None,
                 update: None,
                 upd: Default::default(),
                 update_at: None,
@@ -717,10 +766,15 @@ impl AppState {
         self.inflight = true;
         let core = self.core.clone();
         let edits = self.edits;
+        let trying = self.trying.clone();
         cx.spawn(async move |this, cx| {
             let res = cx.background_executor().spawn(async move { core.refresh() }).await;
             let _ = this.update(cx, |s, cx| {
                 s.inflight = false;
+                // a refresh that left after the address was typed has tried it
+                if trying.is_some() && s.trying == trying {
+                    s.trying = None;
+                }
                 if res.is_ok() && overtaken(edits, s.edits) {
                     s.again = true;
                 } else {
@@ -796,6 +850,10 @@ impl AppState {
                 let same = self.live && self.error.is_none() && self.snap.same_board(&snap);
                 let new_machine = self.snap.machines.len() != snap.machines.len()
                     || snap.machines.iter().any(|m| !self.snap.machines.iter().any(|o| o.name == m.name));
+                // a chat that left one snapshot ago is now gone for good: the windows hear of it, same board or not
+                let before = chat_keys(&self.snap);
+                let settled = before != self.before;
+                self.before = before;
                 self.snap = snap;
                 self.apply_stars(now);
                 self.groups_server = self.snap.groups.clone();
@@ -819,7 +877,7 @@ impl AppState {
                 self.hidden.retain(|k, t| {
                     now - *t < HIDE_SECS && (snap.session(k).is_some() || snap.replaced_row(k).is_some())
                 });
-                if same && hidden == self.hidden.len() {
+                if same && hidden == self.hidden.len() && !settled {
                     return;
                 }
                 self.notify_needs(cx);
@@ -881,13 +939,12 @@ impl AppState {
     /// The address the user typed on the board's first-run screen: saved and tried at once. Err says why it is not
     /// an address.
     pub fn use_server(&mut self, typed: &str, cx: &mut Context<Self>) -> Result<(), String> {
-        let Some(base) = sb_core::net::normalize_base(typed) else {
-            return Err("That's not an address. Try something like 192.0.2.10:8130 or studio.local.".into());
-        };
+        let base = sb_core::net::parse_base(typed).map_err(|e| e.says().to_string())?;
         self.settings.saved.add_typed(&base);
         self.save_settings();
         self.core.set_servers(self.settings.saved.connect_order());
         self.error = None;
+        self.trying = Some(base);
         self.refresh(cx);
         cx.notify();
         Ok(())
@@ -1952,6 +2009,7 @@ impl AppState {
         done: impl FnOnce(&mut AppState, &mut Context<AppState>) + 'static,
         cx: &mut Context<Self>,
     ) {
+        let edits = self.look_edits;
         self.call(
             cx,
             |core| core.prefs().map(|p| (p, core.models())),
@@ -1962,9 +2020,16 @@ impl AppState {
                             st.models = models;
                         }
                         st.prefs_at = Self::now();
-                        if p.appearance.as_ref().is_some_and(|a| st.take_appearance(a)) {
-                            cx.emit(AppEvent::Appearance);
-                            cx.refresh_windows();
+                        match look_step(edits, st.look_edits, st.look_sent) {
+                            LookStep::Take => {
+                                if p.appearance.as_ref().is_some_and(|a| st.take_appearance(a)) {
+                                    cx.emit(AppEvent::Appearance);
+                                    cx.refresh_windows();
+                                }
+                            }
+                            // The server is reachable again: it gets the look chosen while it was not.
+                            LookStep::Send => st.sync_appearance(cx),
+                            LookStep::Keep => {}
                         }
                         st.prefs = Some(p);
                     }
@@ -1976,14 +2041,14 @@ impl AppState {
         );
     }
 
-    /// The look as /api/prefs carries it, from the local settings.
+    /// The look as /api/prefs carries it, from the local settings. The terminal's text size is not part of it:
+    /// each computer keeps its own (screens differ), and the server keeps whatever size it had for older apps.
     pub fn appearance_body(&self) -> serde_json::Value {
         let st = &self.settings;
         serde_json::json!({"appearance": {
             "theme": st.theme.clone().unwrap_or_else(|| "system".into()),
             "term": {
                 "scheme": sb_core::term::scheme::normalize(st.term_colors.as_deref()),
-                "size": st.term_size,
                 "cursor": st.term_cursor.clone().unwrap_or_else(|| "block".into()),
                 "blink": st.term_blink.unwrap_or(true),
             },
@@ -1993,13 +2058,15 @@ impl AppState {
     /// Sends the look to the server, so every device agrees (the local settings stay as the offline cache).
     pub fn sync_appearance(&mut self, cx: &mut Context<Self>) {
         let body = self.appearance_body();
+        self.look_edits += 1;
+        let n = self.look_edits;
         self.call(
             cx,
             move |core| core.set_prefs(&body),
-            |_, res, _| {
-                if let Err(e) = res {
-                    log::info!("appearance not synced: {e}");
-                }
+            move |st, res, _| match res {
+                Ok(_) => st.look_sent = st.look_sent.max(n),
+                // Kept here and sent again at the next read of the server's (load_prefs).
+                Err(e) => log::info!("appearance not synced yet: {e}"),
             },
         );
     }
@@ -2009,7 +2076,6 @@ impl AppState {
         let before = (
             self.settings.theme.clone(),
             self.settings.term_colors.clone(),
-            self.settings.term_size,
             self.settings.term_cursor.clone(),
             self.settings.term_blink,
         );
@@ -2021,15 +2087,14 @@ impl AppState {
             };
         }
         if let Some(t) = &a.term {
+            // Not t.size: the text size is this computer's own.
             self.settings.term_colors = Some(sb_core::term::scheme::normalize(Some(&t.scheme)));
-            self.settings.term_size = t.size;
             self.settings.term_cursor = Some(t.cursor.clone());
             self.settings.term_blink = Some(t.blink);
         }
         let after = (
             self.settings.theme.clone(),
             self.settings.term_colors.clone(),
-            self.settings.term_size,
             self.settings.term_cursor.clone(),
             self.settings.term_blink,
         );
@@ -2704,7 +2769,7 @@ impl AppState {
         match res {
             Ok(j) => job.update(&j, now),
             // The job carries on at the server; look again.
-            Err(CoreError::Unreachable) => return Some(Duration::from_secs(3)),
+            Err(CoreError::Unreachable | CoreError::Timeout) => return Some(Duration::from_secs(3)),
             Err(CoreError::Server { status: 404, .. }) => {
                 job.fail("Switchboard lost track of this one. Check the list in a minute.", now)
             }
@@ -2735,6 +2800,7 @@ impl AppState {
             cx.emit(ev);
         }
         let job = self.jobs.iter().find(|j| j.id == id)?;
+        let started = job.started;
         let select = if job.state == JobState::Done && !was.finished() {
             match (&job.new_machine, &job.new_sid) {
                 (Some(m), Some(s)) => Some(format!("{m}:{s}")),
@@ -2746,16 +2812,26 @@ impl AppState {
         if finished && !was.finished() {
             self.refresh(cx);
             if let Some(k) = select {
-                // Select it once the refresh has it.
+                // Offer it to the windows once the refresh has it (they select it only when idle on the board).
                 self.refresh_in(Duration::from_millis(900), cx);
+                // The snapshot with it may be late: look again a few times, asking for a new one each time.
                 let key = k.clone();
                 cx.spawn(async move |this, cx| {
-                    cx.background_executor().timer(Duration::from_millis(1500)).await;
-                    let _ = this.update(cx, |s, cx| {
-                        if s.snap.session(&key).is_some() {
-                            s.select(key.clone(), cx);
+                    for wait in JOB_READY_WAITS {
+                        cx.background_executor().timer(wait).await;
+                        let found = this.update(cx, |s, cx| {
+                            let found = s.snap.session(&key).is_some();
+                            if found {
+                                cx.emit(AppEvent::JobReady { key: key.clone(), started });
+                            } else {
+                                s.refresh(cx);
+                            }
+                            found
+                        });
+                        if !matches!(found, Ok(false)) {
+                            break;
                         }
-                    });
+                    }
                 })
                 .detach();
             }
@@ -2783,8 +2859,55 @@ impl AppState {
     }
 }
 
+/// What a read of the server's look does with it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LookStep {
+    /// Take the server's.
+    Take,
+    /// The server never got this computer's last change: send it, and keep it.
+    Send,
+    /// The look changed here while the read was on its way, so what came back may be the older one: leave it.
+    Keep,
+}
+
+/// `at_start` is the count of look changes when the read began, `now` the count when it came back, `sent` how
+/// many of them the server has.
+fn look_step(at_start: u64, now: u64, sent: u64) -> LookStep {
+    if sent < now {
+        LookStep::Send
+    } else if now != at_start {
+        LookStep::Keep
+    } else {
+        LookStep::Take
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{JOB_READY_WAITS, LookStep, job_ready_at, look_step};
+    use std::time::Duration;
+
+    #[test]
+    fn a_finished_jobs_new_chat_is_found_when_its_snapshot_is_late() {
+        let s = Duration::from_secs_f32;
+        assert_eq!(job_ready_at(Some(s(0.9))), Some(s(1.5)), "there at the first look, as before");
+        assert_eq!(job_ready_at(Some(s(2.0))), Some(s(3.0)), "late: the next look has it");
+        assert_eq!(job_ready_at(Some(s(11.0))), Some(s(12.0)));
+        assert_eq!(job_ready_at(Some(s(19.0))), Some(s(20.0)));
+        assert_eq!(job_ready_at(Some(s(25.0))), None, "it does not wait for ever");
+        assert_eq!(job_ready_at(None), None);
+        assert_eq!(JOB_READY_WAITS.iter().sum::<Duration>(), s(20.0));
+    }
+
+    #[test]
+    fn a_look_the_server_never_got_is_not_overwritten_by_its_older_one() {
+        assert_eq!(look_step(0, 0, 0), LookStep::Take, "nothing changed here: the server's wins");
+        assert_eq!(look_step(3, 3, 3), LookStep::Take);
+        assert_eq!(look_step(3, 3, 2), LookStep::Send, "the last change never reached the server");
+        assert_eq!(look_step(2, 3, 2), LookStep::Send, "changed during the read, not sent yet");
+        assert_eq!(look_step(2, 3, 3), LookStep::Keep, "changed and sent during the read");
+    }
+
     /// The 2026-10-12 crash: a callback that hears back from the server (`done`, given `&mut App`) ran while AppState
     /// was still being updated, and the New session sheet's callback updated AppState again. GPUI panics ("cannot
     /// update AppState while it is already being updated") inside a main-thread callout, and the app dies. Every

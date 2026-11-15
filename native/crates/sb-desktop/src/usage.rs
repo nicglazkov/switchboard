@@ -169,15 +169,7 @@ impl BoardView {
         let p = &c.app.snap.plan;
         let live = p.five_live(c.now);
         let pct = if live { p.five_hour } else { None };
-        let sub = if live {
-            p.five_hour_reset
-                .map(|r| format!("Resets {}", fmt::when(r, c.now)))
-                .unwrap_or_else(|| "Reset time not known".into())
-        } else if p.five_hour.is_some() {
-            "The window has reset since".into()
-        } else {
-            "No numbers yet".into()
-        };
+        let sub = p.five_note(c.now);
         let tone = tone_color(&t, p.five_tone());
         tile(&t, "5 hours")
             .child(big(&t, if live { p.five_label(c.now) } else { "--".into() }, false))
@@ -191,8 +183,11 @@ impl BoardView {
         let p = &c.app.snap.plan;
         let label = p.week_label(c.now);
         let shown = if label == "--" { 0.0 } else { p.week.unwrap_or(0.0) };
-        let pace = p.week_projected.or_else(|| c.app.usage.as_ref().and_then(|u| u.week.as_ref()).and_then(|w| w.pace));
-        let reset = p.week_reset.or_else(|| c.app.usage.as_ref().and_then(|u| u.week.as_ref()).and_then(|w| w.reset));
+        // After the weekly reset the last number is last week's: no pace, and no reset time that has passed.
+        let over = p.week_over(c.now);
+        let report = c.app.usage.as_ref().and_then(|u| u.week.as_ref());
+        let pace = p.week_pace(c.now).or_else(|| report.and_then(|w| w.pace).filter(|_| !over));
+        let reset = report.and_then(|w| w.reset);
         let at_least = label.starts_with("at least ");
         tile(&t, "This week")
             .child(
@@ -212,12 +207,7 @@ impl BoardView {
                 pace.map(|x| (x / 100.0) as f32),
                 4.,
             ))
-            .child(small(
-                &t,
-                reset
-                    .map(|r| format!("Resets {}", fmt::when(r, c.now)))
-                    .unwrap_or_else(|| "Reset not known yet".into()),
-            ))
+            .child(small(&t, p.week_note(c.now, reset)))
             .children(pace.map(|x| small(&t, format!("At this rate you'll end around {}%", x.round() as i64))))
     }
 
@@ -279,7 +269,9 @@ impl BoardView {
                 }
             }
             (None, true) => "History starts this week".into(),
-            (None, false) => format!("Average of {} {}", weeks.len(), if weeks.len() == 1 { "week" } else { "weeks" }),
+            // The number is the average of where those weeks ended, not of anything about this one.
+            (None, false) if weeks.len() == 1 => "How last week ended".into(),
+            (None, false) => format!("How {} weeks ended, on average", weeks.len()),
         };
         tile(&t, "Last 4 weeks")
             .child(big(&t, avg.map(|a| format!("{}%", a.round() as i64)).unwrap_or_else(|| "--".into()), false))
@@ -304,12 +296,15 @@ impl BoardView {
         };
         // A day's number is weekly-limit percent points, so each reads as a share of the week.
         let help = self.usage_hover == Some(UsageBar::Help);
-        // With a daily budget: "Today 7% of 14% budget", and today's bar amber over it, red at the hard limit.
+        // With a daily budget: "Today: 7% of your weekly limit (budget 14%)", and today's bar amber over it, red at
+        // the hard limit.
         let budget = c.app.snap.budget.clone().unwrap_or_default();
         let (bs, bst) = (budget.settings(), budget.status());
         let today_used = bst.today.or_else(|| slots.iter().find(|s| s.today).and_then(|s| s.used));
         let budget_line = match (bst.daily.or(bs.daily), today_used) {
-            (Some(d), Some(x)) => Some(format!("Today {}% of {}% budget", usage::pts(x), usage::pts(d))),
+            (Some(d), Some(x)) => {
+                Some(format!("Today: {}% of your weekly limit (budget {}%)", usage::pts(x), usage::pts(d)))
+            }
             _ => None,
         };
         let today_c = if bst.over_hard() && !bst.lifted() {
@@ -323,7 +318,7 @@ impl BoardView {
             _ if help => "Each bar is how much of your weekly limit that day used.".to_string(),
             Some(s) if s.future => format!("{}: still to come", s.label),
             Some(s) => match s.used {
-                Some(x) => format!("{}: {}% of the week", s.label, usage::pts(x)),
+                Some(x) => format!("{}: {}% of your weekly limit", s.label, usage::pts(x)),
                 None => format!("{}: no number for that day", s.label),
             },
             None if budget_line.is_some() => budget_line.clone().unwrap_or_default(),
@@ -331,8 +326,8 @@ impl BoardView {
                 let today = slots.iter().find(|s| s.today).and_then(|s| s.used);
                 match today {
                     Some(x) if (total - x).abs() < 0.05 => format!("Today: {}% of your weekly limit", usage::pts(x)),
-                    Some(x) => format!("Today {}%, {}% of the week so far", usage::pts(x), usage::pts(total)),
-                    None => format!("{}% of the week so far", usage::pts(total)),
+                    Some(x) => format!("Today {}%, {}% this week so far", usage::pts(x), usage::pts(total)),
+                    None => format!("{}% of your weekly limit so far", usage::pts(total)),
                 }
             }
             None => String::new(),

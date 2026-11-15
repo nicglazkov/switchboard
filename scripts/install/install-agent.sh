@@ -73,7 +73,9 @@ sums_ok() {  # $1 = file, $2 = its name in SHA256SUMS
   local want got
   want=$(awk -v n="$2" '$2 == n || $2 == "*"n {print $1}' "$TMP/SHA256SUMS")
   got=$("$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1")
-  [ -z "$want" ] || [ "$want" = "$got" ]
+  # A list with no line for this file does not vouch for it: whoever can change the file can drop its line.
+  [ -n "$want" ] || { say "(the server's SHA256SUMS has no line for $2)"; return 1; }
+  [ "$want" = "$got" ]
 }
 
 if ! command -v claude >/dev/null && [ ! -x "$HOME/.local/bin/claude" ] && [ ! -x "$HOME/.claude/local/claude" ]; then

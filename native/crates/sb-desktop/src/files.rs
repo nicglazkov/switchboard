@@ -549,30 +549,29 @@ impl FilesView {
     fn path_of(&self, name: &str, cx: &App) -> String {
         let nav = self.nav.read(cx);
         match nav.shown_listing() {
-            Some(l) if places::is_outside(&nav.folder) && !l.shown.is_empty() => {
-                let sep = if l.shown.contains('\\') && !l.shown.contains('/') { "\\" } else { "/" };
-                format!("{}{sep}{name}", l.shown.trim_end_matches(['/', '\\']))
-            }
-            Some(l) => remote_path(&l.root, &nav.folder, name),
+            Some(l) => file_path(&l.shown, &l.root, &nav.folder, name),
             None => name.to_string(),
         }
     }
 
     /// Chats on this machine whose folder is this one (or inside it), newest first.
-    fn chats_here(&self, cx: &App) -> Vec<(String, String, bool)> {
+    /// The first six are listed; the number is how many more there are.
+    fn chats_here(&self, cx: &App) -> (Vec<(String, String, bool)>, usize) {
         let nav = self.nav.read(cx);
         let app = self.app.read(cx);
-        let Some(m) = app.snap.machine(&nav.machine) else { return Vec::new() };
+        let Some(m) = app.snap.machine(&nav.machine) else { return (Vec::new(), 0) };
         let here = nav.folder.trim_end_matches('/');
-        m.sessions
+        let all: Vec<_> = m
+            .sessions
             .iter()
             .filter(|s| {
                 let f = s.folder_addr.trim_end_matches('/');
                 !s.stale && if here.is_empty() { f.is_empty() } else { places::contains(here, f) }
             })
-            .take(6)
             .map(|s| (s.key.clone(), s.topic.clone(), s.alive))
-            .collect()
+            .collect();
+        let more = all.len().saturating_sub(6);
+        (all.into_iter().take(6).collect(), more)
     }
 
     fn go(&mut self, folder: String, cx: &mut Context<Self>) {
@@ -609,6 +608,13 @@ impl FilesView {
         self.fwd.clear();
         self.file = None;
         self.preview = None;
+        // The keyboard starts at the top on the new machine too (on_nav only sees a change of folder, and both
+        // machines may be at their Claude folder).
+        self.cur = 0;
+        self.list.scroll_to_item(0, gpui::ScrollStrategy::Top);
+        if let Some(c) = &mut self.choose {
+            c.picked = None;
+        }
         self.nav.update(cx, |n, cx| n.set_machine(machine, cx));
     }
 
@@ -1117,7 +1123,7 @@ impl FilesView {
     }
 
     fn chats_block(&self, t: &Theme, cx: &Context<Self>) -> Option<gpui::Div> {
-        let chats = self.chats_here(cx);
+        let (chats, more) = self.chats_here(cx);
         if chats.is_empty() {
             return None;
         }
@@ -1147,7 +1153,7 @@ impl FilesView {
                                 .px(px(8.))
                                 .text_size(px(12.))
                                 .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                    let (key, text) = (k2.clone(), format!("{p} "));
+                                    let (key, text) = (k2.clone(), pasted(&p));
                                     this.app.update(cx, |_, cx| cx.emit(AppEvent::PasteInto { key, text }));
                                 })),
                         )
@@ -1162,6 +1168,16 @@ impl FilesView {
                                 this.app.update(cx, |_, cx| cx.emit(AppEvent::OpenTerm { key, resume: !alive }));
                             })),
                     ),
+            );
+        }
+        if more > 0 {
+            c = c.child(
+                div()
+                    .px(px(8.))
+                    .pt(px(4.))
+                    .text_size(px(12.))
+                    .text_color(t.faint)
+                    .child(format!("And {more} more. The board has every one.")),
             );
         }
         Some(c)
@@ -1645,6 +1661,22 @@ impl FilesView {
 }
 
 /// A file's full path on its machine: the Claude folder, the folder under it, the name (Windows roots keep "\\").
+/// A file's path on its machine. `shown` is the folder as the machine wrote it ("~/Claude/notes", or a full path
+/// outside home) and is what to use: `root` is only the Claude folder's name under home ("Claude"), so a path
+/// built from it means nothing to a chat running somewhere else. An older machine sends no `shown`.
+fn file_path(shown: &str, root: &str, folder: &str, name: &str) -> String {
+    if shown.is_empty() {
+        return remote_path(root, folder, name);
+    }
+    let sep = if shown.contains('\\') && !shown.contains('/') { "\\" } else { "/" };
+    format!("{}{sep}{name}", shown.trim_end_matches(['/', '\\']))
+}
+
+/// The path as it is pasted into a chat: in quotes when it has a space, so it reads as one thing.
+fn pasted(path: &str) -> String {
+    if path.contains(' ') { format!("\"{path}\" ") } else { format!("{path} ") }
+}
+
 fn remote_path(root: &str, folder: &str, name: &str) -> String {
     let win = root.contains('\\') && !root.contains('/');
     let sep = if win { "\\" } else { "/" };
@@ -1668,13 +1700,46 @@ pub struct PairView {
     error: Option<String>,
     busy: bool,
     copied: bool,
+    /// The machines there were when the code was made: one that is on the board and not in here is the one that
+    /// was just linked. None until the server has listed them (a saved or empty snapshot is not taken for it).
+    known: Option<Vec<String>>,
+    /// Counts codes, so the redraw timer of an older one stops.
+    ticks: u64,
     _subs: Vec<Subscription>,
+}
+
+/// The machines on the board now that were not there when the code was made. With no list from the server yet
+/// there is nothing to tell a new one by: none.
+fn newly_linked<'a>(known: Option<&[String]>, now: impl Iterator<Item = &'a str>) -> Vec<&'a str> {
+    let Some(known) = known else { return Vec::new() };
+    now.filter(|n| !known.iter().any(|k| k == n)).collect()
+}
+
+/// The machines to tell a newly linked one from: the server's own list, the first one there is once a code shows.
+fn known_machines<'a>(live: bool, now: impl Iterator<Item = &'a str>) -> Option<Vec<String>> {
+    live.then(|| now.map(str::to_string).collect())
+}
+
+/// A pairing code's time left, in words. `left` is in seconds.
+fn code_left(left: f64) -> String {
+    if left > 0. {
+        format!("Works once, for {} more min", ((left / 60.).ceil() as i64).max(1))
+    } else {
+        "Expired. Get a new one.".to_string()
+    }
 }
 
 impl PairView {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> PairView {
         let app = crate::state::app(cx);
-        let subs = vec![cx.observe_window_appearance(window, |_, _, cx| cx.notify())];
+        let subs = vec![
+            cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
+            // The board's machines: the window says so when the new one has joined.
+            cx.observe(&app, |this: &mut PairView, _, cx| {
+                this.note_known(cx);
+                cx.notify()
+            }),
+        ];
         let os = if cfg!(target_os = "macos") {
             "mac"
         } else if cfg!(windows) {
@@ -1682,7 +1747,27 @@ impl PairView {
         } else {
             "linux"
         };
-        PairView { app, focus: cx.focus_handle(), os, r: None, error: None, busy: false, copied: false, _subs: subs }
+        PairView {
+            app,
+            focus: cx.focus_handle(),
+            os,
+            r: None,
+            error: None,
+            busy: false,
+            copied: false,
+            known: None,
+            ticks: 0,
+            _subs: subs,
+        }
+    }
+
+    /// Notes the machines there are, once a code shows and the server has listed them.
+    fn note_known(&mut self, cx: &mut Context<Self>) {
+        if self.r.is_none() || self.known.is_some() {
+            return;
+        }
+        let app = self.app.read(cx);
+        self.known = known_machines(app.live, app.snap.machines.iter().map(|m| m.name.as_str()));
     }
 
     fn get_code(&mut self, cx: &mut Context<Self>) {
@@ -1699,11 +1784,36 @@ impl PairView {
                 s.busy = false;
                 s.copied = false;
                 match res {
-                    Ok(r) => s.r = Some(r),
+                    Ok(r) => {
+                        s.r = Some(r);
+                        s.known = None;
+                        s.note_known(cx);
+                        s.tick(cx);
+                    }
                     Err(e) => s.error = Some(e.to_string()),
                 }
                 cx.notify();
             });
+        })
+        .detach();
+    }
+
+    /// Draws again every quarter minute while a code shows, so its minutes count down and "Expired" appears
+    /// when it is (nothing else would draw this window while it sits open).
+    fn tick(&mut self, cx: &mut Context<Self>) {
+        self.ticks += 1;
+        let ticket = self.ticks;
+        cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(std::time::Duration::from_secs(15)).await;
+                let go_on = this.update(cx, |s, cx| {
+                    cx.notify();
+                    s.ticks == ticket && s.r.as_ref().is_some_and(|r| pair_expiry(r.expires) - AppState::now() > -30.)
+                });
+                if !go_on.unwrap_or(false) {
+                    break;
+                }
+            }
         })
         .detach();
     }
@@ -1778,9 +1888,51 @@ impl PairView {
                 )
                 .into_any_element();
         };
-        let exp = if r.expires > 1e12 { r.expires / 1000. } else { r.expires };
-        let left = exp - now;
+        let left = pair_expiry(r.expires) - now;
+        let expired = left <= 0.;
         let spaced: String = r.code.chars().map(|c| c.to_string()).collect::<Vec<_>>().join(" ");
+        // The computer the code was for has joined: say so here, where the user is looking.
+        let joined: Vec<String> = {
+            let snap = &self.app.read(cx).snap;
+            newly_linked(self.known.as_deref(), snap.machines.iter().map(|m| m.name.as_str()))
+                .into_iter()
+                .map(|n| snap.label_of(n).unwrap_or_else(|| n.to_string()))
+                .collect()
+        };
+        if !joined.is_empty() {
+            col = col.child(
+                div()
+                    .p(px(14.))
+                    .rounded(px(ui::R_CARD))
+                    .border_1()
+                    .border_color(t.run.alpha(0.5))
+                    .bg(t.run.alpha(0.08))
+                    .flex()
+                    .flex_wrap()
+                    .items_center()
+                    .gap(px(10.))
+                    .child(ui::icon("check", 14., t.run))
+                    .child(
+                        ui::wrap(format!(
+                            "Linked: {}. It's on the board now. Next, pick its Claude folder.",
+                            sb_core::hostsetup::and_list(&joined)
+                        ))
+                        .flex_1()
+                        .min_w(px(200.))
+                        .text_size(px(13.))
+                        .text_color(t.ink),
+                    )
+                    .child(
+                        ui::line_btn(&t, "pair-linked", 30.)
+                            .px(px(12.))
+                            .text_size(px(13.))
+                            .child("Pick its Claude folder")
+                            .on_click(|_: &ClickEvent, _, cx| {
+                                crate::settings::open_at(crate::settings::Section::Machines, cx)
+                            }),
+                    ),
+            );
+        }
         col = col.child(
             div()
                 .p(px(16.))
@@ -1792,11 +1944,9 @@ impl PairView {
                 .gap(px(4.))
                 .child(ui::lbl("CODE", t.faint))
                 .child(div().font_family(NUM).text_size(px(30.)).child(spaced))
-                .child(div().text_size(px(12.5)).text_color(t.dim).child(if left > 0. {
-                    format!("Works once, for {} more min", ((left / 60.).ceil() as i64).max(1))
-                } else {
-                    "Expired. Get a new one.".to_string()
-                })),
+                .child(
+                    div().text_size(px(12.5)).text_color(if expired { t.bad } else { t.dim }).child(code_left(left)),
+                ),
         );
         let mut seg = ui::seg_box(&t);
         for (k, label) in OSES {
@@ -1823,9 +1973,14 @@ impl PairView {
                         ui::primary_btn(&t, "pair-copy", 34.)
                             .px(px(16.))
                             .text_size(px(13.))
+                            // An expired code's line no longer links anything: New code is the button then.
+                            .when(expired, |d| d.opacity(0.45).cursor_default())
                             .child(ui::icon(if self.copied { "check" } else { "copy" }, 12., t.on_accent))
                             .child(if self.copied { "Copied" } else { "Copy the line" })
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                if expired {
+                                    return;
+                                }
                                 copy_text(cx, line.clone());
                                 this.copied = true;
                                 cx.notify();
@@ -1846,6 +2001,11 @@ impl PairView {
     }
 }
 
+/// When a pairing code runs out, in seconds (the server may send milliseconds).
+fn pair_expiry(expires: f64) -> f64 {
+    if expires > 1e12 { expires / 1000. } else { expires }
+}
+
 /// A preview read for (folder, file) `asked` is still the one wanted: no other folder or file was opened since.
 fn still_asked(asked: (u64, u64), now: (u64, u64)) -> bool {
     asked == now
@@ -1862,11 +2022,38 @@ mod tests {
     }
 
     #[test]
+    fn the_add_a_machine_window_knows_the_new_one_and_the_time_left() {
+        use super::{code_left, known_machines, newly_linked, pair_expiry};
+        let known = vec!["studio".to_string(), "laptop".to_string()];
+        assert!(newly_linked(Some(&known), ["studio", "laptop"].into_iter()).is_empty());
+        assert_eq!(newly_linked(Some(&known), ["studio", "tower", "laptop"].into_iter()), vec!["tower"]);
+        // the code came before the server's list did: nothing counts as new until there is a list to compare with
+        assert_eq!(known_machines(false, ["studio"].into_iter()), None, "a saved snapshot is not the list");
+        assert!(newly_linked(None, ["studio", "laptop"].into_iter()).is_empty());
+        let first = known_machines(true, ["studio", "laptop"].into_iter());
+        assert_eq!(first, Some(known.clone()));
+        assert!(newly_linked(first.as_deref(), ["studio", "laptop"].into_iter()).is_empty());
+        assert_eq!(code_left(600.), "Works once, for 10 more min");
+        assert_eq!(code_left(61.), "Works once, for 2 more min");
+        assert_eq!(code_left(5.), "Works once, for 1 more min");
+        assert_eq!(code_left(0.), "Expired. Get a new one.");
+        assert_eq!(pair_expiry(1_800_000_000_000.), 1_800_000_000.);
+        assert_eq!(pair_expiry(1_800_000_000.), 1_800_000_000.);
+    }
+
+    #[test]
     fn a_files_path_on_its_machine() {
         assert_eq!(
             super::remote_path("/Users/you/Claude/", "notes/today", "a.md"),
             "/Users/you/Claude/notes/today/a.md"
         );
         assert_eq!(super::remote_path("C:\\Users\\you\\code", "", "b.txt"), "C:\\Users\\you\\code\\b.txt");
+        // What a machine really sends: the Claude folder's name under home as `root`, the folder itself as `shown`.
+        assert_eq!(super::file_path("~/Claude/notes", "Claude", "notes", "a.md"), "~/Claude/notes/a.md");
+        assert_eq!(super::file_path("~", "Claude", "~", "a.md"), "~/a.md");
+        assert_eq!(super::file_path("D:\\Work\\site", "Claude", "@Work/site", "b.txt"), "D:\\Work\\site\\b.txt");
+        assert_eq!(super::file_path("", "/Users/you/Claude", "notes", "a.md"), "/Users/you/Claude/notes/a.md");
+        assert_eq!(super::pasted("~/Claude/a.md"), "~/Claude/a.md ");
+        assert_eq!(super::pasted("~/Claude/my notes/a.md"), "\"~/Claude/my notes/a.md\" ");
     }
 }

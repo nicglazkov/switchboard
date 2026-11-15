@@ -746,6 +746,42 @@ class ServerLibraryTest(unittest.TestCase):
         self.assertEqual(again.d['defaults'], ['alpha'])
         self.assertEqual(again.d['tools']['alpha']['latest'], 1)
 
+    def test_a_library_file_that_cannot_be_read_empties_no_machine(self):
+        # Audit, server 14: read as an empty library, it had every machine drop every tool, and the next save wrote
+        # over the file.
+        self.publish(make_plugin(self.tmp / 'a', 'alpha'), 'alpha')
+        self.app.post('/api/library/connect', {'tool': 'alpha', 'machine': 'lap', 'on': True})
+        self.assertEqual(self.install_of('lap', 'alpha'), 1)
+        for text in ('{"tools": {"alpha": {"latest": 1, "vers', '[]'):
+            (self.state / 'library.json').write_text(text)
+            (self.state / 'library.json.bad').unlink(missing_ok=True)
+            again = library.Library(self.app, server.HttpError)
+            self.assertTrue(again.broken)
+            self.assertEqual(again.d['tools'], {})
+            self.assertEqual((self.state / 'library.json.bad').read_text(), text, 'kept for whoever repairs it')
+            self.assertFalse((self.state / 'library.json').exists())
+            self.f.calls.clear()
+            again.reconcile('lap')
+            self.assertEqual(self.f.verbs('lap', 'library_drop'), [])
+            self.assertEqual(self.install_of('lap', 'alpha'), 1)
+            # the next start finds no library.json: still nothing is dropped
+            later = library.Library(self.app, server.HttpError)
+            self.assertTrue(later.broken)
+            later.reconcile('lap')
+            self.assertEqual(self.install_of('lap', 'alpha'), 1)
+        self.assertFalse(library.Library(server.App(fleet.Fleet(MACH, self.f), state_dir=self.tmp / 'new', web_dir=self.tmp,
+                                                    poll_every=0), server.HttpError).broken, 'a new server has no library yet: that is fine')
+
+    def test_a_tool_whose_files_are_gone_says_so_and_the_chat_still_starts(self):
+        # Audit, server 15: the job failed with "[Errno 2] No such file or directory: '/.../library/alpha/1.tar.gz'".
+        self.publish(make_plugin(self.tmp / 'a', 'alpha'), 'alpha')
+        (self.state / 'library' / 'alpha' / '1.tar.gz').unlink()
+        with self.assertRaises(server.HttpError) as e:
+            self.app.post('/api/library/connect', {'tool': 'alpha', 'machine': 'lap', 'on': True})
+        self.assertEqual(str(e.exception), "That tool's files are missing on the server. Publish it again.")
+        r = self.app.post('/api/new', {'machine': 'desk', 'folder': '', 'prompt': 'hi', 'tools': ['alpha']})
+        self.assertEqual(self.wait(r['job'])['state'], 'done')
+
 
 if __name__ == '__main__':
     unittest.main()

@@ -69,16 +69,20 @@ actions!(
 
 pub fn bind_keys(cx: &mut App) {
     let b = Some("Board");
-    // Plain keys only while no text field could be typing: the board adds "keys" to its context then.
+    // Arrows and Tab only while the board has the keys: it adds "keys" to its context then (nav_keys_ok).
     let k = Some("Board && keys");
+    // Single letters only while nothing in the window could be typing: "letters" (letter_keys_ok).
+    let l = Some("Board && letters");
     cx.bind_keys([
-        KeyBinding::new("j", Next, k),
+        // Before the plain "n": the Mac's File menu shows an action's first binding beside it.
+        KeyBinding::new("secondary-n", NewSession, b),
+        KeyBinding::new("j", Next, l),
         KeyBinding::new("down", Next, k),
-        KeyBinding::new("k", Prev, k),
+        KeyBinding::new("k", Prev, l),
         KeyBinding::new("up", Prev, k),
-        KeyBinding::new("h", Left, k),
+        KeyBinding::new("h", Left, l),
         KeyBinding::new("left", Left, k),
-        KeyBinding::new("l", Right, k),
+        KeyBinding::new("l", Right, l),
         KeyBinding::new("right", Right, k),
         KeyBinding::new("enter", Activate, b),
         // Tab walks the buttons; the focus ring shows only once the keyboard is in use (ui::focusable).
@@ -90,11 +94,10 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("alt-enter", OpenFloat, k),
         KeyBinding::new("secondary-shift-l", ToggleTheme, None),
         KeyBinding::new("secondary-,", Settings, None),
-        KeyBinding::new("f", Fresh, k),
-        KeyBinding::new("r", Resume, k),
-        KeyBinding::new("c", Continue, k),
-        KeyBinding::new("n", NewSession, k),
-        KeyBinding::new("secondary-n", NewSession, b),
+        KeyBinding::new("f", Fresh, l),
+        KeyBinding::new("r", Resume, l),
+        KeyBinding::new("c", Continue, l),
+        KeyBinding::new("n", NewSession, l),
         KeyBinding::new("secondary-k", TogglePalette, b),
         KeyBinding::new("escape", Escape, b),
         KeyBinding::new("secondary-enter", StartNew, b),
@@ -110,9 +113,9 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("ctrl-p", PalPrev, Some("Palette > Input")),
         KeyBinding::new("ctrl-n", PalNext, Some("Palette > Input")),
         KeyBinding::new("secondary-q", Quit, None),
-        // Tabs: Cmd/Ctrl+W closes the terminal tab (detaches), or the window on the board; Cmd+T opens a shell on
-        // this computer and Cmd+O finds a chat to open; Cmd/Ctrl+1 is the board, 2 to 8 the terminals in order, 9
-        // the last one.
+        // Tabs: Cmd/Ctrl+W closes the terminal tab (detaches), or the window on the board (pressed twice while
+        // terminal tabs are open); Cmd+T opens a shell on this computer and Cmd+O finds a chat to open; Cmd/Ctrl+1
+        // is the board, 2 to 8 the terminal tabs in sight in order, 9 the last one.
         KeyBinding::new("secondary-w", CloseTab, b),
         // A terminal in a window of its own: Cmd/Ctrl+W closes that window (place.rs).
         KeyBinding::new("secondary-w", CloseTab, Some("TermWindow")),
@@ -147,9 +150,47 @@ pub fn bind_keys(cx: &mut App) {
     crate::files::bind_keys(cx);
     // Last, so the terminal's own keys win over the board's.
     crate::term::bind_keys(cx);
-    cx.on_action(|_: &Quit, cx: &mut App| cx.quit());
+    // Once the key or the menu row is done with its window: the board window may have a question first.
+    cx.on_action(|_: &Quit, cx: &mut App| cx.defer(request_quit));
     cx.on_action(|_: &Settings, cx: &mut App| crate::settings::open(cx));
     cx.on_action(|_: &About, cx: &mut App| crate::about::open(cx));
+}
+
+/// Quit, from its keys or a menu: the board window asks first while a local terminal runs a program.
+pub fn request_quit(cx: &mut App) {
+    for w in cx.windows() {
+        let Some(board) = w.downcast::<BoardView>() else { continue };
+        if board.update(cx, |v, window, cx| v.solo.is_none() && v.ask_before_quit(window, cx)).unwrap_or(false) {
+            return;
+        }
+    }
+    cx.quit();
+}
+
+/// A window's own close button where the app draws it (Linux): as the system's button, the board window asks first
+/// while a local terminal runs a program. Call it once the click is done with its window (deferred).
+pub fn request_close(w: gpui::AnyWindowHandle, cx: &mut App) {
+    if let Some(board) = w.downcast::<BoardView>()
+        && board.update(cx, |v, window, cx| v.solo.is_none() && v.ask_before_quit(window, cx)).unwrap_or(false)
+    {
+        return;
+    }
+    let _ = w.update(cx, |_, window, _| window.remove_window());
+}
+
+/// Restart to update, once the new version is ready: the board window asks first while a local terminal runs a
+/// program, as it does before quitting. Cancel leaves the version to install on quit.
+pub fn request_restart(cx: &mut App) {
+    for w in cx.windows() {
+        let Some(board) = w.downcast::<BoardView>() else { continue };
+        if board
+            .update(cx, |v, window, cx| v.solo.is_none() && v.ask_before_leaving(Leave::Restart, window, cx))
+            .unwrap_or(false)
+        {
+            return;
+        }
+    }
+    crate::state::app(cx).update(cx, |s, cx| s.restart_now(cx));
 }
 
 /// Opens the board window, or a lane on its own (`solo`).
@@ -241,6 +282,16 @@ pub enum Main {
     History,
 }
 
+/// What a confirm about no one chat is for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Leave {
+    Quit,
+    /// Restart into the update that is ready.
+    Restart,
+    /// Close this tab group's tabs.
+    Group(String),
+}
+
 pub struct BoardView {
     pub app: Entity<AppState>,
     pub main: Main,
@@ -272,6 +323,14 @@ pub struct BoardView {
     pub solo: Option<String>,
     pub focus: FocusHandle,
     pub sel: Option<String>,
+    /// When the selection was last changed by hand: a job that began before then leaves it alone when it finishes.
+    sel_at: f64,
+    /// A text field somewhere in this window has the keyboard, as of the last frame drawn (single letters type
+    /// there), and what had the focus then.
+    field_focus: bool,
+    focus_seen: Option<gpui::WeakFocusHandle>,
+    /// This window has drawn a frame: only then is there a frame to ask about the keyboard's place in it.
+    drawn_once: bool,
     /// The details popped out into their own window (detached.rs), which follows the selection; None = the sheet.
     pub detached: Option<gpui::AnyWindowHandle>,
     /// Lanes showing every row instead of the cap.
@@ -286,6 +345,8 @@ pub struct BoardView {
     pub tab_hover: Option<usize>,
     /// The tab row is crowded (tabs down to their dots): the header's "Updated ..." line gives its room to the tabs.
     pub tabs_crowded: std::cell::Cell<bool>,
+    /// How wide each terminal tab drew last frame: they narrow on a crowded row before it scrolls (chrome.rs).
+    pub tab_w: std::cell::Cell<f32>,
     /// The tab row's sideways scroll (many tabs on a narrow window), and the tab last scrolled into sight.
     pub tab_scroll: ScrollHandle,
     pub tab_scrolled: std::cell::Cell<(usize, usize, i32)>,
@@ -344,6 +405,13 @@ pub struct BoardView {
     pub confirm_here: bool,
     /// The confirm is closing this local terminal, which still runs a program (not Start fresh).
     pub confirm_close: Option<Entity<TermTab>>,
+    /// The confirm is about no chat (its key is empty): quitting while local terminals run programs, or closing a
+    /// tab group whose chats would stop.
+    pub confirm_leave: Option<Leave>,
+    /// Cmd/Ctrl+W on the board with terminal tabs open: when "Press again to close Switchboard" came up.
+    close_hint: Option<f64>,
+    /// When Esc (or a click beside it) last said "Press Esc again" over a flags drawer with changes not applied.
+    pub(crate) flags_hint: Option<f64>,
     /// The details sheet's "Needs you" card: its picks and text fields (askcard.rs), and whether one is typing.
     pub ask: Option<crate::askcard::AskForm>,
     pub ask_focus: bool,
@@ -443,17 +511,39 @@ impl BoardView {
                 if moved {
                     this.remember_tabs(cx);
                 }
+                // The selected chat left the board (dismissed or gone on its machine): nothing stays selected out
+                // of sight, where the next Esc would close it and New would start on its machine.
+                let gone = {
+                    let s = app.read(cx);
+                    this.sel.as_ref().is_some_and(|k| {
+                        sel_gone(
+                            s.live,
+                            s.snap.session(k).is_some(),
+                            s.snap.replaced_row(k).is_some(),
+                            s.before.contains(k),
+                        )
+                    })
+                };
+                if gone {
+                    this.sel = None;
+                    this.cont_open = None;
+                }
                 cx.notify()
             }),
             cx.subscribe_in(&app, window, |this, _, ev: &AppEvent, window, cx| match ev {
                 AppEvent::Select(key) => {
-                    let mine = match &this.solo {
-                        Some(m) => key.starts_with(&format!("{m}:")),
-                        None => true,
-                    };
-                    if mine {
+                    if this.shows_machine_of(key) {
                         this.select(Some(key.clone()), cx);
                         window.activate_window();
+                    }
+                }
+                // A job's new chat: nothing comes forward and no typing is cut off. Only a window idle on the
+                // board, its selection untouched since the job began, moves to the new chat.
+                AppEvent::JobReady { key, started } => {
+                    if this.shows_machine_of(key) && job_selects(this.idle_on_board(cx), this.sel_at, *started) {
+                        let at = this.sel_at;
+                        this.select(Some(key.clone()), cx);
+                        this.sel_at = at;
                     }
                 }
                 // Terminal tabs follow their own jobs.
@@ -489,17 +579,22 @@ impl BoardView {
                     window.activate_window();
                 }
                 AppEvent::PasteInto { .. } => {}
-                AppEvent::AskFresh { key } => {
+                // Only the board window asks (a torn-off lane would ask a second time), and it comes forward: the
+                // terminal that asked may be in a window of its own.
+                AppEvent::AskFresh { key } if this.solo.is_none() => {
                     if let Some(c) = this.app.read(cx).fresh_confirm(key) {
                         this.confirm = Some((key.clone(), c));
                         this.confirm_chrome = false;
                         this.confirm_here = true;
                         this.confirm_close = None;
+                        this.confirm_leave = None;
                         // The keyboard leaves the terminal, so Enter and Esc answer the question.
                         this.focus_tab = true;
+                        window.activate_window();
                         cx.notify();
                     }
                 }
+                AppEvent::AskFresh { .. } => {}
                 AppEvent::Relaunching { key } => {
                     this.ask_relaunch_news(key, None, cx);
                     this.flags_relaunching(key, cx);
@@ -591,6 +686,11 @@ impl BoardView {
                 })
                 .detach();
             }));
+            // The window's own close button: it asks first while a local terminal runs a program.
+            let me = cx.weak_entity();
+            window.on_window_should_close(cx, move |window, cx| {
+                me.update(cx, |this, cx| !this.ask_before_quit(window, cx)).unwrap_or(true)
+            });
             // Quit or closed within that half second: the new frame is still written.
             subs.push(cx.on_app_quit(|this, cx| {
                 if this.bounds.flush() {
@@ -634,6 +734,10 @@ impl BoardView {
             solo,
             focus,
             sel: None,
+            sel_at: 0.,
+            field_focus: false,
+            drawn_once: false,
+            focus_seen: None,
             detached: None,
             open: HashSet::new(),
             overlay: Overlay::None,
@@ -642,6 +746,7 @@ impl BoardView {
             tab_drop: None,
             tab_hover: None,
             tabs_crowded: std::cell::Cell::new(false),
+            tab_w: std::cell::Cell::new(crate::chrome::TAB_W),
             tab_scroll: ScrollHandle::new(),
             tab_scrolled: std::cell::Cell::new((usize::MAX, 0, 0)),
             tab_scroll_pending: std::cell::Cell::new(false),
@@ -676,6 +781,9 @@ impl BoardView {
             confirm_chrome: false,
             confirm_here: false,
             confirm_close: None,
+            confirm_leave: None,
+            close_hint: None,
+            flags_hint: None,
             ask: None,
             ask_focus: false,
             ask_sending: Default::default(),
@@ -814,9 +922,23 @@ impl BoardView {
         keys
     }
 
+    /// This window shows the machine of the chat at `key` (a torn-off lane shows one).
+    fn shows_machine_of(&self, key: &str) -> bool {
+        match &self.solo {
+            Some(m) => key.starts_with(&format!("{m}:")),
+            None => true,
+        }
+    }
+
+    /// On the board with nothing over it and nothing being typed: a finished job may move the selection.
+    fn idle_on_board(&self, cx: &App) -> bool {
+        self.overlay.is_none() && self.menu.is_none() && letter_keys_ok(&self.key_state(cx))
+    }
+
     pub fn select(&mut self, key: Option<String>, cx: &mut Context<Self>) {
         if key != self.sel {
             self.ins_scroll.set_offset(gpui::point(px(0.), px(0.)));
+            self.sel_at = AppState::now();
         }
         self.cont_open = None;
         self.hint = None;
@@ -908,7 +1030,7 @@ impl BoardView {
 
     fn on_activate(&mut self, _: &Activate, window: &mut Window, cx: &mut Context<Self>) {
         // A button reached with Tab has the focus: Enter presses that button, not the selected card.
-        if self.key_context().contains("keys") && window.focused(cx).is_some_and(|f| f != self.focus) {
+        if nav_keys_ok(&self.key_state(cx)) && window.focused(cx).is_some_and(|f| f != self.focus) {
             cx.propagate();
             return;
         }
@@ -929,6 +1051,11 @@ impl BoardView {
             Overlay::Palette => return self.pal_run(self.pal_idx, window, cx),
             Overlay::New(_) | Overlay::Link(_) => return,
             _ => {}
+        }
+        // History or a terminal tab is what shows: Enter is not for the board's selection, out of sight behind it.
+        if self.overlay.is_none() && (self.tab != 0 || self.main == Main::History) {
+            cx.propagate();
+            return;
         }
         let Some(key) = self.target() else {
             return self.step(1, cx);
@@ -1060,18 +1187,33 @@ impl BoardView {
             self.menu = None;
         } else if self.app_menu_open {
             self.app_menu_open = false;
+        } else if self.add_open {
+            self.add_open = false;
+        } else if self.update_open {
+            self.update_open = false;
         } else if self.plan_open {
             self.plan_open = false;
         } else if self.stopped_open {
             self.stopped_open = false;
         } else if self.confirm.is_some() {
             self.drop_confirm();
+        } else if self.tools_pick.is_some() {
+            self.tools_pick = None;
         } else if self.cont_open.is_some() {
             self.cont_open = None;
         } else if !self.overlay.is_none() {
             self.close_overlay(window, cx);
-        } else if self.sel.is_some() {
+        } else if self.flags.is_some() {
+            // "Relaunch with these flags?" steps back to the flags, as its Cancel does; otherwise the drawer closes
+            // (with changes not applied, on a second press).
+            match &mut self.flags {
+                Some(d) if d.stage == crate::flagsui::Stage::Confirm => d.stage = crate::flagsui::Stage::Edit,
+                _ => self.flags_dismiss(cx),
+            }
+        } else if self.sel.is_some() && self.tab == 0 && self.main == Main::Board {
+            // Only where the selection shows: behind History or a terminal there is nothing to see close.
             self.sel = None;
+            self.sel_at = AppState::now();
         }
         cx.notify();
     }
@@ -1081,18 +1223,76 @@ impl BoardView {
     }
 
     /// Cmd+W closes what is on top: an open sheet or the palette, then the floating sheet, then the terminal tab
-    /// showing, and on the board the window.
+    /// showing, and on the board the window. With terminal tabs open, the board window closes (and Switchboard
+    /// quits) only on a second press: one Cmd+W too many after closing tabs must not take the rest with it.
     fn on_close_tab(&mut self, _: &CloseTab, window: &mut Window, cx: &mut Context<Self>) {
         if !self.overlay.is_none() {
             self.close_overlay(window, cx);
         } else if self.float.is_some() {
             self.close_float(cx);
             self.focus_tab = true;
-        } else if self.tab == 0 {
-            window.remove_window();
-        } else {
+        } else if self.tab != 0 {
             self.close_tab(self.tab - 1, cx);
+        } else if self.solo.is_some() {
+            window.remove_window();
+        } else if self.confirm.is_some() {
+            // A question is up: it is answered first.
+        } else if close_asks_again(self.tabs.len(), self.close_hint, AppState::now()) {
+            self.hint_close(cx);
+        } else {
+            self.close_hint = None;
+            if !self.ask_before_quit(window, cx) {
+                window.remove_window();
+            }
         }
+    }
+
+    /// Shows "Press again to close Switchboard" for as long as the second press counts.
+    fn hint_close(&mut self, cx: &mut Context<Self>) {
+        let at = AppState::now();
+        self.close_hint = Some(at);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs_f64(CLOSE_AGAIN_SECS)).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.close_hint == Some(at) {
+                    v.close_hint = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    /// The programs running in local terminals: this window's tabs and floating sheet, and terminal windows.
+    fn busy_locals(&self, cx: &App) -> Vec<String> {
+        let mut busy: Vec<String> =
+            self.tabs.iter().chain(self.float.iter()).filter_map(|t| t.read(cx).busy()).collect();
+        busy.extend(crate::place::windows_busy(cx));
+        busy
+    }
+
+    /// Quitting, or closing the board window (which quits): while a local terminal runs a program, this asks first
+    /// and says true. OK on that confirm quits.
+    pub fn ask_before_quit(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        self.ask_before_leaving(Leave::Quit, window, cx)
+    }
+
+    /// The same question before quitting (`Leave::Quit`) or restarting into an update (`Leave::Restart`).
+    fn ask_before_leaving(&mut self, leave: Leave, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let busy = self.busy_locals(cx);
+        let asked = if leave == Leave::Restart { restart_confirm(&busy) } else { quit_confirm(&busy) };
+        let Some(c) = asked else { return false };
+        self.confirm = Some((String::new(), c));
+        self.confirm_chrome = false;
+        self.confirm_here = false;
+        self.confirm_close = None;
+        self.confirm_leave = Some(leave);
+        // The keyboard leaves the terminal, so Enter and Esc answer the question instead of reaching the shell.
+        self.focus_tab = true;
+        window.activate_window();
+        cx.notify();
+        true
     }
 
     fn on_new_terminal(&mut self, _: &NewTerminal, window: &mut Window, cx: &mut Context<Self>) {
@@ -1252,6 +1452,8 @@ impl BoardView {
                 },
             ));
             self.confirm_chrome = false;
+            self.confirm_here = false;
+            self.confirm_leave = None;
             self.confirm_close = Some(tab);
             // The keyboard leaves the terminal, so Enter and Esc answer the question instead of reaching the shell.
             self.focus_tab = true;
@@ -1322,6 +1524,8 @@ impl BoardView {
 
     pub fn set_tab(&mut self, n: usize, cx: &mut Context<Self>) {
         self.tab = n.min(self.tabs.len());
+        // A tab in a folded group: its group opens, so the tab row shows where you are.
+        self.unfold_shown(cx);
         // Brought into sight even when it already showed (the arrows may have moved it out).
         self.tab_scrolled.set((usize::MAX, 0, 0));
         self.menu = None;
@@ -1363,6 +1567,10 @@ impl BoardView {
     /// while although it is the active window (and when it draws again).
     fn watch_frames(&mut self) {
         let now = std::time::Instant::now();
+        if self.frame_wanted.is_none() {
+            // for the frame watchdog's report: since when a change has been waiting
+            crate::wake::board_wants();
+        }
         let since = *self.frame_wanted.get_or_insert(now);
         let late = now.saturating_duration_since(since);
         if self.frame_active && !self.frame_late && late >= FRAME_LATE {
@@ -1379,6 +1587,7 @@ impl BoardView {
         }
         self.frame_wanted = None;
         self.frame_active = active;
+        crate::wake::board_drew();
     }
 
     /// Reopens the tabs that were open when Switchboard last closed. A chat that has since stopped or left the board
@@ -1488,15 +1697,20 @@ impl BoardView {
         cx.notify();
     }
 
-    /// Cmd+1..9: 1 the board, 2 to 8 the terminals in order, 9 the last tab.
+    /// Cmd+1..9: 1 the board, 2 to 8 the terminal tabs in the order the row shows them (a folded group's tabs are
+    /// not counted), 9 the last one.
     fn tab_key(&mut self, n: usize, cx: &mut Context<Self>) {
         if !self.overlay.is_none() && !matches!(self.overlay, Overlay::Archive { .. }) {
             return;
         }
-        let to = if n == 9 { self.tabs.len() } else { n - 1 };
-        if to <= self.tabs.len() {
-            self.overlay = Overlay::None;
-            self.set_tab(to, cx);
+        let (infos, groups) = self.tab_infos(cx);
+        let folded = self.folded(cx);
+        let Some(to) = crate::tabgroups::tab_for_key(&infos, &groups, &folded, n) else { return };
+        self.overlay = Overlay::None;
+        self.set_tab(to, cx);
+        // Cmd+1 is the board, also when History was what the first tab showed last.
+        if n == 1 {
+            self.view_board(cx);
         }
     }
 
@@ -1620,6 +1834,8 @@ impl BoardView {
                     self.confirm = Some((key, c));
                     self.confirm_chrome = false;
                     self.confirm_here = false;
+                    self.confirm_close = None;
+                    self.confirm_leave = None;
                 }
             }
             ActionId::Continue => {
@@ -1659,21 +1875,34 @@ impl BoardView {
     }
 
     /// Screenshot states for visual checks (SB_SHOT=inspector,palette,new,model[=more],archive,plan,confirm).
-    /// "Board", plus "keys" when single-letter shortcuts are safe (nothing open that takes typing).
-    fn key_context(&self) -> gpui::KeyContext {
+    /// What the board's plain keys depend on, as it stands now.
+    fn key_state(&self, cx: &App) -> KeyState {
+        let app = self.app.read(cx);
+        KeyState {
+            board: self.tab == 0 && self.main == Main::Board,
+            sheet: !matches!(self.overlay, Overlay::None | Overlay::Archive { .. }),
+            confirm: self.confirm.is_some(),
+            naming: self.ask_focus || self.group_edit.is_some() || self.chat_edit.is_some(),
+            field_focus: self.field_focus,
+            // The flags drawer and the empty board's address field (firstrun.rs).
+            drawer: self.flags.is_some() || self.type_open,
+            asking: self.setup.is_some() || app.trust_ask.is_some() || app.busy_ask.is_some(),
+            float: self.float.is_some(),
+            machines: !app.snap.machines.is_empty(),
+        }
+    }
+
+    /// "Board", plus "keys" while the arrows and Tab are the board's (nav_keys_ok), plus "letters" while its
+    /// single-letter shortcuts are safe: nothing in the window that takes typing (letter_keys_ok).
+    fn key_context(&self, cx: &App) -> gpui::KeyContext {
         let mut kc = gpui::KeyContext::new_with_defaults();
         kc.add("Board");
-        // History embeds the browser, whose search box takes letters: c, f, r, n... must type there, not act.
-        // The details card's fields too (askcard.rs).
-        if self.tab == 0
-            && self.main == Main::Board
-            && matches!(self.overlay, Overlay::None | Overlay::Archive { .. })
-            && self.confirm.is_none()
-            && !self.ask_focus
-            && self.group_edit.is_none()
-            && self.chat_edit.is_none()
-        {
+        let s = self.key_state(cx);
+        if nav_keys_ok(&s) {
             kc.add("keys");
+        }
+        if letter_keys_ok(&s) {
+            kc.add("letters");
         }
         kc
     }
@@ -2283,6 +2512,19 @@ impl Render for BoardView {
             self.rename_chat(k, window, cx);
         }
         self.win_w = f32::from(window.viewport_size().width);
+        // A text field anywhere in this window has the keyboard: single letters type there (key_context). This reads
+        // the frame drawn last, so a field made and focused in one step is looked at again once it has been drawn.
+        // Before the first frame there is none to read, and GPUI panics when asked (its key tree is empty).
+        let drawn = std::mem::replace(&mut self.drawn_once, true);
+        self.field_focus = drawn && window.context_stack().iter().any(|c| c.contains("Input"));
+        let focused = window.focused(cx).map(|f| f.downgrade());
+        if focused != self.focus_seen {
+            self.focus_seen = focused;
+            let me = cx.weak_entity();
+            window.on_next_frame(move |_, cx| {
+                let _ = me.update(cx, |_, cx| cx.notify());
+            });
+        }
         let row_w = f32::from(self.tab_scroll.bounds().size.width).round();
         if row_w != self.tab_row_w {
             self.tab_row_w = row_w;
@@ -2290,6 +2532,9 @@ impl Render for BoardView {
         }
         // Starred tabs sit at the left; a star changed anywhere (here, the iPhone) moves its tab.
         self.order_tabs(cx);
+        // The tab that shows is never hidden in a folded group (its chat joined one elsewhere, or the tab beside it
+        // closed): the group opens.
+        self.unfold_shown(cx);
         if !self.tabs.is_empty() && !self.live_ticking {
             self.live_ticking = true;
             cx.spawn(async move |this, cx| {
@@ -2416,7 +2661,7 @@ impl Render for BoardView {
 
         let mut root = div()
             .id("root")
-            .key_context(self.key_context())
+            .key_context(self.key_context(cx))
             .track_focus(&self.focus)
             .on_action(cx.listener(Self::on_next))
             .on_action(cx.listener(Self::on_prev))
@@ -2592,6 +2837,11 @@ impl Render for BoardView {
         }
         if let Some((_, conf)) = &self.confirm {
             root = root.child(self.confirm_box(&c, conf));
+        }
+        if self.close_hint.is_some() {
+            root = root.child(self.hint_el(&c, "Press again to close Switchboard"));
+        } else if self.flags_hint.is_some() && self.flags.is_some() {
+            root = root.child(self.hint_el(&c, "Press Esc again to discard your changes"));
         }
         root = root.children(self.rename_sheet(&c));
         if let Some(ask) = &c.app.busy_ask {
@@ -2843,16 +3093,36 @@ impl BoardView {
         self.confirm_chrome = false;
         self.confirm_here = false;
         self.confirm_close = None;
+        self.confirm_leave = None;
         self.focus_tab = true;
     }
 
-    /// The confirm's OK: Start fresh, the card's fix (restart with Chrome), or closing a busy local terminal.
+    /// What the confirm showing is for, when it is about no one chat. A confirm for a chat (its key is not empty)
+    /// never counts, whatever an earlier question left behind.
+    fn leave_asked(&self) -> Option<&Leave> {
+        self.confirm_leave.as_ref().filter(|_| self.confirm.as_ref().is_some_and(|(k, _)| k.is_empty()))
+    }
+
+    /// The confirm's OK: Start fresh, the card's fix (restart with Chrome), closing a busy local terminal, closing
+    /// a tab group whose chats stop, or quitting while local terminals run programs.
     fn confirm_ok(&mut self, cx: &mut Context<Self>) {
+        let leave = self.leave_asked().cloned();
+        self.confirm_leave = None;
         if let Some(tab) = self.confirm_close.take() {
             self.confirm = None;
             self.focus_tab = true;
             if let Some(i) = self.tabs.iter().position(|t| *t == tab) {
                 self.force_close_tab(i, cx);
+            }
+        } else if let Some(leave) = leave {
+            self.confirm = None;
+            self.confirm_chrome = false;
+            self.confirm_here = false;
+            self.focus_tab = true;
+            match leave {
+                Leave::Quit => cx.quit(),
+                Leave::Restart => self.app.update(cx, |s, cx| s.restart_now(cx)),
+                Leave::Group(gid) => self.close_group_now(&gid, cx),
             }
         } else if let Some((key, _)) = self.confirm.take() {
             if std::mem::take(&mut self.confirm_chrome) {
@@ -2937,7 +3207,9 @@ impl BoardView {
                                 ui::primary_btn(&t, "cf-ok", 36.)
                                     .px(px(14.))
                                     .child(ui::icon(
-                                        if self.confirm_close.is_some() {
+                                        if matches!(self.leave_asked(), Some(Leave::Quit | Leave::Restart)) {
+                                            "out"
+                                        } else if self.confirm_close.is_some() || self.leave_asked().is_some() {
                                             "x"
                                         } else if self.confirm_chrome {
                                             "relaunch"
@@ -2953,6 +3225,26 @@ impl BoardView {
                             ),
                     ),
             )
+    }
+
+    /// "Press again to close Switchboard", under the header while the second Cmd/Ctrl+W counts.
+    fn hint_el(&self, c: &Ctx, text: &'static str) -> impl IntoElement {
+        let t = c.t;
+        div().absolute().top(px(ui::header() + 14.)).left_0().right_0().flex().justify_center().child(
+            div()
+                .h(px(34.))
+                .px(px(14.))
+                .flex()
+                .items_center()
+                .rounded(px(ui::R_CARD))
+                .border_1()
+                .border_color(t.line2)
+                .bg(t.panel2)
+                .shadow(t.drop())
+                .text_size(px(13.))
+                .text_color(t.ink)
+                .child(text),
+        )
     }
 
     /// Bottom right: running jobs, then toasts.
@@ -3419,6 +3711,84 @@ pub fn grid_row(label: Option<AnyElement>, cells: Vec<AnyElement>) -> gpui::Div 
     row
 }
 
+/// What the board's plain keys depend on (BoardView::key_state).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct KeyState {
+    /// The first tab shows, and it shows the board (not History).
+    board: bool,
+    /// The palette or a sheet is up (the archive list is not one: the keys move along its rows).
+    sheet: bool,
+    confirm: bool,
+    /// A name or a "Needs you" answer is being typed (a group's chip, a chat's name, the card's fields).
+    naming: bool,
+    /// A text field somewhere in the window has the keyboard.
+    field_focus: bool,
+    /// A drawer with fields is open: the flags drawer, the empty board's address field.
+    drawer: bool,
+    /// A question is up over the board (trust, a busy chat, server setup).
+    asking: bool,
+    /// A terminal floats over the board.
+    float: bool,
+    /// There is at least one machine (none: the setup screen shows, and no shortcut has anything to act on).
+    machines: bool,
+}
+
+/// The arrows, Tab, Shift+Enter and Alt+Enter are the board's.
+pub(crate) fn nav_keys_ok(s: &KeyState) -> bool {
+    s.board && !s.sheet && !s.confirm && !s.naming
+}
+
+/// The single-letter shortcuts (j k h l f r c n) are live: the board has the keys and nothing anywhere in the window
+/// could be taking the letters as text. A letter that acts instead of typing can resume a chat mid-word.
+pub(crate) fn letter_keys_ok(s: &KeyState) -> bool {
+    nav_keys_ok(s) && !s.field_focus && !s.drawer && !s.asking && !s.float && s.machines
+}
+
+/// A finished job's new chat: this window selects it by itself only when it is idle on the board and its selection
+/// was not changed by hand after the job began.
+fn job_selects(idle_on_board: bool, sel_at: f64, started: f64) -> bool {
+    idle_on_board && sel_at <= started
+}
+
+/// The selected chat is on the board no more, by the server's own word (a saved snapshot may just be behind), said
+/// twice: a row can drop out of one snapshot and be back in the next, so one that was there a snapshot ago stays.
+fn sel_gone(live: bool, session: bool, replaced: bool, before: bool) -> bool {
+    live && !session && !replaced && !before
+}
+
+/// How long "Press again to close Switchboard" stays, and the second press counts.
+pub(crate) const CLOSE_AGAIN_SECS: f64 = 2.0;
+
+/// Cmd/Ctrl+W on the board: with terminal tabs open it only says "Press again", unless it said so within the last
+/// CLOSE_AGAIN_SECS.
+fn close_asks_again(tabs: usize, hinted: Option<f64>, now: f64) -> bool {
+    tabs > 0 && !hinted.is_some_and(|at| now >= at && now - at <= CLOSE_AGAIN_SECS)
+}
+
+/// Asked before quitting: the programs local terminals are running (none: no question).
+fn quit_confirm(busy: &[String]) -> Option<Confirm> {
+    let body = match busy {
+        [] => return None,
+        [one] => format!("{one} is still running in a terminal. Quitting ends it."),
+        [a, b] => format!("{a} and {b} are still running in terminals. Quitting ends them."),
+        [a, b, rest @ ..] => {
+            format!("{a}, {b} and {} more are still running in terminals. Quitting ends them.", rest.len())
+        }
+    };
+    Some(Confirm { title: "Quit Switchboard?".into(), body, ok: "Quit".into(), cancel: "Cancel".into() })
+}
+
+/// Asked before restarting into an update: the same, in its words.
+fn restart_confirm(busy: &[String]) -> Option<Confirm> {
+    let c = quit_confirm(busy)?;
+    Some(Confirm {
+        title: "Restart Switchboard?".into(),
+        body: c.body.replace("Quitting ends", "Restarting to update ends"),
+        ok: "Restart".into(),
+        cancel: c.cancel,
+    })
+}
+
 /// A frame asked for and not drawn for this long, in the active window, is worth a line in the log.
 const FRAME_LATE: std::time::Duration = std::time::Duration::from_secs(5);
 
@@ -3495,7 +3865,97 @@ impl Debounce {
 
 #[cfg(test)]
 mod tests {
-    use super::{Debounce, Reopen, keeps_tab, reopen, saved_keys};
+    use super::{
+        Debounce, KeyState, Reopen, close_asks_again, job_selects, keeps_tab, letter_keys_ok, nav_keys_ok,
+        quit_confirm, reopen, restart_confirm, saved_keys, sel_gone,
+    };
+
+    /// The board, idle: every plain key is live.
+    fn idle() -> KeyState {
+        KeyState { board: true, machines: true, ..Default::default() }
+    }
+
+    #[test]
+    fn letters_act_only_when_nothing_could_be_typing() {
+        assert!(nav_keys_ok(&idle()) && letter_keys_ok(&idle()));
+        // each of these alone turns the letters off
+        let typing = [
+            KeyState { field_focus: true, ..idle() },
+            KeyState { drawer: true, ..idle() },
+            KeyState { naming: true, ..idle() },
+            KeyState { asking: true, ..idle() },
+            KeyState { float: true, ..idle() },
+            KeyState { sheet: true, ..idle() },
+            KeyState { confirm: true, ..idle() },
+            KeyState { board: false, ..idle() },
+            KeyState { machines: false, ..idle() },
+        ];
+        for s in typing {
+            assert!(!letter_keys_ok(&s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn tab_and_the_arrows_stay_on_the_setup_screen_and_beside_a_drawer() {
+        // no machines yet: Tab still walks the setup screen's buttons, though "n" must type in its address field
+        let setup = KeyState { machines: false, drawer: true, field_focus: true, ..idle() };
+        assert!(nav_keys_ok(&setup) && !letter_keys_ok(&setup));
+        assert!(nav_keys_ok(&KeyState { drawer: true, ..idle() }));
+        for s in [
+            KeyState { board: false, ..idle() },
+            KeyState { sheet: true, ..idle() },
+            KeyState { confirm: true, ..idle() },
+            KeyState { naming: true, ..idle() },
+        ] {
+            assert!(!nav_keys_ok(&s), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn a_finished_job_selects_its_chat_only_on_an_idle_board_left_alone() {
+        assert!(job_selects(true, 100., 120.), "selected before the job began: the new chat takes over");
+        assert!(job_selects(true, 0., 120.), "nothing ever selected");
+        assert!(!job_selects(true, 130., 120.), "another chat picked while the job ran");
+        assert!(!job_selects(false, 100., 120.), "typing, in a terminal tab, or under a sheet");
+    }
+
+    #[test]
+    fn a_selection_goes_when_the_server_says_its_chat_is_gone() {
+        assert!(sel_gone(true, false, false, false));
+        assert!(!sel_gone(true, true, false, false));
+        assert!(!sel_gone(true, false, true, false), "replaced: its row still opens the newer chat");
+        assert!(!sel_gone(false, false, false, false), "a saved snapshot may not have it yet");
+        assert!(!sel_gone(true, false, false, true), "missing from one snapshot only: it may be back in the next");
+        assert!(!sel_gone(true, true, false, true));
+    }
+
+    #[test]
+    fn closing_the_board_with_tabs_open_takes_a_second_press() {
+        assert!(!close_asks_again(0, None, 50.), "no tabs: the window closes at once, as before");
+        assert!(close_asks_again(3, None, 50.));
+        assert!(!close_asks_again(3, Some(49.), 50.), "pressed again within two seconds");
+        assert!(close_asks_again(3, Some(47.), 50.), "too late: it says so again");
+        assert!(close_asks_again(3, Some(60.), 50.), "the clock went back");
+    }
+
+    #[test]
+    fn quitting_asks_only_while_a_local_terminal_runs_a_program() {
+        assert!(quit_confirm(&[]).is_none());
+        assert!(restart_confirm(&[]).is_none(), "nothing runs: the update restarts without a question");
+        let r = restart_confirm(&["cargo".into()]).unwrap();
+        assert_eq!(r.title, "Restart Switchboard?");
+        assert_eq!(r.body, "cargo is still running in a terminal. Restarting to update ends it.");
+        assert_eq!((r.ok.as_str(), r.cancel.as_str()), ("Restart", "Cancel"));
+        let r = restart_confirm(&["cargo".into(), "vim".into()]).unwrap();
+        assert_eq!(r.body, "cargo and vim are still running in terminals. Restarting to update ends them.");
+        let one = quit_confirm(&["cargo".into()]).unwrap();
+        assert_eq!(one.body, "cargo is still running in a terminal. Quitting ends it.");
+        assert_eq!((one.ok.as_str(), one.cancel.as_str()), ("Quit", "Cancel"));
+        let two = quit_confirm(&["cargo".into(), "vim".into()]).unwrap();
+        assert_eq!(two.body, "cargo and vim are still running in terminals. Quitting ends them.");
+        let four = quit_confirm(&["cargo".into(), "vim".into(), "top".into(), "ssh".into()]).unwrap();
+        assert_eq!(four.body, "cargo, vim and 2 more are still running in terminals. Quitting ends them.");
+    }
 
     #[test]
     fn saved_tabs_reopen_from_the_snapshot_without_waiting_for_the_server() {

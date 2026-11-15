@@ -147,6 +147,13 @@ class Terms:
             return self._need('offline', f"{label} is offline, so its terminal can't open. Try again once {label} is back.", about)
         if s is None and bg is None:
             raise NotFound("That chat isn't on the list anymore.")
+        if bg is None and not self._open_somewhere(s):
+            # A chat that was resumed or relaunched lives on under a new id: the same conversation. A tab still
+            # holding the old id gets the new one's terminal; resuming the old copy would leave two of them running.
+            # (Start fresh and Continue make a new conversation: there the old chat is still its own.)
+            nxt = self._successor(name, s)
+            if nxt:
+                name, label, s = nxt
         if bg is None:
             kind, status = s.get('kind'), s.get('status')
             if kind == 'background' and s.get('bg_id') and status not in GONE:
@@ -158,8 +165,36 @@ class Terms:
         if not BG_RE.fullmatch(bg or ''):
             return self._need('resume', "This chat isn't running. Resume it to open its terminal.", about)
         t = mint(self.key(), name, bg, self.clock())
-        return {'ok': True, 'ws': f'ws://{ws_host(host)}:{self.hub_port}/term?t={t}', 'bg': bg,
-                'title': (s or {}).get('title'), 'machine': name, 'label': label}
+        out = {'ok': True, 'ws': f'ws://{ws_host(host)}:{self.hub_port}/term?t={t}', 'bg': bg,
+               'title': (s or {}).get('title'), 'machine': name, 'label': label}
+        if s is not None and isinstance(sid, str) and s.get('sid') != sid:
+            out['sid'] = s.get('sid')  # not the chat that was asked for: the one that carries on from it
+        return out
+
+    @staticmethod
+    def _open_somewhere(s):
+        return s.get('kind') in ('background', 'interactive') and s.get('status') not in GONE and \
+            (s.get('kind') == 'interactive' or bool(s.get('bg_id')))
+
+    def _successor(self, name, s):
+        """(machine, label, row) of the running background chat `s` was resumed as, following its "replaced by" marks
+        a few steps; None when there is none, or it is not running, or its machine is offline."""
+        snaps = {m['name']: m for m in self.fleet.snapshot()['machines']}
+        seen = {(name, s.get('sid'))}
+        for _ in range(6):
+            by = s.get('by') if isinstance(s.get('by'), dict) and s.get('how') == 'resumed' else {}
+            nsid, nname = by.get('sid'), by.get('machine') or name
+            if not isinstance(nsid, str) or not isinstance(nname, str) or nname not in snaps or (nname, nsid) in seen:
+                return None
+            seen.add((nname, nsid))
+            m = snaps[nname]
+            row = next((c for c in list(m.get('sessions') or []) + list(m.get('replaced') or []) if c.get('sid') == nsid), None)
+            if row is None:
+                return None
+            name, s = nname, row
+            if s.get('kind') == 'background' and s.get('bg_id') and s.get('status') not in GONE:
+                return (name, m.get('label') or name, s) if m.get('online') is not False and BG_RE.fullmatch(str(s['bg_id'])) else None
+        return None
 
     @staticmethod
     def _need(need, error, about):

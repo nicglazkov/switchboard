@@ -97,7 +97,7 @@ impl BoardView {
             "Browse every session",
             Some("Search, threads, summaries".into()),
             PalIcon::Icon("search".into()),
-            Some(&ui::mod_cap("B")),
+            Some(&ui::term_cap("B")),
             PalRun::Browse,
         ));
         out.push(row(

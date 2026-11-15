@@ -21,17 +21,17 @@ Switchboard is built to run from the keyboard. On Windows and Linux, read ++ctrl
 | ++cmd+o++ | ++ctrl+o++ | Find a chat and open it in a terminal |
 | ++cmd+b++ | ++ctrl+b++ | History |
 | ++cmd+1++ | ++ctrl+1++ | The board |
-| ++cmd+2++ to ++cmd+8++ | ++ctrl+2++ to ++ctrl+8++ | Terminal tabs, in order |
-| ++cmd+9++ | ++ctrl+9++ | The last tab |
-| ++cmd+w++ | ++ctrl+w++ | Close the top thing: a sheet, a floating terminal, a tab, then the window |
+| ++cmd+2++ to ++cmd+8++ | ++ctrl+2++ to ++ctrl+8++ | Terminal tabs, in the order the tab row shows them (a folded group's tabs are skipped) |
+| ++cmd+9++ | ++ctrl+9++ | The last tab in the row |
+| ++cmd+w++ | ++ctrl+w++ | Close the top thing: a sheet, a floating terminal, a tab, then the window. With terminal tabs open, the window closes on a second press |
 | ++cmd+shift+l++ | ++ctrl+shift+l++ | Switch light and dark |
 | ++cmd+comma++ | ++ctrl+comma++ | Settings |
-| ++cmd+q++ | ++ctrl+q++ | Quit |
+| ++cmd+q++ | ++ctrl+q++ | Quit. It asks first while one of your own shells is running a program |
 | ++esc++ | ++esc++ | Close what's on top, one layer at a time |
 
 ## On the board
 
-These work when you aren't typing in a field.
+The letters work when nothing is open over the board and you aren't typing in a field.
 
 | Key | What it does |
 |---|---|

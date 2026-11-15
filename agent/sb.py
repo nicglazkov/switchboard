@@ -15,7 +15,7 @@ GUARD_CTX = 150_000
 GUARD_IDLE = 3600
 RESEND_WINDOW = 900
 PENDING_TTL = 1800
-HANDOFF_WAIT = 90
+HANDOFF_WAIT = 105  # the new chat waits this long for the summary; its SessionStart hook is given 120 s
 TAIL_BYTES = 4 * 1024 * 1024
 
 IS_WIN = os.name == 'nt'
@@ -46,6 +46,25 @@ def log(msg):
             f.write(f'{_dt.datetime.now().isoformat(timespec="seconds")} {msg}\n')
     except OSError:
         pass
+
+
+def log_once(key, msg, every=3600):
+    """log(), at most once per `every` seconds for one key: for a fault met on every poll or every prompt."""
+    try:
+        p = paths()['state'] / 'logged.json'
+        d = _jget(p)
+        d = d if isinstance(d, dict) else {}
+        now = time.time()
+        last = d.get(key)
+        if isinstance(last, (int, float)) and 0 <= now - last < every:
+            return
+        d = {k: v for k, v in d.items() if isinstance(v, (int, float)) and now - v < 7 * 86400}
+        d[key] = now
+        p.parent.mkdir(parents=True, exist_ok=True)
+        _jput(p, d)
+    except Exception:
+        pass
+    log(msg)
 
 
 def _ts(s):
@@ -87,8 +106,8 @@ def transcript_stats(path, nbytes=TAIL_BYTES):
             d = json.loads(raw)
         except ValueError:
             continue
-        if not isinstance(d, dict):
-            continue
+        if not isinstance(d, dict) or not isinstance(d.get('message') or {}, dict):
+            continue  # not a record Claude Code writes: one odd line never costs the chat its row
         if d.get('type') in ('user', 'assistant', 'system') and d.get('timestamp') and not d.get('isSidechain'):
             # the chat's own last word: Claude Code keeps appending bookkeeping lines (no timestamp) to idle chats
             t = _ts(d['timestamp'])
@@ -113,7 +132,7 @@ def transcript_stats(path, nbytes=TAIL_BYTES):
         if d.get('type') == 'custom-title' and 'customTitle' in d:  # an empty one clears the name (Claude Code reads it so too)
             out['custom_title'] = d.get('customTitle') or None
         if d.get('type') == 'user' and not d.get('isSidechain') and _is_real_user(d):
-            t = _text_of((d.get('message') or {}).get('content')).strip()
+            t = _text_of(_msg(d).get('content')).strip()
             if t and not t.startswith('<'):
                 out['last_prompt'] = t[:300]
         if d.get('type') == 'bridge-session':
@@ -134,7 +153,8 @@ def transcript_stats(path, nbytes=TAIL_BYTES):
         if ctx:
             out['ctx_tokens'] = ctx
         out['last_assistant_ts'] = _ts(d.get('timestamp')) or out['last_assistant_ts']
-        out['model'] = m.get('model') or out['model']
+        if isinstance(m.get('model'), str) and m['model'] and not m['model'].startswith('<'):
+            out['model'] = m['model']  # never '<synthetic>': Claude Code writes that on its own error records
         out['effort'] = d.get('effort') if isinstance(d.get('effort'), str) else out['effort']
         out['speed'] = u.get('speed') or out['speed']
         if not out['chrome_used'] and b'mcp__claude-in-chrome__' in raw and CHROME_RE.search(raw):
@@ -148,10 +168,18 @@ import shlex
 DIRECTIVE = re.compile(r"\b(remember|always|never|don'?t|do not|from now on|make sure|rule|prefer|i want|i don'?t want)\b", re.I)
 
 
+def _msg(d):
+    """A transcript record's message, always as an object (a record in a shape nobody knows reads as an empty one)."""
+    m = d.get('message') if isinstance(d, dict) else None
+    return m if isinstance(m, dict) else {}
+
+
 def _text_of(content):
     if isinstance(content, str):
         return content
-    return '\n'.join(b.get('text', '') for b in content or [] if isinstance(b, dict) and b.get('type') == 'text')
+    if not isinstance(content, list):
+        return ''
+    return '\n'.join(b['text'] for b in content if isinstance(b, dict) and b.get('type') == 'text' and isinstance(b.get('text'), str))
 
 
 def _is_real_user(d):
@@ -161,7 +189,7 @@ def _is_real_user(d):
     kind = o.get('kind') if isinstance(o, dict) else o
     if kind not in (None, 'human'):
         return False
-    c = (d.get('message') or {}).get('content')
+    c = _msg(d).get('content')
     if isinstance(c, list) and any(isinstance(b, dict) and b.get('type') == 'tool_result' for b in c):
         return False
     return True
@@ -177,13 +205,15 @@ def condense(path, max_chars=200_000):
                 d = json.loads(raw)
             except ValueError:
                 continue
+            if not isinstance(d, dict) or not isinstance(d.get('message') or {}, dict):
+                continue
             t = d.get('type')
             if t == 'ai-title':
                 title = d.get('aiTitle') or d.get('title') or title
                 continue
             if t not in ('user', 'assistant') or d.get('isSidechain'):
                 continue
-            c = (d.get('message') or {}).get('content')
+            c = _msg(d).get('content')
             if t == 'user':
                 if not _is_real_user(d):
                     continue
@@ -202,15 +232,15 @@ def condense(path, max_chars=200_000):
                     if sent and len(sent) < 600 and DIRECTIVE.search(sent):
                         directives.append(sent)
             else:
-                for b in c or []:
+                for b in c if isinstance(c, list) else []:
                     if not isinstance(b, dict):
                         continue
-                    if b.get('type') == 'text' and b.get('text', '').strip():
+                    if b.get('type') == 'text' and isinstance(b.get('text'), str) and b['text'].strip():
                         lines.append(f'CLAUDE: {b["text"].strip()}')
                     elif b.get('type') == 'tool_use':
-                        i = b.get('input') or {}
+                        i = b.get('input') if isinstance(b.get('input'), dict) else {}
                         p = i.get('file_path') or i.get('path')
-                        if p:
+                        if isinstance(p, str) and p:
                             files.add(p)
                         arg = p or i.get('command') or i.get('description') or i.get('prompt') or ''
                         lines.append(f'  [tool {b.get("name")}: {str(arg)[:160]}]')
@@ -257,7 +287,10 @@ def handoff_path(session_id):
     return paths()['handoffs'] / f'{session_id}.md'
 
 
-def handoff_is_fresh(session_id, transcript_path, last_reply=None):
+FALLBACK_MARK = '> Automatic summary failed; this is the raw fallback.'
+
+
+def handoff_is_current(session_id, transcript_path, last_reply=None):
     """Written after the session's last reply. Bookkeeping lines (claude stop, cost, last-prompt) touch the
     transcript without new work, so its mtime alone would call for a needless Opus run."""
     try:
@@ -266,6 +299,21 @@ def handoff_is_fresh(session_id, transcript_path, last_reply=None):
     except OSError:
         return False
     return made >= last
+
+
+def handoff_is_fallback(session_id):
+    """The note is the raw fallback written when the summary run failed (rate limit, timeout, offline)."""
+    try:
+        with open(handoff_path(session_id), 'rb') as f:
+            return FALLBACK_MARK.encode() in f.read(1024)
+    except OSError:
+        return False
+
+
+def handoff_is_fresh(session_id, transcript_path, last_reply=None):
+    """A real summary of the chat as it stands, so nothing has to be written again. A fallback note never counts:
+    it is used when nothing better can be had, and the next Start fresh tries the summary again."""
+    return handoff_is_current(session_id, transcript_path, last_reply) and not handoff_is_fallback(session_id)
 
 
 def _claude_exe():
@@ -296,12 +344,67 @@ def claude_env(internal=True, **extra):
     return env
 
 
+def _is_shim(exe):
+    return str(exe).lower().endswith(('.cmd', '.bat'))
+
+
+def prompt_file_ok(runner=None):
+    """This Claude Code reads --system-prompt-file: its help names it (2.1 writes it "--system-prompt[-file]").
+    Asked once per Claude Code build."""
+    exe = _claude_exe()
+    try:
+        mt = os.stat(exe).st_mtime
+    except OSError:
+        return False
+    p = paths()['state'] / 'prompt_file.json'
+    d = _jget(p) or {}
+    if d.get('exe') == exe and d.get('mtime') == mt and isinstance(d.get('ok'), bool):
+        return d['ok']
+    try:
+        text = (runner or (lambda: run_claude_cmd(['--help'], timeout=20)))() or ''
+    except Exception:
+        return False
+    if '--model' not in text:  # not a help page
+        return False
+    ok = '--system-prompt-file' in text or '--system-prompt[-file]' in text
+    try:
+        _jput(p, {'exe': exe, 'mtime': mt, 'ok': ok})
+    except OSError:
+        pass
+    return ok
+
+
+def prompt_args(exe, system_prompt, by_file=None):
+    """How a system prompt reaches claude: as an argument, or from a file when claude is a .cmd or .bat shim (cmd.exe
+    cannot take its quotes and newlines) and this Claude Code reads --system-prompt-file. (args, the file to delete
+    afterwards or None)."""
+    if not _is_shim(exe) or not CMD_UNSAFE_RE.search(system_prompt):
+        return ['--system-prompt', system_prompt], None
+    if not (prompt_file_ok() if by_file is None else by_file):
+        return ['--system-prompt', system_prompt], None  # cmd_safe refuses it and says why
+    d = SB_HOME / 'tmp'
+    d.mkdir(parents=True, exist_ok=True)
+    f = d / f'prompt-{os.getpid()}-{os.urandom(4).hex()}.txt'
+    fd = os.open(f, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w', encoding='utf-8') as fh:
+        fh.write(system_prompt)
+    return ['--system-prompt-file', str(f)], f
+
+
 def run_claude_opus(stdin_text, system_prompt, cwd=None, model='opus', timeout=600):
     env = claude_env()
-    r = run_tree(cmd_safe([_claude_exe(), '-p', '--model', model, '--no-session-persistence', '--tools', '',
-                           '--setting-sources', '', '--strict-mcp-config', '--system-prompt', system_prompt,
-                           '--output-format', 'json']),
-                 stdin_text, timeout, env=env, cwd=cwd or str(Path.home()))
+    exe = _claude_exe()
+    how, tmp = prompt_args(exe, system_prompt)
+    try:
+        r = run_tree(cmd_safe([exe, '-p', '--model', model, '--no-session-persistence', '--tools', '',
+                               '--setting-sources', '', '--strict-mcp-config', *how, '--output-format', 'json']),
+                     stdin_text, timeout, env=env, cwd=cwd or str(Path.home()))
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     d = json.loads(r.stdout or '{}')
     if r.returncode != 0 or d.get('is_error') or not d.get('result'):
         raise RuntimeError(f'claude -p failed rc={r.returncode} err={r.stderr[-300:]!r} res={str(d.get("result"))[:200]!r}')
@@ -312,27 +415,185 @@ HANDOFF_LOCK_TTL = 600
 
 
 def handoff_lock(session_id, now):
-    """Claim the right to generate this session's handoff; False while another run holds a fresh claim."""
-    p = paths()['handoffs'] / f'{session_id}.generating'
-    try:
-        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        try:
-            if now - float(p.read_text() or 0) <= HANDOFF_LOCK_TTL:
-                return False
-        except (OSError, ValueError):
-            pass
-        _jput_text(p, str(now))
+    """Claim the right to generate this session's handoff; False while another run holds a live claim. The claim is
+    made for the run that writes the note (generate_handoff puts its name on it), often another process."""
+    return lock_take(paths()['handoffs'] / f'{session_id}.generating', now, HANDOFF_LOCK_TTL, mine=False)
+
+
+SCAN_CHUNK = 8 * 1024 * 1024
+
+
+def _file_has(path, needle, chunk=None):
+    """True when the bytes are somewhere in the file, read a piece at a time: transcripts reach hundreds of MB."""
+    chunk = chunk or SCAN_CHUNK
+    if not needle:
         return True
-    with os.fdopen(fd, 'w') as f:
-        f.write(str(now))
-    return True
+    keep = b''
+    with open(path, 'rb') as f:
+        while True:
+            b = f.read(chunk)
+            if not b:
+                return False
+            if needle in keep + b:
+                return True
+            keep = (keep + b)[-(len(needle) - 1):] if len(needle) > 1 else b''
+
+
+def _replace(tmp, p):
+    """os.replace, and no temp file left behind when it fails (Windows refuses while another process has p open)."""
+    try:
+        os.replace(tmp, p)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
 
 
 def _jput_text(p, text):
-    tmp = p.with_name(f'{p.name}.{os.getpid()}.tmp')
+    tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     tmp.write_text(text, encoding='utf-8')
-    os.replace(tmp, p)
+    _replace(tmp, p)
+
+
+# ---- claim files. One small file says who is doing a job only one process may do (the launch queue, a chat's
+# handoff, the machine's Haiku slot): {"pid", "ts"}. A claim holds while it is younger than its ttl and, when it names
+# a process, while that process is alive, so a holder that was killed (logout, a crash, antivirus) is replaced at once
+# instead of blocking everyone for the whole ttl.
+def _lock_read(p):
+    """A claim file as {'pid', 'ts', 'raw'}; None when it is gone. An older helper wrote only the time. A file just
+    created is still empty (its owner has not written yet): its age on disk counts then ('empty')."""
+    try:
+        raw = p.read_text(encoding='utf-8', errors='replace').strip()  # bytes that are no text: a stale claim, not a crash
+        if not raw:
+            return {'pid': None, 'ts': p.stat().st_mtime, 'raw': raw, 'empty': True}
+    except OSError:
+        return None
+    try:
+        d = json.loads(raw)
+    except ValueError:
+        d = None
+    pid, ts = (d.get('pid'), d.get('ts')) if isinstance(d, dict) else (None, d)
+    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+    return {'pid': int(pid) if num(pid) and pid > 0 else None, 'ts': float(ts) if num(ts) else 0.0, 'raw': raw}
+
+
+def _lock_live(cur, now, ttl):
+    age = (time.time() if cur.get('empty') else now) - cur['ts']
+    return age <= ttl and (cur['pid'] is None or _pid_alive(cur['pid']))
+
+
+TAKEOVER_TTL = 30  # replacing a dead claim takes microseconds; a taker that died in the middle is passed after this
+
+
+def lock_take(p, now, ttl, mine=True):
+    """Claim the file p: True when the claim is the caller's now. mine=False claims it for a process about to be
+    started (lock_own puts its name on it), so until then only the ttl guards it. A dead claim is replaced by one
+    taker at a time (a second claim file, p.takeover, held for that instant), so two takers never both get it."""
+    body = json.dumps({'pid': os.getpid() if mine else None, 'ts': now})
+    for _ in range(3):
+        try:
+            fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        except FileExistsError:
+            cur = _lock_read(p)
+            if cur is None:
+                continue  # released this instant: try again
+            if _lock_live(cur, now, ttl):
+                return False
+            over = p.with_name(p.name + '.takeover')
+            try:
+                os.close(os.open(over, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600))
+            except FileExistsError:
+                try:
+                    if time.time() - over.stat().st_mtime > TAKEOVER_TTL:
+                        over.unlink()
+                        continue
+                except OSError:
+                    continue
+                return False  # another taker is at it: the claim is theirs
+            except OSError:
+                return False
+            try:
+                cur = _lock_read(p)  # again, now that no other taker can be here
+                if cur is not None and _lock_live(cur, now, ttl):
+                    return False
+                _jput_text(p, body)
+                return True
+            except OSError:
+                return False
+            finally:
+                try:
+                    over.unlink()
+                except OSError:
+                    pass
+        except OSError:
+            return False
+        with os.fdopen(fd, 'w') as f:
+            f.write(body)
+        return True
+    return False
+
+
+def lock_own(p, now):
+    """Put this process's name on a claim (made for it by lock_take(mine=False), or its own, to say it is still at
+    work)."""
+    try:
+        _jput_text(p, json.dumps({'pid': os.getpid(), 'ts': now}))
+    except OSError:
+        pass
+
+
+def lock_drop(p):
+    """Release a claim, unless another process took it over in the meantime."""
+    cur = _lock_read(p)
+    if cur is None or cur['pid'] not in (None, os.getpid()):
+        return
+    try:
+        p.unlink()
+    except OSError:
+        pass
+
+
+UPDATE_LOCK_TTL, UPDATE_LOCK_WAIT = 10, 1.0
+
+
+class held:
+    """`with held(p):` holds the claim file beside p (p.lock) while a read-change-write of p runs, so a hook and a
+    list that change the same file at the same moment both keep their change. A claim that cannot be had within
+    `wait` seconds is not waited for any longer (a hook must never hang): the block runs anyway, as it did before
+    there was a lock."""
+
+    def __init__(self, p, wait=UPDATE_LOCK_WAIT):
+        self.lock, self.wait, self.got = p.with_name(p.name + '.lock'), wait, False
+
+    def __enter__(self):
+        deadline = time.time() + self.wait
+        while True:
+            try:
+                self.got = lock_take(self.lock, time.time(), UPDATE_LOCK_TTL)
+            except OSError:
+                self.got = False
+            if self.got or time.time() >= deadline:
+                return self
+            time.sleep(0.01)
+
+    def __exit__(self, *exc):
+        if self.got:
+            lock_drop(self.lock)
+        return False
+
+
+def locked_update(p, change, wait=UPDATE_LOCK_WAIT):
+    """Read the JSON object in p, let change(d) return what to write (None: leave the file alone) and write it, all
+    under the file's claim (see held). Returns what change returned."""
+    with held(p, wait):
+        d = _jget(p)
+        new = change(d if isinstance(d, dict) else {})
+        if new is not None:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            _jput(p, new)
+        return new
 
 
 def start_handoff(transcript_path, session_id, now, spawn):
@@ -343,18 +604,21 @@ def start_handoff(transcript_path, session_id, now, spawn):
         handoff_path(session_id).unlink()
     except OSError:
         pass
-    spawn(transcript_path, session_id)
+    try:
+        spawn(transcript_path, session_id)
+    except Exception:  # nothing is writing it: free the claim, so the next try does not wait out the ttl
+        lock_drop(paths()['handoffs'] / f'{session_id}.generating')
+        raise
     return True
 
 
 def generate_handoff(transcript_path, session_id, runner=None):
+    lock = paths()['handoffs'] / f'{session_id}.generating'
+    lock_own(lock, time.time())  # the claim is this run's from here: if it dies, the next Start fresh takes over at once
     try:
         return _generate_handoff(transcript_path, session_id, runner)
     finally:
-        try:
-            (paths()['handoffs'] / f'{session_id}.generating').unlink()
-        except OSError:
-            pass
+        lock_drop(lock)
 
 
 SUMMARY_MODELS = ('opus', 'sonnet')
@@ -380,7 +644,7 @@ def _generate_handoff(transcript_path, session_id, runner=None):
         last = ''
     except Exception as e:  # fallback keeps every user rule
         log(f'handoff runner failed for {session_id}: {e!r}')
-        summary = '> Automatic summary failed; this is the raw fallback.'
+        summary = FALLBACK_MARK
         last = '\n\n## Last messages from the user\n' + '\n'.join(f'- {m[:800]}' for m in c['user_messages'][-20:])
     verbatim = '\n\n## Your instructions, verbatim\n' + ('\n'.join(f'- {d}' for d in c['directives']) or '- (none found)')
     footer = (f'\n\n---\nFull transcript of the old session: `{transcript_path}`. '
@@ -437,9 +701,13 @@ def band_words(ctx, warm):
             'big': f'{k}, big: resuming re-reads all {k} at full price'}[ctx_band(ctx)]
 
 
-def condensed_size(transcript_path, mtime=None, now=None, cache=None):
+CONDENSE_POLL_S = 3.0       # one list poll spends this long counting transcripts; the rest are counted by the next
+
+
+def condensed_size(transcript_path, mtime=None, now=None, cache=None, kept_only=False):
     """Tokens in the condensed transcript a summary model would read, without a model call. Cached per transcript
-    mtime in state/condensed.json; a chat still being written to is counted again at most every CONDENSED_KEEP s."""
+    mtime in state/condensed.json; a chat still being written to is counted again at most every CONDENSED_KEEP s.
+    kept_only: answer from what is kept or not at all (None), never by reading the transcript."""
     now = time.time() if now is None else now
     key = str(transcript_path)
     try:
@@ -452,6 +720,8 @@ def condensed_size(transcript_path, mtime=None, now=None, cache=None):
     c = cache.get(key)
     if c and (c.get('mtime') == mtime or now - (c.get('at') or 0) < CONDENSED_KEEP):
         return c.get('tokens')
+    if kept_only:
+        return c.get('tokens') if c else None  # the last count, a little old, beats a guess
     try:
         tokens = round(len(render_condensed(condense(transcript_path))) / CHARS_PER_TOKEN)
     except OSError:
@@ -545,14 +815,13 @@ def thread_piece(sid):
     'started', 'tokens'}."""
     tp, meta = find_session(sid)
     hp = handoff_path(sid)
-    st = transcript_stats(tp) if tp else {}
     c = condense(tp, max_chars=THREAD_PIECE_CHARS)
     if hp.exists() and handoff_is_fresh(sid, tp):
         text, kind = hp.read_text(encoding='utf-8', errors='ignore'), 'handoff'
     else:
         text, kind = render_condensed(c), 'condensed'
     return {'sid': sid, 'title': c['title'] or meta.get('title') or '', 'kind': kind, 'text': text, 'directives': c['directives'],
-            'started': st.get('first_ts'), 'tokens': round(len(text) / CHARS_PER_TOKEN)}
+            'started': _head_meta(tp).get('first_ts') or meta.get('first_ts'), 'tokens': round(len(text) / CHARS_PER_TOKEN)}
 
 
 def combine_thread(pieces, max_chars=THREAD_MAX_CHARS):
@@ -780,14 +1049,15 @@ def _strip(data, now, compact_window):
     seen = False                            # limits another session last saw, until this one's first reply
     if five is None and week is None:
         try:
-            k = latest_limits() or {}
+            k = latest_limits(now) or {}
         except (OSError, ValueError, TypeError, AttributeError):
             k = {}
         five, five_at = _sl_num(k.get('five_hour')), _sl_num(k.get('five_hour_reset'))
         week, week_at = _sl_num(k.get('seven_day')), _sl_num(k.get('seven_day_reset'))
-        five = 0.0 if five is not None and five_at and five_at <= now else five   # that window has reset since
-        week = 0.0 if week is not None and week_at and week_at <= now else week
         seen = five is not None or week is not None
+    # An idle chat keeps the numbers of its last reply: once their window has reset they are not true any more.
+    five = 0.0 if five is not None and five_at and five_at <= now else five
+    week = 0.0 if week is not None and week_at and week_at <= now else week
     big, heavy = ctx >= GUARD_CTX, ctx >= SL_HEAVY
     hot = 'five' if (five or 0) >= 80 and (five or 0) >= (week or 0) else 'week' if (week or 0) >= 80 else None
     mode = 'cold' if big and cache == 'cold' else 'heavy' if heavy else 'guard' if big else 'limit' if hot else 'ok'
@@ -884,29 +1154,61 @@ def render_statusline(data, now, compact_window):
         return m if isinstance(m, str) else 'Claude'
 
 
+LIMIT_KEYS = ('five_hour', 'seven_day', 'five_hour_reset', 'seven_day_reset')
+REPLY_MARKS = ('api_ms', 'cache_expires_at', 'ctx_tokens')  # each moves when Claude answers, and at no other time
+
+
+def limits_seen(prev, st, now):
+    """The plan numbers a chat's state file keeps, and `limits_at`, when a reply last saw them. Claude Code learns
+    them from each reply, but the status line is drawn again every few seconds with the same numbers, so the time
+    of the drawing (`updated`) says nothing about how old they are. They change only when a reply came (one of
+    REPLY_MARKS moved) or a number did; otherwise the last ones stand, with their time. A window Claude Code stopped
+    sending because it reset is kept as it was last seen: its reset time says it is over."""
+    prev = prev if isinstance(prev, dict) else {}
+    new, old = {k: st.get(k) for k in LIMIT_KEYS}, {k: prev.get(k) for k in LIMIT_KEYS}
+    has = lambda d: d['five_hour'] is not None or d['seven_day'] is not None
+    replied = not prev or any(st.get(k) != prev.get(k) for k in REPLY_MARKS if k in prev)
+    moved = any(new[k] is not None and new[k] != old[k] for k in LIMIT_KEYS)
+    if has(new) and (replied or moved):
+        return dict(new, limits_at=now)
+    if not has(old):
+        return dict(new, limits_at=None)
+    at = prev.get('limits_at')
+    if not isinstance(at, (int, float)) or isinstance(at, bool):
+        # A file from before limits_at: the transcript's last write is the closest thing to the last reply.
+        at = prev.get('updated') if isinstance(prev.get('updated'), (int, float)) else now
+        try:
+            at = min(at, os.path.getmtime(prev.get('transcript_path') or st.get('transcript_path') or ''))
+        except (OSError, TypeError, ValueError):
+            pass
+    return dict(old, limits_at=at)
+
+
 def write_state(data, now):
     sid = data.get('session_id')
     if not isinstance(sid, str) or not HOOK_SID_RE.fullmatch(sid):
         return
     pc = data.get('prompt_cache') or {}
     rl = data.get('rate_limits') or {}
+    model = data.get('model')
     st = {'ctx_tokens': ctx_from_status(data), 'cache_expires_at': pc.get('expires_at'),
           'recache_tokens': pc.get('recache_tokens_if_cold'), 'updated': now,
           'five_hour': (rl.get('five_hour') or {}).get('used_percentage'),
           'seven_day': (rl.get('seven_day') or {}).get('used_percentage'),
           'five_hour_reset': (rl.get('five_hour') or {}).get('resets_at'),
           'seven_day_reset': (rl.get('seven_day') or {}).get('resets_at'),
-          'model': (data.get('model') or {}).get('display_name'), 'transcript_path': data.get('transcript_path'),
+          'api_ms': (data.get('cost') or {}).get('total_api_duration_ms') if isinstance(data.get('cost'), dict) else None,
+          'model': model.get('display_name') if isinstance(model, dict) else model if isinstance(model, str) else None,
+          'transcript_path': data.get('transcript_path'),
           'cols': os.environ.get('COLUMNS')}  # the width Claude Code gives the status line
-    p = paths()['state'] / f'{sid}.json'
-    tmp = p.with_suffix('.tmp')
-    tmp.write_text(json.dumps(st))
-    os.replace(tmp, p)
+    st.update(limits_seen(read_state(sid), st, now))
+    _jput(paths()['state'] / f'{sid}.json', st)  # its own temp file: two renders of one chat never share one
 
 
 def read_state(session_id):
     try:
-        return json.loads((paths()['state'] / f'{session_id}.json').read_text())
+        d = json.loads((paths()['state'] / f'{session_id}.json').read_text())
+        return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
 
@@ -1030,9 +1332,9 @@ def _turn_open(lines):
             d = json.loads(line)
         except ValueError:
             continue
-        if d.get('isSidechain') or d.get('isMeta') or d.get('type') not in ('user', 'assistant'):
+        if not isinstance(d, dict) or d.get('isSidechain') or d.get('isMeta') or d.get('type') not in ('user', 'assistant'):
             continue
-        m = d.get('message') or {}
+        m = d.get('message') if isinstance(d.get('message'), dict) else {}
         if d['type'] == 'assistant':
             return m.get('stop_reason') in (None, 'tool_use')
         c = m.get('content')
@@ -1073,16 +1375,17 @@ def waiting_tail(path, mtime=None):
             d = json.loads(line)
         except ValueError:
             continue
-        if d.get('isSidechain') or d.get('isMeta') or d.get('type') not in ('user', 'assistant'):
+        if not isinstance(d, dict) or d.get('isSidechain') or d.get('isMeta') or d.get('type') not in ('user', 'assistant') \
+                or not isinstance(d.get('message') or {}, dict):
             continue
         if d['type'] == 'user':
-            c = (d.get('message') or {}).get('content')
+            c = _msg(d).get('content')
             if isinstance(c, list) and any(isinstance(x, dict) and x.get('type') == 'tool_result' for x in c):
                 if blocks:
                     break
                 continue  # the answer to an earlier call: the message before it is the one waiting
             break
-        c = (d.get('message') or {}).get('content')
+        c = _msg(d).get('content')
         blocks = (c if isinstance(c, list) else [{'type': 'text', 'text': c}] if isinstance(c, str) else []) + blocks
     out = []
     for b in blocks:
@@ -1109,10 +1412,10 @@ def _subagent_label(f):
     try:
         with open(f, 'rb') as fh:
             d = json.loads(fh.readline() or b'{}')
-        t = _text_of((d.get('message') or {}).get('content')).strip()
+        t = _text_of(_msg(d).get('content')).strip()
         if t:
             return ' '.join(t.split())[:60]
-    except (OSError, ValueError):
+    except (OSError, ValueError, AttributeError, TypeError):
         pass
     return 'subagent'
 
@@ -1132,15 +1435,16 @@ def busy_report(sid, now, agents=None, procs=None, transcript=None):
         t_mtime = Path(tp).stat().st_mtime if tp else 0
     except OSError:
         t_mtime = 0
-    seen, whole = set(), []
+    seen, whole = set(), {}
 
     def launched(ident):  # Claude Code names a background command's id when it starts it; a foreground call's spill
-        if not whole:     # file (an app it opened keeps writing there) never gets a notification, so it is not waited on
+        # file (an app it opened keeps writing there) never gets a notification, so it is not waited on
+        if ident not in whole:
             try:
-                whole.append(Path(tp).read_bytes() if tp else b'')
+                whole[ident] = _file_has(tp, ident.encode()) if tp else False
             except OSError:
-                whole.append(raw)
-        return ident.encode() in whole[0]
+                whole[ident] = ident.encode() in raw
+        return whole[ident]
     for d in sorted(_task_dirs(sid), key=lambda d: d.name != 'subagents'):  # subagents first: their output file
         sub = d.name == 'subagents'                                           # under tasks/ is the same transcript
         try:
@@ -1229,7 +1533,7 @@ def _jget(p):
 def _jput(p, obj):
     tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     tmp.write_text(json.dumps(obj))
-    os.replace(tmp, p)
+    _replace(tmp, p)
 
 
 def held_get(sid):
@@ -1321,15 +1625,30 @@ def _name(n):
     return os.path.basename(n or '').lower()
 
 
+CLAUDE_VERSION_RE = re.compile(r'[/\\]claude[/\\]versions[/\\][^/\\]+$', re.I)
+JS_RUNTIMES = ('node', 'node.exe', 'bun', 'bun.exe')
+
+
 def find_claude_pid(start_pid, table):
-    pid, seen = start_pid, set()
+    """The Claude Code process this one runs under: the nearest one up the chain that is named claude, runs from
+    Claude Code's own version file (.../claude/versions/2.1.0) or is retitled 'claude ...'. The nearest, because a
+    background chat runs under one of the last two names with the service that started it, named claude, above it:
+    that one is every chat's ancestor, not this chat. Where there is none of the three it is the nearest node or
+    bun (an npm install). Never just the parent: that is a shell that is gone by the next hook."""
+    pid, seen, js = start_pid, set(), None
     while pid in table and pid not in seen:
         seen.add(pid)
         ppid, name = table[pid]
-        if _name(name) in ('claude', 'claude.exe'):
+        base = _name(name)
+        if base in ('claude', 'claude.exe'):
             return pid
+        if pid != start_pid:
+            if base.startswith('claude ') or CLAUDE_VERSION_RE.search(name or ''):
+                return pid
+            if js is None and base in JS_RUNTIMES:
+                js = pid
         pid = ppid
-    return None
+    return js
 
 
 def process_table():
@@ -1427,7 +1746,8 @@ def machine_name():
     """The name the server knows this machine by: what switchboard-node paired it as, else what the server's poll
     said, else this computer's own name (until the first poll)."""
     try:
-        n = json.loads((Path.home() / '.config' / 'switchboard' / 'node.json').read_text()).get('machine')
+        f = os.environ.get('SB_NODE_JSON') or Path.home() / '.config' / 'switchboard' / 'node.json'
+        n = json.loads(Path(f).read_text()).get('machine')
         if isinstance(n, str) and MACHINE_RE.fullmatch(n):
             return n
     except (OSError, ValueError, AttributeError):
@@ -1498,15 +1818,66 @@ def servers():
     return tuple(agent_conf().get('servers') or ()) or SERVERS
 
 
-def notify_server(event):
-    for base in servers():
+# A hook holds up the prompt it runs for, so everything it sends the server shares one small allowance: with the
+# server switched off, or one of its addresses unreachable (a LAN address away from home), a prompt waits about a
+# second in all, not a timeout per address and per event. (The budget's own question adds BUDGET_WAIT at most.)
+HOOK_NET = 1.1     # seconds one run of the helper waits on the server in all, for events and pings
+NET_FLOOR = 0.1    # once that is used up, each further send still gets this long
+NOTIFY_NEXT = 0.25  # an event goes to the next address when the one before has not answered in this long
+_net_used = [0.0]
+
+
+def net_left(want):
+    """How long the next send may wait: what it asks for, cut to what is left of the run's allowance."""
+    return max(NET_FLOOR, min(want, HOOK_NET - _net_used[0]))
+
+
+def _post_any(event, wait, bases, send=None, stagger=None):
+    """POST an event to the server's addresses until one takes it or `wait` is over. All at once, or with `stagger`
+    one after another: the next is tried as soon as the one before fails, or has been silent that long. True when
+    one took it."""
+    def post(base):
+        req = urllib.request.Request(base + '/api/event', data=json.dumps(event).encode(),
+                                     headers={'Content-Type': 'application/json', 'X-Switchboard': '1'}, method='POST')
+        urllib.request.urlopen(req, timeout=max(wait, NET_FLOOR)).close()
+    send, done, step, t0 = send or post, threading.Event(), threading.Event(), time.time()
+    lock, st = threading.Lock(), {'out': 0, 'all': False, 'took': False}  # out: sends still on their way
+
+    def one(base):
+        ok = True
         try:
-            req = urllib.request.Request(base + '/api/event', data=json.dumps(event).encode(),
-                                         headers={'Content-Type': 'application/json', 'X-Switchboard': '1'}, method='POST')
-            urllib.request.urlopen(req, timeout=1.5).close()
-            return
+            send(base)
         except Exception:
-            continue
+            ok = False
+        with lock:
+            st['out'] -= 1
+            st['took'] = st['took'] or ok
+            if ok or (st['all'] and not st['out']):  # one took it, or every address said no: nothing to wait for
+                done.set()
+        step.set()
+    try:
+        for i, base in enumerate(bases):
+            if i and stagger is not None:
+                step.wait(min(stagger, max(0, wait - (time.time() - t0))))
+                step.clear()
+            if done.is_set() or time.time() - t0 >= wait:
+                break
+            with lock:
+                st['out'] += 1
+            threading.Thread(target=one, args=(base,), daemon=True).start()
+        with lock:
+            st['all'] = True  # no more will be started
+            if not st['out']:
+                done.set()
+        done.wait(max(0, wait - (time.time() - t0)))
+        return st['took']
+    finally:
+        _net_used[0] += time.time() - t0
+
+
+def notify_server(event):
+    """An event the server acts on (the guard held a prompt, the user answered): to the first address that takes it."""
+    return _post_any(event, net_left(HOOK_NET), servers(), stagger=NOTIFY_NEXT)
 
 
 PING_WAIT = 0.6   # a ping never holds Claude up longer than this; the next poll catches what it missed
@@ -1517,21 +1888,7 @@ def ping_server(event, wait=PING_WAIT, servers=None, send=None):
     """Tell the server a session changed (a prompt, a reply finished, a permission question, the status line), so
     every open app shows it within a second or two instead of at the next poll. Every server address at once:
     whichever answers first wins, and nothing waits on one that is not there."""
-    def post(base):
-        req = urllib.request.Request(base + '/api/event', data=json.dumps(event).encode(),
-                                     headers={'Content-Type': 'application/json', 'X-Switchboard': '1'}, method='POST')
-        urllib.request.urlopen(req, timeout=wait).close()
-    send, done = send or post, threading.Event()
-
-    def one(base):
-        try:
-            send(base)
-            done.set()
-        except Exception:
-            pass
-    for base in servers or globals()['servers']():
-        threading.Thread(target=one, args=(base,), daemon=True).start()
-    return done.wait(wait)
+    return _post_any(event, wait, servers or globals()['servers'](), send)
 
 
 def ping_due(sid, now, every=PING_EVERY):
@@ -1564,7 +1921,7 @@ def hook_ping(inp, out, now, ping=None):
     ev = {'event': 'ping', 'why': why, 'machine': machine_name(), 'session_id': sid, 'ts': now}
     if why == 'wait' and isinstance(inp.get('notification_type'), str):
         ev['kind'] = inp['notification_type'][:40]
-    ping_server(ev) if ping is None else ping(ev)
+    ping_server(ev, wait=net_left(PING_WAIT)) if ping is None else ping(ev)
     try:
         (paths()['state'] / f'{sid}.ping').write_text(str(now))
     except OSError:
@@ -1720,12 +2077,13 @@ def budget_merge(out, sid, b):
 INJECT_MAX = 9500  # Claude Code moves larger hook output to a file; keep the essentials inline
 
 
-def _fresh_context(handoff_text, held_prompt, path=None):
+def _fresh_context(handoff_text, held_prompt, path=None, extra=''):
     pre = ('This is a fresh session continuing earlier work. The handoff below was written from the previous '
            "session's transcript and includes the user's standing instructions verbatim; follow them.\n\n")
     tail = ''
     if held_prompt:
         tail = f'\n\nThe user\'s message that was held when the old session went cold:\n"""{held_prompt[:3000]}"""\nTreat it as their current request.'
+    tail += extra
     if len(pre) + len(handoff_text) + len(tail) <= INJECT_MAX or not path:
         return pre + handoff_text + tail
     note = (f'The handoff is long. Before doing anything else, Read the whole file {path} '
@@ -1790,8 +2148,11 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
         m = SEED_RE.match(inp.get('prompt') or '')
         if m:
             text, path = seed_take(m.group(1))
+            said = _said_context(*seed_take(m.group(1), 'msg'))  # the message itself, when it could not ride the command line
             if text is not None:
-                return _ctx_out('UserPromptSubmit', _fresh_context(text, None, path))
+                return _ctx_out('UserPromptSubmit', _fresh_context(text, None, path, said))
+            if said:
+                return _ctx_out('UserPromptSubmit', said.strip())
     if ev == 'UserPromptSubmit' and sid and tp and (is_injected(inp.get('prompt')) or inp.get('agent_id')):
         p = (inp.get('prompt') or '').lstrip()
         log(f'guard: let through an injected prompt for {sid[:8]}: {p[:40]!r} (keys {sorted(inp)})')
@@ -1882,14 +2243,23 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
                 time.sleep(1)
             if hp.exists():
                 text, path = hp.read_text(encoding='utf-8'), hp
-            else:
-                text, path = (f'(The automatic handoff was not ready in time. The previous transcript is at '
-                              f'{rec["transcript_path"]}; grep it for details instead of reading it whole.)'), None
+            else:  # a summary of a big chat can take longer: say where it lands, so it is not lost
+                text, path = (f'(The automatic handoff was not ready in time. It is still being written to {hp}: '
+                              f'before answering, check whether that file exists now and Read it if so. Until it does, '
+                              f'the previous transcript is at {rec["transcript_path"]}; grep it for details instead '
+                              f'of reading it whole.)'), None
             return _ctx_out('SessionStart', _fresh_context(text, rec.get('held'), path))
         return None
     if ev == 'Stop' and sid:
         return None  # status line already records cache expiry; kept as an explicit no-op for Plan 2
     if ev == 'SessionEnd' and sid and inp.get('reason') == 'clear':  # /clear: the terminal moved on to a new chat
+        rec = _jget(paths()['pending'] / f'{claude_pid}.json') if claude_pid else None
+        if (isinstance(rec, dict) and rec.get('session_id') == sid and now - (rec.get('ts') or 0) <= PENDING_TTL
+                and tp and os.path.isfile(tp)):
+            try:  # the guard held a message here and the user cleared: the summary starts now, the new chat waits on it
+                start_handoff(tp, sid, now, spawn)
+            except Exception:
+                log(f'handoff at /clear: {traceback.format_exc(limit=2)}')
         m = (_jget(paths()['state'] / 'replaced.json') or {}).get(sid) or {}
         if not (m.get('by') and now - (m.get('ts') or 0) < 600):  # the new chat's SessionStart may have named itself first
             mark_replaced(sid, 'cleared', now)
@@ -1908,6 +2278,80 @@ BY_RE = re.compile(r'[A-Za-z0-9_-]{1,64}')
 
 class RpcError(Exception):
     """A refusal the user should read as-is."""
+
+
+# ---------------------------------------------------------------- Claude Code's own files
+# ~/.claude.json and ~/.claude/settings.json are Claude Code's, and it rewrites them often. Switchboard changes them
+# rarely (trust for a folder, its hooks, an MCP server), and then: the file keeps its permissions, a symlinked file (a
+# dotfiles setup) stays a symlink, and a change Claude Code made between our read and our write is never undone (the
+# whole step runs again from what is there now).
+class CfgChanged(RpcError, OSError):
+    def __init__(self, p):
+        super().__init__(f'Claude Code was changing {Path(p).name} at the same moment, so nothing was written. Try again.')
+
+
+_cfg_seen = {}
+
+
+def _cfg_sig(p):
+    try:
+        st = os.stat(p)
+        return st.st_mtime_ns, st.st_size
+    except OSError:
+        return None
+
+
+def cfg_read(p):
+    """The JSON object in one of Claude Code's files ({} when there is none), remembering how the file looked."""
+    p = Path(p)
+    for _ in range(3):
+        sig = _cfg_sig(p)
+        text = p.read_text(encoding='utf-8') if sig is not None else None
+        if _cfg_sig(p) == sig:
+            break
+    _cfg_seen[str(p)] = sig
+    return json.loads(text) if text is not None else {}
+
+
+def cfg_write(p, data):
+    """Write it back: to the real file behind a symlink, with the file's own permissions (a new file is the user's
+    alone), and only when it still looks as it did when cfg_read read it (CfgChanged otherwise)."""
+    p = Path(p)
+    real = Path(os.path.realpath(p))
+    try:
+        mode = os.stat(real).st_mode & 0o7777
+    except OSError:
+        mode = 0o600
+    tmp = real.with_name(f'{real.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+    fd = os.open(tmp, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(data, indent=2))
+        if not IS_WIN:
+            os.chmod(tmp, mode)
+        if str(p) in _cfg_seen and _cfg_sig(p) != _cfg_seen.pop(str(p)):  # as late as it can be asked
+            raise CfgChanged(p)
+        os.replace(tmp, real)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def cfg_step(fn):
+    """A function that reads one of Claude Code's files, changes it and writes it: run again from the start when
+    Claude Code wrote the file in between."""
+    def run(*a, **kw):
+        for _ in range(3):
+            try:
+                return fn(*a, **kw)
+            except CfgChanged:
+                time.sleep(0.05)
+        return fn(*a, **kw)
+    run.__name__, run.__doc__ = fn.__name__, fn.__doc__
+    return run
 
 
 # ---------------------------------------------------------------- session names
@@ -2115,9 +2559,14 @@ def _head_meta(path):
             d = json.loads(line)
         except ValueError:
             continue
-        out['entrypoint'] = out['entrypoint'] or d.get('entrypoint')
-        if d.get('type') == 'user' and not d.get('isMeta') and (d.get('origin') or {}).get('kind') in (None, 'human'):
-            t = _text_of((d.get('message') or {}).get('content')).strip()
+        if not isinstance(d, dict):
+            continue
+        if isinstance(d.get('entrypoint'), str):
+            out['entrypoint'] = out['entrypoint'] or d['entrypoint']
+        o = d.get('origin')  # {'kind': 'human'} or, in some records, the bare word
+        if d.get('type') == 'user' and not d.get('isMeta') and (o.get('kind') if isinstance(o, dict) else o) in (None, 'human') \
+                and isinstance(d.get('message') or {}, dict):
+            t = _text_of(_msg(d).get('content')).strip()
             if t and not t.startswith('<'):
                 j = i + 1  # and what hooks added to it, up to Claude's first answer
                 while j < len(head) and j < i + 8 and '"type":"assistant"' not in head[j].replace(' ', '') and \
@@ -2149,8 +2598,12 @@ def session_meta(path):
     return st
 
 
-def run_claude_cmd(args, timeout=30):
-    return _run_to_file([_claude_exe()] + args, timeout, merge=False, env=claude_env(internal=False))[1]
+def run_claude_cmd(args, timeout=30, rc=None):
+    """What `claude <args>` printed. rc, a list, gets its exit code."""
+    code, out = _run_to_file([_claude_exe()] + args, timeout, merge=False, env=claude_env(internal=False))
+    if rc is not None:
+        rc.append(code)
+    return out
 
 
 def stop_bg(bg_id):
@@ -2334,7 +2787,7 @@ def _ask_entries(lines):
             continue
         if not isinstance(d, dict) or d.get('isSidechain') or d.get('isMeta') or d.get('type') not in ('user', 'assistant'):
             continue
-        if d['type'] == 'user' and _text_of((d.get('message') or {}).get('content')).lstrip().startswith(_ASK_NOISE):
+        if d['type'] == 'user' and _text_of(_msg(d).get('content')).lstrip().startswith(_ASK_NOISE):
             continue
         yield d
 
@@ -2348,7 +2801,7 @@ def question_tool_ask(lines, mtime=None, needs=None):
     """An AskUserQuestion Claude is still waiting on (a tool_use with no tool_result after it), mapped exactly."""
     answered = set()
     for d in _ask_entries(lines):
-        c = (d.get('message') or {}).get('content')
+        c = _msg(d).get('content')
         if d['type'] == 'user':
             got = _results_of(c)
             if not got:
@@ -2396,7 +2849,7 @@ def last_assistant_words(lines, limit=ASK_MAX_TEXT):
     """Claude's last turn as text: its words and the tool call it is waiting on, the newest kept when it is long."""
     blocks = []
     for d in _ask_entries(lines):
-        c = (d.get('message') or {}).get('content')
+        c = _msg(d).get('content')
         if d['type'] == 'user':
             if _results_of(c):
                 if any(isinstance(b, dict) and b.get('type') == 'text' for b in blocks):
@@ -2497,35 +2950,88 @@ def prune_asks(now=None):
     return gone
 
 
+PRUNE_EVERY = 3600      # the helper's own folder is tidied this often, from the list poll
+PRUNE_RESULTS_S = 86400  # a launch's result is read within minutes; a day later nobody asks for it
+PRUNE_MAX = 2000         # files one pass removes at most, so a first pass over years of files stays short
+SID_FILE_RE = re.compile(r'([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.[A-Za-z0-9_.]+')
+
+
+def prune_state(now, force=False):
+    """Tidy what the helper keeps per chat (its state, pings, tool lists, summaries) and old launch results, at most
+    once an hour. A chat's files go only when they have not been written for the whole history window (LIST_DAYS)
+    AND the chat's transcript is gone or as old; nothing is touched when the transcripts cannot be listed at all.
+    Returns how many files went (None when it was not due)."""
+    stamp = paths()['state'] / 'pruned.json'
+    if not force and 0 <= now - ((_jget(stamp) or {}).get('at') or 0) < PRUNE_EVERY:
+        return None
+    try:
+        _jput(stamp, {'at': now})
+    except OSError:
+        return None
+    gone, old = 0, now - LIST_DAYS * 86400
+
+    def drop(f):
+        nonlocal gone
+        try:
+            f.unlink()
+            gone += 1
+        except OSError:
+            pass
+    try:
+        for f in paths_q()['queue'].glob('*.result.json'):
+            if gone >= PRUNE_MAX:
+                break
+            try:
+                if f.stat().st_mtime < now - PRUNE_RESULTS_S:
+                    drop(f)
+            except OSError:
+                pass
+    except OSError:
+        pass
+    live, any_seen = {}, False  # chat id -> when its transcript was last written
+    try:
+        for t in (claude_dir() / 'projects').glob('*/*.jsonl'):
+            any_seen = True
+            try:
+                live[t.stem] = max(live.get(t.stem, 0), t.stat().st_mtime)
+            except OSError:
+                live[t.stem] = now  # there, but unreadable right now: its files stay
+    except OSError:
+        return gone
+    if not any_seen:  # no transcripts at all: the Claude folder is missing or moved, not every chat deleted
+        return gone
+    for d in (paths()['state'], paths()['handoffs']):
+        try:
+            files = list(d.iterdir())
+        except OSError:
+            continue
+        for f in files:
+            m = SID_FILE_RE.fullmatch(f.name)
+            if not m or gone >= PRUNE_MAX:
+                continue
+            try:
+                if f.name.endswith('.tools') and m.group(1) in live:
+                    continue  # written once, at the start: what the chat has is true for as long as it can be resumed
+                if f.is_file() and not f.is_symlink() and f.stat().st_mtime < old and live.get(m.group(1), 0) < old:
+                    drop(f)
+            except OSError:
+                pass
+    if gone:
+        log(f'tidied {gone} old files of chats that are gone or past the history window')
+    return gone
+
+
 def _ask_lock():
     return paths()['state'] / 'ask.lock'
 
 
 def ask_slot(now):
     """Claim the machine's one Haiku slot; False while a live pass holds it."""
-    p = _ask_lock()
-    try:
-        fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        try:
-            if now - float(p.read_text() or 0) <= ASK_LOCK_TTL:
-                return False
-        except (OSError, ValueError):
-            pass
-        _jput_text(p, str(now))
-        return True
-    except OSError:
-        return False
-    with os.fdopen(fd, 'w') as f:
-        f.write(str(now))
-    return True
+    return lock_take(_ask_lock(), now, ASK_LOCK_TTL, mine=False)  # for the detached pass, which names itself
 
 
 def ask_release():
-    try:
-        _ask_lock().unlink()
-    except OSError:
-        pass
+    lock_drop(_ask_lock())
 
 
 def spawn_ask(transcript_path, sid, short):
@@ -2544,6 +3050,7 @@ def spawn_ask(transcript_path, sid, short):
 
 def run_need_ask(transcript_path, sid, short):
     """The detached process: one pass, then free the machine's slot."""
+    lock_own(_ask_lock(), time.time())  # if this pass is killed, the next one takes the slot at once
     try:
         if SID_RE.fullmatch(sid or ''):
             build_ask(transcript_path, sid, short if JOB_ID_RE.fullmatch(short or '') else None)
@@ -2590,11 +3097,37 @@ def norm_agents(agents):
     return agents
 
 
+class _NoAgents(list):
+    """What claude_agents() gives when Claude Code could not be asked: empty, and not the same as "nothing runs"."""
+
+
+AGENTS_UNKNOWN = "Couldn't ask Claude Code on that machine what is running, so nothing was changed. Try again in a moment."
+
+
+def agents_known(agents):
+    return not isinstance(agents, _NoAgents)
+
+
+def sure_agents(agents):
+    """The list for a step that stops, hides or starts something: never a guess."""
+    if not agents_known(agents):
+        raise RpcError(AGENTS_UNKNOWN)
+    return agents
+
+
 def claude_agents():
     try:
-        return norm_agents(json.loads(run_claude_cmd(['agents', '--json', '--all'], timeout=20) or '[]'))
-    except Exception:
-        return []
+        rc = []
+        out = run_claude_cmd(['agents', '--json', '--all'], timeout=20, rc=rc)
+        if rc and rc[0] != 0:
+            raise ValueError(f'claude agents exited {rc[0]}')
+        d = json.loads(out)  # a machine with nothing running prints []: no output at all is no answer
+        if not isinstance(d, list) or not all(isinstance(a, dict) for a in d):
+            raise ValueError('not a list of sessions')
+        return norm_agents(d)
+    except Exception as e:
+        log_once('agents', f'claude agents failed: {e!r}'[:300], 600)
+        return _NoAgents()
 
 
 def _transcripts(now):
@@ -2619,12 +3152,12 @@ REPLACED_SHOW = 20
 def mark_replaced(sid, how, now, by=None):
     """A newer session took over from this one (Start fresh, resume, Continue on another machine, /clear in a
     terminal). It drops out of the list until Claude replies in it again."""
-    p = paths()['state'] / 'replaced.json'
-    d = _jget(p) or {}
-    d[sid] = {'ts': now, 'how': how, 'by': by}
-    if len(d) > 400:  # old marks only matter inside the list window
-        d = dict(sorted(d.items(), key=lambda kv: -(kv[1].get('ts') or 0))[:300])
-    _jput(p, d)
+    def change(d):
+        d[sid] = {'ts': now, 'how': how, 'by': by}
+        if len(d) > 400:  # old marks only matter inside the list window
+            d = dict(sorted(d.items(), key=lambda kv: -((kv[1] if isinstance(kv[1], dict) else {}).get('ts') or 0))[:300])
+        return d
+    locked_update(paths()['state'] / 'replaced.json', change)
 
 
 def cleared_by(old, new, now):
@@ -2716,10 +3249,11 @@ def supersede(rows, marks):
         for r in group:
             if r is not keep:
                 hidden.setdefault(r['sid'], ('resumed', {'sid': keep['sid']}))
-    # Two chats with the same name in the same repo: the older one, if nothing is running it, is an old copy
+    # Two chats with the same name in the same repo: the older one, if nothing is running it, is an old copy. A chat
+    # with no name yet is listed by its first message, and two chats that both open with "continue" are not copies.
     same = {}
     for r in rows:
-        if not (r['c'].get('entrypoint') or '').startswith('sdk'):
+        if r.get('named', True) and not (r['c'].get('entrypoint') or '').startswith('sdk'):
             same.setdefault((' '.join(r['title'].split()).casefold(), _repo_key(r['c'].get('cwd'))), []).append(r)
     for group in same.values():
         keep = max(group, key=lambda r: r['active'])
@@ -2790,7 +3324,10 @@ SHOWN_FLAGS = {'--model': r'[A-Za-z0-9._\[\]-]{1,64}', '--effort': r'[a-z]{2,12}
 FLAG_SKIP = {'--bg', '--background', '--resume', '-r', '--name', '-n', '--continue', '-c', '--session-id', '--bg-spare',
              '--fork-session', '--print', '-p', '--output-format', '--input-format', '--settings', '--mcp-config', '--plugin-dir',
              '--agents', '--debug-file', '--system-prompt', '--system-prompt-file', '--append-system-prompt-file'}
-FLAG_VALUE_MAX = 200
+# The whole value is kept: a relaunch, resume or fresh start sends it back, and half an instruction or half a tool
+# pattern is worse than none. 2000 is the longest value any flag takes (FLAG_TEXT_RE).
+FLAG_VALUE_MAX = 2000
+FLAG_RECORD = 2  # flags.json records from before this kept only the first 200 characters of a value
 
 
 def flag_list(args, root=None):
@@ -2803,6 +3340,7 @@ def flag_list(args, root=None):
     while i < len(args):
         a, val = args[i], None
         i += 1
+        a = '--worktree' if a == '-w' else a
         if not a.startswith('--') and a not in FLAG_SKIP:
             continue
         if a.startswith('--') and '=' in a:
@@ -2819,7 +3357,7 @@ def flag_list(args, root=None):
             if a not in other and len(other) < 16 and re.fullmatch(r'--[a-z][a-z0-9-]{1,40}', a):
                 other.append(a)
             continue
-        if spec_of[a] is None:
+        if spec_of[a] is None or (a in FLAG_OPTIONAL and not val):
             if [a] not in out:
                 out.append([a])
             continue
@@ -2835,7 +3373,11 @@ def flag_list(args, root=None):
                     other.append('--add-dir')
                 continue
             val = rel
-        out.append([a, val[:FLAG_VALUE_MAX]])
+        if len(val) > FLAG_VALUE_MAX:  # too long to keep whole: named, never sent back as half of itself
+            if a not in other:
+                other.append(a)
+            continue
+        out.append([a, val])
     return out, other
 
 
@@ -2847,9 +3389,48 @@ def _proc_cmdline(pid):
     return [w.decode('utf-8', 'replace') for w in raw.split(b'\0') if w] or None
 
 
-def _cmdlines(pids):
+def parse_procargs2(raw):
+    """The argument words in macOS's kern.procargs2 block: a count, the program's path, padding, then that many
+    NUL-ended words (the environment follows and is not read). None when the block is not that."""
+    if len(raw) < 8:
+        return None
+    argc = int.from_bytes(raw[:4], sys.byteorder, signed=True)
+    end = raw.find(b'\0', 4)
+    if argc <= 0 or argc > 4096 or end < 0:
+        return None
+    words = raw[end:].lstrip(b'\0').split(b'\0')
+    if len(words) <= argc:  # cut short: the last word may be half of one
+        return None
+    return [w.decode('utf-8', 'replace') for w in words[:argc]]
+
+
+def _mac_argv(pid):
+    """A process's own argument words on macOS, from sysctl kern.procargs2: `ps` prints them joined by spaces, so a
+    value with a space in it could not be told from two words. Reading our own user's processes needs no
+    permission. None when it cannot be read (ps is asked instead)."""
+    try:
+        import ctypes
+        import ctypes.util
+        libc = ctypes.CDLL(ctypes.util.find_library('c') or '/usr/lib/libc.dylib', use_errno=True)
+        try:
+            cap = max(4096, min(int(os.sysconf('SC_ARG_MAX')), 4 << 20))
+        except (ValueError, OSError):
+            cap = 1 << 20
+        mib = (ctypes.c_int * 3)(1, 49, int(pid))  # CTL_KERN, KERN_PROCARGS2
+        buf, size = ctypes.create_string_buffer(cap), ctypes.c_size_t(cap)
+        if libc.sysctl(mib, 3, buf, ctypes.byref(size), None, 0) != 0:
+            return None
+        return parse_procargs2(buf.raw[:size.value])
+    except Exception:
+        return None
+
+
+def _cmdlines(pids, loose=None):
     """{pid: [args]} for running processes. Runs once per new terminal session (the answer is remembered). Linux
-    reads /proc (exact words); macOS asks ps at full width; Windows asks CIM for Win32_Process.CommandLine."""
+    reads /proc and macOS asks the kernel (exact words both); a Mac that will not say is asked through ps at full
+    width; Windows asks CIM for Win32_Process.CommandLine. loose, a set, gets the pids whose words came from a
+    line of text cut at its spaces (ps, or a Windows line that would not parse): a value with a space in it is
+    not whole there."""
     pids = sorted({int(p) for p in pids if str(p).isdigit()})
     if not pids:
         return {}
@@ -2857,6 +3438,12 @@ def _cmdlines(pids):
         got = {p: _proc_cmdline(p) for p in pids}
         if all(got.values()):
             return got
+    exact = {}
+    if sys.platform == 'darwin':
+        exact = {p: a for p, a in ((p, _mac_argv(p)) for p in pids) if a}
+        pids = [p for p in pids if p not in exact]
+        if not pids:
+            return exact
     if IS_WIN:
         q = ' or '.join(f'ProcessId={p}' for p in pids)
         argv = ['powershell', '-NoProfile', '-NonInteractive', '-Command',
@@ -2866,15 +3453,18 @@ def _cmdlines(pids):
     try:
         text = _run_to_file(argv, 20, merge=False)[1]
     except Exception:
-        return {}
-    out = {}
+        return exact
+    out = dict(exact)
     for line in text.splitlines():
         pid, _, rest = line.strip().replace('\t', ' ', 1).partition(' ')
         if pid.isdigit():
+            cut = not IS_WIN  # ps prints the words with one space between them and no quotes
             try:
                 out[int(pid)] = [w.strip('"') for w in shlex.split(rest, posix=not IS_WIN)]
             except ValueError:
-                out[int(pid)] = rest.split()
+                out[int(pid)], cut = rest.split(), True
+            if cut and loose is not None:
+                loose.add(int(pid))
     return out
 
 
@@ -2901,6 +3491,9 @@ def _roster_args():
 FLAGS_KEEP = 400
 
 
+FLAG_RETRY_S = 600  # a process whose command line could not be read is asked for again this much later
+
+
 def launch_flags(agents, now, full=None):
     """{session id: flags it was launched with}. Background sessions: the background service's roster (their process
     starts as a spare, so its command line has no flags). Terminal sessions: the process's own command line.
@@ -2916,8 +3509,9 @@ def launch_flags(agents, now, full=None):
     for sid, args in roster.items():
         f = flags_from_args(args)
         fl, other = flag_list(args)
-        if (known.get(sid) or {}).get('launch') != f or (known.get(sid) or {}).get('all') != fl:
-            known[sid] = {'launch': f, 'all': fl, 'other': other, 'ts': now, 'from': 'roster'}
+        k = known.get(sid) or {}
+        if k.get('launch') != f or k.get('all') != fl or k.get('v') != FLAG_RECORD:
+            known[sid] = {'launch': f, 'all': fl, 'other': other, 'ts': now, 'from': 'roster', 'v': FLAG_RECORD}
             changed = True
     ask = {}
     for a in agents:
@@ -2925,15 +3519,33 @@ def launch_flags(agents, now, full=None):
         if a.get('kind') != 'interactive' or not sid or not pid or sid in roster:
             continue
         k = known.get(sid) or {}
-        if k.get('pid') != pid or k.get('started') != a.get('startedAt'):
+        # asked once per process; and once more for a record an older helper wrote (values cut short, and on a
+        # Mac split at their spaces)
+        same = k.get('pid') == pid and k.get('started') == a.get('startedAt')
+        if same and k.get('missed') and 0 <= now - k['missed'] < FLAG_RETRY_S:
+            continue  # its command line could not be had a moment ago: not at every poll
+        if not same or k.get('v') != FLAG_RECORD or k.get('missed'):
             ask[pid] = a
     if ask:
-        lines = _cmdlines(list(ask))
+        loose = set()
+        lines = _cmdlines(list(ask), loose)
         for pid, a in ask.items():
             if pid in lines:
                 fl, other = flag_list(lines[pid])
                 known[a['sessionId']] = {'launch': flags_from_args(lines[pid]), 'all': fl, 'other': other, 'ts': now,
-                                         'from': 'ps', 'pid': pid, 'started': a.get('startedAt')}
+                                         'from': 'ps', 'pid': pid, 'started': a.get('startedAt'), 'v': FLAG_RECORD}
+                if pid in loose:  # read off a line cut at its spaces: whole_flags sends back no value that could hold one
+                    known[a['sessionId']]['split'] = True
+                changed = True
+            else:
+                # The process is gone, or will not say. An empty record of this version, so it is not asked for again
+                # at every poll (FLAG_RETRY_S); what an older helper wrote for this very process stays as it is.
+                k = known.get(a['sessionId']) or {}
+                if k.get('pid') == pid and k.get('started') == a.get('startedAt'):
+                    known[a['sessionId']] = dict(k, missed=now)
+                else:
+                    known[a['sessionId']] = {'launch': {}, 'all': [], 'other': [], 'ts': now, 'from': 'none', 'pid': pid,
+                                             'started': a.get('startedAt'), 'v': FLAG_RECORD, 'missed': now}
                 changed = True
     if changed:
         if len(known) > FLAGS_KEEP:
@@ -2943,9 +3555,32 @@ def launch_flags(agents, now, full=None):
         except OSError:
             pass
     if full is not None:
-        full.update({sid: {'flags': v.get('all') or [], 'other': v.get('other') or [], 'from': v.get('from')}
-                     for sid, v in known.items() if 'all' in v})
+        for sid, v in known.items():
+            if 'all' in v:
+                fl, other = whole_flags(v)
+                full[sid] = {'flags': fl, 'other': other, 'from': v.get('from')}
     return {sid: v.get('launch') or {} for sid, v in known.items()}
+
+
+# Flags whose value may hold a space (a sentence, a list of tool patterns, a path). Every other value is one word by
+# its own pattern (a test checks that), so it is whole however the command line was read.
+WORDY_FLAGS = ('--add-dir', '--append-system-prompt', '--allowed-tools', '--disallowed-tools', '--tools')
+
+
+def whole_flags(rec):
+    """(flags, other) of a flags.json record, as far as its values can be trusted to be whole. A record an older
+    helper wrote cut values at 200 characters and, read off `ps`, at their spaces; one read off `ps` today (split)
+    is still cut at spaces. "--append-system-prompt Always" or "--tools Bash" from such a record may be the first
+    word of something longer, so a flag whose value can hold a space is only named (other) there: no relaunch,
+    resume or fresh start sends half of it."""
+    fl, other = [f for f in rec.get('all') or [] if isinstance(f, list) and f], list(rec.get('other') or [])
+    if rec.get('v') == FLAG_RECORD and not rec.get('split'):
+        return fl, other
+    cut = [f for f in fl if len(f) > 1 and (f[0] in WORDY_FLAGS or (isinstance(f[1], str) and len(f[1]) >= 200))]
+    for f in cut:
+        if f[0] not in other:
+            other.append(f[0])
+    return [f for f in fl if f not in cut], other
 
 
 def machine_defaults():
@@ -3020,15 +3655,40 @@ def session_flags(c, launch, base):
     return f
 
 
+LIST_BAD_MAX = 20  # chats one list pass leaves out before it gives up
+
+
 def list_sessions(now, agents, replaced_out=None, procs=None):
+    """The machine's chats. One whose transcript cannot be read (a damaged file, a record in a shape this helper does
+    not know) is left out and logged, and the rest of the list is as it would have been."""
+    skip = {}  # {sid: True when it was its head or tail that could not be read}
+    while True:
+        at, replaced = {}, []
+        try:
+            out = _list_sessions(now, agents, replaced, procs, skip, at)
+        except Exception:
+            sid = at.get('sid')
+            if sid is None or sid in skip or len(skip) >= LIST_BAD_MAX:
+                raise
+            log_once(f'list:{sid}', f'list: {sid} is left out, it could not be read: {traceback.format_exc(limit=4)}')
+            skip[sid] = bool(at.get('meta'))
+            continue
+        if replaced_out is not None:
+            replaced_out.extend(replaced)
+        return out
+
+
+def _list_sessions(now, agents, replaced_out, procs, skip, at):
     root = machine_root()
     state_dir = paths()['state']
     idx = _jget(state_dir / 'index.json') or {}
     dismissed = _jget(state_dir / 'dismissed.json') or {}
-    dismissed_moved = False
+    turn_over = {}
     marks = _jget(state_dir / 'replaced.json') or {}
+    known = agents_known(agents)  # False: Claude Code was not asked or did not answer, so nothing counts as stopped
     try:
-        flush_names(agents)
+        if known:
+            flush_names(agents)
     except OSError:
         log(f'names: {traceback.format_exc(limit=1)}')
     names = _jget(state_dir / 'names.json') or {}  # renamed in Switchboard
@@ -3038,18 +3698,24 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
     show, gone = [], []
     for mtime, size, f in _transcripts(now):
         sid, key = f.stem, str(f)
+        at['sid'], at['meta'] = sid, True
         c = idx.get(key)
-        if not c or c.get('mtime') != mtime or c.get('size') != size or c.get('v') != META_V:
-            c = dict(session_meta(f), mtime=mtime, size=size, v=META_V)
+        if not isinstance(c, dict) or c.get('mtime') != mtime or c.get('size') != size or c.get('v') != META_V:
+            if sid in skip and skip[sid]:  # its head or tail could not be read: left out until the file changes
+                c = {'bad': True, 'mtime': mtime, 'size': size, 'v': META_V}
+            else:
+                c = dict(session_meta(f), mtime=mtime, size=size, v=META_V)
+        at['meta'] = False
         new_idx[key] = c
+        if c.get('bad') or sid in skip:
+            continue
         active = c.get('last_assistant_ts') or mtime
         if sid in dismissed:
             d = dismissed[sid]
             if isinstance(d, dict):  # dismissed while Claude was working there: hidden for the rest of that turn
-                if (by_sid.get(sid) or {}).get('status') == 'busy':
+                if not known or (by_sid.get(sid) or {}).get('status') == 'busy':
                     continue
-                dismissed[sid] = d = active  # that turn is over: from here on, as any dismiss
-                dismissed_moved = True
+                dismissed[sid] = turn_over[sid] = d = active  # that turn is over: from here on, as any dismiss
             if active <= d:  # hidden until Claude replies there again
                 continue
         if name_overruled(sid, c.get('custom_title'), names, pending_names):
@@ -3058,17 +3724,21 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
         title = names.get(sid) or c.get('custom_title') or c.get('title') or c.get('first_prompt')
         if not title:
             continue
-        rows.append({'sid': sid, 'f': f, 'c': c, 'mtime': mtime, 'active': active, 'title': title, 'a': by_sid.get(sid) or {}})
+        rows.append({'sid': sid, 'f': f, 'c': c, 'mtime': mtime, 'active': active, 'title': title, 'a': by_sid.get(sid) or {},
+                     'named': bool(names.get(sid) or c.get('custom_title') or c.get('title'))})  # not just its first words
         if len(rows) >= LIST_MAX:
+            at['sid'] = None
             show, gone = supersede(rows, marks)
             if len(show) >= LIST_MAX:
                 break
+    at['sid'] = None
     if len(rows) < LIST_MAX:
         show, gone = supersede(rows, marks)
     try:
         _jput(state_dir / 'index.json', new_idx)
-        if dismissed_moved:
-            _jput(state_dir / 'dismissed.json', dismissed)
+        if turn_over:  # only the ones this pass moved, so a dismiss made meanwhile is kept
+            locked_update(state_dir / 'dismissed.json',
+                          lambda d: dict(d, **{k: v for k, v in turn_over.items() if isinstance(d.get(k), dict)}))
     except OSError:
         pass
     folder = lambda c: folder_of(c['cwd'], root) if c.get('cwd') else None
@@ -3081,12 +3751,14 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
         launched, base = {}, {'effort': 'high', 'model': 'opus', 'perm': 'default'}
     condensed = _jget(state_dir / 'condensed.json') or {}
     cond_before = dict(condensed)
+    cond_spent = 0.0  # after an update every row is uncounted at once: a poll counts for a few seconds, the next go on
     model = summary_model()
     ttls = _jget(state_dir / TTL_FILE) or {}
     ttls_before = dict(ttls)
     cu_cj = (_jget(claude_json_path()) or {}) if sys.platform == 'darwin' or IS_WIN else None  # computer use, per folder
     for r in show[:LIST_MAX]:
         sid, f, c, a, active = r['sid'], r['f'], r['c'], r['a'], r['active']
+        at['sid'] = sid
         turn_open = None  # only read where Claude Code's own word is in doubt: the server trusts status otherwise
         if a.get('status') == 'busy' or a.get('state') == 'running':
             turn_open = _turn_open(_tail_lines(f, TAIL_READ)[1])
@@ -3115,6 +3787,9 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
             'handoff_of': c.get('handoff_of'),
             'last_ts': c.get('last_ts'), 'archived': c.get('archived_ts'),
         }
+        dirs = [x[1] for x in (full.get(sid) or {}).get('flags') or [] if x[0] == '--add-dir' and len(x) > 1]
+        if dirs:
+            s['flags']['dirs'] = dirs  # the extra folders it was launched with, as the picker names them
         if cu_cj is not None and c.get('cwd') and computer_use_on(c['cwd'], cu_cj):
             s['flags']['computer'] = s['now']['computer'] = True  # its folder has computer use: the chat gets it at start
         if (launched.get(sid) or {}).get('chrome') and c.get('chrome_loaded') is False and not c.get('chrome_used'):
@@ -3122,11 +3797,13 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
         elif (launched.get(sid) or {}).get('chrome') and c.get('chrome_loaded'):
             s['chrome_ok'] = True
         if s['ctx']:
+            t_cond = time.time()
             try:
-                size = condensed_size(f, r['mtime'], now, condensed)
+                size = condensed_size(f, r['mtime'], now, condensed, kept_only=cond_spent > CONDENSE_POLL_S)
             except Exception:
                 log(f'condense failed: {traceback.format_exc(limit=2)}')
                 size = None
+            cond_spent += time.time() - t_cond
             s['condensed'] = size
             s['cost'] = cost_model(s['ctx'], size, s['handoff_fresh'], note_size(sid) if s['handoff_fresh'] else None,
                                    summary_model=model)
@@ -3150,6 +3827,7 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
         if r.get('repeats'):
             s['repeats'] = r['repeats']
         out.append(s)
+    at['sid'] = None
     if ttls != ttls_before:
         try:
             keep = {r['sid'] for r in show[:LIST_MAX]}
@@ -3177,21 +3855,80 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
     return out
 
 
-def latest_limits():
-    best = None
+LIMITS_SLACK = 3600  # reset times this close are the same window
+
+
+def sane_limits(lim, now):
+    """One sighting of the plan numbers with what cannot be true taken out, so that a single garbled reading never
+    stands as "the highest this week": a percent that is not 0 to 100 (a little over reads as 100), or a window
+    that would end later than one starting now could (5 hours, 7 days). The server's rule (fleet.sane_limits)."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf')
+    out = dict(lim)
+    for pct, reset, span in (('five_hour', 'five_hour_reset', 5 * 3600), ('seven_day', 'seven_day_reset', 7 * 86400)):
+        v, r = lim.get(pct), lim.get(reset)
+        if v is None:
+            continue
+        if not num(v) or not 0 <= v <= 200 or (num(r) and r > now + span + LIMITS_SLACK):
+            out[pct] = out[reset] = None
+        elif v > 100:
+            out[pct] = 100
+    return out
+
+
+def merge_limits(rows, now):
+    """One answer from many sightings of the plan numbers (dicts with LIMIT_KEYS and `updated`, when a reply saw
+    them). Each window is read by itself: of the sightings whose window is still open, the one that resets last is
+    the current window, and the highest percent in it is the truth, because use only grows inside a window and a
+    chat that has not replied for a while still shows an older, lower number. `updated` is when that highest number
+    was last seen. With no open window, the newest sighting stands (its reset time says it is over). Readings that
+    cannot be true are left out first (sane_limits). None when nobody saw a number. The server merges the machines'
+    answers the same way (fleet.merge_limits)."""
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf')
+    at = lambda r: r.get('updated') if num(r.get('updated')) else 0
+    rows = [sane_limits(r, now) for r in rows if isinstance(r, dict)]
+    rows = [r for r in rows if num(r.get('five_hour')) or num(r.get('seven_day'))]
+    if not rows:
+        return None
+
+    def window(pct, reset):
+        live = [r for r in rows if num(r.get(pct)) and num(r.get(reset)) and r[reset] > now]
+        if not live:
+            return None
+        end = max(r[reset] for r in live)
+        live = [r for r in live if end - r[reset] <= LIMITS_SLACK]
+        top = max(r[pct] for r in live)
+        return max((r for r in live if r[pct] == top), key=at)
+    newest = max(rows, key=at)
+    week = window('seven_day', 'seven_day_reset') or max((r for r in rows if num(r.get('seven_day'))), key=at, default=None)
+    # No open 5-hour window: the last one any chat saw within the week (its reset time says it is over), else what
+    # the newest reply saw. Nothing there means the plan does not report one.
+    past = [r for r in rows if num(r.get('five_hour')) and num(r.get('five_hour_reset')) and r['five_hour_reset'] > now - 7 * 86400]
+    five = window('five_hour', 'five_hour_reset') or max(past, key=lambda r: r['five_hour_reset'], default=None) or newest
+    week = week or {}
+    return {'five_hour': five.get('five_hour'), 'seven_day': week.get('seven_day'),
+            'five_hour_reset': five.get('five_hour_reset') if five.get('five_hour') is not None else None,
+            'seven_day_reset': week.get('seven_day_reset'), 'updated': (week or five).get('updated')}
+
+
+def latest_limits(now=None):
+    """The plan numbers this machine's chats last saw, merged (merge_limits). `merged` tells the server so."""
+    rows = []
     for p in paths()['state'].glob('*-*-*-*-*.json'):
-        d = _jget(p) or {}
-        if d.get('seven_day') is not None and (not best or (d.get('updated') or 0) > (best.get('updated') or 0)):
-            best = d
-    return {k: best.get(k) for k in ('five_hour', 'seven_day', 'five_hour_reset', 'seven_day_reset', 'updated')} if best else None
+        d = _jget(p)
+        if isinstance(d, dict):
+            at = d.get('limits_at')  # a file from before limits_at: when its status line was last drawn
+            rows.append(dict({k: d.get(k) for k in LIMIT_KEYS}, updated=at if isinstance(at, (int, float)) else d.get('updated')))
+    best = merge_limits(rows, time.time() if now is None else now)
+    return dict(best, merged=True) if best else None
 
 
+@cfg_step
 def pretrust(p):
     """Mark a new folder trusted in ~/.claude.json, unless the folder or an ancestor already is. The nearest folder
     with a trust answer decides: a parent saying no (Desktop/Claude after a declined prompt) hides a trusted grandparent."""
     p = Path(p)
     cj = claude_json_path()
-    data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    data = cfg_read(cj)
     projects = data.setdefault('projects', {})
     for d in [p, *p.parents]:
         e = projects.get(trust_key(d)) or {}
@@ -3201,17 +3938,18 @@ def pretrust(p):
             break
     _backup(cj)
     projects.setdefault(trust_key(p), {})['hasTrustDialogAccepted'] = True
-    _jput_text(cj, json.dumps(data, indent=2))
+    cfg_write(cj, data)
     return True
 
 
+@cfg_step
 def inherit_trust(p):
     """Give a folder its own trust entry when the nearest folder above it with an answer was trusted and it has none.
     A background launch refuses a folder that only a parent trusts (a git worktree inside a trusted project, say), so
     this writes what accepting the prompt there would. A folder or parent that said no is left alone."""
     p = Path(p)
     cj = claude_json_path()
-    data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    data = cfg_read(cj)
     projects = data.setdefault('projects', {})
     if 'hasTrustDialogAccepted' in (projects.get(trust_key(p)) or {}):
         return False
@@ -3222,7 +3960,7 @@ def inherit_trust(p):
                 return False
             _backup(cj)
             projects.setdefault(trust_key(p), {})['hasTrustDialogAccepted'] = True
-            _jput_text(cj, json.dumps(data, indent=2))
+            cfg_write(cj, data)
             return True
     return False
 
@@ -3331,13 +4069,50 @@ def any_name(s):
             not any(c in s for c in '/\\') and not any(ord(c) < 32 for c in s))
 
 
+def _fold(name):
+    """A name as the file system compares it: macOS and Windows take Library, library and LIBRARY for one folder."""
+    return name.casefold() if IS_WIN or sys.platform == 'darwin' else name
+
+
+def _private_top(parts):
+    """True when the first of these parts under home is private: a dot folder, ~/Library (but iCloud Drive), AppData."""
+    if not parts:
+        return False
+    if parts[0].startswith('.'):
+        return True
+    if _fold(parts[0]) in {_fold(x) for x in PRIVATE_TOP}:
+        return tuple(_fold(x) for x in parts[:3]) != tuple(_fold(x) for x in ICLOUD_REL)
+    return False
+
+
 def _private(parts):
     """True for what a client never sees under home: dot folders, ~/Library (but iCloud Drive) and AppData."""
-    if any(x.startswith('.') for x in parts):
-        return True
-    if parts and parts[0] in PRIVATE_TOP:
-        return tuple(parts[:3]) != ICLOUD_REL
-    return False
+    return any(x.startswith('.') for x in parts) or _private_top(parts)
+
+
+def _below(base, p):
+    """The parts of p under base, compared as the file system compares names; None when p is not in base. Both are
+    real paths (symlinks followed, and on Windows short names such as APPDAT~1 written out)."""
+    bp, pp = Path(base).parts, Path(p).parts
+    if len(pp) < len(bp) or tuple(_fold(x) for x in pp[:len(bp)]) != tuple(_fold(x) for x in bp):
+        return None
+    return pp[len(bp):]
+
+
+def _home_private(p):
+    """The real path p is in a part of home no client is shown: a dot folder at the top of home, ~/Library (but
+    iCloud Drive) or AppData."""
+    parts = _below(user_home(), p)
+    return parts is not None and _private_top(parts)
+
+
+def _root_private(p, root=None):
+    """The same for a folder in the Claude folder, which may be the home folder itself. A Claude folder the owner put
+    inside such a folder is theirs to share."""
+    return _home_private(p) and not _home_private(root or machine_root())
+
+
+PRIVATE_MSG = 'That folder is private to the machine.'
 
 
 def _clean_parts(rel, strict=False):
@@ -3366,19 +4141,25 @@ def resolve_folder(folder, must_exist=True, strict_last=False):
     if f == '~' or f.startswith('~/'):
         if not roam_on():
             raise ValueError('This machine keeps chats in its Claude folder. Settings can let them start anywhere in home.')
-        base, parts = user_home(), _clean_parts(f[1:])
+        base, parts, in_home = user_home(), _clean_parts(f[1:]), True
         if _private(parts):
-            raise ValueError('That folder is private to the machine.')
+            raise ValueError(PRIVATE_MSG)
     elif f.startswith('@'):
         name, _, rest = f[1:].partition('/')
-        base, parts = _place_root(name), _clean_parts(rest)
+        base, parts, in_home = _place_root(name), _clean_parts(rest), False
         if any(x.startswith('.') for x in parts):
-            raise ValueError('That folder is private to the machine.')
+            raise ValueError(PRIVATE_MSG)
     else:
+        root = machine_root()
         if not must_exist:
-            return _new_under(machine_root(), _clean_parts(f, True)) if strict_last else safe_path(machine_root(), folder)
-        p = safe_path(machine_root(), folder)
-        if not p.is_dir():
+            p = _new_under(root, _clean_parts(f, True)) if strict_last else safe_path(root, folder)
+        else:
+            p = safe_path(root, folder)
+        # The Claude folder may be the home folder itself (never picked, or picked so): ~/Library, AppData and the
+        # dot folders at its top are as private then as they are by their '~/' names.
+        if _root_private(p, root):
+            raise ValueError(PRIVATE_MSG)
+        if must_exist and not p.is_dir():
             raise ValueError('folder does not exist')
         return p
     if strict_last and parts and not valid_name(parts[-1]):
@@ -3386,6 +4167,11 @@ def resolve_folder(folder, must_exist=True, strict_last=False):
     p = base.joinpath(*parts).resolve()
     if p != base and base not in p.parents:
         raise ValueError('That folder is outside the places this machine shares.')
+    # Again on the real path: the name asked for can differ from it by letter case (macOS, Windows), a symlink on the
+    # way (~/Documents/keys -> ~/.ssh) or a Windows short name (APPDAT~1).
+    real = _below(base, p)
+    if real is None or (_private(real) if in_home else any(x.startswith('.') for x in real)):
+        raise ValueError(PRIVATE_MSG)
     if must_exist and not p.is_dir():
         raise ValueError('folder does not exist')
     return p
@@ -3407,26 +4193,24 @@ def folder_of(cwd, root=None):
     if not cwd:
         return None
     root = root or machine_root()
-    rel = _rel(root, cwd)
-    if rel is not None:
-        return rel
     try:
         p = Path(cwd).resolve()
     except (OSError, TypeError, ValueError):
         return None
-    home = user_home()
-    if roam_on() and (p == home or home in p.parents):
-        parts = p.relative_to(home).parts
+    rel = _rel(root, p)
+    if rel is not None:  # in the Claude folder; when that is the home folder, never its private folders
+        return None if _root_private(p, root) else rel
+    parts = _below(user_home(), p)
+    if roam_on() and parts is not None:
         return None if _private(parts) else ('~/' + '/'.join(parts) if parts else '~')
     for pl in local_places():
         try:
             base = Path(os.path.expanduser(pl['path'])).resolve()
         except (OSError, RuntimeError):
             continue
-        if p == base or base in p.parents:
-            parts = p.relative_to(base).parts
-            if not any(x.startswith('.') for x in parts):
-                return '@' + pl['name'] + ('/' + '/'.join(parts) if parts else '')
+        parts = _below(base, p)
+        if parts is not None and not any(x.startswith('.') for x in parts):
+            return '@' + pl['name'] + ('/' + '/'.join(parts) if parts else '')
     return None
 
 
@@ -3463,17 +4247,18 @@ def trust_state(p):
     return TRUST_ASK
 
 
+@cfg_step
 def grant_trust(p):
     """The user allowed Claude into folder p from an app: write the answer accepting Claude's own prompt would."""
     cj = claude_json_path()
-    data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    data = cfg_read(cj)
     projects = data.setdefault('projects', {})
     e = projects.setdefault(trust_key(p), {})
     if e.get('hasTrustDialogAccepted') is True:
         return False
     _backup(cj)
     e['hasTrustDialogAccepted'] = True
-    _jput_text(cj, json.dumps(data, indent=2))
+    cfg_write(cj, data)
     log(f'trusted {p} at the user\'s request')
     return True
 
@@ -3613,6 +4398,8 @@ def folder_children(parent):
     """One level of the folder tree under the root, for New's folder picker. Folders with sessions say how recent."""
     root = machine_root()
     base = safe_path(root, parent) if parent else root
+    if parent and _root_private(base, root):
+        raise ValueError(PRIVATE_MSG)
     if not base.is_dir():
         raise ValueError('folder does not exist')
     recent = {}
@@ -3625,7 +4412,7 @@ def folder_children(parent):
                 recent[k] = max(recent.get(k) or 0, c.get('mtime') or 0)
     out = []
     try:
-        subs = sorted((d for d in base.iterdir() if _shown_dir(d)), key=lambda d: d.name.lower())
+        subs = sorted((d for d in base.iterdir() if _shown_dir(d) and not _root_private(d, root)), key=lambda d: d.name.lower())
     except OSError:
         subs = []
     for d in subs[:300]:
@@ -3644,6 +4431,29 @@ SECRET_RE = re.compile(r'^\.env|^id_(rsa|dsa|ecdsa|ed25519)|\.(key|pem|p8|p12|pf
                        r'|secret|credential|password|token', re.I)
 
 
+def _files_hidden(p):
+    """The file browser shows nothing of the real folder p: it is, or is inside, a dot folder of the place it is in,
+    or one of home's private folders."""
+    root = machine_root()
+    parts = _below(root, p)
+    if parts is not None:
+        return any(x.startswith('.') for x in parts) or _root_private(p, root)
+    for pl in local_places():  # before home's own rule: a place the owner made inside ~/Library is theirs to share
+        try:
+            at = Path(os.path.expanduser(pl['path'])).resolve()
+            parts = _below(at, p)
+        except (OSError, RuntimeError):
+            continue
+        if parts is not None and (any(x.startswith('.') for x in parts) or _root_private(p, at)):
+            return True
+        if parts is not None:
+            return False
+    parts = _below(user_home(), p)
+    if parts is not None:
+        return _private(parts)
+    return True
+
+
 def list_files(folder, name=None):
     """The file browser: one folder (folders, then files), or the first 64 KB of one file, in any place a client may
     name (resolve_folder). No dot entries, ~/Library or AppData, nothing through a symlink, and a file that looks
@@ -3651,6 +4461,8 @@ def list_files(folder, name=None):
     if isinstance(folder, str) and any(x.startswith('.') and x != '.' for x in folder.replace('\\', '/').split('/')):
         raise ValueError('folder does not exist')  # dot folders (.ssh, .config, .claude) hold keys and tokens
     base = resolve_folder(folder or '')
+    if _files_hidden(base):  # on the real folder: a symlink or another spelling of a hidden folder shows nothing either
+        raise ValueError('folder does not exist')
     addr = (folder_of(str(base)) or '') if folder else ''
     out = {'ok': True, 'root': root_label(), 'folder': addr, 'shown': shown_path(base),
            'trust': 'yes' if not outside_root(str(base)) else trust_state(base)}
@@ -3660,8 +4472,12 @@ def list_files(folder, name=None):
         p = base / name
         if p.is_symlink() or not p.is_file():
             raise ValueError('file does not exist')
+        real = p.resolve().name  # the file's own name: Windows also opens it by a short name (CREDEN~1.JSO)
+        if real.startswith('.') or _below(base, p.resolve()) != (real,):
+            raise ValueError('file does not exist')
         st = p.stat()
-        f = {'name': name, 'size': st.st_size, 'mtime': st.st_mtime, 'secret': bool(SECRET_RE.search(name))}
+        f = {'name': name, 'size': st.st_size, 'mtime': st.st_mtime,
+             'secret': bool(SECRET_RE.search(name) or SECRET_RE.search(real.rstrip('. ')))}
         if not f['secret']:
             try:
                 with open(p, 'rb') as fh:
@@ -3715,7 +4531,8 @@ def list_folders(now):
             out.append({'folder': rel, 'recent': c.get('mtime')})
     try:
         subs = sorted((d for d in root.iterdir() if d.is_dir() and not d.name.startswith('.') and d.name not in
-                       ('Library', 'Applications', 'Movies', 'Music', 'Pictures', 'Public')), key=lambda d: d.name.lower())
+                       ('Library', 'Applications', 'Movies', 'Music', 'Pictures', 'Public') and not _root_private(d, root)),
+                      key=lambda d: d.name.lower())
     except OSError:
         subs = []
     for d in subs:
@@ -3777,7 +4594,12 @@ def rpc(req, now, agents=None):
                 device = {'os': os_name(), 'form': device_form()}
             except Exception:
                 device = {'os': os_name(), 'form': None}
+            known = agents_known(ags)
             sessions = list_sessions(now, ags, replaced, procs)
+            try:
+                prune_state(now)
+            except Exception:
+                log(f'tidy failed: {traceback.format_exc(limit=2)}')
             try:
                 setup = setup_issues(sessions, now)
             except Exception:
@@ -3785,14 +4607,14 @@ def rpc(req, now, agents=None):
                 setup = []
             return {'ok': True, 'machine': machine_name(), 'os': device['os'], 'device': device, 'root_set': root_is_set(),
                     'root': trust_key(machine_root()), 'sessions': sessions, 'setup': setup,
-                    'replaced': replaced, 'limits': latest_limits(), 'now': now,
+                    'replaced': replaced, 'limits': latest_limits(now), 'now': now,
+                    'agents_ok': known,  # False: Claude Code could not be asked, so no row says what runs
                     'clock': now + (time.time() - t0),  # as it answers: the server converts this machine's times with it
-
-                    'launcher': {'alive': None} if IS_WIN else launcher_status(now), 'mem': mem_or_none(ags, procs),
+                    'launcher': {'alive': None} if IS_WIN else launcher_status(now), 'mem': mem_or_none(ags, procs) if known else None,
                     'features': list(AGENT_FEATURES), 'versions': {'agent': agent_version(), 'claude': claude_version()},
                     'models': models_or_none(), 'root_suggest': None if root_is_set() else root_suggest()}
         if verb == 'folders':
-            list_sessions(now, [])
+            list_sessions(now, _NoAgents())  # for the index only: nobody was asked, so nothing counts as stopped
             if 'parent' in req:  # the tree: one level at a time
                 parent = req.get('parent') or ''
                 if not isinstance(parent, str) or len(parent) > 512:
@@ -3847,13 +4669,12 @@ def rpc(req, now, agents=None):
             return dict(busy_report(sid, now, get_agents(), procs), ok=True)
         if verb in ('stop', 'dismiss'):
             sid = _need_sid(req)
-            a = _agent_for(sid, get_agents())
+            a = _agent_for(sid, sure_agents(get_agents()))  # not known: nothing is hidden or stopped on a guess
             if verb == 'dismiss':
-                d = _jget(paths()['state'] / 'dismissed.json') or {}
                 # One still working keeps writing to its transcript: it stays hidden until that turn is over, so it
                 # comes back only for a reply after it.
-                d[sid] = {'at': now} if a and a.get('status') == 'busy' else now
-                _jput(paths()['state'] / 'dismissed.json', d)
+                mark = {'at': now} if a and a.get('status') == 'busy' else now
+                locked_update(paths()['state'] / 'dismissed.json', lambda d: dict(d, **{sid: mark}))
             if a and a.get('kind') == 'background' and a.get('id'):
                 if a.get('status') == 'stopped':
                     return {'ok': True, 'note': 'not running'}
@@ -3865,7 +4686,7 @@ def rpc(req, now, agents=None):
                 return {'ok': True, 'note': 'not running'}
             return {'ok': True}
         if verb == 'budget_stop':  # the hard limit: stop the busy background chats here (claude stop; resumable)
-            return budget_stop(get_agents())
+            return budget_stop(sure_agents(get_agents()))
         if verb in FEAT_VERBS:
             return rpc_feat(verb, req, now, get_agents)
         if verb in LIBRARY_VERBS:
@@ -4030,7 +4851,7 @@ def paths_q():
 def find_session(sid):
     """(transcript path, meta) for a session on this machine, from the index or a direct lookup."""
     for key, c in (_jget(paths()['state'] / 'index.json') or {}).items():
-        if Path(key).stem == sid:
+        if Path(key).stem == sid and isinstance(c, dict) and not c.get('bad'):
             return key, c
     for f in (claude_dir() / 'projects').glob(f'*/{sid}.jsonl'):
         return str(f), session_meta(f)
@@ -4063,14 +4884,8 @@ def wake_launcher(run=None, sleep=time.sleep, wait=25):
     access, but Claude's background service lives in the desktop session: ask it for a promptless session in a
     trusted folder, whose SessionStart hook starts the launcher there. Then remove that session."""
     flag = paths_q()['queue'] / '.waking'
-    try:
-        fd = os.open(flag, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(time.time()).encode())
-        os.close(fd)
-    except FileExistsError:
-        if _claim_fresh(flag, time.time(), WAKE_TTL):
-            return False
-        _jput_text(flag, str(time.time()))
+    if not lock_take(flag, time.time(), WAKE_TTL):
+        return False
     try:
         wd = SB_HOME / 'wake'
         wd.mkdir(parents=True, exist_ok=True)
@@ -4095,10 +4910,7 @@ def wake_launcher(run=None, sleep=time.sleep, wait=25):
                 return up
         return False
     finally:
-        try:
-            flag.unlink()
-        except OSError:
-            pass
+        lock_drop(flag)
 
 
 def _queue(job, now):
@@ -4156,7 +4968,8 @@ def rpc_jobs(verb, req, now, get_agents):
             raise ValueError('message too long')
         if mode == 'ultracode' and model not in (None, 'opus'):
             raise ValueError('UltraCode runs on Opus')
-        flags = check_flags(req.get('flags'), root, claude_flags() if req.get('flags') else None)
+        flags = check_flags(req.get('flags'), root, claude_flags() if req.get('flags') else None,
+                            claude_perms() if req.get('flags') else None)
         if '--chrome' in flags:
             chrome, flags = True, [f for f in flags if f != '--chrome']
         return _queue({'verb': 'start', 'cwd': str(cwd), 'name': name, 'model': model, 'prompt': prompt, 'handoff_text': htext,
@@ -4179,10 +4992,13 @@ def rpc_jobs(verb, req, now, get_agents):
             model, effort = req.get('model') or None, req.get('effort') or None
             if not model_ok(model) or effort not in (None, 'ultracode') + EFFORTS:
                 raise ValueError('unknown model or effort')
-            a = _agent_for(sid, get_agents()) or {}
+            a = _agent_for(sid, sure_agents(get_agents())) or {}
             if a.get('kind') == 'interactive' and a.get('status') not in (None, 'stopped'):
                 raise ValueError('This chat is open in a terminal. Close it there first, then relaunch.')
-            flags = check_flags(req.get('flags'), None, claude_flags() if req.get('flags') else None)
+            flags = check_flags(req.get('flags'), None, claude_flags() if req.get('flags') else None,
+                                claude_perms() if req.get('flags') else None)
+            # a worktree is made once, at the start: the relaunch runs inside it already (an older server sends it back)
+            flags = [f for f in flags if f.split('=', 1)[0] != '--worktree']
             prompt = req.get('prompt')
             if prompt is not None and (not isinstance(prompt, str) or len(prompt) > 20_000):
                 raise ValueError('message too long')
@@ -4194,7 +5010,7 @@ def rpc_jobs(verb, req, now, get_agents):
                        flags=[f for f in flags if f != '--chrome'], stop=a.get('id') if a.get('kind') == 'background' else None,
                        name=given_name(sid) or a.get('name') or job['name'])  # the same chat again: its own name
         elif verb == 'resume':
-            a = _agent_for(sid, get_agents()) or {}
+            a = _agent_for(sid, sure_agents(get_agents())) or {}
             job['in_place'] = a.get('kind') == 'background' and a.get('status') == 'stopped'
         if verb == 'fresh':
             job['name'] = compose_name(topic, f'part {fresh + 2}', name_stamp(now))
@@ -4261,7 +5077,9 @@ def rpc_jobs(verb, req, now, get_agents):
         if not p.exists():
             raise ValueError('no handoff yet')
         tp, meta = find_session(sid)
-        return {'ok': True, 'text': p.read_text(encoding='utf-8'), 'carry': carry_over(tp, meta.get('model')) if tp else {}}
+        # carry: chrome, effort and model as every server reads them, and 'flags' (permission mode, extra folders,
+        # agent, instructions) for a server that passes them on to the machine the chat continues on
+        return {'ok': True, 'text': p.read_text(encoding='utf-8'), 'carry': carry_over(tp, meta.get('model'), sid) if tp else {}}
     raise ValueError(f'unknown verb {verb!r}')
 
 # ---------------------------------------------------------------- v2: flags for a new session
@@ -4270,27 +5088,38 @@ def rpc_jobs(verb, req, now, get_agents):
 # (server/flags.py; a test keeps the two the same). No character a Windows .cmd shim would act on can get through.
 FLAG_TEXT_RE = r"[A-Za-z0-9 .,:;'?()\[\]/_+=*#@$-]{1,2000}"
 FLAG_TOOLS_RE = r"[A-Za-z0-9_*:().,/ @-]{1,400}"
+FLAG_MODEL_RE = r'(?:fable|opus|sonnet|haiku)(?:\[1m\])?|claude-[a-z0-9]+(?:-[a-z0-9]+){1,6}(?:\[1m\])?'  # an alias or a full id
 START_FLAGS = {
     '--chrome': None, '--no-chrome': None,
-    '--permission-mode': r'acceptEdits|auto|bypassPermissions|manual|dontAsk|plan',
+    # manual and default both mean "asks every time": Claude Code lists one or the other, by version (ask_mode)
+    '--permission-mode': r'acceptEdits|auto|bypassPermissions|manual|default|dontAsk|plan',
     '--add-dir': 'folder',
     '--agent': r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',
     '--worktree': r'[A-Za-z0-9][A-Za-z0-9_.-]{0,63}',
-    '--fallback-model': r'(?:opus|sonnet|haiku|fable)(?:,(?:opus|sonnet|haiku|fable)){0,3}',
+    '--fallback-model': rf'(?:{FLAG_MODEL_RE})(?:,(?:{FLAG_MODEL_RE})){{0,3}}',
     '--append-system-prompt': FLAG_TEXT_RE,
     '--allowed-tools': FLAG_TOOLS_RE, '--disallowed-tools': FLAG_TOOLS_RE, '--tools': FLAG_TOOLS_RE,
-    '--autocompact': r'auto|[1-9][0-9]{2,3}k|1M',
+    '--autocompact': r'auto|[1-9][0-9]{2}k|1000k|1M',  # Claude Code takes 100k to 1M
     '--setting-sources': r'(?:user|project|local)(?:,(?:user|project|local)){0,2}',
     '--brief': None, '--verbose': None, '--safe-mode': None, '--restricted': None, '--disable-slash-commands': None,
     '--strict-mcp-config': None, '--exclude-dynamic-system-prompt-sections': None,
 }
 FLAG_REPEAT = {'--add-dir': 8}  # the rest come once
+FLAG_OPTIONAL = ('--worktree',)  # the value may be left out: Claude Code then names the worktree itself
 FLAGS_MAX = 24
+ASK_MODES = ('manual', 'default')  # "asks every time", as newer and older Claude Code call it
 
 
-def check_flags(flags, root=None, known=None):
+def ask_mode(perms):
+    """What this machine's Claude Code calls the mode that asks every time, from the choices its help lists for
+    --permission-mode; None when it lists neither name (or the help could not be read)."""
+    return next((m for m in ASK_MODES if m in (perms or ())), None)
+
+
+def check_flags(flags, root=None, known=None, perms=None):
     """[[name], [name, value], ...] from the app as argv items ("--name" or "--name=value"; the = form keeps a flag
-    that takes several values from eating the message after it). ValueError says what is wrong."""
+    that takes several values from eating the message after it). ValueError says what is wrong. known: the flags
+    this machine's `claude --help` lists; perms: the permission modes it lists (both None when it cannot say)."""
     if flags is None:
         return []
     if not isinstance(flags, list) or len(flags) > FLAGS_MAX:
@@ -4313,6 +5142,9 @@ def check_flags(flags, root=None, known=None):
                 raise ValueError(f'{name} takes no value')
             out.append(name)
             continue
+        if len(f) == 1 and name in FLAG_OPTIONAL:
+            out.append(name)
+            continue
         if len(f) != 2 or not f[1]:
             raise ValueError(f'{name} needs a value')
         v = f[1]
@@ -4323,18 +5155,41 @@ def check_flags(flags, root=None, known=None):
             v = str(d)
         elif not re.fullmatch(spec, v):
             raise ValueError(f'{name}: that value is not allowed')
+        if name == '--permission-mode' and perms and v not in perms:
+            if v not in ASK_MODES:
+                raise ValueError(f'Claude Code on this machine has no {v} permission mode. Update it there, or pick another.')
+            v = ask_mode(perms)  # the same mode under the name this build takes
+            if not v:
+                continue  # it cannot be told: its own default mode, as before
         out.append(f'{name}={v}')
     if '--chrome' in seen and '--no-chrome' in seen:
         raise ValueError('--chrome and --no-chrome cancel out')
     return out
 
 
-HELP_FLAG_RE = re.compile(r'(?<![\w-])--[a-z][a-z0-9-]+')
+# A flag where the help defines it: at the start of an option's line ("  --chrome", "  -w, --worktree [name]",
+# "  --allowedTools, --allowed-tools <tools...>"). A flag only named in another option's description (--restricted
+# talks about --tools and --add-dir) is not one this build has.
+HELP_FLAG_RE = re.compile(r'^ {1,4}(?:-[A-Za-z], )?(--[A-Za-z][A-Za-z0-9-]+(?:, --[A-Za-z][A-Za-z0-9-]+)*)', re.M)
+HELP_PERMS_RE = re.compile(r'^ {1,4}--permission-mode\b[^\n]*((?:\n(?! {1,4}-)[^\n]*)*)', re.M)
+
+
+def help_flags(text):
+    """The long flags `claude --help` defines."""
+    return sorted({f for names in HELP_FLAG_RE.findall(text or '') for f in names.split(', ')})
+
+
+def help_perm_modes(text):
+    """The permission modes `claude --help` lists for --permission-mode (choices: "acceptEdits", "auto", ...), in
+    its order; [] when it lists none."""
+    m = HELP_PERMS_RE.search(text or '')
+    c = re.search(r'choices:\s*((?:"[A-Za-z]{2,24}"[,\s]*)+)', m.group(0)) if m else None
+    return re.findall(r'"([A-Za-z]{2,24})"', c.group(1))[:12] if c else []
 
 
 def _claude_help(refresh=False, runner=None):
-    """What this machine's `claude --help` says, cached per Claude Code build: {'flags': [...], 'models': [...]};
-    None when it cannot say."""
+    """What this machine's `claude --help` says, cached per Claude Code build: {'flags': [...], 'models': [...],
+    'perms': [...]}; None when it cannot say."""
     exe = _claude_exe()
     try:
         mt = os.stat(exe).st_mtime
@@ -4342,17 +5197,18 @@ def _claude_help(refresh=False, runner=None):
         return None
     p = paths()['state'] / 'claude_help.json'
     d = _jget(p) or {}
+    # 'v': how the text is read. A copy an older helper cached counted flags named in prose, so it is read again.
     if not refresh and d.get('exe') == exe and d.get('mtime') == mt and isinstance(d.get('flags'), list) \
-            and isinstance(d.get('models'), list):
+            and isinstance(d.get('models'), list) and isinstance(d.get('perms'), list) and d.get('v') == 2:
         return d
     try:
         text = (runner or (lambda: run_claude_cmd(['--help'], timeout=20)))() or ''
     except Exception:
         return None
-    found = sorted(set(HELP_FLAG_RE.findall(text)))
+    found = help_flags(text)
     if '--chrome' not in found and '--model' not in found:  # not a help page
         return None
-    d = {'exe': exe, 'mtime': mt, 'flags': found, 'models': help_model_aliases(text)}
+    d = {'exe': exe, 'mtime': mt, 'flags': found, 'models': help_model_aliases(text), 'perms': help_perm_modes(text), 'v': 2}
     try:
         _jput(p, d)
     except OSError:
@@ -4364,6 +5220,12 @@ def claude_flags(refresh=False, runner=None):
     """The long flags this machine's `claude --help` lists, cached per Claude Code build; None when it cannot say."""
     d = _claude_help(refresh, runner)
     return set(d['flags']) if d else None
+
+
+def claude_perms():
+    """The permission modes this machine's Claude Code lists for --permission-mode; None when it cannot say."""
+    d = _claude_help()
+    return list(d['perms']) if d and d.get('perms') else None
 
 
 MODEL_ALIAS_RE = re.compile(r"'([a-z][a-z0-9]{1,23})'")
@@ -4390,7 +5252,8 @@ def claude_models():
     s = s if isinstance(s, dict) else {}
     allowed = s.get('availableModels')
     allowed = [a[:80] for a in allowed if isinstance(a, str)][:40] if isinstance(allowed, list) else None
-    return {'aliases': (d or {}).get('models') or [], 'allowed': allowed,
+    # perms: the permission modes its --permission-mode takes, so the server only names a mode this build knows
+    return {'aliases': (d or {}).get('models') or [], 'allowed': allowed, 'perms': (d or {}).get('perms') or [],
             'default': s['model'][:80] if isinstance(s.get('model'), str) else None, 'catalog': model_catalog()}
 
 
@@ -4598,6 +5461,7 @@ def computer_use_on(cwd, cj=None):
     return any(CU_SERVER in ((projects.get(k) or {}).get('enabledMcpServers') or []) for k in _cu_keys(cwd))
 
 
+@cfg_step
 def set_computer_use(cwd, on):
     """Enable or disable computer use for a folder the way /mcp does. True when ~/.claude.json changed."""
     if IS_WIN:
@@ -4606,7 +5470,7 @@ def set_computer_use(cwd, on):
         return False
     cj = claude_json_path()
     try:
-        data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+        data = cfg_read(cj)
     except ValueError:
         return False  # Claude Code is mid-write; leave it alone
     projects = data.setdefault('projects', {})
@@ -4625,11 +5489,13 @@ def set_computer_use(cwd, on):
         bak = cj.with_name(cj.name + '.bak-sb-computer-use')
         if not bak.exists():
             shutil.copy2(cj, bak)
-        _jput_text(cj, json.dumps(data, indent=2))
+            _own_only(bak)
+        cfg_write(cj, data)
         log(f'computer use {"on" if on else "off"} for {cwd}')
     return changed
 
 
+@cfg_step
 def _set_win_computer_use(cwd, on):
     """Windows: Windows-MCP in (or out of) the folder's own servers, installed first when it is missing. A disconnected
     desktop is put back on the screen when the admin-made task is there."""
@@ -4641,7 +5507,7 @@ def _set_win_computer_use(cwd, on):
         _win_reconnect()
     cj = claude_json_path()
     try:
-        data = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+        data = cfg_read(cj)
     except ValueError:
         return False  # Claude Code is mid-write; leave it alone
     projects = data.setdefault('projects', {})
@@ -4661,7 +5527,8 @@ def _set_win_computer_use(cwd, on):
         bak = cj.with_name(cj.name + '.bak-sb-computer-use')
         if not bak.exists() and cj.exists():
             shutil.copy2(cj, bak)
-        _jput_text(cj, json.dumps(data, indent=2))
+            _own_only(bak)
+        cfg_write(cj, data)
         log(f'computer use (windows-mcp) {"on" if on else "off"} for {cwd}')
     return changed
 
@@ -4672,13 +5539,34 @@ ULTRA_RE = re.compile(rb'"type":\s*"ultra_effort_(enter|exit)"')
 # Written when the chat is archived (or ended) in the Claude app: the background process lives on, but nobody can
 # reach it from there again.
 ARCHIVED_RE = re.compile(r'Remote Control disconnected\W+this session was ended or archived')
-EFFORT_RE = re.compile(rb'"effort":\s*"([a-z]+)"')
+CARRY_KEYS = ('chrome', 'effort', 'model')  # what a server from before the flags came along reads
 
 
-def carry_over(path, model=None):
-    """What the old chat could do, for the chat that continues it: Claude in Chrome if it used it, its effort (UltraCode
-    included), and a model other than the default Opus. One pass over the transcript, a few MB at a time."""
-    out, ultra, last = {}, None, b''
+def model_arg(model_id, launched=None, default='opus'):
+    """--model for a chat that carries on from one that ran on model_id: what that one was launched with (a pinned
+    version such as claude-opus-4-8, or opus[1m]) while it still ran on that family, else the family's alias.
+    None for this machine's default family when no --model was given: naming it would drop what settings.json
+    adds to it (the 1M context of opus[1m])."""
+    fam = next((m for m in MODELS if m in (model_id or '')), None)
+    if isinstance(launched, str) and MODEL_PICK_RE.fullmatch(launched) and (not fam or fam in launched):
+        return launched
+    return fam if fam != default else None
+
+
+def carry_over(path, model=None, sid=None):
+    """What the old chat ran with, for the chat that continues it (a resume, a fresh start, a compacted thread, or
+    the same work on another machine): Claude in Chrome if it used it or was started with it, its effort (UltraCode
+    included), its model as it was launched, and under 'flags' ([[name], [name, value]], unchecked) its permission
+    mode as the transcript last had it and every other flag it was launched with: extra folders, the agent, extra
+    instructions. A worktree is not carried: it is made once, when a chat first starts. One pass over the
+    transcript, a few MB at a time."""
+    out, ultra = {}, None
+    rec = ((_jget(paths()['state'] / 'flags.json') or {}).get(sid) or {}) if sid else {}
+    rec = rec if isinstance(rec, dict) else {}
+    launched, _ = whole_flags(rec)
+    first = rec.get('launch') if isinstance(rec.get('launch'), dict) else {}
+    if first.get('chrome'):
+        out['chrome'] = True
     try:
         with open(path, 'rb') as f:
             prev = b''
@@ -4691,36 +5579,86 @@ def carry_over(path, model=None):
                     out['chrome'] = True
                 for m in ULTRA_RE.finditer(buf):
                     ultra = m.group(1) == b'enter'
-                last, prev = buf[-(2 << 20):], buf[-64:]
-    except OSError:
-        return out
-    efforts = EFFORT_RE.findall(last)
-    effort = 'ultracode' if ultra else efforts[-1].decode() if efforts else None
+                prev = buf[-64:]
+        st = transcript_stats(path)  # the effort and mode its last turns ran with, as the list shows them
+    except (OSError, TypeError):
+        st = {}
+    effort = 'ultracode' if ultra else st.get('effort') or first.get('effort')
     if effort in EFFORTS + ('ultracode',):
         out['effort'] = effort
-    m = next((x for x in MODELS if x != 'opus' and x in (model or '')), None)
+    base = machine_defaults()
+    m = model_arg(model, next((f[1] for f in reversed(launched) if f[0] == '--model' and len(f) > 1), None), base['model'])
     if m:
         out['model'] = m
+    flags = [f for f in launched if f[0] in START_FLAGS and f[0] not in ('--worktree', '--chrome', '--permission-mode')
+             and not (f[0] == '--no-chrome' and out.get('chrome'))]
+    perm = st.get('perm') or first.get('perm')
+    if perm == 'bypassPermissions' and first.get('perm') != perm and \
+            not any(f[0] == '--allow-dangerously-skip-permissions' or (f[0] == '--permission-mode' and f[1:] == [perm])
+                    for f in launched):
+        # Skipping every permission check is only ever carried from how the chat was launched (or it is this
+        # machine's own default, which needs no flag): never from what its transcript last said alone.
+        log(f'carry: {sid or path}: its transcript ends in bypassPermissions but it was not launched so; not carried')
+        perm = first.get('perm')
+    ask = lambda v: 'default' if v in ASK_MODES else v  # one mode, two names
+    if isinstance(perm, str) and perm and ask(perm) != ask(base['perm']):  # this machine's own default needs no flag
+        flags.append(['--permission-mode', perm])
+    if flags:
+        out['flags'] = flags
+    return out
+
+
+def soft_flags(flags):
+    """Carried flags as argv items, each checked the way a new chat's are. One this machine cannot take now (a
+    folder that is gone, a flag or mode its Claude Code does not have) is left out and logged: the chat still
+    comes back, without that one flag."""
+    if not flags:
+        return []
+    known, perms = claude_flags(), claude_perms()
+    if known is None:  # its help could not be read, so nothing can be checked: the chat comes back plain
+        log('carried flags left out (claude --help could not be read): '
+            + ' '.join(sorted({str(f[0])[:40] for f in flags if isinstance(f, list) and f})))
+        return []
+    out, seen = [], {}
+    for f in flags:
+        name = f[0] if isinstance(f, list) and f and isinstance(f[0], str) else ''
+        if seen.get(name, 0) >= FLAG_REPEAT.get(name, 1) or len(out) >= FLAGS_MAX:
+            continue
+        if name == '--permission-mode' and f[1:] and f[1] in ASK_MODES and not perms:
+            continue  # "asks every time" has two names, and this Claude Code has not said which it takes
+        try:
+            out += check_flags([f], None, known, perms)
+            seen[name] = seen.get(name, 0) + 1
+        except (ValueError, OSError) as e:
+            log(f'carried flag left out: {name[:40]}: {e}')
     return out
 
 
 def launch_argv(job, exe=None):
     if job.get('bare'):
         return [exe or _claude_exe(), '--bg', '--resume', job['resume']]
-    argv = [exe or _claude_exe(), '--bg', '--remote-control']
+    flags = [f for f in job.get('flags') or [] if isinstance(f, str) and f.split('=', 1)[0] in START_FLAGS]  # checked at start
+    # A flag whose value may be left out (--worktree) goes first, with a flag right after it: anywhere later, it
+    # would take the next word, the chat's first message, as its value.
+    bare = [f for f in flags if f in FLAG_OPTIONAL]
+    argv = [exe or _claude_exe(), '--bg'] + bare + ['--remote-control']
     if job.get('name'):
         argv += ['--name', job['name']]
     mode = job.get('mode') or 'normal'
+    # A new UltraCode chat runs on Opus (the New sheet says so, and start refuses another model). A chat that is
+    # relaunched or carried on with UltraCode keeps the model it has: Claude Code itself says when a model cannot
+    # run UltraCode, so the model picked is never swapped for another without a word.
+    model = job.get('model') or ('opus' if mode == 'ultracode' else None)
     if job.get('effort') == 'ultracode':
         mode = 'ultracode'
-    if job.get('model') or mode == 'ultracode':
-        argv += ['--model', 'opus' if mode == 'ultracode' else job['model']]
+    if model:
+        argv += ['--model', model]
     effort = mode if mode in ('max', 'ultracode') else job.get('effort')
     if effort:  # ultracode: workflows on for the whole session, effort xhigh
         argv += ['--effort', effort]
     if job.get('chrome'):
         argv.append('--chrome')
-    argv += [f for f in job.get('flags') or [] if isinstance(f, str) and f.split('=', 1)[0] in START_FLAGS]  # checked at start
+    argv += [f for f in flags if f not in bare]
     for d in library_dirs(job.get('tools'))[0] if job.get('tools') else ():  # the chat's library tools; missing ones skipped
         argv += ['--plugin-dir', d]
     if job.get('resume'):
@@ -4785,6 +5723,38 @@ def find_url(bg_id, wait=45):
         time.sleep(3)
 
 
+# A new chat's first message is an argument of `claude`. Windows takes about 32,000 characters for a whole command
+# line, and through an npm .cmd shim cmd.exe takes 8,191 and no quote, newline or % at all (cmd_safe refuses those).
+# A message that does not fit goes to a file beside the seeds instead, and the chat's first hook hands it to Claude.
+ARG_MAX = 100_000 if not IS_WIN else 24_000
+ARG_MAX_SHIM = 6_000
+SAID_INLINE = 3000
+SEED_STUB = 'My message is in the context Switchboard added to this one. Answer it as my request.'
+
+
+def prompt_for_argv(prompt, now, exe=None):
+    """The first message as it goes on the command line: itself, or, when this machine cannot pass it that way, a
+    short stand-in that names the file the whole message was put in."""
+    exe = exe or _claude_exe()
+    shim = _is_shim(exe)
+    if len(prompt) <= (ARG_MAX_SHIM if shim else ARG_MAX) and not (shim and CMD_UNSAFE_RE.search(prompt)):
+        return prompt
+    m = SEED_RE.match(prompt)
+    seed_id, body = (m.group(1), prompt[m.end():].strip()) if m else (os.urandom(6).hex(), prompt)
+    _jput_text(paths_q()['seeds'] / f'{seed_id}.msg.md', body)
+    return f'[switchboard:{seed_id}] {SEED_STUB}'
+
+
+def _said_context(text, path):
+    """What the chat's first hook tells Claude about a message that came by file ('' when there is none)."""
+    if text is None:
+        return ''
+    if len(text) <= SAID_INLINE:
+        return f'\n\nThe user\'s message for this chat, in full:\n"""{text}"""\nTreat it as their current request.'
+    return (f'\n\nThe user\'s message for this chat is long. Read the whole file {path} before anything else and treat '
+            f'it as their current request. Its beginning:\n"""{text[:1500]}"""\n[...]')
+
+
 def _seed(text, held_hint, now):
     sid = os.urandom(6).hex()
     hp = paths_q()['seeds'] / f'{sid}.md'
@@ -4810,13 +5780,14 @@ def wait_live(bg_id, wait=25, sleep=time.sleep):
 def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None):
     live = live or wait_live
     verb = job['verb']
+    carried = []  # flags nobody asked for just now: the old chat's own, brought along (dropped if they stop the launch)
     if verb == 'resume' and not job.get('relaunch'):
         # Already running in the background (a second click, or another device got there first): open that one.
         # `claude --bg --resume` on a running chat starts a copy every time.
-        try:
-            a = _agent_for(job['sid'], claude_agents())
-        except Exception:
-            a = None
+        ags = claude_agents()
+        if not agents_known(ags):  # it may be running: a second copy is worse than trying again
+            return {'state': 'error', 'error': AGENTS_UNKNOWN}
+        a = _agent_for(job['sid'], ags)
         if a and a.get('kind') == 'background' and a.get('id') and a.get('status') not in (None, 'stopped'):
             return {'state': 'done', 'bg_id': a['id'], 'url': find_url(a['id']), 'cwd': job['cwd'], 'name': a.get('name'),
                     'sid': job['sid']}
@@ -4826,7 +5797,9 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
         note = make_thread_note(combine_thread(job['pieces']), job['sid'])
         text = f'(Handoff file: {note})\n\n' + note.read_text(encoding='utf-8')
         job = dict(job, verb='start', handoff_text=text, pieces=None, compacted=job['sid'])
-        job.update(carry_over(job['transcript'], job.get('model_was')))
+        c = carry_over(job['transcript'], job.get('model_was'), job['sid'])  # the newest chat's own setup comes along
+        carried = soft_flags(c.get('flags'))
+        job.update({k: c[k] for k in CARRY_KEYS if k in c}, flags=list(carried))
         verb = 'start'
     if verb in ('fresh', 'handoff') and not handoff_is_fresh(job['sid'], job['transcript']):
         if progress:  # written only now that Start fresh was picked; the apps say so while it runs
@@ -4834,12 +5807,18 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
         if handoff_lock(job['sid'], now):
             make_handoff(job['transcript'], job['sid'])
         else:  # a hook-started run is already writing it
-            deadline = time.time() + 240
+            deadline, claim = time.time() + 240, paths()['handoffs'] / f'{job["sid"]}.generating'
             while not handoff_is_fresh(job['sid'], job['transcript']) and time.time() < deadline:
+                if handoff_is_current(job['sid'], job['transcript']) and not claim.exists():
+                    break  # that run is over and left the fallback note: no better one is coming
                 time.sleep(2)
     if verb == 'handoff':
         if job.get('close'):
-            a = _agent_for(job['sid'], claude_agents())
+            ags = claude_agents()
+            if not agents_known(ags):
+                return {'state': 'error', 'handoff': True, 'error': 'The summary is written, but the chat was not closed: '
+                        "couldn't ask Claude Code what is running. Stop it from the list."}
+            a = _agent_for(job['sid'], ags)
             if a and a.get('kind') == 'background' and a.get('id'):
                 run_claude_cmd(['stop', a['id']])
         return {'state': 'done', 'handoff': True}
@@ -4851,7 +5830,11 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
         tag = job.get('tag') or ''
         launch['name'] = compose_name(split_title(topic, legacy=False)[0], tag, name_stamp(now) if tag.startswith('from ') else None)
     if verb == 'fresh' or (verb == 'resume' and not job.get('in_place') and not job.get('relaunch')):
-        launch.update(carry_over(job['transcript'], job.get('model_was')))
+        # the chat comes back the way it ran: its model, effort, Chrome, permission mode and the flags it was
+        # launched with (a relaunch is told all of that by the server; a stopped chat resumed in place keeps its own)
+        c = carry_over(job['transcript'], job.get('model_was'), job['sid'])
+        carried = soft_flags(c.get('flags'))
+        launch.update({k: c[k] for k in CARRY_KEYS if k in c}, flags=list(carried))
     if job.get('relaunch') and job.get('stop'):  # the running copy ends first, so the chat is never open twice
         try:
             run_claude_cmd(['stop', job['stop']])
@@ -4900,9 +5883,25 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
             inherit_trust(Path(cwd))
         except (OSError, ValueError):
             log(f'trust check failed: {traceback.format_exc(limit=2)}')
+    if launch.get('prompt'):
+        launch['prompt'] = prompt_for_argv(launch['prompt'], now)
+    dropped = []
     for attempt in (1, 2):
+        t0 = time.monotonic()
         rc, out = runner(launch_argv(launch), cwd, claude_env(internal=False))
         bg = parse_bg_id(out)
+        if rc != 0 and not bg and carried and not launch.get('bare') and time.monotonic() - t0 < CARRY_RETRY_S \
+                and 'not trusted' not in ANSI_RE.sub('', out):
+            # Claude Code refused to start, at once, and named no chat: nothing is running. A flag the old chat
+            # brought along may be why (one this Claude Code no longer takes), and no such flag may ever keep a
+            # chat from coming back, so it is tried once more without them. Never after a slow or unclear failure.
+            dropped = sorted({f.split('=', 1)[0] for f in carried})
+            said = ' '.join(ANSI_RE.sub('', out).split())[-200:] or f'claude exited {rc}'
+            log(f'job {job.get("id")}: launch refused ({said}); trying again without the carried {" ".join(dropped)}')
+            launch['flags'] = [f for f in launch.get('flags') or [] if f not in carried]
+            carried = []
+            rc, out = runner(launch_argv(launch), cwd, claude_env(internal=False))
+            bg = parse_bg_id(out)
         if rc != 0 or not bg:
             msg = ' '.join(ANSI_RE.sub('', out).split())[-300:] or f'claude exited {rc}'
             if 'not trusted' in msg and attempt == 1 and not _is_home(cwd) and Path(cwd).is_dir():
@@ -4925,6 +5924,9 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
                 run_claude_cmd([cmd, bg])
             except Exception:
                 pass
+        m = SEED_RE.match(launch.get('prompt') or '')
+        if m:  # the chat that never came up may have read its first message already: the next one needs it too
+            seed_put_back(m.group(1))
     else:
         return {'state': 'error', 'error': 'Claude started the chat, but it never came up. Try again in a minute.'}
     new_sid = bg_session_id(bg)
@@ -4958,7 +5960,14 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
         out['tools'] = list(tools)
     if skipped:
         out['skipped_tools'] = skipped
+    if dropped:
+        out['dropped_flags'] = dropped
+        out['note'] = (f'Started without {", ".join(dropped)}: Claude Code would not start the chat with what it '
+                       'ran with before. Set them again in its flags if you still want them.')
     return out
+
+
+CARRY_RETRY_S = 20  # a launch that fails on a flag fails at once; a slower failure may have started something
 
 
 def bg_session_id(bg_id):
@@ -4969,31 +5978,15 @@ def bg_session_id(bg_id):
         return None
 
 
-def _claim_fresh(p, now, ttl):
-    """Someone else's O_EXCL claim file is live. Empty means its owner has not written the time yet."""
-    try:
-        raw = p.read_text().strip()
-        if raw:
-            return now - float(raw) <= ttl
-        return time.time() - p.stat().st_mtime <= ttl
-    except (OSError, ValueError):
-        return False
-
-
 def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=None):
     runner, find_url, live = runner or _run_launch, find_url or globals()['find_url'], live or wait_live
     make_handoff = make_handoff or generate_handoff
     q = paths_q()['queue']
     lock = q / '.lock'
     now = now or time.time()
-    try:
-        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-        os.write(fd, str(now).encode())
-        os.close(fd)
-    except FileExistsError:
-        if _claim_fresh(lock, now, QUEUE_LOCK_TTL):
-            return 0
-        _jput_text(lock, str(now))
+    if not lock_take(lock, now, QUEUE_LOCK_TTL):
+        return 0
+    t0 = time.time()
     try:
         while True:
             jobs = sorted(p for p in q.glob('*.json') if not p.name.endswith('.result.json'))
@@ -5018,6 +6011,7 @@ def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=N
                                'finished': time.time()})
                     continue
                 _jput(rp, {'state': 'running', 'started': now})
+                lock_own(lock, now + (time.time() - t0))  # still at work: a long queue is not taken for a dead drain
                 try:
                     res = _run_job(job, runner, find_url, make_handoff, now, live,
                                    progress=lambda d, rp=rp: _jput(rp, dict(d, state='running', started=now)))
@@ -5026,21 +6020,20 @@ def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=N
                     res = {'state': 'error', 'error': f"Couldn't launch it: {e}"}
                 _jput(rp, dict(res, finished=time.time()))
     finally:
-        try:
-            lock.unlink()
-        except OSError:
-            pass
+        lock_drop(lock)
 
 
 SEED_KEEP = 7 * 86400
 
 
-def seed_take(seed_id):
-    """Single use, but the file stays (as <id>.used.md) so a long handoff can tell the session to Read it."""
+def seed_take(seed_id, kind=None):
+    """Single use, but the file stays (as <id>.used.md) so a long handoff can tell the session to Read it.
+    kind 'msg': the user's own message kept beside it (prompt_for_argv)."""
     d = paths_q()['seeds']
-    used = d / f'{seed_id}.used.md'
+    stem = f'{seed_id}.{kind}' if kind else seed_id
+    used = d / f'{stem}.used.md'
     try:
-        os.replace(d / f'{seed_id}.md', used)
+        os.replace(d / f'{stem}.md', used)
         text = used.read_text(encoding='utf-8')
     except OSError:
         return None, None
@@ -5051,6 +6044,17 @@ def seed_take(seed_id):
         except OSError:
             pass
     return text, used
+
+
+def seed_put_back(seed_id):
+    """A seed a launch took and then failed with is there again for the launch that follows (seed_take)."""
+    d = paths_q()['seeds']
+    for stem in (seed_id, f'{seed_id}.msg'):
+        try:
+            if not (d / f'{stem}.md').exists():
+                os.replace(d / f'{stem}.used.md', d / f'{stem}.md')
+        except OSError:
+            pass
 
 
 def launcher_task_xml(pythonw, sb_path, user):
@@ -5086,18 +6090,19 @@ def heal_launcher(now):
         pass
 
 
+@cfg_step
 def heal_statusline(home=None):
     """A helper installed before SL_REFRESH: give Switchboard's own status line its refresh, once. Only our entry, and
     only when it has none, so a user's own value or status line is never touched. True when it wrote."""
     sp = (home or Path.home()) / '.claude' / 'settings.json'
     if not sp.exists():
         return False
-    cur = json.loads(sp.read_text())
+    cur = cfg_read(sp)
     sl = cur.get('statusLine') if isinstance(cur, dict) else None
     if not isinstance(sl, dict) or 'sb.py' not in str(sl.get('command', '')) or 'refreshInterval' in sl:
         return False
     sl['refreshInterval'] = SL_REFRESH
-    _jput_text(sp, json.dumps(cur, indent=2))
+    cfg_write(sp, cur)
     return True
 
 
@@ -5106,10 +6111,38 @@ LAUNCHER_BEAT, LAUNCHER_STALE = 10, 45
 
 def _pid_alive(pid):
     try:
-        os.kill(int(pid), 0)
-        return True
-    except (OSError, ValueError, TypeError):
+        pid = int(pid)
+    except (ValueError, TypeError):
         return False
+    if pid <= 0:
+        return False
+    if IS_WIN:  # never os.kill(pid, 0) there: signal 0 is Ctrl+C on Windows
+        return _pid_alive_win(pid)
+    try:
+        os.kill(pid, 0)
+        return True
+    except PermissionError:
+        return True  # it is there, and another user's
+    except OSError:
+        return False
+
+
+def _pid_alive_win(pid):
+    import ctypes
+    from ctypes import wintypes
+    try:
+        k32 = _win_k32()
+        k32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        h = k32.OpenProcess(0x1000, False, pid)  # QUERY_LIMITED
+        if not h:
+            return ctypes.get_last_error() == 5  # access denied: it is there, and not ours to open
+        try:
+            code = wintypes.DWORD()
+            return not k32.GetExitCodeProcess(h, ctypes.byref(code)) or code.value == 259  # STILL_ACTIVE
+        finally:
+            k32.CloseHandle(h)
+    except Exception:
+        return True  # cannot tell: the claim's age decides
 
 
 def launcher_status(now):
@@ -5596,11 +6629,11 @@ def rpc_summary(req):
         if not isinstance(d, dict) or d.get('isSidechain'):
             continue
         if d.get('type') == 'user' and _is_real_user(d):
-            t = _text_of((d.get('message') or {}).get('content')).strip()
+            t = _text_of(_msg(d).get('content')).strip()
             if t and not t.startswith('<'):
                 users.append({'ts': _ts(d.get('timestamp')), 'text': t[:600]})
         elif d.get('type') == 'assistant':
-            t = _text_of((d.get('message') or {}).get('content')).strip()
+            t = _text_of(_msg(d).get('content')).strip()
             if t:
                 last_answer = t
     head = _head_meta(tp)
@@ -5646,26 +6679,27 @@ def set_given_name(sid, name, tp, running):
     """Give a chat a name, or clear it with ''. True when the transcript has it now, False when it waits for the
     chat to stop, None when there was nothing to change."""
     np, pp, wp = _names_files()
-    names, pending, was = _jget(np) or {}, _jget(pp) or {}, _jget(wp) or {}
-    if name:
-        if sid not in names and sid not in was:
-            was[sid] = transcript_stats(tp, BROWSE_TAIL).get('custom_title') or ''
-        names[sid], title = name, name
-    else:
-        if sid not in names and sid not in was and sid not in pending:
-            return None  # never named here: Claude Code's own title stays
-        names.pop(sid, None)
-        title = was.pop(sid, '') or ''
-    _jput(np, names)
-    _jput(wp, was)
-    if running:
-        pending[sid] = title
-        _jput(pp, pending)
-        return False
-    _write_title(tp, sid, title)
-    if pending.pop(sid, None) is not None:
-        _jput(pp, pending)
-    return True
+    with held(np):  # one claim for the three files: a rename, a /clear and a list pass never undo each other
+        names, pending, was = _jget(np) or {}, _jget(pp) or {}, _jget(wp) or {}
+        if name:
+            if sid not in names and sid not in was:
+                was[sid] = transcript_stats(tp, BROWSE_TAIL).get('custom_title') or ''
+            names[sid], title = name, name
+        else:
+            if sid not in names and sid not in was and sid not in pending:
+                return None  # never named here: Claude Code's own title stays
+            names.pop(sid, None)
+            title = was.pop(sid, '') or ''
+        _jput(np, names)
+        _jput(wp, was)
+        if running:
+            pending[sid] = title
+            _jput(pp, pending)
+            return False
+        _write_title(tp, sid, title)
+        if pending.pop(sid, None) is not None:
+            _jput(pp, pending)
+        return True
 
 
 def carry_name(old, new, now=None):
@@ -5676,29 +6710,31 @@ def carry_name(old, new, now=None):
     topic, fresh = split_title(n)
     name = compose_name(topic or n, f'part {fresh + 2}')
     np, pp, _ = _names_files()
-    names, pending = _jget(np) or {}, _jget(pp) or {}
-    names[new], pending[new] = name, name  # the new chat is running: its transcript gets the name once it stops
-    _jput(np, names)
-    _jput(pp, pending)
+    with held(np):
+        names, pending = _jget(np) or {}, _jget(pp) or {}
+        names[new], pending[new] = name, name  # the new chat is running: its transcript gets the name once it stops
+        _jput(np, names)
+        _jput(pp, pending)
 
 
 def flush_names(agents):
     """Names waiting for their chat to stop: write the ones whose chat has stopped (every list pass)."""
-    pp = _names_files()[1]
-    pending = _jget(pp) or {}
-    if not pending:
+    np, pp, _ = _names_files()
+    if not _jget(pp):
         return
-    left = {}
-    for sid, title in pending.items():
-        if _chat_running(_agent_for(sid, agents)):
-            left[sid] = title
-            continue
-        try:
-            tp, _ = find_any_session(sid)
-            _write_title(tp, sid, title)
-        except (ValueError, OSError):
-            pass  # gone from this machine: nothing to write
-    _jput(pp, left)
+    with held(np):
+        pending = _jget(pp) or {}
+        left = {}
+        for sid, title in pending.items():
+            if _chat_running(_agent_for(sid, agents)):
+                left[sid] = title
+                continue
+            try:
+                tp, _ = find_any_session(sid)
+                _write_title(tp, sid, title)
+            except (ValueError, OSError):
+                pass  # gone from this machine: nothing to write
+        _jput(pp, left)
 
 
 def name_overruled(sid, custom, names, pending):
@@ -5709,11 +6745,12 @@ def name_overruled(sid, custom, names, pending):
 
 def drop_given_name(sid):
     np, _, wp = _names_files()
-    names, was = _jget(np) or {}, _jget(wp) or {}
-    names.pop(sid, None)
-    was.pop(sid, None)
-    _jput(np, names)
-    _jput(wp, was)
+    with held(np):
+        names, was = _jget(np) or {}, _jget(wp) or {}
+        names.pop(sid, None)
+        was.pop(sid, None)
+        _jput(np, names)
+        _jput(wp, was)
 
 
 def rpc_rename(req, get_agents):
@@ -5724,7 +6761,8 @@ def rpc_rename(req, get_agents):
     if not (isinstance(name, str) and (name == '' or (SESSION_NAME_RE.fullmatch(name) and name == name.strip()))):
         raise ValueError("a name may use letters, digits, spaces and . , : ' + # ( ) - _ (max 64)")
     tp, _ = find_any_session(sid)
-    done = set_given_name(sid, name, tp, _chat_running(_agent_for(sid, get_agents())))
+    ags = get_agents()
+    done = set_given_name(sid, name, tp, not agents_known(ags) or _chat_running(_agent_for(sid, ags)))
     return {'ok': True, 'name': name, 'in_transcript': bool(done)}
 
 
@@ -6045,6 +7083,7 @@ def setup_issues(sessions, now, force=False):
     return out
 
 
+@cfg_step
 def setup_fix(fix, now):
     """Repairs one setup problem. 'mcp-path': each unreachable MCP server gets its command's full path, and a PATH
     with that folder first (npx and node live side by side under nvm)."""
@@ -6053,7 +7092,7 @@ def setup_fix(fix, now):
     bg = _service_path() or BG_PATH_DEFAULT
     login = _login_path(now)
     cj = claude_json_path()
-    data = json.loads(cj.read_text(encoding='utf-8'))
+    data = cfg_read(cj)
     fixed, missing = [], []
     for name, cmd in _mcp_unreachable(bg).items():
         full = shutil.which(os.path.basename(cmd), path=login)
@@ -6070,7 +7109,7 @@ def setup_fix(fix, now):
         fixed.append(name)
     if fixed:
         _backup(cj)
-        _jput_text(cj, json.dumps(data, indent=2))
+        cfg_write(cj, data)
     _jput(paths()['state'] / 'setup.json', {})  # check again on the next list
     if missing:
         return {'ok': bool(fixed), 'fixed': fixed, 'error': f"Couldn't find {', '.join(missing)} in your login shell either."}
@@ -6248,7 +7287,7 @@ def rpc_feat(verb, req, now, get_agents):
         pids = req.get('pids')
         if pids is not None and not (isinstance(pids, list) and len(pids) <= 64 and all(isinstance(x, int) and x > 1 for x in pids)):
             raise ValueError('pids must be a list of process ids')
-        return reap_orphans(get_agents(), req.get('min_age_h', ORPHAN_MIN_H), dry_run=bool(req.get('dry_run')),
+        return reap_orphans(sure_agents(get_agents()), req.get('min_age_h', ORPHAN_MIN_H), dry_run=bool(req.get('dry_run')),
                             pids=set(pids) if pids is not None else None)
     if verb == 'caps':
         return {'ok': True, 'caps': machine_caps(now, force=req.get('refresh') is True)}
@@ -6741,10 +7780,10 @@ def last_reply(tp):
             d = json.loads(raw)
         except ValueError:
             continue
-        if d.get('type') != 'assistant' or d.get('isSidechain'):
+        if not isinstance(d, dict) or d.get('type') != 'assistant' or d.get('isSidechain') or not isinstance(d.get('message') or {}, dict):
             continue
-        content = (d.get('message') or {}).get('content')
-        parts = [c.get('text') or '' for c in content if isinstance(c, dict) and c.get('type') == 'text'] if isinstance(content, list) \
+        content = _msg(d).get('content')
+        parts = [c['text'] for c in content if isinstance(c, dict) and c.get('type') == 'text' and isinstance(c.get('text'), str)] if isinstance(content, list) \
             else [content] if isinstance(content, str) else []
         said = '\n\n'.join(x.strip() for x in parts if x and x.strip())
         if said:
@@ -7123,29 +8162,31 @@ def mcp_entry(python, sb_path):
     return {'type': 'stdio', 'command': python, 'args': [sb_path.replace('\\', '/'), 'mcp'], 'env': {}}
 
 
+@cfg_step
 def install_mcp(home, sb_path, python):
     """Registers the MCP server for every project (user scope): mcpServers.switchboard in ~/.claude.json."""
     cj = home / '.claude.json'
-    cur = json.loads(cj.read_text(encoding='utf-8')) if cj.exists() else {}
+    cur = cfg_read(cj)
     want = mcp_entry(python, sb_path)
     if (cur.get('mcpServers') or {}).get('switchboard') == want:
         return False
     _backup(cj)
     cur.setdefault('mcpServers', {})['switchboard'] = want
-    _jput_text(cj, json.dumps(cur, indent=2))
+    cfg_write(cj, cur)
     return True
 
 
+@cfg_step
 def uninstall_mcp(home):
     cj = home / '.claude.json'
     if not cj.exists():
         return False
-    cur = json.loads(cj.read_text(encoding='utf-8'))
+    cur = cfg_read(cj)
     if 'switchboard' not in (cur.get('mcpServers') or {}):
         return False
     _backup(cj)
     del cur['mcpServers']['switchboard']
-    _jput_text(cj, json.dumps(cur, indent=2))
+    cfg_write(cj, cur)
     return True
 
 # ---------------------------------------------------------------- Tool library (feature `library`)
@@ -7943,9 +8984,11 @@ def library_put(req, get_agents=None):
     idx['tools'][tool] = rec
     _lib_save(idx)
     try:
-        keep = _prune_tool(tool, {v} | tools_in_use(tool, get_agents() if get_agents else []))
-        rec['versions'] = {k: s for k, s in rec['versions'].items() if int(k) in keep}
-        _lib_save(idx)
+        ags = get_agents() if get_agents else []
+        if agents_known(ags):  # else older versions stay for now: a running chat may still use one
+            keep = _prune_tool(tool, {v} | tools_in_use(tool, ags))
+            rec['versions'] = {k: s for k, s in rec['versions'].items() if int(k) in keep}
+            _lib_save(idx)
     except Exception:
         log(f'library prune {tool}: {traceback.format_exc(limit=2)}')
     log(f'library: {tool} v{v} installed')
@@ -7955,10 +8998,11 @@ def library_put(req, get_agents=None):
 def library_drop(req, get_agents=None):
     """The tool leaves this machine. Versions a running chat started with stay until that chat ends."""
     tool = need_tool(req.get('tool'))
+    ags = sure_agents(get_agents() if get_agents else [])  # its files go: only when it is known no chat uses them
     idx = lib_index()
     idx['tools'].pop(tool, None)
     _lib_save(idx)
-    kept = _prune_tool(tool, tools_in_use(tool, get_agents() if get_agents else []))
+    kept = _prune_tool(tool, tools_in_use(tool, ags))
     log(f'library: {tool} dropped' + (f', v{kept} kept for running chats' if kept else ''))
     return {'ok': True, 'kept': kept}
 
@@ -8346,9 +9390,39 @@ def merge_settings(settings, sb_path, python):
     return s
 
 
+BACKUPS_KEEP = 3
+
+
+def _own_only(p):
+    """A copy of a file with tokens in it (~/.claude.json) is for its owner alone."""
+    try:
+        if not IS_WIN:
+            os.chmod(p, 0o600)
+    except OSError:
+        pass
+
+
 def _backup(p):
-    if p.exists():
-        shutil.copy2(p, p.with_name(p.name + '.bak-sb-' + _dt.datetime.now().strftime('%Y%m%d-%H%M%S')))
+    """A dated copy of one of Claude Code's files before Switchboard changes it: the newest BACKUPS_KEEP are kept,
+    readable by the user alone."""
+    p = Path(p)
+    if not p.exists():
+        return
+    bak = p.with_name(p.name + '.bak-sb-' + _dt.datetime.now().strftime('%Y%m%d-%H%M%S'))
+    shutil.copy2(p, bak)
+    _own_only(bak)
+    try:
+        old = sorted(b for b in p.parent.glob(p.name + '.bak-sb-[0-9]*')
+                     if re.fullmatch(r'\d{8}-\d{6}', b.name[len(p.name) + 8:]) and b.is_file() and not b.is_symlink())
+    except OSError:
+        return
+    for b in old[:-BACKUPS_KEEP]:
+        try:
+            b.unlink()
+        except OSError:
+            pass
+    for b in old[-BACKUPS_KEEP:]:
+        _own_only(b)
 
 
 # ---- the opt-in changes to the user's own Claude setup (Settings on the server: setup_subagent_rule,
@@ -8398,6 +9472,7 @@ def _strip_rule(text):
     return body + '\n' if body.strip() else ''
 
 
+@cfg_step
 def apply_setup(cdir, opts, dry_run=False):
     """Add or take back each opt-in change to the Claude folder `cdir` to match the settings, removing only what
     Switchboard added. Returns {item: 'added'|'removed'} for what changed."""
@@ -8406,7 +9481,7 @@ def apply_setup(cdir, opts, dry_run=False):
     sp, ex, cm = cdir / 'settings.json', cdir / 'agents' / 'Explore.md', cdir / 'CLAUDE.md'
     want = lambda k: opts.get(k) is True
 
-    s = json.loads(sp.read_text()) if sp.exists() else {}
+    s = cfg_read(sp)
     env = s.get('env') if isinstance(s.get('env'), dict) else {}
     have = env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
     if want('setup_compact_window') and have is None:
@@ -8424,7 +9499,7 @@ def apply_setup(cdir, opts, dry_run=False):
         if not env:
             s.pop('env')
         _backup(sp)
-        _jput_text(sp, json.dumps(s, indent=2))
+        cfg_write(sp, s)
 
     mine = ex.exists() and ex.read_text() == EXPLORE_MD
     if want('setup_explore_agent') and not ex.exists():
@@ -8466,6 +9541,7 @@ def apply_setup(cdir, opts, dry_run=False):
     return done
 
 
+@cfg_step
 def install(dry_run=False, home=None):
     home = home or Path.home()
     cdir = home / '.claude'
@@ -8473,7 +9549,7 @@ def install(dry_run=False, home=None):
     sb_path = str(sbdir / 'sb.py')
     python = 'python' if os.name == 'nt' else 'python3'
     sp = cdir / 'settings.json'
-    cur = json.loads(sp.read_text()) if sp.exists() else {}
+    cur = cfg_read(sp)
     new = merge_settings(cur, sb_path, python)
     opts = agent_conf().get('options')  # what the server's last poll said; None before the first poll
     if dry_run:
@@ -8489,7 +9565,7 @@ def install(dry_run=False, home=None):
     if 'statusLine' in cur and 'sb.py' not in cur['statusLine'].get('command', '') and not prev.exists():
         prev.write_text(json.dumps(cur['statusLine']))
     _backup(sp)
-    _jput_text(sp, json.dumps(new, indent=2))
+    cfg_write(sp, new)
     install_launcher(home, sb_path)
     install_mcp(home, sb_path, python)  # v2: machines, run_on, check, continue_on in every chat
     if isinstance(opts, dict):  # before the server has said, whatever is there stays as it is (the poll applies it)
@@ -8516,11 +9592,12 @@ def install_launcher(home, sb_path):
     _retire_launch_agent(home)  # the resident launcher starts from the next Claude hook on this Mac
 
 
+@cfg_step
 def uninstall(home=None):
     home = home or Path.home()
     cdir = home / '.claude'
     sp = cdir / 'settings.json'
-    s = json.loads(sp.read_text()) if sp.exists() else {}
+    s = cfg_read(sp)
     owned = _setup_owned(cdir)
     _backup(sp)
     if owned['setup_compact_window'] and (s.get('env') or {}).get('CLAUDE_CODE_AUTO_COMPACT_WINDOW') == COMPACT_WINDOW:
@@ -8534,7 +9611,7 @@ def uninstall(home=None):
         s['hooks'][ev] = [g for g in s['hooks'][ev] if not any(_sb_hook(h.get('command')) for h in g.get('hooks', []))]
         if not s['hooks'][ev]:
             del s['hooks'][ev]
-    _jput_text(sp, json.dumps(s, indent=2))
+    cfg_write(sp, s)
     ex = cdir / 'agents' / 'Explore.md'  # only what Switchboard added; anything the user wrote stays
     if owned['setup_explore_agent'] and ex.exists() and ex.read_text() == EXPLORE_MD:
         ex.unlink()
@@ -8577,6 +9654,9 @@ def main(argv):
                 pid = find_claude_pid(os.getpid(), process_table())
             except Exception:
                 pid = None
+            if not pid and not os.environ.get('SB_INTERNAL'):
+                # without it /clear cannot carry a summary over, and continue_on cannot tell which chat asked
+                log_once('no-claude-pid', 'hook: no Claude Code process found above this one (how is claude started here?)', 86400)
             out = handle_hook(inp, time.time(), pid)
             if out:
                 sys.stdout.write(json.dumps(out))

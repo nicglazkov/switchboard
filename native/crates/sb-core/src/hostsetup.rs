@@ -14,6 +14,31 @@ use crate::firstrun::Found;
 /// The server (8130), the downloads for Add a machine (8131) and the hub (8132).
 pub const PORTS: [u16; 3] = [8130, 8131, 8132];
 
+/// The ports the server set up on this kind of computer listens on: a Windows one has no hub.
+pub fn ports(os: Os) -> &'static [u16] {
+    match os {
+        Os::Windows => &PORTS[..2],
+        _ => &PORTS,
+    }
+}
+
+/// Where the installer puts the server, given the home folder (`%LOCALAPPDATA%` on Windows).
+pub fn app_dir(os: Os, home: &Path) -> PathBuf {
+    match os {
+        Os::Windows => home.join("Switchboard").join("app"),
+        _ => home.join(".local/share/switchboard/app"),
+    }
+}
+
+/// Whether an earlier setup already put the server on this computer (it may not be running).
+pub fn server_installed(os: Os) -> bool {
+    let home = match os {
+        Os::Windows => std::env::var_os("LOCALAPPDATA"),
+        _ => std::env::var_os("HOME"),
+    };
+    home.is_some_and(|h| app_dir(os, Path::new(&h)).is_dir())
+}
+
 /// Where the app connects once the server runs here.
 pub const LOCAL_URL: &str = "http://localhost:8130";
 
@@ -354,6 +379,9 @@ pub struct Facts {
     pub here: Option<Found>,
     /// The app carries the server kit.
     pub kit: bool,
+    /// An earlier setup left the server's files here, so busy ports are its own services (a setup that failed at
+    /// the last step and is tried again). The installer restarts them.
+    pub installed: bool,
 }
 
 pub fn checks(os: Os, f: &Facts) -> Vec<Check> {
@@ -418,26 +446,40 @@ pub fn checks(os: Os, f: &Facts) -> Vec<Check> {
             Check { key: Key::Python, title: "Python is too old".into(), mark: Mark::Bad, detail: why.clone() }
         }
     });
+    let all = and_list(&ports(os).iter().map(|p| p.to_string()).collect::<Vec<_>>());
     out.push(match &f.busy {
         None => Check { key: Key::Ports, title: "Checking the ports".into(), mark: Mark::Wait, detail: String::new() },
         Some(b) if b.is_empty() => Check {
             key: Key::Ports,
-            title: "Ports 8130, 8131 and 8132 are free".into(),
+            title: format!("Ports {all} are free"),
             mark: Mark::Ok,
-            detail: "The server, its downloads and its hub each listen on one.".into(),
+            detail: if os == Os::Windows {
+                "The server and its downloads each listen on one.".into()
+            } else {
+                "The server, its downloads and its hub each listen on one.".into()
+            },
         },
         Some(b) => {
             let names: Vec<String> = b.iter().map(|p| p.to_string()).collect();
             let (one, verb) = if b.len() == 1 { ("Port", "is") } else { ("Ports", "are") };
-            Check {
-                key: Key::Ports,
-                title: format!("{one} {} {verb} in use", and_list(&names)),
-                mark: Mark::Bad,
-                detail: format!(
-                    "Another program on {this} listens on {}. Switchboard needs 8130, 8131 and 8132. Quit that \
-                     program, then check again.",
-                    and_list(&names)
-                ),
+            if f.installed {
+                Check {
+                    key: Key::Ports,
+                    title: format!("{one} {} {verb} used by the Switchboard already here", and_list(&names)),
+                    mark: Mark::Ok,
+                    detail: "An earlier setup left part of it running. Setting it up again restarts it.".into(),
+                }
+            } else {
+                Check {
+                    key: Key::Ports,
+                    title: format!("{one} {} {verb} in use", and_list(&names)),
+                    mark: Mark::Bad,
+                    detail: format!(
+                        "Another program on {this} listens on {}. Switchboard needs {all}. Quit that program, then \
+                         check again.",
+                        and_list(&names)
+                    ),
+                }
             }
         }
     });
@@ -626,8 +668,12 @@ pub struct Install {
 /// How many of the installer's last lines are kept, for an error.
 const TAIL: usize = 14;
 
-/// The steps install-server.sh takes, in its words. The hub step only when there is a hub.
-pub fn plan(hub: bool) -> Vec<&'static str> {
+/// The steps the installer takes, in its words: install-server.sh's, or on Windows install-server.ps1's (which
+/// names two of them differently and has no hub). The hub step only when there is a hub.
+pub fn plan(os: Os, hub: bool) -> Vec<&'static str> {
+    if os == Os::Windows {
+        return vec!["Checking this PC", "Putting the server in place", "Downloads for adding machines", "Running it"];
+    }
     let mut p = vec!["Checking this machine", "Putting the server in place"];
     if hub {
         p.push("The hub");
@@ -641,9 +687,11 @@ pub fn step_title(raw: &str) -> String {
     let r = raw.trim();
     let known = [
         ("Checking this machine", "Checking this computer"),
+        ("Checking this PC", "Checking this computer"),
         ("Putting the server in place", "Putting the server in place"),
         ("The hub", "Adding the hub, for terminals and linked machines"),
         ("Downloads for Add a machine", "Getting downloads ready for your other machines"),
+        ("Downloads for adding machines", "Getting downloads ready for your other machines"),
         ("Running it", "Starting Switchboard and keeping it running"),
         ("First-run setup", "First-run setup"),
     ];
@@ -839,6 +887,7 @@ mod tests {
             others: vec![],
             here: None,
             kit: true,
+            installed: false,
         }
     }
 
@@ -878,6 +927,21 @@ mod tests {
         let c = checks(Os::Linux, &Facts { busy: Some(vec![8130, 8132]), ..all_good() });
         assert_eq!(c.iter().find(|c| c.key == Key::Ports).unwrap().title, "Ports 8130 and 8132 are in use");
         assert_eq!(verdict(&c, true), Verdict::Blocked);
+        // A setup that failed at its last step left its own services on the ports: trying again is not blocked.
+        let c = checks(Os::Mac, &Facts { busy: Some(vec![8131, 8132]), installed: true, ..all_good() });
+        let p = c.iter().find(|c| c.key == Key::Ports).unwrap();
+        assert_eq!(p.mark, Mark::Ok);
+        assert_eq!(p.title, "Ports 8131 and 8132 are used by the Switchboard already here");
+        assert_eq!(verdict(&c, true), Verdict::Go);
+        // A Windows server has no hub, so 8132 is not one of its ports.
+        assert_eq!(ports(Os::Windows), &[8130, 8131]);
+        assert_eq!(ports(Os::Mac), &PORTS);
+        let c = checks(Os::Windows, &all_good());
+        assert_eq!(c.iter().find(|c| c.key == Key::Ports).unwrap().title, "Ports 8130 and 8131 are free");
+        let c = checks(Os::Windows, &Facts { busy: Some(vec![8131]), ..all_good() });
+        assert!(c.iter().find(|c| c.key == Key::Ports).unwrap().detail.contains("needs 8130 and 8131."));
+        assert!(app_dir(Os::Mac, Path::new("/Users/you")).ends_with(".local/share/switchboard/app"));
+        assert!(app_dir(Os::Windows, Path::new("AppData")).ends_with("Switchboard/app"));
 
         let c = checks(Os::Mac, &Facts { python: Some(Python::Missing("not here".into())), ..all_good() });
         assert_eq!(verdict(&c, true), Verdict::Blocked);
@@ -944,7 +1008,19 @@ mod tests {
 
     #[test]
     fn progress_from_the_installer_lines() {
-        let mut i = Install::new(&plan(true));
+        // install-server.ps1's own step names fill the planned rows, with none added.
+        let mut i = Install::new(&plan(Os::Windows, true));
+        assert_eq!(i.steps.len(), 4);
+        for l in ["== Checking this PC", "== Putting the server in place", "== Downloads for adding machines"] {
+            i.line(l);
+        }
+        i.line("== Running it");
+        assert_eq!(i.steps.len(), 4, "{:?}", i.steps);
+        assert_eq!(i.steps[0].title, "Checking this computer");
+        assert_eq!(i.steps[2].title, "Getting downloads ready for your other machines");
+        assert_eq!((i.steps[2].state, i.steps[3].state), (StepState::Done, StepState::Now));
+
+        let mut i = Install::new(&plan(Os::Mac, true));
         assert_eq!(i.steps.len(), 5);
         assert!(i.steps.iter().all(|s| s.state == StepState::Todo));
         for l in ["", "== Checking this machine", "Python 3.12.4 at /opt/homebrew/bin/python3", "Time zone UTC"] {
@@ -967,20 +1043,20 @@ mod tests {
         assert_eq!(i.tail().last().unwrap(), "install-server.sh: the server did not start. See: switchboard logs");
         assert!(!i.tail().iter().any(|l| l.is_empty()));
 
-        let mut i = Install::new(&plan(false));
+        let mut i = Install::new(&plan(Os::Linux, false));
         assert_eq!(i.steps.len(), 4);
         i.line("== Something new");
         assert_eq!(i.steps[0].title, "Something new", "a step it did not plan for still shows");
         i.finish(true);
         assert!(i.steps.iter().all(|s| s.state == StepState::Done));
-        let mut i = Install::new(&plan(false));
+        let mut i = Install::new(&plan(Os::Mac, false));
         i.finish(false);
         assert_eq!(i.steps[0].state, StepState::Failed, "a failure before any step marks the first");
     }
 
     #[test]
     fn the_tail_keeps_the_last_lines() {
-        let mut i = Install::new(&plan(false));
+        let mut i = Install::new(&plan(Os::Mac, false));
         for n in 0..40 {
             i.line(&format!("line {n}"));
         }

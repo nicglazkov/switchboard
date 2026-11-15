@@ -6,7 +6,9 @@ use serde::{Deserialize, Serialize};
 /// GET /api/sessions
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ApiSessions {
-    #[serde(default)]
+    /// A machine or a chat the app can't read (a field of a kind it doesn't expect, from a newer server) is left
+    /// out; the rest of the board still shows.
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub machines: Vec<ApiMachine>,
     #[serde(default)]
     pub now: Option<f64>,
@@ -170,7 +172,7 @@ pub struct ApiMachine {
     pub as_of: Option<f64>,
     #[serde(default)]
     pub root: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "lenient_vec")]
     pub sessions: Vec<ApiSession>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub replaced: Vec<ApiReplaced>,
@@ -2000,6 +2002,26 @@ pub struct ApiToolStored {
     pub tool: String,
     #[serde(default)]
     pub version: u32,
+}
+
+#[cfg(test)]
+mod board_tests {
+    use super::*;
+
+    #[test]
+    fn one_unreadable_chat_does_not_sink_the_board() {
+        let raw = r#"{"machines":[
+            {"name":"studio","sessions":[{"sid":"a","title":"Fine"},{"sid":"b","mtime":"soon"},{"title":"no sid"}]},
+            {"name":"laptop","sessions":"none"},
+            {"sessions":[]},
+            7],"now":1.0}"#;
+        let s: ApiSessions = serde_json::from_str(raw).expect("the board still reads");
+        let names: Vec<&str> = s.machines.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(names, vec!["studio", "laptop"]);
+        let sids: Vec<&str> = s.machines[0].sessions.iter().map(|x| x.sid.as_str()).collect();
+        assert_eq!(sids, vec!["a"]);
+        assert!(s.machines[1].sessions.is_empty());
+    }
 }
 
 #[cfg(test)]

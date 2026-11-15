@@ -56,6 +56,10 @@ pub struct Staged {
 /// Before any window: handles the first start after an install (sb_core::update::at_launch). When the new build
 /// failed its first run, this puts the old one back, opens it and exits.
 pub fn at_launch() {
+    // An update cut off between its two renames left this app under its kept-copy name: give it its own back.
+    if let Ok(app) = this_app() {
+        up::restore_if_stranded(up::kind(), &app);
+    }
     let Some(state) = up::state_path() else { return };
     if let Some(back) = up::at_launch(up::kind(), &state, up::this_build()) {
         if let Err(e) = open_app(&back) {
@@ -73,6 +77,26 @@ impl AppState {
             healthy();
         })
         .detach();
+        // A new version that didn't start was put back: said once, and kept for Settings > Updates.
+        if let Some(state) = up::state_path() {
+            let st = up::load_state(&state);
+            self.rolled_back = st.bad_build.is_some().then(|| st.bad_version.unwrap_or_default());
+            if let Some(v) = up::take_rollback_news(&state) {
+                cx.spawn(async move |this, cx| {
+                    // Once the window is up.
+                    cx.background_executor().timer(Duration::from_secs(2)).await;
+                    let _ = this.update(cx, |s, cx| {
+                        s.toast(
+                            rolled_back_words(&v),
+                            Some("To try it again, open Settings, then Updates.".into()),
+                            true,
+                            cx,
+                        )
+                    });
+                })
+                .detach();
+            }
+        }
         cx.on_app_quit(|s, _| {
             // A clean quit counts as a healthy run too.
             healthy();
@@ -127,20 +151,37 @@ impl AppState {
         .detach();
     }
 
+    /// Settings > Updates, Try it again: the version that was put back may be offered once more.
+    pub fn retry_rolled_back(&mut self, cx: &mut Context<Self>) {
+        if let Some(state) = up::state_path()
+            && let Err(e) = up::forget_bad(&state)
+        {
+            self.toast("Couldn't note that", Some(e.to_string()), true, cx);
+            return;
+        }
+        self.rolled_back = None;
+        self.look_for_update(cx);
+        cx.notify();
+    }
+
     /// Restart to update or Install on quit: download (resuming), check, unpack, make sure it runs; then install
     /// and reopen, or wait for quit.
     pub fn run_update(&mut self, then: Then, cx: &mut Context<Self>) {
         let Some(o) = self.update.clone() else { return };
         match (&self.upd, then) {
             (Upd::Getting { .. }, _) => return,
-            (Upd::OnQuit(st), Then::Restart) => {
-                let st = (**st).clone();
-                self.upd = Upd::Idle;
-                self.finish(Ok(st), Then::Restart, cx);
+            (Upd::OnQuit(_), Then::Restart) => {
+                cx.defer(crate::view::request_restart);
                 return;
             }
             (Upd::OnQuit(_), Then::OnQuit) => return,
             _ => {}
+        }
+        // Before the download: an app that can't be replaced where it is says so now, not after 100 MB.
+        if let Err(e) = this_app().and_then(|app| can_replace(&app)) {
+            self.upd = Upd::Failed(e);
+            cx.notify();
+            return;
         }
         let (got, total) = (Arc::new(AtomicU64::new(0)), Arc::new(AtomicU64::new(0)));
         self.upd = Upd::Getting { got: got.clone(), total: total.clone(), then };
@@ -177,21 +218,48 @@ impl AppState {
     fn finish(&mut self, res: Result<Staged, String>, then: Then, cx: &mut Context<Self>) {
         self.upd = match (res, then) {
             (Ok(st), Then::OnQuit) => Upd::OnQuit(Box::new(st)),
-            (Ok(st), Then::Restart) => match swap(&st) {
-                Ok(()) => match open_app(&st.target) {
-                    Ok(()) => {
-                        cx.quit();
-                        Upd::Idle
-                    }
-                    Err(e) => Upd::Failed(format!(
-                        "Version {} is installed, but it didn't open: {e}. Quit Switchboard and open it again.",
-                        st.offer.version
-                    )),
-                },
-                Err(e) => Upd::Failed(e),
-            },
+            // Ready, and kept as for a quit until the restart goes ahead: the board window asks first while a
+            // local terminal runs a program (view::request_restart), and Cancel there leaves it to install on quit.
+            (Ok(st), Then::Restart) => {
+                cx.defer(crate::view::request_restart);
+                Upd::OnQuit(Box::new(st))
+            }
             (Err(e), _) => Upd::Failed(e),
         };
+        self.said_failed(cx);
+    }
+
+    /// The version that waits for a quit goes in now, and Switchboard reopens as it.
+    pub fn restart_now(&mut self, cx: &mut Context<Self>) {
+        let st = match std::mem::take(&mut self.upd) {
+            Upd::OnQuit(st) => st,
+            other => {
+                self.upd = other;
+                return;
+            }
+        };
+        self.upd = match swap(&st) {
+            Ok(()) => match open_app(&st.target) {
+                Ok(()) => {
+                    cx.quit();
+                    Upd::Idle
+                }
+                Err(e) => Upd::Failed(format!(
+                    "Version {} is installed, but it didn't open: {e}. Quit Switchboard and open it again.",
+                    st.offer.version
+                )),
+            },
+            Err(e) => Upd::Failed(e),
+        };
+        self.said_failed(cx);
+    }
+
+    fn said_failed(&mut self, cx: &mut Context<Self>) {
+        // The header may be all that shows of it (the popup closed during the download): say it failed.
+        if let Upd::Failed(e) = &self.upd {
+            let e = e.clone();
+            self.toast("The update wasn't installed", Some(e), true, cx);
+        }
         cx.notify();
     }
 
@@ -240,12 +308,40 @@ fn this_app() -> Result<PathBuf, String> {
     }
 }
 
+/// "Version 0.9.0 didn't start on this computer, so the one before it was put back."
+pub fn rolled_back_words(version: &str) -> String {
+    let what = if version.is_empty() { "The new version".to_string() } else { format!("Version {version}") };
+    format!("{what} didn't start on this computer, so the one before it was put back.")
+}
+
+/// Whether the update can go where `app` is: the new build is unpacked beside it and renamed over it, so its
+/// folder has to take a new file. A copy run from a disk image, or from a folder only an administrator can
+/// change, can't update itself.
+fn can_replace(app: &Path) -> Result<(), String> {
+    let folder = app.parent().ok_or("No folder above the app")?;
+    let probe = folder.join(format!(".Switchboard-check-{}", std::process::id()));
+    match std::fs::File::create(&probe) {
+        Ok(_) => {
+            let _ = std::fs::remove_file(&probe);
+            Ok(())
+        }
+        Err(e) => Err(format!(
+            "Switchboard can't update itself where it is: it can't write to {} ({}). Move Switchboard to a folder \
+             of your own{}, or download the new version from the page.",
+            folder.display(),
+            e.kind(),
+            if cfg!(target_os = "macos") { " (Applications is the usual place)" } else { "" }
+        )),
+    }
+}
+
 /// Unpacks the checked download next to the app it replaces (the same folder, so the swap is a rename), and runs
 /// the new build once with --version to be sure it starts on this computer.
 fn stage(file: &Path, dir: &Path, o: &Offer) -> Result<Staged, String> {
     let target = this_app()?;
     let folder = target.parent().ok_or("No folder above the app")?.to_path_buf();
     let unpack = folder.join(".Switchboard-update");
+    let run = |cmd: &str, args: &[&str]| run(cmd, args).map_err(|e| format!("Couldn't unpack the update: {e}"));
     let (new, bin) = match up::kind() {
         up::Kind::Bundle => {
             up::remove_any(&unpack);
@@ -402,7 +498,9 @@ impl BoardView {
     pub fn update_chip(&self, c: &Ctx) -> Option<AnyElement> {
         c.app.update.as_ref()?;
         let t = c.t;
-        let label = if matches!(c.app.upd, Upd::OnQuit(_)) { "Installs on quit" } else { "Update ready" };
+        let failed = matches!(c.app.upd, Upd::Failed(_));
+        let label = chip_label(&c.app.upd);
+        let tint = if failed { t.bad } else { t.accent };
         Some(
             div()
                 .id("update-chip")
@@ -414,17 +512,17 @@ impl BoardView {
                 .items_center()
                 .gap(px(6.))
                 .rounded(px(ui::R_SHEET))
-                .bg(t.accent.alpha(if t.dark { 0.16 } else { 0.11 }))
+                .bg(tint.alpha(if t.dark { 0.16 } else { 0.11 }))
                 .text_size(px(12.5))
                 .font_weight(FontWeight::SEMIBOLD)
-                .text_color(t.accent)
+                .text_color(tint)
                 .cursor_pointer()
                 .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .on_click(c.cx.listener(|this, _: &ClickEvent, _, cx| {
                     this.update_open = !this.update_open;
                     cx.notify();
                 }))
-                .child(ui::icon("update", 13., t.accent))
+                .child(ui::icon("update", 13., tint))
                 .child(label)
                 .into_any_element(),
         )
@@ -566,10 +664,34 @@ impl BoardView {
     }
 }
 
+/// The header pill's words: where the update stands, also while its popup is closed.
+fn chip_label(upd: &Upd) -> String {
+    match upd {
+        Upd::Idle => "Update ready".into(),
+        Upd::OnQuit(_) => "Installs on quit".into(),
+        Upd::Failed(_) => "Update failed".into(),
+        Upd::Getting { got, total, .. } => {
+            let (g, n) = (got.load(Ordering::Relaxed), total.load(Ordering::Relaxed));
+            match (g * 100).checked_div(n) {
+                Some(p) if p >= 100 => "Installing".into(),
+                Some(p) => format!("Downloading {p}%"),
+                None => "Downloading".into(),
+            }
+        }
+    }
+}
+
 /// Settings > Updates: what this build does about updates, in plain words.
 pub fn status_line(app: &AppState) -> String {
     if let Some(off) = up::off_reason() {
         return off.to_string();
+    }
+    if let (Some(v), None) = (&app.rolled_back, &app.update) {
+        let last = if app.update_busy { " Checking now." } else { "" };
+        return format!(
+            "{} It won't be offered again until you choose Try it again; a later version still will be.{last}",
+            rolled_back_words(v)
+        );
     }
     let last = match app.update_at {
         _ if app.update_busy => "Checking now.".to_string(),
@@ -587,4 +709,40 @@ pub fn status_line(app: &AppState) -> String {
         _ => String::new(),
     };
     format!("Switchboard checks for a newer version once a day and asks before installing it. {last}{found}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_header_pill_says_where_the_update_stands() {
+        assert_eq!(chip_label(&Upd::Idle), "Update ready");
+        assert_eq!(chip_label(&Upd::Failed("no".into())), "Update failed");
+        let getting = |g: u64, n: u64| Upd::Getting {
+            got: Arc::new(AtomicU64::new(g)),
+            total: Arc::new(AtomicU64::new(n)),
+            then: Then::OnQuit,
+        };
+        assert_eq!(chip_label(&getting(0, 0)), "Downloading", "before the size is known");
+        assert_eq!(chip_label(&getting(21, 50)), "Downloading 42%");
+        assert_eq!(chip_label(&getting(50, 50)), "Installing");
+    }
+
+    #[test]
+    fn an_app_in_a_folder_it_cannot_write_to_says_so_before_downloading() {
+        let dir = std::env::temp_dir().join(format!("sb-upd-probe-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(can_replace(&dir.join("Switchboard.app")), Ok(()));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "the probe file is gone");
+        let e = can_replace(&dir.join("gone").join("Switchboard.app")).unwrap_err();
+        assert!(e.starts_with("Switchboard can't update itself where it is"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_rolled_back_version_is_named_when_known() {
+        assert!(rolled_back_words("0.9.0").starts_with("Version 0.9.0 didn't start"));
+        assert!(rolled_back_words("").starts_with("The new version didn't start"));
+    }
 }

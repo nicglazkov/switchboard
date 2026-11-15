@@ -5,14 +5,20 @@ use std::collections::HashMap;
 
 use crate::api::ApiSetup;
 
-/// Permissions: the flag's value and the button's name ("" is Claude Code's own default, which asks first).
-pub const PERMS: [(&str, &str); 5] = [
-    ("", "Asks first"),
+/// Permissions: the flag's value and the button's name. "" sends no flag, so the chat starts in whatever mode that
+/// machine's own Claude Code settings say (it may not ask first); "default" asks every time (the server writes it
+/// the way that machine's Claude Code takes it, "manual" on a newer one). The same six modes as the flags drawer.
+pub const PERMS: [(&str, &str); 7] = [
+    ("", "Machine default"),
+    ("default", "Asks first"),
     ("acceptEdits", "Accept edits"),
     ("plan", "Plan"),
     ("auto", "Auto"),
     ("bypassPermissions", "Bypass"),
+    ("dontAsk", "Never asks"),
 ];
+/// Flags whose value may be left out.
+pub const OPTIONAL: [&str; 1] = ["--worktree"];
 /// Effort: "" leaves it to the machine; Max and UltraCode set their own.
 pub const EFFORTS: [(&str, &str); 5] =
     [("", "Default"), ("low", "Low"), ("medium", "Medium"), ("high", "High"), ("xhigh", "Extra high")];
@@ -59,6 +65,7 @@ impl Opts {
         for f in &s.flags {
             match (f.first().map(String::as_str), f.get(1)) {
                 (Some("--chrome"), _) => o.chrome = true,
+                (Some("--permission-mode"), Some(v)) if v == "manual" => o.perm = "default".into(),
                 (Some("--permission-mode"), Some(v)) if PERMS.iter().any(|p| !p.0.is_empty() && p.0 == v) => {
                     o.perm = v.clone()
                 }
@@ -74,6 +81,17 @@ impl Opts {
         o.other = other.join(" ").trim().to_string();
         o
     }
+
+    /// What the setup used last fills in when the sheet opens. Its extra folders stay behind: they are folders
+    /// on the machine that chat ran on, and this sheet may be on another.
+    pub fn from_last(s: &ApiSetup) -> Opts {
+        Opts { dirs: Vec::new(), ..Opts::from_setup(s) }
+    }
+
+    /// The sheet moved to another machine: the extra folders were picked on the one before.
+    pub fn machine_changed(&mut self) {
+        self.dirs.clear();
+    }
 }
 
 /// Max and UltraCode set the effort themselves.
@@ -87,19 +105,30 @@ pub fn shq(v: &str) -> String {
     if plain { v.to_string() } else { format!("'{}'", v.replace('\'', "'\\''")) }
 }
 
-/// "Other flags" as Claude Code reads them: shell-style words (no shell ever sees them).
+/// "Other flags" as Claude Code reads them: shell-style words (no shell ever sees them). The server's rules
+/// (Python's shlex): single quotes keep everything, a backslash outside quotes keeps the next character, and
+/// inside double quotes it only does so before a `"` or another backslash. So `'don'\''t'`, which `shq` writes
+/// for "don't", reads back as one word.
 pub fn words(text: &str) -> Result<Vec<String>, String> {
     let (mut out, mut cur, mut q): (Vec<String>, Option<String>, Option<char>) = (Vec::new(), None, None);
-    for ch in text.chars() {
+    let mut it = text.chars().peekable();
+    while let Some(ch) = it.next() {
         if let Some(qc) = q {
             if ch == qc {
                 q = None;
+            } else if ch == '\\' && qc == '"' && matches!(it.peek(), Some('"') | Some('\\')) {
+                cur.get_or_insert_with(String::new).extend(it.next());
             } else {
                 cur.get_or_insert_with(String::new).push(ch);
             }
             continue;
         }
-        if ch == '"' || ch == '\'' {
+        if ch == '\\' {
+            match it.next() {
+                Some(next) => cur.get_or_insert_with(String::new).push(next),
+                None => return Err("A \\ at the end has nothing after it.".into()),
+            }
+        } else if ch == '"' || ch == '\'' {
             q = Some(ch);
             cur.get_or_insert_with(String::new);
         } else if ch.is_whitespace() {
@@ -173,20 +202,25 @@ pub fn check_other(
             return Some(format!("{name} takes no value."));
         }
         if needs && eq.is_none() {
-            if i + 1 >= ws.len() || ws[i + 1].starts_with("--") {
+            let bare = i + 1 >= ws.len() || ws[i + 1].starts_with("--");
+            if bare && !OPTIONAL.contains(&name.as_str()) {
                 return Some(format!("{name} needs a value."));
             }
-            i += 1;
+            if !bare {
+                i += 1;
+            }
         }
         i += 1;
     }
     None
 }
 
-/// The command the machine runs, as the sheet previews it.
+/// The command the machine runs, as the sheet previews it: every flag Switchboard passes, in its order. Left out
+/// are the chat's name (made from the message once it starts) and the message itself; an extra folder is shown as
+/// it was picked, and the machine passes its full path.
 pub fn cmd_text(o: &Opts, model: &str, mode: &str) -> String {
     let ultra = mode == "ultracode";
-    let mut a: Vec<String> = vec!["claude".into(), "--bg".into()];
+    let mut a: Vec<String> = vec!["claude".into(), "--bg".into(), "--remote-control".into()];
     let mdl = if ultra { "opus" } else { model };
     if !mdl.is_empty() {
         a.extend(["--model".to_string(), mdl.to_string()]);
@@ -266,9 +300,71 @@ mod tests {
         };
         assert_eq!(
             cmd_text(&o, "sonnet", "normal"),
-            "claude --bg --model sonnet --effort high --chrome --permission-mode plan --add-dir 'My Notes' --agent reviewer"
+            "claude --bg --remote-control --model sonnet --effort high --chrome --permission-mode plan --add-dir 'My Notes' --agent reviewer"
         );
-        assert_eq!(cmd_text(&Opts::default(), "", "ultracode"), "claude --bg --model opus --effort ultracode");
+        assert_eq!(
+            cmd_text(&Opts::default(), "", "ultracode"),
+            "claude --bg --remote-control --model opus --effort ultracode"
+        );
+    }
+
+    #[test]
+    fn asks_first_is_a_choice_of_its_own() {
+        // "" sends no flag (the machine's own default mode); "Asks first" says so by name
+        assert_eq!(PERMS[0], ("", "Machine default"));
+        assert!(Opts::default().flags().is_empty());
+        let o = Opts { perm: "default".into(), ..Default::default() };
+        assert_eq!(o.flags(), vec![vec!["--permission-mode".to_string(), "default".to_string()]]);
+        assert_eq!(PERMS.iter().find(|p| p.0 == "default").unwrap().1, "Asks first");
+        // a setup saved by a client that calls the mode "manual" lands on the same choice
+        let s = ApiSetup { flags: vec![vec!["--permission-mode".into(), "manual".into()]], ..Default::default() };
+        assert_eq!(Opts::from_setup(&s).perm, "default");
+        let s = ApiSetup { flags: vec![vec!["--permission-mode".into(), "dontAsk".into()]], ..Default::default() };
+        assert_eq!(Opts::from_setup(&s).perm, "dontAsk");
+    }
+
+    #[test]
+    fn words_read_quotes_the_way_the_server_does() {
+        let w = |t: &str| words(t).unwrap();
+        assert_eq!(w(r"--append-system-prompt 'don'\''t stop'"), ["--append-system-prompt", "don't stop"]);
+        assert_eq!(w(&format!("--x {}", shq("it's a 'test'"))), ["--x", "it's a 'test'"]);
+        assert_eq!(w(r#"--x "a \"b\" c\d" e\ f ''"#), ["--x", r#"a "b" c\d"#, "e f", ""]);
+        assert_eq!(w(r"'a\b'"), [r"a\b"]);
+        assert!(words("--x \\").is_err());
+        assert!(words("--x 'open").is_err());
+        // what a setup writes into Other reads back as the same words
+        let s =
+            ApiSetup { flags: vec![vec!["--append-system-prompt".into(), "don't stop".into()]], ..Default::default() };
+        let o = Opts::from_setup(&s);
+        assert_eq!(w(&o.other), ["--append-system-prompt", "don't stop"]);
+        let (t, a) = takes();
+        let t: HashMap<String, bool> = t.into_iter().chain([("--append-system-prompt".to_string(), true)]).collect();
+        assert!(check_other(&o, "", "normal", &t, &a).is_none());
+    }
+
+    #[test]
+    fn extra_folders_belong_to_the_machine_they_were_picked_on() {
+        let mut o = Opts { chrome: true, dirs: vec!["notes".into()], other: "--verbose".into(), ..Default::default() };
+        o.machine_changed();
+        assert_eq!(o, Opts { chrome: true, other: "--verbose".into(), ..Default::default() });
+        let last = ApiSetup {
+            flags: vec![vec!["--chrome".into()], vec!["--add-dir".into(), "notes".into()]],
+            effort: Some("high".into()),
+            ..Default::default()
+        };
+        assert_eq!(Opts::from_last(&last), Opts { chrome: true, effort: "high".into(), ..Default::default() });
+        assert_eq!(Opts::from_setup(&last).dirs, ["notes"]); // picked by hand, a setup still brings them
+    }
+
+    #[test]
+    fn a_worktree_may_go_without_a_name() {
+        let (t, a) = takes();
+        let chk = |other: &str| check_other(&Opts { other: other.into(), ..Default::default() }, "", "normal", &t, &a);
+        assert!(chk("--worktree").is_none());
+        assert!(chk("-w --verbose").is_none());
+        assert!(chk("--worktree fix --verbose").is_none());
+        assert_eq!(chk("--agent --verbose").unwrap(), "--agent needs a value.");
+        assert_eq!(chk("--worktree fix extra").unwrap(), "extra isn't a flag. Flags start with --.");
     }
 
     #[test]

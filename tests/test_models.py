@@ -104,7 +104,7 @@ class ModelAgentTest(RpcBase):
         self.sb.run_claude_cmd = lambda args, **kw: HELP.replace("'sonnet'", "'sonnet', 'mythos'") if args == ['--help'] else ''
         (self.cdir / 'settings.json').write_text(json.dumps({'model': 'opus', 'availableModels': ['opus', 'fable']}))
         r = self.sb.rpc({'verb': 'list'}, NOW, agents=[])
-        self.assertEqual(r['models'], {'aliases': ['fable', 'opus', 'sonnet', 'mythos'], 'allowed': ['opus', 'fable'], 'default': 'opus',
+        self.assertEqual(r['models'], {'aliases': ['fable', 'opus', 'sonnet', 'mythos'], 'allowed': ['opus', 'fable'], 'default': 'opus', 'perms': [],
                                        'catalog': None})
         for model in ('claude-opus-5-5', 'fable', 'mythos'):
             self.assertTrue(self.sb.rpc({'verb': 'start', 'folder': 'proj', 'model': model}, NOW, agents=[])['ok'], model)

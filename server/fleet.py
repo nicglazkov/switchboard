@@ -12,6 +12,9 @@ KEY = '~/.ssh/switchboard_ed25519'
 WEEK = 7 * 86400
 SAMPLE_EVERY = 15 * 60    # the weekly percent is written down at most this often
 RESET_SLACK = 3600        # a weekly reset that moves more than this is a new week
+FIVE_HOURS = 5 * 3600
+LIMITS_STEP = 300         # how far an old agent's "numbers seen at" moves before the apps are told again
+PCT_MOST = 200            # a percent past this is not a reading at all; one a little over 100 reads as 100
 GAP = 3 * 3600            # samples further apart than this, with usage growing between them, leave a day unknown
 def server_tz():
     """The time zone the week's days are counted in: SWITCHBOARD_TZ (set it when the server runs in UTC but you do
@@ -42,7 +45,24 @@ MACHINES_MAX = 32
 
 
 class FleetError(Exception):
-    pass
+    maybe_delivered = False  # True when the machine may have got the request although no answer came back
+
+
+class MaybeDelivered(OSError):
+    """A call that left this server but got no answer: the machine may have acted on it (a hub link that timed out
+    or dropped mid-call, an ssh session that hung). Never sent again by itself: a second copy of a launch is a
+    second chat."""
+
+
+# ssh's own words for a session that was up and then went away: the request may already be running there
+SSH_MIDWAY = ('closed by remote host', 'Broken pipe', 'not responding', 'Connection reset')
+# ...unless it says so about the hello, before anyone logged in: nothing was sent, so trying again is safe
+SSH_BEFORE = ('kex_exchange_identification', 'ssh_exchange_identification', 'banner exchange')
+
+
+def ssh_midway(msg):
+    """Did ssh's last words say the session went away after it was up (the request may have been delivered)?"""
+    return any(w in msg for w in SSH_MIDWAY) and not any(w in msg for w in SSH_BEFORE)
 
 
 def valid_target(t):
@@ -229,14 +249,21 @@ def mark_age(s, now):
 
 def ssh_transport(target, req, timeout):
     import os
-    r = subprocess.run(['ssh', '-T', '-i', os.path.expanduser(KEY), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
-                        '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', target],
-                       input=json.dumps(req), capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run(['ssh', '-T', '-i', os.path.expanduser(KEY), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
+                            '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', target],
+                           input=json.dumps(req), capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise MaybeDelivered('timed out')
     out = r.stdout.strip()
     if not out:
         err = (r.stderr or '').strip().splitlines()
-        raise OSError(err[-1] if err else f'ssh exited {r.returncode}')
-    return json.loads(out.splitlines()[-1])
+        msg = err[-1] if err else f'ssh exited {r.returncode}'
+        raise (MaybeDelivered if ssh_midway(msg) else OSError)(msg)
+    try:
+        return json.loads(out.splitlines()[-1])
+    except ValueError:  # it ran, and said something that is not an answer
+        raise MaybeDelivered('its answer could not be read')
 
 
 class Fleet:
@@ -249,12 +276,15 @@ class Fleet:
         self.state = {n: self._blank() for n in self.order}
         self.lock = threading.Lock()
         self.history = None  # a WeekHistory, attached by the server: the week's samples for the iPhone widgets
+        self.unlinked = set()  # linked machines the hub no longer lists (nodes.sync): not asked until it does again
+        self._held = {}  # machine: the highest weekly number an agent from before merged limits has shown (limits)
         self.on_change = None  # called with a machine's name when what it reports changed (the server's live updates)
         self.on_save = None  # called with the machine list after it changed (the server writes fleet.json and the hub's file)
         self.servers = []  # the server's own addresses, told to each machine's agent (where its hooks report)
         self.budget_view = None  # set by the server: the usage budget's status, sent with every poll (budget.py)
         self.options = None  # set by the server: the opt-in settings, sent with every poll (options.py)
         self._digest = {}
+        self._save_lock = threading.Lock()  # saves go out one at a time, each with the list as it is then
         self._stopped = {}  # (machine, sid): when Stop succeeded; shown stopped at once, not at the next poll
 
     STOP_HOLD = 20  # seconds a stop shows before the machine's own list agrees (claude stop can lag a poll)
@@ -262,8 +292,11 @@ class Fleet:
     def mark_stopped(self, name, sid, on=True):
         """A chat was just stopped (or, on=False, started again): the board shows it at once."""
         with self.lock:
+            now = self.clock()
+            for k in [k for k, t in self._stopped.items() if now - t > self.STOP_HOLD]:  # chats that never came back
+                del self._stopped[k]
             if on:
-                self._stopped[(name, sid)] = self.clock()
+                self._stopped[(name, sid)] = now
             else:
                 self._stopped.pop((name, sid), None)
 
@@ -271,7 +304,8 @@ class Fleet:
         t = self._stopped.get((n, s.get('sid')))
         if t is None:
             return s
-        if now - t > self.STOP_HOLD or s.get('status') in ('stopped', 'done') or not s.get('kind'):
+        if now - t > self.STOP_HOLD or s.get('status') in ('stopped', 'done') or \
+                (not s.get('kind') and self.state[n].get('agents_ok') is not False):
             self._stopped.pop((n, s.get('sid')), None)
             return s
         return dict(s, status='stopped')
@@ -279,7 +313,7 @@ class Fleet:
     @staticmethod
     def _blank():
         return {'online': None, 'error': None, 'sessions': [], 'replaced': [], 'limits': None, 'updated': None, 'as_of': None, 'skew': 0.0, 'root': None,
-                'launcher': None, 'mem': None, 'features': [], 'versions': None, 'models': None, 'setup': [], 'root_set': None, 'root_suggest': None}
+                'launcher': None, 'mem': None, 'features': [], 'versions': None, 'models': None, 'setup': [], 'root_set': None, 'root_suggest': None, 'agents_ok': True}
 
     def config(self):
         """The machine list as saved: in order, without what the machines report."""
@@ -288,10 +322,11 @@ class Fleet:
 
     def _saved(self):
         if self.on_save:
-            try:
-                self.on_save(self.config())
-            except Exception:
-                pass
+            with self._save_lock:  # two quick edits: the later save always carries both
+                try:
+                    self.on_save(self.config())
+                except Exception:
+                    pass
 
     def add_machine(self, m, save=True):
         """A machine added in Settings, or linked through the hub (nodes.py): polled from the next round on. One that is
@@ -320,6 +355,7 @@ class Fleet:
             self.machines = {k: v for k, v in self.machines.items() if k != name}
             self.state.pop(name, None)
             self._digest.pop(name, None)
+            self.unlinked.discard(name)
         if save:
             self._saved()
         return True
@@ -367,7 +403,7 @@ class Fleet:
 
     def reorder(self, names):
         with self.lock:
-            if not isinstance(names, list) or sorted(names) != sorted(self.order):
+            if not isinstance(names, list) or not all(isinstance(n, str) for n in names) or sorted(names) != sorted(self.order):
                 raise FleetError('The new order has to name every machine once.')
             if names == self.order:
                 return False
@@ -427,22 +463,32 @@ class Fleet:
         m = self.machines.get(name)
         if m is None:  # unpaired while the round ran
             return
+        if name in self.unlinked and m['target'].startswith('node:'):  # the hub does not list it: there is nobody to ask (nodes.sync says so, and why)
+            return
         asked = self.clock()  # live guesses older than this are settled by the answer (server.App overlay)
         r = None
         try:
             r = self.transport(m['target'], self._list_req(m), timeout)
+            if not isinstance(r, dict):
+                raise OSError('its answer could not be read')
             if not r.get('ok'):
                 raise OSError(r.get('error') or 'list failed')
             got = self.clock()
             sent = _num(r.get('clock')) or _num(r.get('now'))  # the machine's own clock as it answered
-            upd = {'online': True, 'error': None, 'sessions': r.get('sessions', []), 'replaced': r.get('replaced') or [], 'limits': r.get('limits'),
+            # only rows and limits of the right shape: one machine's odd answer never breaks the list for the others
+            rows = lambda k: [s for s in r[k] if isinstance(s, dict)] if isinstance(r.get(k), list) else []
+            upd = {'online': True, 'error': None, 'sessions': rows('sessions'), 'replaced': rows('replaced'),
+                   'limits': r.get('limits') if isinstance(r.get('limits'), dict) else None,
                    'updated': time.time(), 'as_of': got, 'skew': round(got - sent, 3) if sent else 0.0, 'root': r.get('root'), 'launcher': r.get('launcher'), 'mem': r.get('mem'),
                    'features': r.get('features') if isinstance(r.get('features'), list) else [], 'asked': asked,
                    'versions': r.get('versions') if isinstance(r.get('versions'), dict) else None,
                    'models': r.get('models') if isinstance(r.get('models'), dict) else None,
                    'setup': [i for i in r.get('setup') or [] if isinstance(i, dict) and i.get('id')][:12],
                    'root_set': r.get('root_set') if isinstance(r.get('root_set'), bool) else None,
-                   'root_suggest': r.get('root_suggest') if isinstance(r.get('root_suggest'), str) else None}
+                   'root_suggest': r.get('root_suggest') if isinstance(r.get('root_suggest'), str) else None,
+                   # False: Claude Code there could not be asked what runs, so no row's kind or status says
+                   # anything (a chat with neither is not a stopped one). An agent that never says is believed.
+                   'agents_ok': r.get('agents_ok') is not False}
         except Exception as e:
             upd, r = {'online': False, 'error': _short(e), 'asked': asked}, None
         if r is not None:
@@ -451,10 +497,19 @@ class Fleet:
 
     def store(self, name, upd):
         """Keep what a machine said; tell the server when it differs from last time (not just its timestamps)."""
-        digest = json.dumps({k: v for k, v in upd.items() if k not in ('updated', 'asked', 'as_of', 'skew')}, sort_keys=True, default=str)
+        said = {k: v for k, v in upd.items() if k not in ('updated', 'asked', 'as_of', 'skew')}
         with self.lock:
             if name not in self.state:
                 return
+            lim = said.get('limits')
+            if isinstance(lim, dict) and not lim.get('merged'):
+                # An agent from before merged limits says whichever chat drew its status line last, with the time of
+                # the drawing: different at every poll. What counts as a change is the number that stands for it
+                # (_hold), and its age only in steps, so the apps' "as of" keeps up without a nudge every poll.
+                shown = self._hold(name, lim, self.clock())
+                said['limits'] = [shown.get(k) for k in ('seven_day', 'seven_day_reset', 'five_hour', 'five_hour_reset')] \
+                    + [(_num(shown.get('updated')) or 0) // LIMITS_STEP]
+            digest = json.dumps(said, sort_keys=True, default=str)
             self.state[name].update(upd)
             changed = self._digest.get(name) != digest
             self._digest[name] = digest
@@ -474,8 +529,9 @@ class Fleet:
     def record_week(self):
         """Write down the weekly percent (at most every 15 minutes) for the widgets' week strip and trace."""
         if self.history is not None:
-            lim = self._newest_limits(self.snapshot()['machines'])
-            self.history.record(lim.get('seven_day'), lim.get('seven_day_reset'), self.clock())
+            now = self.clock()
+            lim = self.limits(now)
+            self.history.record(lim.get('seven_day'), lim.get('seven_day_reset'), now)
 
     def poll_one(self, name, timeout=15):
         if name in self.machines:
@@ -499,13 +555,64 @@ class Fleet:
                                  for n in self.order], 'now': now}
 
     @staticmethod
-    def _newest_limits(snap):
-        lims = [m['limits'] for m in snap if m.get('limits')]
-        return max(lims, key=lambda l: l.get('updated') or 0) if lims else {}
+    def _newest_limits(snap, now=None):
+        """The plan numbers from what every machine last reported, merged (merge_limits). `updated` comes out on the
+        server's clock: each machine's own time plus how far its clock is off."""
+        rows = []
+        for m in snap:
+            lim = m.get('limits')
+            if isinstance(lim, dict):
+                at, skew = _num(lim.get('updated')), m.get('skew')
+                rows.append(dict(lim, updated=float(round(at + skew))) if at and isinstance(skew, (int, float)) else lim)
+        return merge_limits(rows, time.time() if now is None else now) or {}
+
+    def limits(self, now=None, snap=None):
+        """The plan numbers every part of the server shows and budgets by. An agent from before merged limits reports
+        whichever chat redrew its status line last, so its numbers jump around under the true ones; inside one window
+        a number only grows, so for such a machine the highest it has shown in each window stands (the week, and
+        the 5 hours by their own reset times), as of the last time the machine showed any number. After a restart
+        the week starts from the last sample written down (WeekHistory), so it cannot dip then either."""
+        now = self.clock() if now is None else now
+        snap = [dict(m) for m in (self.snapshot()['machines'] if snap is None else snap)]
+        with self.lock:
+            for m in snap:
+                m['limits'] = self._hold(m['name'], m.get('limits'), now)
+        return self._newest_limits(snap, now)
+
+    def _hold(self, name, lim, now):
+        """One machine's plan numbers as limits() counts them: its own when its agent merges them, else the highest
+        it has shown in each window. Called with the lock held."""
+        if not isinstance(lim, dict) or lim.get('merged'):
+            self._held.pop(name, None)
+            return lim
+        last = self.history.last() if self.history is not None and hasattr(self.history, 'last') else None
+        lim = sane_limits(lim, now)
+        held = self._held.setdefault(name, {})
+        at = max(_num(lim.get('updated')) or 0, held.get('updated') or 0)
+        for pct_k, reset_k, keep in (('seven_day', 'seven_day_reset', 0), ('five_hour', 'five_hour_reset', WEEK)):
+            pct, reset = lim.get(pct_k), _num(lim.get(reset_k))
+            seen = _isnum(pct) and bool(reset) and reset > now
+            h = held.get(pct_k)
+            if h and h[1] + keep <= now:  # its window is over (the 5 hours stay a week, to say "has reset")
+                h = None
+            if h is None and seen and keep == 0 and last and abs(last[0] - reset) <= RESET_SLACK:
+                h = (last[1], last[0])  # a server that just started: where the week stood when it stopped
+            if seen and (h is None or reset - h[1] > RESET_SLACK or (abs(reset - h[1]) <= RESET_SLACK and pct > h[0])):
+                h = (pct, reset)  # a new window, or more of this one used
+            if h is None:
+                held.pop(pct_k, None)
+                continue
+            held[pct_k] = h
+            if h[1] > now or not seen:
+                lim[pct_k], lim[reset_k] = h
+        if at:
+            held['updated'] = lim['updated'] = at
+        return lim
 
     def summary(self):
         snap = self.snapshot()['machines']
-        newest, now = self._newest_limits(snap), self.clock()
+        now = self.clock()
+        newest = self.limits(now, snap)
         live = {m['name']: [s for s in m['sessions'] if not s['stale']] for m in snap}
         sessions = [s for m in snap for s in live[m['name']]]
         week, reset = newest.get('seven_day'), newest.get('seven_day_reset')
@@ -523,7 +630,8 @@ class Fleet:
 
     def usage(self):
         """GET /api/usage: the plan limits the Week chip shows, this week by day, and past weeks' final percents."""
-        newest, now = self._newest_limits(self.snapshot()['machines']), self.clock()
+        now = self.clock()
+        newest = self.limits(now)
         week, reset = newest.get('seven_day'), newest.get('seven_day_reset')
         days, weeks = self.history.usage(week, reset, now) if self.history is not None else ([], [])
         return {'ok': True, 'now': now, 'tz': DAY_TZ,
@@ -538,8 +646,12 @@ class Fleet:
         try:
             return self.transport(m['target'], req, timeout)
         except Exception as e:
-            self.store(name, {'online': False, 'error': _short(e)})  # announced now, not at the next poll
-            raise FleetError(f'{m["label"]} is not reachable right now ({_short(e)})')
+            err = FleetError(f'{m["label"]} is not reachable right now ({_short(e)})')
+            err.maybe_delivered = isinstance(e, (MaybeDelivered, subprocess.TimeoutExpired))
+            if not err.maybe_delivered:  # it could not be reached at all: announced now, not at the next poll
+                self.store(name, {'online': False, 'error': _short(e)})
+            # A call that went out and got no answer says nothing of the machine: one slow verb is not offline.
+            raise err
 
 
 def _running(sessions):
@@ -550,9 +662,65 @@ def _cold(sessions):
     return sum(1 for s in sessions if s.get('cache') == 'cold' and s.get('heavy') and s.get('activity') == 'quiet')
 
 
+def _isnum(v):
+    return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf')
+
+
+def sane_limits(lim, now):
+    """One sighting of the plan numbers with what cannot be true taken out, so that a single garbled reading never
+    stands as "the highest this week": a percent that is not 0 to 100 (a little over reads as 100), or a window
+    that would end later than one starting now could (5 hours, 7 days)."""
+    out = dict(lim)
+    for pct, reset, span in (('five_hour', 'five_hour_reset', FIVE_HOURS), ('seven_day', 'seven_day_reset', WEEK)):
+        v, r = lim.get(pct), lim.get(reset)
+        if v is None:
+            continue
+        if not _isnum(v) or not 0 <= v <= PCT_MOST or (_isnum(r) and r > now + span + RESET_SLACK):
+            out[pct] = out[reset] = None
+        elif v > 100:
+            out[pct] = 100
+    return out
+
+
+def merge_limits(rows, now):
+    """One answer from many sightings of the plan numbers (dicts with five_hour, seven_day, their reset times and
+    `updated`, when a reply saw them). Each window is read by itself: of the sightings whose window is still open,
+    the one that resets last is the current window, and the highest percent in it is the truth, because use only
+    grows inside a window and a chat that has not replied for a while still shows an older, lower number. `updated`
+    is when that highest number was last seen. With no open window, the newest sighting stands (its reset time says
+    it is over). Readings that cannot be true are left out first (sane_limits). None when nobody saw a number. The
+    agent merges its chats the same way (agent/sb.py merge_limits); one account is assumed."""
+    num = _isnum  # a percent may be 0
+    at = lambda r: r.get('updated') if num(r.get('updated')) else 0
+    rows = [sane_limits(r, now) for r in rows if isinstance(r, dict)]
+    rows = [r for r in rows if num(r.get('five_hour')) or num(r.get('seven_day'))]
+    if not rows:
+        return None
+
+    def window(pct, reset):
+        live = [r for r in rows if num(r.get(pct)) and num(r.get(reset)) and r[reset] > now]
+        if not live:
+            return None
+        end = max(r[reset] for r in live)
+        live = [r for r in live if end - r[reset] <= RESET_SLACK]
+        top = max(r[pct] for r in live)
+        return max((r for r in live if r[pct] == top), key=at)
+    newest = max(rows, key=at)
+    week = window('seven_day', 'seven_day_reset') or max((r for r in rows if num(r.get('seven_day'))), key=at, default=None)
+    # No open 5-hour window: the last one anybody saw within the week (its reset time says it is over), else what
+    # the newest reply saw. Nothing there means the plan does not report one.
+    past = [r for r in rows if num(r.get('five_hour')) and num(r.get('five_hour_reset')) and r['five_hour_reset'] > now - WEEK]
+    five = window('five_hour', 'five_hour_reset') or max(past, key=lambda r: r['five_hour_reset'], default=None) or newest
+    week = week or {}
+    return {'five_hour': five.get('five_hour'), 'seven_day': week.get('seven_day'),
+            'five_hour_reset': five.get('five_hour_reset') if five.get('five_hour') is not None else None,
+            'seven_day_reset': week.get('seven_day_reset'), 'updated': (week or five).get('updated')}
+
+
 def _projected(used, reset, now, week=WEEK):
-    """Weekly use at reset if the rest of the week goes like the part so far."""
-    if used is None or not reset:
+    """Weekly use at reset if the rest of the week goes like the part so far. None once the reset has passed: the
+    number is last week's."""
+    if used is None or not reset or reset <= now:
         return None
     elapsed = (week - (reset - now)) / week
     if elapsed < 0.05:  # too early in the week to say
@@ -648,26 +816,6 @@ def week_trace(samples, reset):
     return [hours[h] for h in sorted(hours)]
 
 
-def day_used(samples, start, end, tz=DAY_TZ):
-    """[{day, used}] for each local calendar day from `start` (the week's start) to `end`: the weekly percent at the
-    day's last sample minus its first, never negative. The week's first day counts from 0 at the reset. None for a
-    day with too few samples to tell."""
-    tz = _zone(tz)
-    by = {}
-    for t, p in sorted(samples):
-        if start < t <= end and p is not None:
-            by.setdefault(datetime.fromtimestamp(t, tz).date(), []).append(float(p))
-    first = datetime.fromtimestamp(start, tz).date()
-    by.setdefault(first, []).insert(0, 0.0)
-    out, d, last = [], first, datetime.fromtimestamp(max(start, end), tz).date()
-    while d <= last:
-        v = by.get(d) or []
-        out.append({'day': d.isoformat(), 'used': round(max(0.0, v[-1] - v[0]), 1) if len(v) > 1 else
-                    (0.0 if d == first else None)})
-        d += timedelta(days=1)
-    return out
-
-
 def local_midnight(ts, tz=DAY_TZ):
     """The start of the local calendar day `ts` falls on, in `tz`."""
     tz = _zone(tz)
@@ -696,6 +844,30 @@ def today_used(samples, pct, reset, now, tz=DAY_TZ):
             return None
         base = later[0]
     return round(max(0.0, float(pct) - base), 1)
+
+
+def days_used(samples, pct, reset, now, tz=DAY_TZ):
+    """[{day, used}] for each local calendar day in `tz` of the week that ends at `reset`, from its first day to the
+    day `now` falls on: the weekly percent at the day's end (or now) minus the percent at its start, never negative.
+    The percent at each midnight is read off the samples like week_daily does, so the days add up to the week so
+    far; a day the samples cannot account for (the server was not keeping them yet, or was down while usage grew) is
+    None. The last day is today_used, the number the budget counts."""
+    if pct is None or not reset:
+        return []
+    tz = _zone(tz)
+    start, end = reset - WEEK, min(now, reset)
+    points = [(start, 0.0)] + sorted((t, float(p)) for t, p in samples if start < t < end and p is not None) + [(end, float(pct))]
+    out, d, last = [], datetime.fromtimestamp(start, tz).date(), datetime.fromtimestamp(end, tz).date()
+    while d <= last:
+        a = max(start, datetime.combine(d, dtime(0), tzinfo=tz).timestamp())
+        b = min(end, datetime.combine(d + timedelta(days=1), dtime(0), tzinfo=tz).timestamp())
+        lo, hi = _pct_at(points, a), _pct_at(points, b)
+        used = None if lo is None or hi is None else round(max(0.0, hi - lo), 1)
+        if d == last and now < reset:
+            used = today_used(samples, pct, reset, now, tz)
+        out.append({'day': d.isoformat(), 'used': used})
+        d += timedelta(days=1)
+    return out
 
 
 class WeekHistory:
@@ -729,9 +901,19 @@ class WeekHistory:
         """Keeps the weekly percent now if the last sample is 15 minutes old. True when it was written down."""
         if pct is None or not reset or reset <= now:  # unknown, or numbers from a week that is over
             return False
+        if not _isnum(pct) or not 0 <= pct <= PCT_MOST or reset > now + WEEK + RESET_SLACK:
+            return False  # not a reading: no week ends more than seven days from now
+        pct = min(pct, 100)
         with self.lock:
-            if self.reset is None or abs(reset - self.reset) > RESET_SLACK:
-                self._archive()
+            if self.reset is not None and self.reset > now + WEEK + RESET_SLACK:
+                self.reset, self.samples = None, []  # one such reading was kept by an older server: it goes
+            if self.reset is not None and self.reset - reset > RESET_SLACK:
+                # A week that ends before the one being kept, which is still running: numbers from somewhere else
+                # (a second account). One week is kept; this one is not written into it.
+                return False
+            if self.reset is None or reset - self.reset > RESET_SLACK:
+                if self.reset is not None and self.reset <= now:
+                    self._archive()  # only a week that ran to its end is a past week; one cut short is not
                 self.samples = []  # a new week (or an early reset): what was kept belongs to the last one
             self.reset = reset
             self.samples = [s for s in self.samples if reset - WEEK <= s[0] <= now]
@@ -746,13 +928,18 @@ class WeekHistory:
                 pass  # kept in memory; the next sample writes the file again
             return True
 
+    def last(self):
+        """(reset, percent) of the newest sample, or None: where the week stood when it was last written down."""
+        with self.lock:
+            return (self.reset, self.samples[-1][1]) if self.reset is not None and self.samples else None
+
     def _archive(self):
         """Keep the week that just ended (its last percent and its days) in week_archive.json. Called under the lock."""
         if self.reset is None or not self.samples:
             return
         old = self.reset
-        week = {'reset': old, 'pct': round(self.samples[-1][1], 1),
-                'days': day_used(self.samples, old - WEEK, min(old, self.samples[-1][0]), self.tz)}
+        pct = self.samples[-1][1]  # where the week ended, as far as anyone saw
+        week = {'reset': old, 'pct': round(pct, 1), 'days': days_used(self.samples, pct, old, old, self.tz)}
         self.weeks = ([week] + [w for w in self.weeks if abs(w['reset'] - old) > RESET_SLACK])[:self.WEEKS]
         self.weeks.sort(key=lambda w: -w['reset'])
         try:
@@ -770,9 +957,7 @@ class WeekHistory:
             samples = [tuple(s) for s in self.samples if reset - WEEK <= s[0] <= now] if same else []
         if not reset or reset <= now:
             return [], weeks
-        if pct is not None:
-            samples.append((now, float(pct)))
-        return day_used(samples, reset - WEEK, now, self.tz), weeks
+        return days_used(samples, pct, reset, now, self.tz), weeks
 
     def today(self, pct, reset, now):
         """Percent of the week used today so far (today_used), for the usage budget."""

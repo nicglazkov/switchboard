@@ -17,14 +17,19 @@
 use crate::link::NodeTerm;
 use crate::pty::Term;
 use alacritty_terminal::event::VoidListener;
-use axum::body::Bytes;
 use sb_core::term::screen::{self, Screen};
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
+use tokio::sync::Notify;
 
-/// Messages queued for one viewer before it counts as behind.
+/// Output queued for one viewer before it counts as behind. Counted in bytes: a program that writes in many tiny
+/// pieces (ConPTY on Windows) must not put a viewer behind that is only a few kilobytes late.
+pub const VIEWER_BACKLOG_BYTES: usize = 1024 * 1024;
+/// Messages queued for one viewer before it counts as behind, whatever their size.
 pub const VIEWER_BACKLOG: usize = 256;
+/// Output waiting for a viewer is joined into messages of up to this much.
+const MERGE_MAX: usize = 64 * 1024;
 
 /// Where a terminal runs: ssh in a PTY here, or a PTY on the machine through its node link.
 pub enum Backend {
@@ -55,7 +60,7 @@ impl Backend {
 pub enum Out {
     /// The program has started writing (`status: open`).
     Open,
-    Bytes(Bytes),
+    Bytes(Vec<u8>),
     Size(u16, u16),
     Owner(bool),
     /// The screen as bytes, between `snapshot_begin` and `snapshot_end`.
@@ -73,9 +78,97 @@ pub struct Hello {
     pub history: bool,
 }
 
+/// What is waiting to go to one viewer. Output that arrives while output is still waiting is joined to it, so a
+/// burst of small writes leaves as a few messages.
+#[derive(Default)]
+struct Waiting {
+    items: VecDeque<Out>,
+    /// Output bytes in `items` (snapshots and the rest do not count).
+    bytes: usize,
+    closed: bool,
+}
+
+#[derive(Default)]
+pub struct Queue {
+    q: Mutex<Waiting>,
+    more: Notify,
+}
+
+impl Queue {
+    /// Adds `o`. False, with nothing added, when the queue is at its bound.
+    fn push(&self, o: Out) -> bool {
+        let mut q = lock(&self.q);
+        if q.closed {
+            return true;
+        }
+        if let Out::Bytes(b) = &o {
+            if q.bytes + b.len() > VIEWER_BACKLOG_BYTES {
+                return false;
+            }
+            if let Some(Out::Bytes(last)) = q.items.back_mut()
+                && last.len() + b.len() <= MERGE_MAX
+            {
+                last.extend_from_slice(b);
+                q.bytes += b.len();
+                return true; // the viewer was already told there is something to read
+            }
+        }
+        if q.items.len() >= VIEWER_BACKLOG {
+            return false;
+        }
+        if let Out::Bytes(b) = &o {
+            q.bytes += b.len();
+        }
+        q.items.push_back(o);
+        drop(q);
+        self.more.notify_one();
+        true
+    }
+
+    fn close(&self) {
+        lock(&self.q).closed = true;
+        self.more.notify_one();
+    }
+
+    fn pop(&self) -> Result<Out, bool> {
+        let mut q = lock(&self.q);
+        match q.items.pop_front() {
+            Some(o) => {
+                if let Out::Bytes(b) = &o {
+                    q.bytes -= b.len();
+                }
+                Ok(o)
+            }
+            None => Err(q.closed),
+        }
+    }
+
+    /// The next message, waiting for one. None once the terminal ended and everything before that was read.
+    /// Only one task reads a queue (the viewer's relay).
+    pub async fn recv(&self) -> Option<Out> {
+        loop {
+            match self.pop() {
+                Ok(o) => return Some(o),
+                Err(true) => return None,
+                // a push between the look above and this wait leaves its wake-up behind, so none is missed
+                Err(false) => self.more.notified().await,
+            }
+        }
+    }
+
+    /// The next message if one is waiting.
+    pub fn try_recv(&self) -> Option<Out> {
+        self.pop().ok()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        lock(&self.q).items.is_empty()
+    }
+}
+
 struct Viewer {
     id: u64,
-    tx: Option<mpsc::Sender<Out>>,
+    queue: Arc<Queue>,
     want: (u16, u16),
     /// When it last had focus or typed (a counter), to pick the next owner.
     active: u64,
@@ -92,11 +185,10 @@ impl Viewer {
         if self.behind.load(Ordering::Relaxed) {
             return;
         }
-        let Some(tx) = &self.tx else { return };
         if matches!(o, Out::Bytes(_) | Out::Snapshot(_)) {
             self.has_screen = true;
         }
-        if let Err(mpsc::error::TrySendError::Full(_)) = tx.try_send(o) {
+        if !self.queue.push(o) {
             self.behind.store(true, Ordering::Relaxed);
         }
     }
@@ -131,7 +223,7 @@ fn lock<T>(m: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 /// A viewer's end of a shared terminal.
 pub struct Seat {
     pub id: u64,
-    pub rx: mpsc::Receiver<Out>,
+    pub rx: Arc<Queue>,
     pub behind: Arc<AtomicBool>,
 }
 
@@ -190,14 +282,14 @@ impl Shared {
     /// screen, and takes the size over once it has focus or types.
     pub fn join(&self, hello: Hello) -> Seat {
         let id = self.next.fetch_add(1, Ordering::Relaxed);
-        let (tx, rx) = mpsc::channel(VIEWER_BACKLOG);
+        let rx = Arc::new(Queue::default());
         let behind = Arc::new(AtomicBool::new(false));
         let mut st = lock(&self.st);
         st.tick += 1;
         let active = st.tick;
         st.viewers.push(Viewer {
             id,
-            tx: Some(tx),
+            queue: rx.clone(),
             want: (hello.cols, hello.rows),
             active,
             behind: behind.clone(),
@@ -227,12 +319,11 @@ impl Shared {
         st.out_bytes += b.len() as u64;
         let first = !st.opened;
         st.opened = true;
-        let bytes = Bytes::from(b);
         for v in st.viewers.iter_mut() {
             if first {
                 v.push(Out::Open);
             }
-            v.push(Out::Bytes(bytes.clone()));
+            v.push(Out::Bytes(b.clone()));
         }
     }
 
@@ -361,8 +452,8 @@ impl Shared {
     pub fn ended(&self, code: Option<i64>) {
         let mut st = lock(&self.st);
         st.exited = Some(code);
-        for v in st.viewers.iter_mut() {
-            v.tx = None;
+        for v in st.viewers.iter() {
+            v.queue.close();
         }
         drop(st);
         lock(&self.backend).take();
@@ -394,6 +485,7 @@ mod tests {
     use crate::link::Link;
     use crate::link_proto::ToNode;
     use axum::extract::ws::Message;
+    use tokio::sync::mpsc;
 
     /// A shared terminal on a fake node link, so resizes show up as messages to read.
     fn lab() -> (Arc<Shared>, mpsc::Receiver<Message>, crate::pty::TermIo) {
@@ -409,7 +501,7 @@ mod tests {
 
     fn drain(s: &mut Seat) -> Vec<Out> {
         let mut v = vec![];
-        while let Ok(o) = s.rx.try_recv() {
+        while let Some(o) = s.rx.try_recv() {
             v.push(o);
         }
         v
@@ -447,7 +539,7 @@ mod tests {
         sh.output(b"hello".to_vec());
         let mut b = sh.join(hello(100, 30));
         sh.output(b" world".to_vec());
-        assert_eq!(kinds(&drain(&mut a)), "size:80x24 owner:true open bytes:hello bytes: world");
+        assert_eq!(kinds(&drain(&mut a)), "size:80x24 owner:true open bytes:hello world");
         // the late one sees the size, that it does not own it, then the screen, then live output
         assert_eq!(kinds(&drain(&mut b)), "size:80x24 owner:false open snapshot bytes: world");
     }
@@ -497,12 +589,16 @@ mod tests {
     fn a_viewer_that_falls_behind_gets_the_screen_instead() {
         let (sh, _rx, _io) = lab();
         let mut a = sh.join(hello(80, 24));
-        for i in 0..VIEWER_BACKLOG + 50 {
-            sh.output(format!("line {i}\r\n").into_bytes());
+        let line = |i: usize| format!("line {i} {}\r\n", "x".repeat(60)).into_bytes();
+        let lines = VIEWER_BACKLOG_BYTES / line(0).len() + 50;
+        for i in 0..lines {
+            sh.output(line(i));
         }
         assert!(a.behind.load(Ordering::Relaxed));
         let queued = drain(&mut a);
-        assert_eq!(queued.len(), VIEWER_BACKLOG, "nothing past the bound");
+        let bytes: usize = queued.iter().map(|o| if let Out::Bytes(b) = o { b.len() } else { 0 }).sum();
+        assert!(bytes <= VIEWER_BACKLOG_BYTES, "nothing past the bound: {bytes}");
+        assert!(bytes > VIEWER_BACKLOG_BYTES - 1024, "and everything up to it: {bytes}");
         let again = sh.catch_up(a.id);
         assert_eq!(kinds(&again), "size:80x24 owner:true snapshot");
         let Out::Snapshot(snap) = &again[2] else { panic!() };
@@ -510,9 +606,92 @@ mod tests {
         let mut copy: Screen<VoidListener> = Screen::new(80, 24, 100, VoidListener);
         copy.feed(snap);
         let text = screen::dump(&copy.term, 0).join("\n");
-        assert!(text.contains(&format!("line {}", VIEWER_BACKLOG + 49)), "{text}");
+        assert!(text.contains(&format!("line {} ", lines - 1)), "{text}");
         sh.output(b"live".to_vec());
         assert_eq!(kinds(&drain(&mut a)), "bytes:live");
+    }
+
+    #[test]
+    fn many_small_writes_wait_as_a_few_messages_and_leave_nobody_behind() {
+        // ConPTY on Windows: hundreds of tiny writes a second. A thousand of them is 10 KB, not a viewer behind.
+        let (sh, _rx, _io) = lab();
+        let mut a = sh.join(hello(80, 24));
+        let mut want = Vec::new();
+        for i in 0..1000 {
+            let piece = format!("{:>9}\n", i).into_bytes();
+            want.extend_from_slice(&piece);
+            sh.output(piece);
+        }
+        assert!(!a.behind.load(Ordering::Relaxed));
+        let queued = drain(&mut a);
+        assert_eq!(queued.len(), 4, "size, owner, open and one piece of output: {}", queued.len());
+        let Some(Out::Bytes(got)) = queued.last() else { panic!() };
+        assert_eq!(got, &want, "in order, nothing lost");
+    }
+
+    #[test]
+    fn joined_output_stays_in_order_around_other_frames_and_within_a_message_size() {
+        let (sh, _rx, _io) = lab();
+        let mut a = sh.join(hello(80, 24));
+        let mut b = sh.join(hello(100, 30));
+        sh.output(b"one".to_vec());
+        sh.output(b"two".to_vec());
+        sh.focus(b.id); // a size frame goes between: output after it is not joined to output before it
+        sh.output(b"three".to_vec());
+        assert_eq!(
+            kinds(&drain(&mut a)),
+            "size:80x24 owner:true open bytes:onetwo owner:false size:100x30 bytes:three"
+        );
+        let _ = drain(&mut b);
+        // 200 KB waiting is four messages or so, none larger than a join allows
+        for _ in 0..200 {
+            sh.output(vec![b'x'; 1000]);
+        }
+        let sizes = |outs: Vec<Out>| -> Vec<usize> {
+            outs.iter().map(|o| if let Out::Bytes(b) = o { b.len() } else { 0 }).collect()
+        };
+        let got = sizes(drain(&mut a));
+        assert!(got.len() <= 4, "{got:?}");
+        assert_eq!(got.iter().sum::<usize>(), 200_000);
+        assert!(got.iter().all(|n| *n <= MERGE_MAX), "{got:?}");
+        // each viewer has its own copy: joining for one never changes what another reads
+        assert_eq!(sizes(drain(&mut b)).iter().sum::<usize>(), 200_000);
+    }
+
+    #[test]
+    fn a_viewer_far_behind_in_messages_gets_the_screen_too() {
+        // frames that cannot be joined (a size change between every write) still have a bound
+        let (sh, _rx, _io) = lab();
+        let mut a = sh.join(hello(80, 24));
+        for i in 0..VIEWER_BACKLOG as u16 {
+            sh.want(a.id, 81 + i % 2, 24);
+            sh.output(b"x".to_vec());
+        }
+        assert!(a.behind.load(Ordering::Relaxed));
+        assert_eq!(drain(&mut a).len(), VIEWER_BACKLOG, "nothing past the bound");
+    }
+
+    #[tokio::test]
+    async fn a_waiting_viewer_wakes_for_output_and_for_the_end() {
+        let (sh, _rx, _io) = lab();
+        let a = sh.join(hello(80, 24));
+        while a.rx.try_recv().is_some() {}
+        let reader = tokio::spawn({
+            let rx = a.rx.clone();
+            async move {
+                let mut got = Vec::new();
+                while let Some(o) = rx.recv().await {
+                    got.push(o);
+                }
+                got
+            }
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sh.output(b"late".to_vec());
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        sh.ended(Some(0));
+        let got = tokio::time::timeout(std::time::Duration::from_secs(5), reader).await.unwrap().unwrap();
+        assert_eq!(kinds(&got), "open bytes:late");
     }
 
     #[test]
@@ -552,7 +731,7 @@ mod tests {
         sh.output(b"last words".to_vec());
         sh.ended(Some(0));
         assert_eq!(kinds(&drain(&mut a)), "size:80x24 owner:true open bytes:last words");
-        assert!(a.rx.try_recv().is_err());
+        assert!(a.rx.try_recv().is_none());
         assert_eq!(sh.exit_code(), Some(Some(0)));
         assert!(!sh.alive());
     }

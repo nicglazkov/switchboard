@@ -229,5 +229,121 @@ class HandoffFreshnessTest(JobBase):
         self.assertFalse(self.sb.handoff_is_fresh(SID_A, str(t)))
 
 
+class SmallHelperFixesTest(JobBase):
+    """0.8.20 review, the helper's small ones."""
+    def test_a_send_nobody_takes_is_over_as_soon_as_all_said_no(self):
+        def refused(base):
+            raise OSError('connection refused')
+        for stagger in (None, 0.05):
+            t0 = time.time()
+            self.assertFalse(self.sb._post_any({'event': 'x'}, 5, ['http://127.0.0.1:9', 'http://127.0.0.1:10'], send=refused,
+                                               stagger=stagger))
+            self.assertLess(time.time() - t0, 0.3, stagger)
+        t0 = time.time()
+        self.assertFalse(self.sb._post_any({'event': 'x'}, 5, []))
+        self.assertLess(time.time() - t0, 0.3)
+        # one that takes it still wins, however the other answers
+        self.assertTrue(self.sb._post_any({'event': 'x'}, 5, ['a', 'b'], send=lambda b: refused(b) if b == 'a' else None))
+        self.assertTrue(self.sb._post_any({'event': 'x'}, 5, ['a', 'b'], send=lambda b: refused(b) if b == 'b' else None, stagger=0.05))
+
+    def test_a_claim_file_that_is_not_text_is_stale_not_a_crash(self):
+        lock = self.sb.paths()['state'] / 'x.lock'
+        lock.write_bytes(b'\xff\xfe\x00garbage\x80')
+        os.utime(lock, (NOW - 9999, NOW - 9999))
+        self.assertEqual(self.sb._lock_read(lock)['pid'], None)
+        self.assertTrue(self.sb.lock_take(lock, NOW, 60))
+        self.assertEqual(json.loads(lock.read_text())['pid'], os.getpid())
+
+    def test_claude_agents_that_said_nothing_is_not_nothing_running(self):
+        for out, rc in (('', 0), ('[]', 1), ('not json', 0), ('{}', 0)):
+            def run(args, timeout=30, rc=None, out=out, code=rc):
+                rc.append(code)
+                return out
+            self.sb.run_claude_cmd = run
+            self.assertFalse(self.sb.agents_known(self.sb.claude_agents()), (out, rc))
+        self.sb.run_claude_cmd = lambda args, timeout=30, rc=None: rc.append(0) or '[]'
+        ags = self.sb.claude_agents()
+        self.assertTrue(self.sb.agents_known(ags))
+        self.assertEqual(ags, [])
+
+    def test_start_fresh_does_not_wait_for_a_writer_that_left_the_fallback(self):
+        # a hook-started run wrote the fallback note and dropped its claim between our look and our try for the claim
+        self.transcript(SID_A, str(self.root / 'proj'), NOW - 60)
+        self.sb.rpc({'verb': 'list'}, NOW, agents=[])
+        self.sb.handoff_path(SID_A).write_text(self.sb.FALLBACK_MARK + '\nraw')
+        self.sb.handoff_lock = lambda sid, now: False
+        slept = []
+        self.job({'verb': 'fresh', 'sid': SID_A})
+        with mock.patch.object(self.sb.time, 'sleep', lambda s: slept.append(s)):
+            self.drain(make_handoff=lambda tp, sid: self.fail('not ours to write'))
+        self.assertEqual([x for x in slept if x == 2], [])
+        self.assertEqual(len(self.launched), 1)
+
+    def test_a_write_that_cannot_land_leaves_no_temp_file(self):
+        st = self.sb.paths()['state']
+        with mock.patch.object(self.sb.os, 'replace', mock.Mock(side_effect=PermissionError('in use'))):
+            with self.assertRaises(OSError):
+                self.sb._jput(st / 'x.json', {'a': 1})
+            with self.assertRaises(OSError):
+                self.sb._jput_text(st / 'y.md', 'text')
+        self.assertEqual([f.name for f in st.iterdir() if f.name.endswith('.tmp')], [])
+
+    def test_a_chats_tool_list_stays_while_its_transcript_does(self):
+        st, old = self.sb.paths()['state'], NOW - 60 * 86400
+        proj = self.cdir / 'projects' / 'p'
+        proj.mkdir(parents=True, exist_ok=True)
+        gone = 'aaaaaaaa-0000-4000-8000-000000000009'
+        t = proj / f'{SID_A}.jsonl'
+        t.write_text('{}\n')
+        for f in (t, ):
+            os.utime(f, (old, old))
+        for sid in (SID_A, gone):
+            for ext in ('.tools', '.ping'):
+                (st / f'{sid}{ext}').write_text('{}')
+                os.utime(st / f'{sid}{ext}', (old, old))
+        self.sb.prune_state(NOW, force=True)
+        self.assertEqual(sorted(f.name for f in st.iterdir() if f.name.endswith(('.tools', '.ping'))), [f'{SID_A}.tools'])
+
+    def test_a_process_that_will_not_say_its_command_line_is_not_asked_at_every_poll(self):
+        agents = [{'kind': 'interactive', 'sessionId': SID_A, 'pid': 4242, 'startedAt': 5}]
+        asked = []
+        self.sb._cmdlines = lambda pids, loose=None: asked.append(list(pids)) or {}
+        self.sb._roster_args = lambda: {}
+        for dt_ in (0, 15, 30, 599):
+            self.assertEqual(self.sb.launch_flags(agents, NOW + dt_), {SID_A: {}})
+        self.assertEqual(asked, [[4242]])
+        self.sb._cmdlines = lambda pids, loose=None: asked.append(list(pids)) or {4242: ['claude', '--chrome']}
+        self.assertEqual(self.sb.launch_flags(agents, NOW + 700), {SID_A: {'chrome': True}})  # asked again later: healed
+        self.sb.launch_flags(agents, NOW + 715)
+        self.assertEqual(len(asked), 2)
+        # what an older helper wrote for this very process is kept when the process will not say
+        flags = self.sb.paths()['state'] / 'flags.json'
+        flags.write_text(json.dumps({SID_A: {'launch': {'chrome': True}, 'all': [['--chrome']], 'pid': 4242, 'started': 5}}))
+        self.sb._cmdlines = lambda pids, loose=None: asked.append(list(pids)) or {}
+        self.assertEqual(self.sb.launch_flags(agents, NOW + 800), {SID_A: {'chrome': True}})
+        self.sb.launch_flags(agents, NOW + 815)
+        self.assertEqual(len(asked), 3)
+
+    def test_a_first_message_by_file_survives_a_launch_that_never_came_up(self):
+        long = 'x' * 7000
+        self.sb._is_shim = lambda exe: True  # an npm install on Windows: a long first message goes by file
+        self.job({'verb': 'start', 'folder': 'proj', 'prompt': long, 'handoff_text': 'HANDOFF', 'name': 'Long'})
+        seen, health = [], iter(['dead', 'ready'])
+
+        def run(argv, cwd, env):
+            self.launched.append({'argv': argv})
+            # the chat gets as far as its first hook, which takes the message and the handoff
+            seen.append(self.sb.handle_hook({'hook_event_name': 'UserPromptSubmit', 'session_id': 'S9', 'transcript_path': '/none',
+                                             'prompt': argv[-1]}, NOW + 6, None))
+            return 0, '  claude stop 3022c163    stop this session\n'
+        self.sb.run_claude_cmd = lambda args, **kw: ''
+        self.drain(runner=run, live=lambda bg: next(health))
+        self.assertEqual(len(seen), 2)
+        for out in seen:
+            ctx = out['hookSpecificOutput']['additionalContext']
+            self.assertIn('HANDOFF', ctx)
+            self.assertIn('x' * 100, ctx)
+
+
 if __name__ == '__main__':
     unittest.main()

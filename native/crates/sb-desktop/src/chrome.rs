@@ -190,8 +190,8 @@ impl BoardView {
         )
     }
 
-    /// The menu under that button: what the Mac's menu bar holds (Settings, History, light and dark, the terminal's
-    /// text size, Quit), each with its keys.
+    /// The menu under that button: what the Mac's menu bar holds (New chat, the palette, Settings, History, light and
+    /// dark, the terminal's text size and Redraw, Quit), each with the keys that work everywhere, a terminal included.
     pub fn app_menu(&self, c: &Ctx, decorations: Decorations) -> Option<AnyElement> {
         if cfg!(target_os = "macos") || !self.app_menu_open {
             return None;
@@ -226,6 +226,9 @@ impl BoardView {
                     window.dispatch_action(act(), cx);
                 }))
         };
+        // The rows that act on the terminal in front: dimmed while none shows (they would do nothing).
+        let no_term = self.tab == 0 && self.float.is_none();
+        let term_row = |d: gpui::Stateful<gpui::Div>| d.when(no_term, |d| d.opacity(0.45).cursor_default());
         let menu = div()
             .id("app-menu")
             .absolute()
@@ -242,27 +245,36 @@ impl BoardView {
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .flex()
             .flex_col()
+            .child(item("am-new", "plus", "New chat", ui::term_cap("N"), || Box::new(crate::view::NewSession)))
             .child(item("am-term", "term", "New terminal", ui::term_cap("T"), || Box::new(crate::view::NewTerminal)))
             .child(item("am-chat", "search", "Open a chat in a terminal", ui::term_cap("O"), || {
                 Box::new(crate::view::ChatPalette)
             }))
+            .child(item("am-palette", "cmd", "Command palette", ui::term_cap("K"), || {
+                Box::new(crate::view::TogglePalette)
+            }))
             .child(rule())
             .child(item("am-settings", "gear", "Settings", ui::mod_cap(","), || Box::new(crate::view::Settings)))
-            .child(item("am-history", "history", "History", ui::mod_cap("B"), || Box::new(crate::view::Browse)))
+            .child(item("am-history", "history", "History", ui::term_cap("B"), || Box::new(crate::view::Browse)))
             .child(item("am-theme", "contrast", "Switch light and dark", ui::mod_cap("Shift L"), || {
                 Box::new(crate::view::ToggleTheme)
             }))
             .child(rule())
-            .child(item("am-bigger", "zoomin", "Bigger terminal text", ui::mod_cap("+"), || {
+            .child(term_row(item("am-bigger", "zoomin", "Bigger terminal text", ui::mod_cap("+"), || {
                 Box::new(crate::term::TermBigger)
-            }))
-            .child(item("am-smaller", "zoomout", "Smaller terminal text", ui::mod_cap("-"), || {
+            })))
+            .child(term_row(item("am-smaller", "zoomout", "Smaller terminal text", ui::mod_cap("-"), || {
                 Box::new(crate::term::TermSmaller)
-            }))
-            .child(item("am-actual", "fit", "Actual size", ui::mod_cap("0"), || Box::new(crate::term::TermSizeReset)))
+            })))
+            .child(term_row(item("am-actual", "fit", "Actual size", ui::mod_cap("0"), || {
+                Box::new(crate::term::TermSizeReset)
+            })))
+            .child(term_row(item("am-redraw", "fresh", "Redraw the terminal", ui::mod_cap("Shift R"), || {
+                Box::new(crate::term::TermRedraw)
+            })))
             .child(rule())
             .child(item("am-about", "info", "About Switchboard", String::new(), || Box::new(crate::view::About)))
-            .child(item("am-quit", "out", "Quit Switchboard", ui::mod_cap("Q"), || Box::new(crate::view::Quit)));
+            .child(item("am-quit", "out", "Quit Switchboard", ui::term_cap("Q"), || Box::new(crate::view::Quit)));
         Some(
             div()
                 .absolute()
@@ -397,10 +409,11 @@ impl BoardView {
                 || drop_at == Some(g);
             div().flex_none().w(px(1.)).h(px(16.)).rounded(px(0.5)).when(!hide, |d| d.bg(line2))
         };
-        // About the room each terminal tab would get (the window less the brand, Board, History, "+", the group chips
-        // and the chips on the right). Every terminal tab is TAB_W wide whatever its title, so nothing moves under the
-        // pointer; with many tabs "Updated ..." in the header goes first, group names shrink to about 6 letters, and
-        // past that the row scrolls sideways, with the tab that shows kept in sight.
+        // About the room the terminal tabs get (the window less the brand, Board, History, "+", the group chips and the
+        // chips on the right). Every terminal tab is the same width whatever its title, so nothing moves under the
+        // pointer: TAB_W while they fit, narrower together (down to TAB_MIN_W) as the row fills. Once they are at their
+        // narrowest "Updated ..." in the header goes, then group names shrink to about 6 letters, and past that the
+        // row scrolls sideways, with the tab that shows kept in sight.
         // (With 40 px to spare: the Week chip and the header's own padding vary, and an estimate a little short scrolls the
         // first group's chip half out of sight.)
         let fixed = if self.solo.is_some() { 750. } else { 830. } + if self.tabs.len() >= 2 { 52. } else { 0. };
@@ -421,12 +434,16 @@ impl BoardView {
                 })
                 .sum()
         };
-        // What is left once every tab has its TAB_W: below zero, the row would have to scroll.
-        let spare = |fixed: f32, max: f32| self.win_w - fixed - chip_room(max) - n_vis as f32 * (TAB_W + 5.);
-        let is_crowded = spare(fixed, 120.) < 0.;
+        // The tabs' width in that room, and whether they fit at it: when not, the row would have to scroll.
+        let fit = |fixed: f32, max: f32| tab_fit(self.win_w - fixed - chip_room(max), n_vis);
+        let is_crowded = !fit(fixed, 120.).1;
         self.tabs_crowded.set(is_crowded);
         let fixed = if is_crowded { fixed - 100. } else { fixed };
-        let chip_max = if spare(fixed, 120.) >= 0. { 120. } else { 60. };
+        let chip_max = if fit(fixed, 120.).1 { 120. } else { 60. };
+        let tab_w = fit(fixed, chip_max).0;
+        self.tab_w.set(tab_w);
+        // A narrow tab gives its room to the title: the machine label shrinks, then goes.
+        let label_w = (tab_w - 150.).clamp(0., 72.);
         // Room above and below for the shown tab's ring, which the clip would cut.
         let mut terms = div()
             .id("tab-row")
@@ -508,7 +525,8 @@ impl BoardView {
                 !left && infos[i].group == Some(g) && !next_tab_in(&slots, si, &infos, Some(g))
             });
             terms = terms.child(
-                term_tab(&t, ("tab", i), on)
+                // A tab being renamed is full width, for the name field.
+                term_tab(&t, ("tab", i), on, if editing { TAB_W } else { tab_w })
                     .on_hover(cx.listener(move |this, h: &bool, _, cx| {
                         let next = if *h {
                             Some(i)
@@ -599,8 +617,8 @@ impl BoardView {
                                 .child(ui::icon("star-on", 11., t.cold)),
                         )
                     })
-                    // The title takes the room and is what gives way (an ellipsis); the machine label (up to 72 px), the
-                    // dot, star and close button never shrink.
+                    // The title takes the room and is what gives way (an ellipsis); the machine label (up to 72 px, less
+                    // on a narrow tab), the dot, star and close button never shrink.
                     // Being renamed: the name field in its place (rename.rs), and the machine label steps aside for it.
                     .child(if editing {
                         self.chat_name_field(c, "tab-rename", 22., 13.)
@@ -612,11 +630,11 @@ impl BoardView {
                     } else {
                         ui::line(topic).flex_grow(1.).flex_shrink(1.).min_w(px(12.)).into_any_element()
                     })
-                    .when(!editing && !tb.label.is_empty(), |d| {
+                    .when(!editing && !tb.label.is_empty() && label_w >= 24., |d| {
                         d.child(
                             ui::line(tb.label.clone())
                                 .flex_none()
-                                .max_w(px(72.))
+                                .max_w(px(label_w))
                                 .text_color(t.faint)
                                 .text_size(px(12.5)),
                         )
@@ -1095,7 +1113,7 @@ impl BoardView {
     fn tab_step(&mut self, dir: i32, cx: &mut gpui::Context<Self>) {
         let max = f32::from(self.tab_scroll.max_offset().x);
         let from = f32::from(self.tab_scroll.offset().x);
-        let to = (self.tab_glide_to.unwrap_or(from) - dir as f32 * (TAB_W + 5.)).clamp(-max, 0.);
+        let to = (self.tab_glide_to.unwrap_or(from) - dir as f32 * (self.tab_w.get() + 5.)).clamp(-max, 0.);
         if max <= 1. || (to - from).abs() < 0.5 {
             return;
         }
@@ -1134,10 +1152,10 @@ impl BoardView {
     fn week_chip(&self, c: &Ctx) -> AnyElement {
         let t = c.t;
         let plan = &c.app.snap.plan;
-        let Some(week) = plan.week else { return div().into_any_element() };
+        // With no weekly number yet the chip still shows ("--"): it is the way into the Usage panel.
         // Old numbers stay readable but quieter, with how old they are next to them.
-        let old = plan.limits_old(c.now);
-        let week = if plan.week_label(c.now) == "--" { 0.0 } else { week };
+        let old = plan.limits_old(c.now) || plan.week.is_none();
+        let week = if plan.week_label(c.now) == "--" { 0.0 } else { plan.week.unwrap_or(0.0) };
         // Over the daily budget turns the chip amber; the hard limit stopping chats turns it red.
         let st = c.app.snap.budget.as_ref().map(|b| b.status()).unwrap_or_default();
         let alarm = if st.blocking() {
@@ -1181,7 +1199,7 @@ impl BoardView {
                 &t,
                 (week / 100.0) as f32,
                 tone,
-                plan.week_projected.map(|p| (p / 100.0) as f32),
+                plan.week_pace(c.now).map(|p| (p / 100.0) as f32),
                 4.,
             )))
             .child(
@@ -1195,7 +1213,11 @@ impl BoardView {
                     })
                     .child(plan.week_label(c.now)),
             )
-            .children(plan.as_of(c.now).map(|a| div().text_size(px(12.)).text_color(t.faint).child(a)))
+            .children(
+                plan.as_of(c.now)
+                    .filter(|_| plan.week.is_some())
+                    .map(|a| div().text_size(px(12.)).text_color(t.faint).child(a)),
+            )
             .into_any_element()
     }
 
@@ -1302,7 +1324,7 @@ impl BoardView {
                                 "plus",
                                 "New chat".into(),
                                 "Any machine and folder, with a terminal".into(),
-                                Some(ui::mod_cap("N")),
+                                Some(ui::term_cap("N")),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
                                 this.add_open = false;
@@ -1328,7 +1350,7 @@ impl BoardView {
                                 "history",
                                 "Find an older chat".into(),
                                 "Every chat on every machine".into(),
-                                Some(ui::mod_cap("B")),
+                                Some(ui::term_cap("B")),
                             )
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
                                 this.add_open = false;
@@ -1340,13 +1362,19 @@ impl BoardView {
         )
     }
 
-    /// About where "+" sits, for its menu: the Board tab, the brand and the terminal tabs before it.
+    /// About where "+" sits, for its menu and the tab list's: from where the tab row ended on the last frame drawn
+    /// (folded groups, narrowed tabs and a scrolling row all move it), else from the brand and the Board tab.
     fn tab_strip_width(&self) -> f32 {
+        let list = if self.tabs.len() >= 2 { 52. } else { 0. };
+        let row = self.tab_scroll.bounds();
+        if !self.tabs.is_empty() && row.size.width > px(0.) {
+            // The arrow at the row's right end, while it scrolls.
+            let arrow = if f32::from(self.tab_scroll.max_offset().x) > 1. { 24. } else { 0. };
+            return plus_offset(f32::from(row.right()), arrow, list, lead());
+        }
         let brand = 16. + 7. + 92. + 10. + 1. + 10.;
         let board = 110. + if self.solo.is_some() { 60. } else { 100. };
-        let tabs = self.tabs.len() as f32 * (TAB_W + 5.);
-        let list = if self.tabs.len() >= 2 { 52. } else { 0. };
-        brand + board + tabs + list
+        brand + board + list
     }
 }
 
@@ -1616,20 +1644,40 @@ fn tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<gp
         .when(!on, |d| d.text_color(t.dim))
 }
 
-/// Every terminal tab's width. It never changes with the title, the hover buttons or the number of tabs: a tab that
+/// A terminal tab's width while the row has room. It never changes with the title or the hover buttons: a tab that
 /// grew under the pointer could push itself out from under it and flicker. It fits a two-word title, the machine
 /// label (up to 72 px), the dot and the star and close buttons.
-const TAB_W: f32 = 240.;
+pub const TAB_W: f32 = 240.;
 
-/// A terminal tab, Chrome style: its own padding, TAB_W wide, a raised fill when it shows and a soft one under the
-/// pointer. Board and History keep `tab` (fixed tabs with an underline).
-fn term_tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool) -> gpui::Stateful<gpui::Div> {
+/// The narrowest the tabs get on a full row, all together, before the row scrolls: the dot, a few letters of the
+/// title and the close button.
+pub const TAB_MIN_W: f32 = 120.;
+
+/// How wide each of `n` terminal tabs is in `room` (each with its 5 px gap): TAB_W while they fit, narrower down to
+/// TAB_MIN_W as the row fills. And whether they fit at that width (false: the row scrolls).
+pub fn tab_fit(room: f32, n: usize) -> (f32, bool) {
+    if n == 0 {
+        return (TAB_W, true);
+    }
+    let w = (room / n as f32 - 5.).clamp(TAB_MIN_W, TAB_W);
+    (w, n as f32 * (w + 5.) <= room)
+}
+
+/// How far "+" is from where the header's content starts (`lead`): the tab row ended at `row_right` in the window,
+/// then the row's right arrow and the tab list's button, when they show, and the gaps between.
+fn plus_offset(row_right: f32, arrow: f32, list: f32, lead: f32) -> f32 {
+    (row_right + arrow + list + 6. - lead).max(0.)
+}
+
+/// A terminal tab, Chrome style: its own padding, `w` wide (tab_fit), a raised fill when it shows and a soft one
+/// under the pointer. Board and History keep `tab` (fixed tabs with an underline).
+fn term_tab(t: &Theme, id: impl Into<gpui::ElementId>, on: bool, w: f32) -> gpui::Stateful<gpui::Div> {
     let hover = t.hover;
     div()
         .id(id.into())
         .relative()
         .flex_none()
-        .w(px(TAB_W))
+        .w(px(w))
         .overflow_hidden()
         .h(px(30.))
         .pl(px(12.))
@@ -1707,4 +1755,30 @@ fn next_tab_in(
     g: Option<usize>,
 ) -> bool {
     slots.get(si + 1).is_some_and(|s| matches!(s, crate::tabgroups::Slot::Tab(j) if infos[*j].group == g))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TAB_MIN_W, TAB_W, plus_offset, tab_fit};
+
+    #[test]
+    fn tabs_narrow_together_before_the_row_scrolls() {
+        assert_eq!(tab_fit(0., 0), (TAB_W, true), "no tabs");
+        assert_eq!(tab_fit(800., 3), (TAB_W, true), "room for all: full width");
+        // three tabs in 600 px: 195 each with its gap
+        assert_eq!(tab_fit(600., 3), (195., true));
+        // at the narrowest they still fit exactly
+        assert_eq!(tab_fit(3. * (TAB_MIN_W + 5.), 3), (TAB_MIN_W, true));
+        // past that the row scrolls, with the tabs at their narrowest
+        assert_eq!(tab_fit(300., 3), (TAB_MIN_W, false));
+        assert_eq!(tab_fit(-40., 1), (TAB_MIN_W, false), "a window narrower than the header's fixed parts");
+    }
+
+    #[test]
+    fn the_plus_menu_follows_the_end_of_the_tab_row() {
+        // the row ended at 560 px (a folded group and one tab), with the list button after it
+        assert_eq!(plus_offset(560., 0., 52., 16.), 602.);
+        assert_eq!(plus_offset(900., 24., 52., 16.), 966.);
+        assert_eq!(plus_offset(0., 0., 0., 16.), 0.);
+    }
 }

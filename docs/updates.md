@@ -12,7 +12,10 @@ Check now** checks right away. When there is one, the header offers it with two 
 - **Restart to update** downloads it, installs it and opens the new version.
 - **Install on quit** downloads it and installs it the next time you quit.
 
-Nothing is downloaded or installed until you pick one, and a stopped download picks up where it left off. The update panel's **What's new** opens the release's notes, and
+Nothing is downloaded or installed until you pick one, and a stopped download picks up where it left off. The
+header's pill says where it is: **Update ready**, **Downloading** with a percentage, **Installing**, **Installs on
+quit** or **Update failed**. If the app can't write to where it is installed, it says so before downloading
+anything. The update panel's **What's new** opens the release's notes, and
 **About, What's new** in the app lists every version's changes (the same list as the [changelog](changelog.md)).
 
 ### Where updates come from
@@ -46,8 +49,10 @@ So neither your server nor GitHub can change what the app installs.
 ### If the new version doesn't start
 
 The app keeps the old version until the new one has run for 20 seconds or quit cleanly. If the new one crashes
-or won't start, the next launch puts the old one back and opens it, and that build is not offered again. The swap
-touches only the app, never your settings.
+or won't start, the next launch puts the old one back and opens it. The app then says once that the update didn't
+start and it went back, and that build is not offered again by itself: **Settings, Updates** has **Try it again**
+for when you want to. Opening the app a second time while the new version is still starting does not count as a
+crash. The swap touches only the app, never your settings.
 
 !!! info "Settings, Updates says it couldn't look"
     The server couldn't reach GitHub, or the release has no list yet. The message says which. The app tries again
@@ -74,7 +79,8 @@ Your chats keep running, and open terminals reconnect by themselves.
 
 The server downloads the new version from the GitHub release, and installs it only if it matches the SHA-256 in
 the release's signed list, which the app has checked with its key. If anything goes wrong, the old server keeps
-running and the page says what happened; **Update server** tries again.
+running and the page says what happened; **Update server** tries again. The old server is kept until the new one
+has answered: if the new one does not start within a minute, the old one is put back and started again.
 
 The same page shows whether each part is running (the server, the hub behind terminals and linked computers, and
 the downloads for Add a machine), the free disk space, a **Restart** button, each part's logs, and **Copy

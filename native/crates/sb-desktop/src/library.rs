@@ -10,6 +10,83 @@ use sb_core::{Core, CoreError, JobKind};
 
 use crate::state::AppState;
 
+/// A change shown at once, before the server answers. `apply` writes it into the copy on screen; `undo` takes it
+/// out again when the server refused it or was not reached, so a failed change never stays up as if it worked.
+#[derive(Debug, Clone, PartialEq)]
+pub enum LibEdit {
+    Connect { tool: String, machine: String, on: bool },
+    Default { tool: String, on: bool },
+    Auto { tool: String, auto: bool, when: String },
+    Delete { tool: String },
+}
+
+impl LibEdit {
+    pub fn apply(&self, l: &mut ApiLibrary) {
+        match self {
+            LibEdit::Connect { tool, machine, on } => {
+                l.machines.entry(machine.clone()).or_default().entry(tool.clone()).or_default().connected = *on;
+            }
+            LibEdit::Default { tool, on } => {
+                l.defaults.retain(|d| d != tool);
+                if *on {
+                    l.defaults.push(tool.clone());
+                }
+            }
+            LibEdit::Auto { tool, auto, when } => {
+                if let Some(x) = l.tools.iter_mut().find(|x| x.name == *tool) {
+                    x.auto = Some(*auto);
+                    x.when = Some(when.clone());
+                }
+            }
+            LibEdit::Delete { tool } => {
+                l.tools.retain(|x| x.name != *tool);
+                l.defaults.retain(|d| d != tool);
+            }
+        }
+    }
+
+    /// Puts back what this change touched, as it is in `before` (the library just before `apply`). Only that: a
+    /// second change made since stays.
+    pub fn undo(&self, l: &mut ApiLibrary, before: &ApiLibrary) {
+        let default_back = |l: &mut ApiLibrary, tool: &String| {
+            l.defaults.retain(|d| d != tool);
+            if let Some(i) = before.defaults.iter().position(|d| d == tool) {
+                l.defaults.insert(i.min(l.defaults.len()), tool.clone());
+            }
+        };
+        match self {
+            LibEdit::Connect { tool, machine, .. } => match before.machines.get(machine).and_then(|m| m.get(tool)) {
+                Some(was) => {
+                    l.machines.entry(machine.clone()).or_default().insert(tool.clone(), was.clone());
+                }
+                None => {
+                    if let Some(m) = l.machines.get_mut(machine) {
+                        m.remove(tool);
+                    }
+                    if !before.machines.contains_key(machine) && l.machines.get(machine).is_some_and(|m| m.is_empty()) {
+                        l.machines.remove(machine);
+                    }
+                }
+            },
+            LibEdit::Default { tool, .. } => default_back(l, tool),
+            LibEdit::Auto { tool, .. } => {
+                if let (Some(x), Some(was)) = (l.tools.iter_mut().find(|x| x.name == *tool), before.tool(tool)) {
+                    x.auto = was.auto;
+                    x.when = was.when.clone();
+                }
+            }
+            LibEdit::Delete { tool } => {
+                if l.tool(tool).is_none()
+                    && let Some(i) = before.tools.iter().position(|x| x.name == *tool)
+                {
+                    l.tools.insert(i.min(l.tools.len()), before.tools[i].clone());
+                }
+                default_back(l, tool);
+            }
+        }
+    }
+}
+
 /// Tool names, as the server takes them: a lowercase letter or digit, then up to 39 more or dashes.
 pub fn valid_tool_name(s: &str) -> bool {
     let b = s.as_bytes();
@@ -17,6 +94,24 @@ pub fn valid_tool_name(s: &str) -> bool {
         && b.len() <= 40
         && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
         && b.iter().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || *c == b'-')
+}
+
+/// The tool name the server gives an imported skill folder or MCP server (server/library.py tool_slug): the last
+/// part of its path, lowercase, everything else a dash, at most 40 long.
+pub fn tool_slug(source: &str) -> String {
+    let last = source.replace('\\', "/");
+    let last = last.trim_end_matches('/').rsplit('/').next().unwrap_or("").to_lowercase();
+    let mut out = String::new();
+    for c in last.chars() {
+        if c.is_ascii_lowercase() || c.is_ascii_digit() {
+            out.push(c);
+        } else if !out.ends_with('-') {
+            out.push('-');
+        }
+    }
+    let cut: String = out.trim_matches('-').chars().take(40).collect();
+    let cut = cut.trim_matches('-');
+    if cut.is_empty() { "tool".into() } else { cut.to_string() }
 }
 
 /// The command that stores one secret in a machine's keychain. It asks for the value without showing it.
@@ -184,15 +279,22 @@ impl AppState {
     }
 
     /// One change: marked busy while it runs, a toast when it is done or fails, then the library is read again.
+    /// `edit` is what shows at once; it is taken back when the change fails. False when the same thing is still
+    /// being changed: nothing is shown or sent then, so a second click can't show one thing and send another.
     fn lib_change(
         &mut self,
         busy: String,
         ok: Option<String>,
+        edit: Option<LibEdit>,
         work: impl FnOnce(&Core) -> Result<(), CoreError> + Send + 'static,
         cx: &mut Context<Self>,
-    ) {
+    ) -> bool {
         if !self.lib_busy.insert(busy.clone()) {
-            return;
+            return false;
+        }
+        let before = edit.as_ref().and_then(|_| self.lib().cloned());
+        if let (Some(e), Some(Ok(l))) = (&edit, self.library.as_mut()) {
+            e.apply(l);
         }
         cx.notify();
         self.call(cx, work, move |st, res, cx| {
@@ -203,24 +305,30 @@ impl AppState {
                         st.toast(m, None, false, cx);
                     }
                 }
-                Err(e) => st.toast(e.to_string(), None, true, cx),
+                Err(e) => {
+                    // Back to how it was: the read below may fail too (the server is away), and the change must
+                    // not stay on screen as if it went through.
+                    if let (Some(edit), Some(before), Some(Ok(l))) = (&edit, &before, st.library.as_mut()) {
+                        edit.undo(l, before);
+                    }
+                    st.toast(e.to_string(), None, true, cx)
+                }
             }
             st.load_library(cx);
             cx.notify();
         });
+        true
     }
 
     /// Puts a tool's latest version on a machine, or takes it off.
     pub fn lib_connect(&mut self, tool: &str, machine: &str, on: bool, cx: &mut Context<Self>) {
-        if let Some(Ok(l)) = self.library.as_mut() {
-            l.machines.entry(machine.to_string()).or_default().entry(tool.to_string()).or_default().connected = on;
-        }
         let label = self.label(machine);
         let ok = if on { format!("{tool} is on {label}") } else { format!("{tool} is off {label}") };
         let (t, m) = (tool.to_string(), machine.to_string());
         self.lib_change(
             format!("connect:{tool}@{machine}"),
             Some(ok),
+            Some(LibEdit::Connect { tool: t.clone(), machine: m.clone(), on }),
             move |core| core.library_connect(&t, &m, on),
             cx,
         );
@@ -228,29 +336,27 @@ impl AppState {
 
     /// On for every new chat, or not.
     pub fn lib_default(&mut self, tool: &str, on: bool, cx: &mut Context<Self>) {
-        if let Some(Ok(l)) = self.library.as_mut() {
-            l.defaults.retain(|d| d != tool);
-            if on {
-                l.defaults.push(tool.to_string());
-            }
-        }
         let t = tool.to_string();
-        self.lib_change(format!("default:{tool}"), None, move |core| core.library_defaults(&t, on), cx);
+        self.lib_change(
+            format!("default:{tool}"),
+            None,
+            Some(LibEdit::Default { tool: t.clone(), on }),
+            move |core| core.library_defaults(&t, on),
+            cx,
+        );
     }
 
-    /// Puts a tool in Auto or takes it out, and sets its "When to use" line.
-    pub fn lib_auto(&mut self, tool: &str, auto: bool, when: &str, cx: &mut Context<Self>) {
-        if let Some(x) = self
-            .library
-            .as_mut()
-            .and_then(|l| l.as_mut().ok())
-            .and_then(|l| l.tools.iter_mut().find(|x| x.name == tool))
-        {
-            x.auto = Some(auto);
-            x.when = Some(when.to_string());
-        }
+    /// Puts a tool in Auto or takes it out, and sets its "When to use" line. False when an earlier change to the
+    /// same tool is still on its way (nothing was sent: the caller keeps what was typed).
+    pub fn lib_auto(&mut self, tool: &str, auto: bool, when: &str, cx: &mut Context<Self>) -> bool {
         let (t, w) = (tool.to_string(), when.to_string());
-        self.lib_change(format!("auto:{tool}"), None, move |core| core.library_auto(&t, auto, &w), cx);
+        self.lib_change(
+            format!("auto:{tool}"),
+            None,
+            Some(LibEdit::Auto { tool: t.clone(), auto, when: w.clone() }),
+            move |core| core.library_auto(&t, auto, &w),
+            cx,
+        )
     }
 
     /// Makes an older version the latest again; machines that have the tool get it.
@@ -259,6 +365,7 @@ impl AppState {
         self.lib_change(
             format!("rollback:{tool}"),
             Some(format!("{tool} v{version} is the latest again")),
+            None,
             move |core| core.library_rollback(&t, version),
             cx,
         );
@@ -266,14 +373,11 @@ impl AppState {
 
     /// Deletes a tool everywhere.
     pub fn lib_delete(&mut self, tool: &str, cx: &mut Context<Self>) {
-        if let Some(Ok(l)) = self.library.as_mut() {
-            l.tools.retain(|x| x.name != tool);
-            l.defaults.retain(|d| d != tool);
-        }
         let t = tool.to_string();
         self.lib_change(
             format!("delete:{tool}"),
             Some(format!("Deleted {tool}")),
+            Some(LibEdit::Delete { tool: t.clone() }),
             move |core| core.library_delete(&t),
             cx,
         );
@@ -449,6 +553,51 @@ fn newer_read(seq: u64, shown: u64) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_imported_tool_is_named_as_the_server_names_it() {
+        assert_eq!(tool_slug("PDF_Tools"), "pdf-tools");
+        assert_eq!(tool_slug("/Users/you/.claude/skills/Web  Fetch!/"), "web-fetch");
+        assert_eq!(tool_slug("C:\\Users\\you\\skills\\notes.v2"), "notes-v2");
+        assert_eq!(tool_slug("___"), "tool");
+        assert_eq!(tool_slug(&"abcdefghi-".repeat(5)).len(), 39, "cut at 40, then no dash at the end");
+        assert!(valid_tool_name(&tool_slug("Caf\u{e9} tools")));
+    }
+
+    #[test]
+    fn a_change_that_failed_is_taken_back_off_the_screen() {
+        let raw = r#"{"tools":[{"name":"alpha","auto":true,"when":"for a"},{"name":"beta"},{"name":"gamma"}],
+            "defaults":["alpha","beta"],
+            "machines":{"studio":{"beta":{"connected":true,"version":2}}}}"#;
+        let before: ApiLibrary = serde_json::from_str(raw).unwrap();
+        let s = |x: &str| x.to_string();
+        let edits = [
+            LibEdit::Delete { tool: s("beta") },
+            LibEdit::Delete { tool: s("alpha") },
+            LibEdit::Default { tool: s("alpha"), on: false },
+            LibEdit::Default { tool: s("gamma"), on: true },
+            LibEdit::Auto { tool: s("alpha"), auto: false, when: s("never") },
+            LibEdit::Connect { tool: s("beta"), machine: s("studio"), on: false },
+            LibEdit::Connect { tool: s("gamma"), machine: s("studio"), on: true },
+            LibEdit::Connect { tool: s("gamma"), machine: s("laptop"), on: true },
+        ];
+        for e in &edits {
+            let mut l = before.clone();
+            e.apply(&mut l);
+            assert_ne!(l, before, "{e:?} shows at once");
+            e.undo(&mut l, &before);
+            assert_eq!(l, before, "{e:?} is taken back whole");
+        }
+        // Another change made in between stays.
+        let mut l = before.clone();
+        edits[0].apply(&mut l);
+        let mid = l.clone();
+        edits[3].apply(&mut l);
+        edits[3].undo(&mut l, &mid);
+        assert_eq!(l, mid);
+        edits[0].undo(&mut l, &before);
+        assert_eq!(l, before);
+    }
 
     #[test]
     fn a_read_of_the_library_that_comes_back_late_is_dropped() {

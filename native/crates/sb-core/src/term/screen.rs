@@ -12,7 +12,9 @@ use alacritty_terminal::grid::{Dimensions, Grid};
 use alacritty_terminal::index::{Column, Line};
 use alacritty_terminal::term::cell::{Cell, Flags, Hyperlink};
 use alacritty_terminal::term::{Term, TermMode};
-use alacritty_terminal::vte::ansi::{Color, CursorShape, NamedColor, Processor, StdSyncHandler};
+use alacritty_terminal::vte::ansi::{
+    Color, CursorShape, Handler, NamedColor, NamedPrivateMode, PrivateMode, Processor, StdSyncHandler,
+};
 
 /// Scrollback lines a snapshot carries at most.
 pub const HISTORY: usize = 1000;
@@ -195,8 +197,9 @@ fn cup(out: &mut Vec<u8>, line: i32, col: usize) {
     out.extend_from_slice(format!("\x1b[{};{}H", line + 1, col + 1).as_bytes());
 }
 
-/// The cursor (and the one saved with ESC 7) where the grid has them, with their pens.
-fn cursor(out: &mut Vec<u8>, grid: &Grid<Cell>, origin_mode: bool, pen: &mut Pen) {
+/// The cursor (and the one saved with ESC 7) where the grid has them, with their pens. `top` is the scroll
+/// region's first row: in origin mode the cursor is addressed from there.
+fn cursor(out: &mut Vec<u8>, grid: &Grid<Cell>, origin_mode: bool, top: i32, pen: &mut Pen) {
     let saved = &grid.saved_cursor;
     if saved.point.line.0 != 0 || saved.point.column.0 != 0 || look_of(&saved.template) != default_look() {
         cup(out, saved.point.line.0, saved.point.column.0);
@@ -207,6 +210,7 @@ fn cursor(out: &mut Vec<u8>, grid: &Grid<Cell>, origin_mode: bool, pen: &mut Pen
     if origin_mode {
         out.extend_from_slice(b"\x1b[?6h");
     }
+    let top = if origin_mode { top } else { 0 };
     let c = &grid.cursor;
     let cols = grid.columns();
     if c.input_needs_wrap && c.point.column.0 + 1 >= cols {
@@ -216,12 +220,12 @@ fn cursor(out: &mut Vec<u8>, grid: &Grid<Cell>, origin_mode: bool, pen: &mut Pen
         if row[Column(col)].flags.contains(Flags::WIDE_CHAR_SPACER) && col > 0 {
             col -= 1;
         }
-        cup(out, c.point.line.0, col);
+        cup(out, c.point.line.0 - top, col);
         let cell = &row[Column(col)];
         pen.set(out, cell);
         push_cell(out, cell);
     } else {
-        cup(out, c.point.line.0, c.point.column.0);
+        cup(out, c.point.line.0 - top, c.point.column.0);
     }
     pen.look = None;
     out.extend_from_slice(sgr(&look_of(&c.template)).as_bytes());
@@ -266,13 +270,35 @@ fn modes(out: &mut Vec<u8>, mode: TermMode) {
     }
 }
 
-/// One grid: its last `history` scrollback lines and the screen, then its cursors.
-fn grid_bytes(out: &mut Vec<u8>, grid: &Grid<Cell>, history: usize, origin_mode: bool) {
+/// One grid: its last `history` scrollback lines and the screen, then the scroll region `region` (first and last
+/// row) when a program set one, then its cursors.
+fn grid_bytes(out: &mut Vec<u8>, grid: &Grid<Cell>, history: usize, origin_mode: bool, region: Option<(i32, i32)>) {
     let mut pen = Pen::default();
     let hist = history.min(grid.history_size()) as i32;
     out.extend_from_slice(b"\x1b[H");
     rows(out, grid, -hist, grid.screen_lines() as i32, &mut pen);
-    cursor(out, grid, origin_mode, &mut pen);
+    if let Some((top, bottom)) = region {
+        out.extend_from_slice(format!("\x1b[{};{}r", top + 1, bottom + 1).as_bytes());
+    }
+    cursor(out, grid, origin_mode, region.map_or(0, |r| r.0), &mut pen);
+}
+
+/// The scroll region a program set (its first and last row), or None when it is the whole screen. The terminal
+/// keeps it private, so this asks the cursor: in origin mode it cannot leave the region. The cursor and the mode
+/// are put back.
+fn scroll_region<T: EventListener>(term: &mut Term<T>) -> Option<(i32, i32)> {
+    let cursor = term.grid().cursor.clone();
+    let origin = term.mode().contains(TermMode::ORIGIN);
+    let mode = PrivateMode::Named(NamedPrivateMode::Origin);
+    term.set_private_mode(mode); // homes the cursor: the region's first row
+    let top = term.grid().cursor.point.line.0;
+    term.goto(term.screen_lines() as i32, 0);
+    let bottom = term.grid().cursor.point.line.0;
+    if !origin {
+        term.unset_private_mode(mode);
+    }
+    term.grid_mut().cursor = cursor;
+    (top != 0 || bottom + 1 != term.screen_lines() as i32).then_some((top, bottom))
 }
 
 /// The snapshot of `term` for a fresh terminal of its size, with up to `history` lines of scrollback. `sync` is what
@@ -281,18 +307,19 @@ pub fn snapshot<T: EventListener>(term: &mut Term<T>, history: usize, sync: &[u8
     let mut out = Vec::with_capacity(64 * 1024);
     let mode = *term.mode();
     let origin = mode.contains(TermMode::ORIGIN);
+    let region = scroll_region(term);
     if mode.contains(TermMode::ALT_SCREEN) {
         // The primary screen is under the alternate one: look at it (swap, write, swap back) and put back the
         // alternate grid, which swapping in clears.
         let alt = term.grid().clone();
         term.swap_alt();
-        grid_bytes(&mut out, term.grid(), history, false);
+        grid_bytes(&mut out, term.grid(), history, false, None);
         term.swap_alt();
         *term.grid_mut() = alt;
         out.extend_from_slice(b"\x1b[0m\x1b[?1049h");
-        grid_bytes(&mut out, term.grid(), 0, origin);
+        grid_bytes(&mut out, term.grid(), 0, origin, region);
     } else {
-        grid_bytes(&mut out, term.grid(), history, origin);
+        grid_bytes(&mut out, term.grid(), history, origin, region);
     }
     modes(&mut out, mode);
     let style = term.cursor_style();
@@ -352,6 +379,33 @@ pub fn carry_history<T: EventListener, U: EventListener>(old: &mut Term<T>, fres
     push.extend(std::iter::repeat_n(b'\n', used.max(0) as usize));
     push.extend_from_slice(b"\x1b[H");
     parser.advance(fresh, &push);
+}
+
+/// Makes `term` what a fresh terminal with `carry_history` done would be, in place: the scrollback stays where it
+/// is, and the screen, the modes, the scroll region, the pen and the palette are a new terminal's, ready for a
+/// snapshot of the same size. The cost is one screen, not the whole history (which `carry_history` writes out and
+/// parses again: tens of milliseconds for a long one, on the thread that draws).
+pub fn keep_history<T: EventListener>(term: &mut Term<T>) {
+    if term.mode().contains(TermMode::ALT_SCREEN) {
+        term.swap_alt();
+    }
+    let (lines, cols) = (term.screen_lines(), term.columns());
+    // The reset clears the grid it finds, scrollback and all: it gets an empty stand-in while the real one waits.
+    let mut grid = std::mem::replace(term.grid_mut(), Grid::new(lines, cols, 0));
+    term.reset_state();
+    for i in 0..alacritty_terminal::term::color::COUNT {
+        if term.colors()[i].is_some() {
+            term.reset_color(i);
+        }
+    }
+    grid.cursor = Default::default();
+    grid.saved_cursor = Default::default();
+    grid.reset_region(..);
+    // the screen under the last scrollback line is gone, so it no longer wraps into it
+    if grid.history_size() > 0 {
+        grid[Line(-1)][Column(cols - 1)].flags.remove(Flags::WRAPLINE);
+    }
+    *term.grid_mut() = grid;
 }
 
 /// Where the stream is between sequences: in plain text, or partway through an escape sequence or a UTF-8 character.
@@ -753,6 +807,130 @@ mod tests {
         assert_eq!(t.open(), b"");
         t.feed(b"\x1b]0;a\x1b[2");
         assert_eq!(t.open(), b"\x1b[2", "the ESC ended the title and began a new sequence");
+    }
+
+    #[test]
+    fn a_scroll_region_is_restored() {
+        // rows 2 to 5 scroll, the rest stay: a status line under a scrolling pane
+        let mut s = screen(20, 8, b"top\x1b[8;1Hstatus\x1b[2;5r\x1b[2;1Ha\r\nb\r\nc\r\nd");
+        round_trip(&mut s, 0);
+        let mut copy = Screen::new(20, 8, 2000, VoidListener);
+        copy.feed(&s.snapshot(0));
+        for t in [&mut s, &mut copy] {
+            t.feed(b"\r\ne\r\nf\x1b[H\x1bM");
+        }
+        assert_eq!(dump(&copy.term, 0), dump(&s.term, 0), "the same rows scrolled");
+        assert_eq!(state(&copy.term), state(&s.term));
+        assert!(dump(&s.term, 0)[7].contains("status") && dump(&s.term, 0)[0].contains("top"));
+        // on the alternate screen, and with the cursor addressed from the region's first row (origin mode)
+        let mut s = screen(20, 8, b"primary\x1b[?1049h\x1b[3;6r\x1b[?6h\x1b[2;4Hx");
+        round_trip(&mut s, 0);
+        let mut copy = Screen::new(20, 8, 2000, VoidListener);
+        copy.feed(&s.snapshot(0));
+        for t in [&mut s, &mut copy] {
+            t.feed(b"\r\n1\r\n2\r\n3\r\n4\x1b[1;1Hhome");
+        }
+        assert_eq!(dump(&copy.term, 0), dump(&s.term, 0));
+        assert_eq!(state(&copy.term), state(&s.term));
+        assert!(dump(&s.term, 0)[2].contains("home"), "origin mode: row 1 is the region's first");
+    }
+
+    /// A terminal a program left in every odd state, with `lines` of scrollback.
+    fn lived_in(lines: usize) -> Screen<VoidListener> {
+        let mut bytes = Vec::new();
+        for i in 0..lines + 5 {
+            bytes.extend_from_slice(format!("\x1b[3{}mrow {i} {}\x1b[0m\r\n", i % 8, "x".repeat(i % 50)).as_bytes());
+        }
+        bytes.extend_from_slice(
+            b"\x1b7\x1b[?1049h\x1b[2;4r\x1b[?6h\x1b[?1h\x1b[?2004h\x1b[?1006h\x1b[?25l\x1b[4h\x1b=\x1b[5 q",
+        );
+        bytes.extend_from_slice(
+            b"\x1b]4;1;rgb:12/34/56\x1b\\\x1b]11;rgb:01/02/03\x1b\\\x1b(0\x1b[1;41malt text\x1b[2;2H\x1b7",
+        );
+        let mut s = Screen::new(60, 6, 10_000, VoidListener);
+        s.feed(&bytes);
+        s
+    }
+
+    #[test]
+    fn keeping_the_history_in_place_is_a_fresh_terminal_with_it_carried() {
+        // what the hub has: another terminal's screen, in a state of its own
+        let mut hub = screen(60, 6, b"one\r\ntwo\x1b[?1049h\x1b[2;5r\x1b[3;3Hthree\x1b[?1000h\x1b[32m");
+        let snap = hub.snapshot(HISTORY);
+        let mut old = lived_in(40);
+        let mut carried = Screen::new(60, 6, 10_000, VoidListener);
+        carry_history(&mut old.term, &mut carried.term);
+        let mut kept = lived_in(40);
+        keep_history(&mut kept.term);
+        assert_eq!(dump(&kept.term, 10_000), dump(&carried.term, 10_000), "before the snapshot");
+        assert_eq!(state(&kept.term), state(&carried.term));
+        assert!(kept.term.colors()[1].is_none() && kept.term.colors()[257].is_none(), "the palette is reset");
+        let mut parser: Processor<StdSyncHandler> = Processor::new();
+        parser.advance(&mut kept.term, &snap);
+        carried.feed(&snap);
+        // and what the program writes next lands the same way: region, pen, charset and saved cursor included
+        for t in [&mut kept.term, &mut carried.term] {
+            let mut p: Processor<StdSyncHandler> = Processor::new();
+            p.advance(t, b"\r\nq\r\nq\r\nq\r\nq\x1b8saved\x1b[?1049lback\r\n\r\n\r\n\r\n\r\n\r\n\r\nend");
+        }
+        assert_eq!(dump(&kept.term, 10_000), dump(&carried.term, 10_000), "after the snapshot");
+        assert_eq!(state(&kept.term), state(&carried.term));
+    }
+
+    #[test]
+    fn keeping_5000_lines_costs_a_screen_not_the_history() {
+        // the terminal is on its alternate screen: the scrollback is the primary screen's, under it
+        let mut primary = lived_in(5000);
+        primary.feed(b"\x1b[?1049l");
+        let before = dump(&primary.term, 10_000);
+        let hist = primary.term.grid().history_size();
+        assert!(hist >= 5000);
+        let mut old = lived_in(5000);
+        assert!(old.term.mode().contains(TermMode::ALT_SCREEN) && old.term.grid().history_size() == 0);
+        let t = std::time::Instant::now();
+        let mut carried = Screen::new(60, 6, 10_000, VoidListener);
+        carry_history(&mut old.term, &mut carried.term);
+        let carry = t.elapsed();
+        let mut kept = lived_in(5000);
+        let t = std::time::Instant::now();
+        keep_history(&mut kept.term);
+        let keep = t.elapsed();
+        assert_eq!(kept.term.grid().history_size(), hist);
+        let after = dump(&kept.term, 10_000);
+        assert_eq!(&after[..hist - 1], &before[..hist - 1], "every scrollback line is where it was");
+        assert_eq!(after, dump(&carried.term, 10_000));
+        assert!(keep * 5 < carry, "kept in place in {keep:?}, carried in {carry:?}");
+    }
+
+    #[test]
+    fn a_snapshot_onto_a_terminal_left_on_its_alternate_screen_keeps_the_scrollback() {
+        // an editor was open when the link dropped; the hub's screen is back at the shell, or in another editor
+        let lines = |t: &Term<VoidListener>| -> Vec<String> {
+            let n = t.grid().history_size();
+            dump(t, 10_000)[..n].to_vec()
+        };
+        let mut primary = lived_in(200);
+        primary.feed(b"\x1b[?1049l");
+        let want = lines(&primary.term);
+        assert_eq!(want.len(), 200);
+        for hub_bytes in [&b"at the shell\r\n$ "[..], &b"shell\x1b[?1049h\x1b[2;2Hanother editor\x1b[?25l"[..]] {
+            let mut hub = screen(60, 6, hub_bytes);
+            let mut t = lived_in(200);
+            keep_history(&mut t.term);
+            assert!(!t.term.mode().contains(TermMode::ALT_SCREEN), "fresh: on the primary screen");
+            assert_eq!(t.term.mode(), Term::new(Default::default(), &dims(60, 6), VoidListener).mode());
+            assert_eq!(lines(&t.term)[..199], want[..199], "the scrollback is there");
+            assert!(dump(&t.term, 0).iter().all(|l| !l.contains("row") && !l.contains("alt text")), "a blank screen");
+            // the hub sends only the screen to a viewer that has its own scrollback
+            let mut parser: Processor<StdSyncHandler> = Processor::new();
+            parser.advance(&mut t.term, &hub.snapshot(0));
+            assert_eq!(dump(&t.term, 0), dump(&hub.term, 0), "the screen is the hub's");
+            assert_eq!(state(&t.term), state(&hub.term), "and its modes, the alternate screen among them");
+            // back on the primary screen (if it left it), the scrollback is still all there
+            parser.advance(&mut t.term, b"\x1b[?1049l");
+            assert_eq!(lines(&t.term)[..199], want[..199]);
+            assert_eq!(t.term.grid().history_size(), 200);
+        }
     }
 
     #[test]

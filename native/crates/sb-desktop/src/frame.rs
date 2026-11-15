@@ -133,7 +133,11 @@ pub fn buttons(t: &Theme, maxed: bool) -> impl IntoElement {
             ui::icon_btn(t, "w-max", if maxed { "restore" } else { "max" }, 28.)
                 .on_click(|_, window, _| window.zoom_window()),
         )
-        .child(ui::icon_btn(t, "w-close", "close", 28.).on_click(|_, window, _| window.remove_window()))
+        .child(ui::icon_btn(t, "w-close", "close", 28.).on_click(|_, window, cx| {
+            // as the system's close button: the board window may have a question first (view::request_close)
+            let w = window.window_handle();
+            cx.defer(move |cx| crate::view::request_close(w, cx));
+        }))
 }
 
 /// Moves the window from a title bar: drag to move, double click to maximize, right click for the window menu.

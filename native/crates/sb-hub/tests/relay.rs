@@ -428,3 +428,60 @@ async fn a_viewer_that_went_away_is_let_go() {
     assert_eq!(lab.get("/internal/open").await["open"], serde_json::json!([]));
     drop(ws);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn pings_are_answered_while_a_paste_waits_for_the_machine() {
+    let lab = lab(|_| {}).await;
+    let mut ws = lab.connect(&lab.ticket("c03ef0d9"), None, "&proto=2").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(10), |s| s.out.contains("PID")).await;
+    // the machine reads nothing for 6 s while 6 MiB arrives, more than the terminal queues (4 MiB): the rest
+    // waits in the hub, and the viewer's ping behind it is still answered at once
+    const SIZE: usize = 6 << 20;
+    let began = Instant::now();
+    ws.send(Message::Binary(format!("stall {SIZE}\n").into_bytes().into())).await.unwrap();
+    let mut line = vec![b'p'; 1023];
+    line.push(b'\n');
+    let paste: Vec<u8> = line.iter().copied().cycle().take(SIZE).collect();
+    for piece in paste.chunks(64 * 1024) {
+        ws.send(Message::Binary(piece.to_vec().into())).await.unwrap();
+    }
+    ws.send(Message::Text(r#"{"type":"ping"}"#.into())).await.unwrap();
+    read_until(&mut ws, &mut s, Duration::from_secs(4), |s| has_type(s, "pong")).await;
+    assert!(has_type(&s, "pong"), "no pong in {:?}", began.elapsed());
+    assert!(!s.out.contains("SWALLOWED"), "the pong came while the paste was still waiting");
+    // and the paste still arrives whole
+    read_until(&mut ws, &mut s, Duration::from_secs(60), |s| s.out.contains("SWALLOWED") || s.close.is_some()).await;
+    assert!(s.out.contains("SWALLOWED"), "{:?}", s.close);
+    assert_eq!(s.close, None);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn an_idle_time_of_zero_means_never() {
+    let lab = lab(|c| c.idle = Duration::ZERO).await;
+    let mut ws = lab.connect(&lab.ticket("c03ef0d9"), None, "").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(10), |s| s.out.contains("PID")).await;
+    read_until(&mut ws, &mut s, Duration::from_millis(1200), |s| s.close.is_some()).await;
+    assert_eq!(s.close, None, "{:?}", s.texts);
+    ws.send(Message::Binary(b"hello\n".to_vec().into())).await.unwrap();
+    read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.out.contains("GOT hello")).await;
+    assert!(s.out.contains("GOT hello"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn two_viewers_opening_a_chat_at_once_share_one_terminal() {
+    let lab = lab(|_| {}).await;
+    let (ta, tb) = (lab.ticket("c03ef0d9"), lab.ticket("c03ef0d9"));
+    let (mut a, mut b) = tokio::join!(lab.connect(&ta, None, "&proto=2"), lab.connect(&tb, None, "&proto=2"));
+    let (mut sa, mut sb) = (Seen::default(), Seen::default());
+    read_until(&mut a, &mut sa, Duration::from_secs(10), |s| s.out.contains("PID")).await;
+    read_until(&mut b, &mut sb, Duration::from_secs(10), |s| s.out.contains("PID")).await;
+    // one of them types: both see the one program answer
+    a.send(Message::Binary(b"both\n".to_vec().into())).await.unwrap();
+    read_until(&mut a, &mut sa, Duration::from_secs(5), |s| s.out.contains("GOT both")).await;
+    read_until(&mut b, &mut sb, Duration::from_secs(5), |s| s.out.contains("GOT both")).await;
+    assert!(sa.out.contains("GOT both") && sb.out.contains("GOT both"), "{:?} / {:?}", sa.out, sb.out);
+    let pid = |s: &Seen| s.out.split("PID ").nth(1).map(|r| r.split_whitespace().next().unwrap_or("").to_string());
+    assert_eq!(pid(&sa), pid(&sb));
+}

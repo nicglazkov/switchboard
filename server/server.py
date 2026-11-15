@@ -28,11 +28,14 @@ EFFORTS = {'low', 'medium', 'high', 'xhigh', 'max', None}
 PING_WHY = {'prompt', 'stop', 'wait', 'start', 'end', 'status'}
 OVERLAY_FOR = 45      # a ping's guess at a session (busy, idle, its context) holds until the machine's next answer
 STREAM_FOR, STREAM_MAX, STREAM_BEAT = 600, 64, 15  # live pages: reconnect every 10 min, at most 64, a beat every 15 s
+STREAM_IDLE = 30  # with nothing changed for this long, a live page is told to load again anyway
+DRAIN_MAX, DRAIN_S = 48 * 1024 * 1024, 5  # how much of an unread request is read off after an early answer, and for how long
 WIDGET_EVERY = 60     # iPhone widget pushes: at most one a minute (Apple budgets them), the last change always goes out
 PRESETS_MAX = 12
 DEVICES_MAX = 16    # push tokens kept (each phone or iPad, and its reinstalls); the oldest go first
 NAME_RE = re.compile(r"[A-Za-z0-9 ._,:'+#()-]{1,64}")
 JOB_KEEP, WATCH_FOR, WATCH_GRACE = 3600, 1800, 6
+LIVE_END_RETRY = (3, 15)  # seconds before a Live Activity's last push is tried again, when Apple could not be reached
 COMPACT_MAX = 40  # the newest chats of a thread that compacting reads
 DONE_TITLES = {'fresh': 'Fresh chat ready', 'start': 'New chat ready', 'resume': 'Chat resumed',
                'continue': 'Continued on {where}', 'handoff': 'Handoff saved', 'relaunch': 'Relaunched with new flags',
@@ -40,6 +43,7 @@ DONE_TITLES = {'fresh': 'Fresh chat ready', 'start': 'New chat ready', 'resume':
 FAIL_TITLES = {'fresh': "Start fresh didn't finish", 'start': "New chat didn't start", 'resume': "Resume didn't finish",
                'continue': "Continue didn't finish", 'handoff': "Handoff didn't finish", 'relaunch': "Relaunch didn't finish",
                'stop': "Stop didn't finish", 'compact': "Compacting the thread didn't finish"}
+AGAIN_OK = {'mkdir', 'handoff_text', 'thread_pieces'}  # job steps that only read, or make what may already be there
 QUICK_FOR, QUICK_POLL = 20, 1  # a job's machine is asked every second for its first 20 s: most resumes end by then
 RELAUNCH_WAIT = 15 * 60  # a relaunch that waits for Claude to finish its reply gives up after this
 CHILD_WAIT = 4 * 3600  # ... and one that waits for subagents or background commands, after this
@@ -239,6 +243,7 @@ class ServerConfig:
 class HttpError(Exception):
     def __init__(self, code, msg, extra=None):
         super().__init__(msg)
+        self.maybe_delivered = False
         self.code = code
         self.extra = extra or {}  # more for the app to act on, e.g. {'need': 'trust'} (a folder to say yes to)
 
@@ -269,6 +274,7 @@ class App:
         self.live_pusher = None  # Live Activity pushes (main wires it to APNs)
         self.push_ready = False  # main sets it when <config>/apns.json and its key load
         self.fleet_cfg = fleet_mod.FleetConfig(self.cfg_dir / 'fleet.json')
+        self.prefs_lock = threading.RLock()  # prefs.json: read, change and save as one step
         if hasattr(fleet, 'on_save'):
             fleet.on_save = self._fleet_saved
             fleet.servers = list(server_cfg.origins) if server_cfg else []
@@ -282,6 +288,7 @@ class App:
         self.clock, self.sleep, self.poll_every, self.retry_waits = clock, sleep, poll_every, retry_waits
         self.jobs, self.jobs_lock = {}, threading.Lock()
         self.chrome_lock = threading.Lock()
+        self.devices_lock = threading.Lock()  # devices.json and widget_tokens.json: read, change and save as one step
         self._names_lock, self._name_tries = threading.Lock(), {}  # names given in Switchboard (set_name)
         # live updates: every change bumps the version; open pages hear it over /api/stream and load again
         self.version, self.changed, self.streams = 0, threading.Condition(), 0
@@ -297,9 +304,30 @@ class App:
     # ---- helpers
     def devices(self):
         try:
-            return json.loads((self.state_dir / 'devices.json').read_text())
+            d = json.loads((self.state_dir / 'devices.json').read_text())
+            return d if isinstance(d, dict) else {}
         except (OSError, ValueError):
             return {}
+
+    def _token_add(self, file, tok, name, keep):
+        """A phone's push token joins devices.json or widget_tokens.json; the oldest beyond `keep` go."""
+        with self.devices_lock:
+            d = self.devices() if file == 'devices.json' else self.widget_tokens()
+            d = {k: v for k, v in d.items() if isinstance(v, dict)}
+            d[tok] = {'name': str(name or 'iPhone')[:40], 'added': time.time()}
+            added = lambda k: d[k].get('added') if isinstance(d[k].get('added'), (int, float)) else 0
+            for old in sorted(d, key=added)[:-keep]:  # a reinstall makes a new token: never grows without limit
+                d.pop(old, None)
+            self._save_json(file, d)
+
+    def token_gone(self, file, tok):
+        """Apple says this token is no longer in use. Taken out of the file as it is now, not as it was when the
+        push went out: a phone that registered in the meantime stays."""
+        with self.devices_lock:
+            d = self.devices() if file == 'devices.json' else self.widget_tokens()
+            if tok in d:
+                d.pop(tok)
+                self._save_json(file, d)
 
     def _push(self, title, body, url, kind='jobs', group=None):
         """One notification to every iPhone, unless its kind is turned off in Settings. `group`: pushes with the same
@@ -314,14 +342,15 @@ class App:
             log('push failed: ' + traceback.format_exc())
 
     def _push_guard(self, evt):
-        title = (evt.get('title') or 'A chat').strip()[:80]
-        body = f'{title} has {int(evt.get("ctx") or 0) // 1000}k of context and has been idle {fmt_idle(evt.get("idle"))}. Tap to start it fresh.'
+        num = lambda v: int(v) if isinstance(v, (int, float)) and not isinstance(v, bool) and 0 <= v < 1e12 else 0  # a hook's own words
+        title = (str(evt.get('title') or '').strip() or 'A chat')[:80]
+        body = f'{title} has {num(evt.get("ctx")) // 1000}k of context and has been idle {fmt_idle(num(evt.get("idle")))}. Tap to start it fresh.'
         self._push('Message held', body, f'/s/{evt.get("machine")}/{evt.get("session_id")}', 'held',
                    f'held-{evt.get("session_id")}')
 
     def _machine(self, body_or_name):
-        name = body_or_name if isinstance(body_or_name, str) else body_or_name.get('machine')
-        if name not in self.fleet.machines:
+        name = body_or_name.get('machine') if isinstance(body_or_name, dict) else body_or_name
+        if not isinstance(name, str) or name not in self.fleet.machines:
             raise HttpError(400, 'unknown machine')
         return name
 
@@ -343,7 +372,13 @@ class App:
         try:
             r = self.fleet.call(name, req, timeout)
         except fleet_mod.FleetError as e:
-            raise HttpError(502, str(e))
+            err = HttpError(502, str(e))
+            err.maybe_delivered = e.maybe_delivered  # no answer, but the machine may have acted on it (_reach)
+            raise err
+        if not isinstance(r, dict):
+            err = HttpError(502, f"{self._label(name)}'s answer could not be read.")
+            err.maybe_delivered = True
+            raise err
         if not r.get('ok'):
             extra = {'need': 'trust', **{k: r[k] for k in ('folder_shown', 'declined') if k in r}} if r.get('need') == 'trust' else None
             raise HttpError(409 if extra else 400, r.get('error') or 'request failed', extra)
@@ -526,9 +561,26 @@ class App:
             raise HttpError(400, 'bad session id')
         _, s = self._session(name, sid)
         try:
-            return dict(flags_mod.plan(s, body.get('want'), (self.fleet.state.get(name) or {}).get('root')), ok=True)
+            return dict(flags_mod.plan(s, body.get('want'), (self.fleet.state.get(name) or {}).get('root'),
+                                       self.ask_mode(name)), ok=True)
         except flags_mod.FlagError as e:
             raise HttpError(400, str(e))
+
+    def ask_mode(self, name):
+        """What that machine's Claude Code calls the permission mode that asks every time ("manual", or "default" on
+        an older one), from what its agent read in `claude --help`. None when the agent does not say: an older
+        Switchboard there, which is never sent the mode by name (it would pass it on unchecked)."""
+        st = self.fleet.state.get(name) or {}
+        return flags_mod.ask_mode((st.get('models') or {}).get('perms'))
+
+    def asks_note(self, name, flags):
+        """What to tell someone who picked "Asks first" for a machine that cannot be told so by name (its Switchboard
+        is from before it said which name its Claude Code takes, and it refuses the other one). None otherwise."""
+        if not flags_mod.asks_dropped(flags, self.ask_mode(name)):
+            return None
+        label = self._label(name)
+        return (f"{label} can't be told to ask first until Switchboard is updated there, so the chat starts in "
+                f"{label}'s own default mode.")
 
     def relaunch(self, body):
         """POST /api/relaunch {machine, sid, flags, other, model, effort, when: "idle"|"now"}: the chat restarts with
@@ -544,12 +596,16 @@ class App:
             raise HttpError(400, str(e))
         model = body.get('model') or f.get('model')
         effort = body.get('effort') or f.get('effort')
-        if not self.model_ok(model) or (effort not in EFFORTS and effort != 'ultracode'):
+        if not isinstance(effort, (str, type(None))) or not self.model_ok(model) or (effort not in EFFORTS and effort != 'ultracode'):
             raise HttpError(400, 'unknown model or effort')
         m, s = self._session(name, sid)
         label = m.get('label') or name
         if 'relaunch' not in ((self.fleet.state.get(name) or {}).get('features') or []):  # an older agent would just resume
             raise HttpError(409, f'Update Switchboard on {label} to relaunch with new flags.')
+        # "Asks first" under the name that machine's Claude Code takes; a worktree is made once, at the start, and
+        # the relaunch already runs inside it (an older app sends the flag back with the rest)
+        note = self.asks_note(name, f['flags'])
+        f['flags'] = [x for x in flags_mod.fit_perm(f['flags'], self.ask_mode(name)) if x[0] not in flags_mod.START_ONLY]
         computer = body.get('computer') if isinstance(body.get('computer'), bool) else None
         if computer is not None:  # computer use for its folder, on or off, set before it starts
             if 'computer_use' not in ((self.fleet.state.get(name) or {}).get('features') or []):
@@ -561,8 +617,13 @@ class App:
             if computer is not None:  # the folder changes now; the command below starts the chat again with it
                 self._call(name, {'verb': 'computer_use', 'sid': sid, 'on': computer}, timeout=20)
             # Switchboard does not own that terminal: it says what to run there instead
-            words = ['claude', '--resume', sid] + (['--model', model] if model else []) + (['--effort', effort] if effort else [])
-            cmd = ' '.join(words + ([flags_mod.command_line(f['flags'] + ([['--chrome']] if f['chrome'] else []))] if f['flags'] or f['chrome'] else []))
+            # run in the chat's own folder, so an extra folder goes in as its full path, quoted for that machine's shell
+            win = (self.fleet.machines.get(name) or {}).get('os') == 'windows'
+            words = ['claude', '--resume', sid] + (['--model', flags_mod.quote(model, win)] if model else []) \
+                + (['--effort', effort] if effort else [])
+            extra = flags_mod.command_line(f['flags'] + ([['--chrome']] if f['chrome'] else []),
+                                           (self.fleet.state.get(name) or {}).get('root'), win)
+            cmd = ' '.join(words + ([extra] if extra else []))
             return {'ok': False, 'need': 'terminal', 'command': cmd,
                     'error': f'This chat is open in a terminal on {label}. Exit Claude there (type /exit), then run this in the same folder.'}
         when = body.get('when')
@@ -573,7 +634,8 @@ class App:
                'model': model, 'effort': effort}
         if computer is not None:
             req['computer'] = computer
-        return self._submit('relaunch', name, {'req': req, 'wait_idle': when == 'idle'}, self._title(name, sid))
+        r = self._submit('relaunch', name, {'req': req, 'wait_idle': when == 'idle'}, self._title(name, sid))
+        return dict(r, note=note) if note else r
 
     EDIT_FLAGS = {'perm': '--permission-mode', 'agent': '--agent', 'dirs': '--add-dir', 'chrome': '--chrome'}
 
@@ -606,13 +668,31 @@ class App:
         _, s = self._session(name, sid)
         launch = [list(f) for f in ((s.get('launch') or {}).get('flags') or []) if isinstance(f, list) and f]
         now = s.get('now') or {}
-        touched = {self.EDIT_FLAGS[k] for k in keys if k in self.EDIT_FLAGS}
-        # Switchboard's own (--remote-control) and model and effort (sent on their own) are not carried as flags
-        flags = [f for f in launch if flags_mod.ALIASES.get(f[0], f[0]) in flags_mod.START_FLAGS
-                 and flags_mod.ALIASES.get(f[0], f[0]) not in touched]
-        if 'perm' not in keys and not any(flags_mod.ALIASES.get(f[0], f[0]) == '--permission-mode' for f in flags) \
-                and now.get('perm') not in (None, 'default'):
-            flags.append(['--permission-mode', now['perm']])  # what it runs with now, when the launch did not say
+        # The phone sends the folders it adds, not the ones the chat already has (it was never told those), so
+        # "dirs" adds to the launch's own; only remove: ["dirs"] takes them away.
+        touched = {self.EDIT_FLAGS[k] for k in keys if k in self.EDIT_FLAGS and (k != 'dirs' or k in remove)}
+        # Switchboard's own (--remote-control), model and effort (sent on their own) and a worktree (made once, at
+        # the start) are not carried as flags
+        flags = []
+        for f in launch:
+            n = flags_mod.ALIASES.get(f[0], f[0])
+            if n not in flags_mod.START_FLAGS or n in flags_mod.START_ONLY or n in touched:
+                continue
+            if n == '--permission-mode' and now.get('perm') in flags_mod.PERM_WORD:
+                f = [n, now['perm']]  # the mode it runs in now (a Shift+Tab since) wins over the one it started in
+            flags.append([n] + f[1:])
+        started = [f[0] if len(f) == 1 else f[1] for f in launch
+                   if f[0] in ('--permission-mode', '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions')]
+        # Skipping every permission check comes along only when the chat was launched so: never from the mode its
+        # transcript last had alone.
+        bypass_ok = bool({'bypassPermissions', '--dangerously-skip-permissions', '--allow-dangerously-skip-permissions'} & set(started))
+        flags = [f for f in flags if f != ['--permission-mode', 'bypassPermissions'] or bypass_ok]
+        if 'perm' not in keys and not any(f[0] == '--permission-mode' for f in flags) and now.get('perm') in flags_mod.PERM_WORD \
+                and now['perm'] not in flags_mod.ASK_MODES and (now['perm'] != 'bypassPermissions' or bypass_ok):
+            # what it runs with now, when the launch did not say. "Asks first" is not said for it: with nothing in
+            # its launch, that is the machine's own default (the agent fills the default in for `now`), and the
+            # chat goes on in it without a flag.
+            flags.append(['--permission-mode', now['perm']])
         if 'chrome' not in keys and now.get('chrome') and not any(f[0] == '--chrome' for f in flags):
             flags.append(['--chrome'])
         for k, flag in self.EDIT_FLAGS.items():
@@ -622,10 +702,19 @@ class App:
                 if vals[k][0].lower() not in ('', 'off', 'false', '0'):
                     flags.append(['--chrome'])
             elif k == 'dirs':
-                flags += [['--add-dir', d] for d in vals[k] if d.strip()]
-            elif vals[k][0] and not (k == 'perm' and vals[k][0] == 'default'):
+                have = [f[1] for f in flags if f[0] == '--add-dir' and len(f) > 1]
+                for d in vals[k]:
+                    if d.strip() and d not in have:
+                        flags.append(['--add-dir', d])
+                        have.append(d)
+            elif vals[k][0]:  # "default" (asks first) goes by name too: relaunch writes it the way the machine takes it
                 flags.append([flag, vals[k][0]])
-        pick = lambda k: None if k in remove else (vals[k][0] or None) if k in vals else now.get(k)
+        if 'perm' in remove:  # the phone's way back to "Asks first": said by name where the machine can be told
+            flags.append(['--permission-mode', 'default'])
+        if any(f[0] == '--chrome' for f in flags):  # Chrome on: the flag that kept it off goes
+            flags = [f for f in flags if f[0] != '--no-chrome']
+        current = {'model': flags_mod.launch_model(s), 'effort': now.get('effort')}  # a pinned model stays pinned
+        pick = lambda k: None if k in remove else (vals[k][0] or None) if k in vals else current.get(k)
         out = {'machine': name, 'sid': sid, 'flags': flags, 'model': pick('model'), 'effort': pick('effort'),
                'when': body.get('when') or 'idle'}
         if 'computer' in keys:  # on or off for its folder; untouched, the folder keeps what it has
@@ -635,14 +724,26 @@ class App:
     # ---- what a relaunch, stop, move or fresh start would cut off (the agent's busy verb)
     def busy(self, name, sid):
         """{live, subagents, commands, replying, pending, summary} for one chat. A machine without the busy verb
-        answers from the list: live means Claude is replying."""
+        answers from the list: live means Claude is replying.
+
+        When the machine could not be asked (it did not answer, or its answer made no sense), nobody knows what is
+        running there: the answer is live with unknown: True, so whoever asked waits or asks the user, and nothing
+        is ever cut off because of a hiccup. A machine that was reached and refused the question is not that: its
+        list answers, as it does for one without the verb."""
+        asked = 'busy' in ((self.fleet.state.get(name) or {}).get('features') or [])
         try:
             r = self._call(name, {'verb': 'busy', 'sid': sid}, timeout=30)
-        except HttpError:
+        except HttpError as e:
             r = None
+            # not reached: its last list is no proof either. A machine that answered "no" (it does not know the chat,
+            # or the verb) did answer: its list says what there is to say, and nobody waits on it blind.
+            asked = e.code == 502
         if isinstance(r, dict) and isinstance(r.get('live'), bool):
-            out = {k: [str(x) for x in r.get(k) or []][:20] for k in ('subagents', 'commands', 'pending')}
+            out = {k: [str(x) for x in r.get(k) or []][:20] if isinstance(r.get(k), list) else [] for k in ('subagents', 'commands', 'pending')}
             return dict(out, live=r['live'], replying=bool(r.get('replying')), summary=str(r.get('summary') or ''))
+        if asked or (self.fleet.state.get(name) or {}).get('agents_ok') is False:  # or its list says nothing of what runs
+            return {'live': True, 'unknown': True, 'subagents': [], 'commands': [], 'replying': False, 'pending': [],
+                    'summary': f"{self._label(name)} didn't answer, so its subagents or commands may still be running."}
         try:
             _, s = self._session(name, sid)
         except HttpError:
@@ -659,14 +760,16 @@ class App:
         b = self.busy(name, sid)
         if not b['live']:
             return None
-        if not (b['subagents'] or b['commands'] or b['pending']):
+        if not (b['subagents'] or b['commands'] or b['pending'] or b.get('unknown')):
             then = BUSY_REPLY.get(then, then)
         return {'ok': False, 'need': 'busy', 'busy': b, 'error': f"{b['summary']} {then}".strip()}
 
     def _wait_idle(self, jid, name, sid):
         """Waits until nothing in the chat would be cut off: no reply, subagent, background command or undelivered
-        result. A reply alone is waited on for 15 minutes; subagents and commands for 4 hours."""
+        result. A reply alone is waited on for 15 minutes; subagents and commands for 4 hours. While the machine
+        cannot be asked, it keeps waiting (a failed check is never "nothing is running"), for 15 minutes at most."""
         start = self.clock()
+        only_reply, blind = True, None  # blind: since when the machine has not said what is running
         while True:
             if self.jobs.get(jid, {}).get('cancel'):  # first: a called-off job never goes ahead
                 raise HttpError(409, 'Cancelled. Nothing was changed.')
@@ -677,8 +780,14 @@ class App:
             b = self.busy(name, sid)
             if not b['live']:
                 return self._go(jid)
-            only_reply = not (b['subagents'] or b['commands'] or b['pending'])
-            if self.clock() - start > (RELAUNCH_WAIT if only_reply else CHILD_WAIT):
+            if b.get('unknown'):
+                blind = self.clock() if blind is None else blind
+                if self.clock() - blind > RELAUNCH_WAIT:
+                    raise HttpError(409, f"{self._label(name)} hasn't answered for 15 minutes, so nothing changed. "
+                                         "Try again when it's back.")
+            else:
+                only_reply, blind = not (b['subagents'] or b['commands'] or b['pending']), None
+            if self.clock() - start > (RELAUNCH_WAIT if only_reply and blind is None else CHILD_WAIT):
                 raise HttpError(409, ('Claude was still replying after 15 minutes' if only_reply else
                                       'Its work was still running after 4 hours') + ", so nothing changed. Try again when it's done.")
             self._set(jid, state='queued', step='waiting', note=b['summary'])
@@ -722,7 +831,7 @@ class App:
         """A machine's hook or status line: a prompt went in, Claude finished, it asks for permission, the context
         grew. Shown at once (an overlay on the last poll), then the machine is asked to confirm."""
         name, sid, why = body['machine'], body['session_id'], body.get('why')
-        if why not in PING_WHY or not SID_RE.fullmatch(sid):
+        if not isinstance(why, str) or why not in PING_WHY or not isinstance(sid, str) or not SID_RE.fullmatch(sid):
             raise HttpError(400, 'bad ping')
         o = {}
         if why in ('prompt', 'stop'):
@@ -744,6 +853,10 @@ class App:
             o['cold_at'] = round(exp + (self.clock() - ts), 3)  # its machine's clock, as of the ping, on ours
         if o:
             with self.overlay_lock:
+                if len(self.overlay) > 500:  # nobody is looking (a look clears the old ones): keep it small anyway
+                    now = self.clock()
+                    for k in [k for k, v in self.overlay.items() if now - v['at'] > OVERLAY_FOR]:
+                        del self.overlay[k]
                 self.overlay[(name, sid)] = dict(self.overlay.get((name, sid)) or {}, **o, at=self.clock())
             self.bump()
         if why != 'status':  # the status line changes all the time; its numbers need no confirming
@@ -770,8 +883,9 @@ class App:
                     s['status'] = o['status']
                 s['held'] = self.guard.held(m['name'], s.get('sid'))
                 hook = {'why': o.get('why'), 'at': o['at'], 'cold_at': o.get('cold_at')} if o else None
-                if hook and s.get('status') not in ('idle', 'busy', 'waiting'):
-                    hook['why'] = None  # stopped, or closed: a late ping does not bring it back
+                if hook and s.get('status') not in ('idle', 'busy', 'waiting') and m.get('agents_ok') is not False:
+                    hook['why'] = None  # stopped, or closed: a late ping does not bring it back (not one whose
+                    # machine could not say what runs: there the ping is all anyone knows)
                 s.update(fleet_mod.derive(s, now, m.get('skew') or 0.0, s['held'], hook, m.get('updated')))
                 s['stalled'] = s['activity'] == 'stalled'
 
@@ -916,7 +1030,8 @@ class App:
                     try:  # a linked machine is unpaired too, or the hub would bring it back
                         nodes_mod.hub_call('POST', f'/internal/unpair/{name}', {})
                     except OSError as e:
-                        raise HttpError(502, f"The hub couldn't unlink it ({e}).")
+                        if 'No linked machine' not in str(e):  # the hub has forgotten it already: nothing to unlink
+                            raise HttpError(502, f"The hub couldn't unlink it ({e}).")
                 self.fleet.drop_machine(name)
             elif op == 'add':
                 name, target = body.get('name'), body.get('target')
@@ -952,7 +1067,10 @@ class App:
             else:
                 d.pop(key, None)
             self._save_json('names.json', d)
-        self._name_tries[key] = time.time()
+            now = time.time()
+            if len(self._name_tries) > 500:  # tries for names long since delivered
+                self._name_tries = {k: t for k, t in self._name_tries.items() if now - t < 3600}
+            self._name_tries[key] = now
         self.bump()
 
     def forget_names(self, keys):
@@ -990,7 +1108,7 @@ class App:
 
     def set_chrome_for(self, name, sid, chrome):
         """A chat's Chrome machine, or None to clear it. Only known machines; the newest 2000 chats are kept."""
-        if chrome not in (None, '') and chrome not in self.fleet.machines:
+        if chrome not in (None, '') and (not isinstance(chrome, str) or chrome not in self.fleet.machines):
             raise HttpError(400, 'unknown machine')
         with self.chrome_lock:
             d = self.chrome_machines()
@@ -1051,6 +1169,8 @@ class App:
             raise HttpError(400, 'a setup is an object')
         out = {'model': d.get('model') or None, 'effort': d.get('effort') or None, 'mode': d.get('mode') or 'normal',
                'flags': d.get('flags') or [], 'other': d.get('other') or ''}
+        if not all(isinstance(out[k], (str, type(None))) for k in ('model', 'effort', 'mode')):
+            raise HttpError(400, 'unknown model, effort or mode')
         if not self.model_ok(out['model']) or out['effort'] not in EFFORTS or out['mode'] not in MODES:
             raise HttpError(400, 'unknown model, effort or mode')
         try:
@@ -1060,10 +1180,14 @@ class App:
         return out
 
     def set_prefs(self, body):
+        with self.prefs_lock:  # two devices saving at once: each change lands on top of the other, none is lost
+            return self._set_prefs(body)
+
+    def _set_prefs(self, body):
         d = self.prefs()
         if 'chrome_machine' in body:
             v = body['chrome_machine']
-            if v not in (None, '') and v not in self.fleet.machines:
+            if v not in (None, '') and (not isinstance(v, str) or v not in self.fleet.machines):
                 raise HttpError(400, 'unknown machine')
             d['chrome_machine'] = v or None
         if 'presets' in body:
@@ -1105,9 +1229,11 @@ class App:
     def _remember(self, body):
         """The New sheet opens with the setup used last."""
         try:
-            d = self.prefs()
-            d['last'] = self.flag_set({k: body.get(k) for k in ('model', 'effort', 'mode', 'flags', 'other')})
-            self._save_json('prefs.json', d)
+            last = self.flag_set({k: body.get(k) for k in ('model', 'effort', 'mode', 'flags', 'other')})
+            with self.prefs_lock:
+                d = self.prefs()
+                d['last'] = last
+                self._save_json('prefs.json', d)
         except Exception:
             log('could not remember the setup: ' + traceback.format_exc(limit=1))
 
@@ -1161,28 +1287,51 @@ class App:
         if not tok:
             return
         end = j.get('state') in ('done', 'error')
-        try:
-            gone = self.live_pusher(tok, self.live_state(j), end, 4 * 60 if j.get('state') == 'done' else 60)
-        except Exception:
-            log('live activity push failed: ' + traceback.format_exc(limit=1))
-            return
-        if gone or end:
+        # The push that ends the activity matters most: missed, the Lock Screen shows "Starting..." for hours. It
+        # is tried a few times before the token is let go. live_pusher answers True (the token is gone), 'retry'
+        # (Apple was not reached, or said to come back), or anything else (sent).
+        for wait in (*LIVE_END_RETRY, None) if end else (None,):
+            try:
+                got = self.live_pusher(tok, self.live_state(j), end, 4 * 60 if j.get('state') == 'done' else 60)
+            except Exception:
+                log('live activity push failed: ' + traceback.format_exc(limit=1))
+                got = 'retry'
+            if got != 'retry' or wait is None:
+                break
+            self.sleep(wait)
+        if (got and got != 'retry') or end:
             with self.jobs_lock:
-                if jid in self.jobs:
+                if jid in self.jobs and self.jobs[jid].get('live') == tok:
                     self.jobs[jid].pop('live', None)
                     self._jobs_save()
 
     def _recover_jobs(self):
         """After a restart: keep watching launches already handed to a machine; anything earlier cannot be known."""
+        path = self.state_dir / 'jobs.json'
         try:
-            self.jobs = json.loads((self.state_dir / 'jobs.json').read_text())
+            jobs = json.loads(path.read_text())
+        except FileNotFoundError:
+            jobs = {}
         except (OSError, ValueError):
-            self.jobs = {}
+            jobs = None
+        ok = lambda j: (isinstance(j, dict) and j.get('kind') in DONE_TITLES and isinstance(j.get('machine'), str)
+                        and isinstance(j.get('plan') or {}, dict))
+        if not isinstance(jobs, dict) or not all(isinstance(k, str) and ok(j) for k, j in jobs.items()):
+            # A file cut short or edited by hand never stops the server from starting: what can be read is kept, and
+            # the file as it was is put aside.
+            log('jobs.json could not be read in full: kept as jobs.json.bad')
+            try:
+                os.replace(path, path.with_name('jobs.json.bad'))
+            except OSError:
+                pass
+            jobs = {k: j for k, j in jobs.items() if isinstance(k, str) and ok(j)} if isinstance(jobs, dict) else {}
+        self.jobs = jobs
         now = self.clock()
         for jid, j in self.jobs.items():
             if j.get('state') in ('done', 'error'):
                 continue
-            if j.get('inner') and now - j.get('created', 0) < WATCH_FOR:
+            created = j.get('created') if isinstance(j.get('created'), (int, float)) else 0
+            if isinstance(j.get('inner'), str) and now - created < WATCH_FOR:
                 threading.Thread(target=self._rewatch, args=(jid,), daemon=True).start()
             else:
                 j.update(state='error', finished=now,
@@ -1210,13 +1359,19 @@ class App:
         return {'ok': True, 'job': jid, 'machine': 'server'}
 
     def _reach(self, jid, name, req):
-        """One machine call; an unreachable machine gets a few more tries before the job gives up. A call that
-        connected but timed out is not retried: it may have queued the launch already."""
+        """One machine call; an unreachable machine gets a few more tries before the job gives up. A call that went
+        out and got no answer (a timeout, a hub link that dropped mid-call) is never sent again: the machine may have
+        queued the launch already, and a second copy is a second chat."""
         for wait in (*self.retry_waits, None):
             try:
                 return self._call(name, req)
             except HttpError as e:
-                if e.code != 502 or wait is None or '(timed out)' in str(e):
+                again = req.get('verb') in AGAIN_OK  # asking twice changes nothing there
+                if e.code == 502 and (e.maybe_delivered or '(timed out)' in str(e)) and not again:
+                    err = HttpError(502, f'{e} It may have gone through anyway: check the list before trying again.')
+                    err.maybe_delivered = True
+                    raise err
+                if e.code != 502 or wait is None:
                     raise
                 self._set(jid, step='retrying', note=str(e))
                 self.sleep(wait)
@@ -1276,7 +1431,14 @@ class App:
     def _rewatch(self, jid):
         with self.jobs_lock:
             j = dict(self.jobs[jid])
-        self._finish(jid, self._watch(jid, j['machine'], j['inner']))
+        try:
+            res = self._watch(jid, j['machine'], j['inner'])
+            if j['kind'] == 'continue' and res.get('state') == 'done' and (j.get('plan') or {}).get('src'):
+                self._superseded(j['plan'], j['machine'], res)  # as _drive does: the old chat steps aside
+        except Exception as e:
+            log('job failed: ' + traceback.format_exc())
+            res = {'state': 'error', 'error': f'Switchboard hit an error: {e}'}
+        self._finish(jid, res)
 
     def _continue_steps(self, jid, p):
         src, dst = p['src'], p['dst']
@@ -1304,8 +1466,43 @@ class App:
             req['effort'] = carry['effort']
         if p.get('model') or isinstance(carry.get('model'), str):
             req['model'] = p.get('model') or carry['model']
+        flags = self._carried_flags(dst, carry.get('flags'))  # and how it ran: permissions, folders, agent, instructions
+        if flags:
+            req['flags'] = flags
         req = self.feat.library.ready(dst, p, req)  # the chat's tools come along
         return dst, self._reach(jid, dst, req)['job']
+
+    def _carried_flags(self, dst, flags):
+        """The flags a chat ran with, for the machine it continues on: each checked like a new chat's, and left out
+        when that machine cannot take it (a folder it does not have, a flag its Claude Code lacks, a Switchboard
+        there from before flags). Leaving one out never stops the move."""
+        st = self.fleet.state.get(dst) or {}
+        feats = st.get('features') or []
+        if not isinstance(flags, list) or 'flags' not in feats:
+            return []
+        old = self.ask_mode(dst) is None and not ((st.get('models') or {}).get('perms'))  # a Switchboard from before 0.8.20
+        has = (self.feat.auto.detected(dst) or {}).get('flags')  # what its `claude --help` lists, when it has said
+        out, seen = [], {}
+        for f in flags[:flags_mod.FLAGS_MAX]:
+            try:
+                got = flags_mod.fit_perm(flags_mod.parse([f])['flags'], self.ask_mode(dst))
+            except flags_mod.FlagError:
+                continue
+            for name, *val in got:
+                if name in flags_mod.START_ONLY or (isinstance(has, list) and name not in has) \
+                        or seen.get(name, 0) >= flags_mod.FLAG_REPEAT.get(name, 1):
+                    continue
+                if old and not flags_mod.old_takes([name] + val):
+                    continue  # a value its older Switchboard would refuse (a full model id for the fallback)
+                if name == '--add-dir':  # only a folder that is there too
+                    try:
+                        if 'places' not in feats or not self._call(dst, {'verb': 'folder_check', 'folder': val[0]}, timeout=20).get('ok'):
+                            continue
+                    except HttpError:
+                        continue
+                seen[name] = seen.get(name, 0) + 1
+                out.append([name] + val)
+        return out
 
     # ---- Compact a History thread into one fresh chat
     def _thread_chats(self, name, sid):
@@ -1385,6 +1582,11 @@ class App:
         keep = {k: res.get(k) for k in ('url', 'name', 'sid', 'bg_id', 'error', 'missing_tools', 'skipped_tools') if res.get(k)}
         if isinstance(res.get('tools'), list):  # what the chat was started with (an auto chat: only tools with their keys)
             keep['tools'] = res['tools']
+        if isinstance(res.get('dropped_flags'), list) and res['dropped_flags']:
+            # flags the old chat ran with that its machine would not start it with again: the chat came back without
+            keep['dropped_flags'] = [str(x)[:60] for x in res['dropped_flags']][:24]
+            if isinstance(res.get('note'), str):
+                keep['note'] = res['note'][:300]
         state = 'done' if res.get('state') == 'done' else 'error'
         if state == 'error' and not keep.get('error'):
             keep['error'] = 'Something went wrong.'
@@ -1397,7 +1599,7 @@ class App:
         if j.get('live'):
             threading.Thread(target=self._live, args=(jid,), daemon=True).start()
         self._chrome_carry(j)
-        self.feat.job_done(j)
+        self.feat.job_done(j, jid)
         stopped = ((j.get('plan') or {}).get('req') or {}).get('sid')
         if j.get('kind') == 'stop' and state == 'done' and isinstance(stopped, str):
             self.fleet.mark_stopped(j['machine'], stopped)  # a queued stop: off the board as soon as it runs
@@ -1445,7 +1647,7 @@ class App:
             if not j:
                 raise HttpError(404, 'unknown job')
             return {'ok': True, **{k: j.get(k) for k in ('state', 'step', 'note', 'error', 'url', 'name', 'sid', 'bg_id', 'kind', 'picked', 'by',
-                                                          'missing_tools')},
+                                                          'missing_tools', 'dropped_flags')},
                     'machine': j['machine'], 'label': self._label(j['machine'])}
         r = self._call(self._machine(name), {'verb': 'job', 'id': jid})
         if r['state'] != 'queued':
@@ -1560,6 +1762,7 @@ class App:
             name, fix = body.get('machine'), body.get('fix')
             if not isinstance(name, str) or not isinstance(fix, str):
                 return {'ok': False, 'error': 'Say which machine and what to fix.'}
+            name = self._machine(name)
             r = self._call(name, {'verb': 'setup_fix', 'fix': fix}, timeout=60)
             if r.get('ok'):
                 threading.Thread(target=self.fleet.poll_one, args=(name,), daemon=True).start()
@@ -1602,11 +1805,11 @@ class App:
             return self.sessions()
         if path == '/api/action':
             name, verb = self._machine(body), body.get('verb')
-            if verb in self.feat.ACTIONS:
+            if isinstance(verb, str) and verb in self.feat.ACTIONS:
                 return self.feat.action(name, verb, body)
             if verb == 'relaunch':  # the iPhone app's form of POST /api/relaunch
                 return self.relaunch_edit(body)
-            if verb not in ACTION_VERBS:
+            if not isinstance(verb, str) or verb not in ACTION_VERBS:
                 raise HttpError(400, 'unknown action')
             sid = body.get('sid')
             if not isinstance(sid, str) or not SID_RE.fullmatch(sid):
@@ -1637,6 +1840,10 @@ class App:
             name = 'auto' if auto else self._machine(body)
             folder, model, mode = body.get('folder') or '', body.get('model') or None, body.get('mode') or 'normal'
             effort = body.get('effort') or None
+            for k, v in (('folder', folder), ('model', model), ('mode', mode), ('effort', effort), ('prompt', body.get('prompt')),
+                         ('name', body.get('name')), ('chrome_machine', body.get('chrome_machine'))):
+                if not isinstance(v, (str, type(None))):  # a client's slip is a 400 that says so, not a server error
+                    raise HttpError(400, f'{k} must be text')
             if not self.model_ok(model):
                 raise HttpError(400, 'unknown model')
             if mode not in MODES:
@@ -1667,6 +1874,10 @@ class App:
             cm = body.get('chrome_machine') or None  # this chat's own Chrome machine (Auto sends it there)
             if cm is not None and cm not in self.fleet.machines:
                 raise HttpError(400, 'unknown machine')
+            note = None
+            if not auto:  # "Asks first" by the name that machine's Claude Code takes (Auto: once the machine is picked)
+                note = self.asks_note(name, fl['flags'])
+                fl['flags'] = flags_mod.fit_perm(fl['flags'], self.ask_mode(name))
             if fl['flags']:
                 req['flags'] = fl['flags']
             if body.get('name'):
@@ -1685,7 +1896,7 @@ class App:
                 r = self._submit('start', name, {'req': req, 'mkdir': folder if body.get('create') else None, 'chrome_machine': cm,
                                                  'tools': tools}, 'New session')
             self._remember(body)
-            return r
+            return dict(r, note=note) if note else r
         if path == '/api/continue':
             src, dst = self._machine(body.get('machine')), self._machine(body.get('to'))
             sid = body.get('sid')
@@ -1706,7 +1917,8 @@ class App:
                                                   'wait_idle': body.get('when') == 'idle'}, title)
         if path == '/api/event':
             ev = body.get('event')
-            if body.get('machine') not in self.fleet.machines or not isinstance(body.get('session_id'), str):
+            if not isinstance(body.get('machine'), str) or body['machine'] not in self.fleet.machines \
+                    or not isinstance(body.get('session_id'), str):
                 raise HttpError(400, 'bad event')
             if ev == 'ping':
                 return self.ping(body)
@@ -1733,23 +1945,13 @@ class App:
             tok = body.get('token')
             if not isinstance(tok, str) or not TOKEN_RE.fullmatch(tok):
                 raise HttpError(400, 'bad widget push token')
-            d = self.widget_tokens()
-            d[tok] = {'name': str(body.get('name') or 'iPhone')[:40], 'added': time.time()}
-            for old in sorted(d, key=lambda k: d[k].get('added') or 0)[:-8]:  # a reinstall makes a new token
-                d.pop(old, None)
-            self._save_json('widget_tokens.json', d)
+            self._token_add('widget_tokens.json', tok, body.get('name'), 8)
             return {'ok': True}
         if path == '/api/devices':
             tok = body.get('token')
             if not isinstance(tok, str) or not TOKEN_RE.fullmatch(tok):
                 raise HttpError(400, 'bad device token')
-            d = self.devices()
-            d[tok] = {'name': str(body.get('name') or 'iPhone')[:40], 'added': time.time()}
-            for old in sorted(d, key=lambda k: d[k].get('added') or 0)[:-DEVICES_MAX]:  # never grows without limit
-                d.pop(old, None)
-            tmp = self.state_dir / f'devices.{os.getpid()}.tmp'
-            tmp.write_text(json.dumps(d, indent=1))
-            os.replace(tmp, self.state_dir / 'devices.json')
+            self._token_add('devices.json', tok, body.get('name'), DEVICES_MAX)
             if not self.push_ready:  # the phone is kept, so pushes start once the server is set up
                 return {'ok': True, 'push': False, 'note': "Notifications aren't set up on this server yet. "
                         'They need an APNs key and ~/.config/switchboard/apns.json.'}
@@ -1808,8 +2010,35 @@ def make_handler(app):
             self.send_header('Referrer-Policy', 'no-referrer')
             if ctype.startswith('text/html'):
                 self.send_header('Content-Security-Policy', CSP)
+            left, self._left = getattr(self, '_left', 0), 0
+            if left != 0:
+                # Answered without reading what the client sent (too large, the wrong header). Left in the socket,
+                # those bytes would be read as the next request, so this connection ends here.
+                self.send_header('Connection', 'close')
+                self.close_connection = True
             self.end_headers()
             self.wfile.write(data)
+            if left:
+                self.wfile.flush()
+                self._drain(left)
+
+        def _drain(self, n):
+            """Reads on for a moment after an early answer: a client still sending its file gets the answer, not a
+            connection reset. Bounded in size and in time."""
+            end, n = time.time() + DRAIN_S, min(n, DRAIN_MAX)
+            try:
+                self.connection.settimeout(1)
+                while n > 0 and time.time() < end:
+                    got = self.rfile.read1(min(n, 65536))
+                    if not got:
+                        break
+                    n -= len(got)
+            except (OSError, ValueError):
+                pass
+
+        def _body(self, n):
+            self._left = 0
+            return self.rfile.read(n) if n else b''
 
         def _host_ok(self):
             return app.host_ok(self.headers.get('Host'))
@@ -1879,13 +2108,17 @@ def make_handler(app):
                 self.wfile.write(f'retry: 2000\nevent: hello\ndata: {json.dumps({"v": v})}\n\n'.encode())
                 self.wfile.flush()
                 end = time.time() + STREAM_FOR
+                told = time.time()
                 while time.time() < end:
                     nv = app.wait_change(v, STREAM_BEAT)
-                    if nv == v:
+                    if nv == v and time.time() - told < STREAM_IDLE:
                         self.wfile.write(b': beat\n\n')
                     else:
-                        time.sleep(0.12)  # a burst of changes goes out as one
-                        v = app.version
+                        # Also when nothing changed for a while: the phone loads the list only on a change, and
+                        # on a quiet fleet its copy grew old enough to grey every chat as "as of 2m ago".
+                        if nv != v:
+                            time.sleep(0.12)  # a burst of changes goes out as one
+                        v, told = app.version, time.time()
                         self.wfile.write(f'event: change\ndata: {{"v": {v}}}\n\n'.encode())
                     self.wfile.flush()
             except OSError:
@@ -1916,6 +2149,9 @@ def make_handler(app):
         def do_POST(self):
             u = urlsplit(self.path)
             path = u.path
+            # How much of this request is still in the socket (None: it does not say in a way this server reads).
+            v = (self.headers.get('Content-Length') or '0').strip()
+            self._left = int(v) if v.isdigit() and not self.headers.get('Transfer-Encoding') else None
 
             def upload():
                 ctype = self.headers.get('Content-Type') or ''
@@ -1925,7 +2161,7 @@ def make_handler(app):
                     if n > 1_000_000:
                         raise HttpError(413, 'That file is too big to send from the phone.')
                     try:
-                        b = json.loads(self.rfile.read(n) or b'{}')
+                        b = json.loads(self._body(n) or b'{}')
                         raw = base64.b64decode(b.get('data') or '', validate=True)
                     except (ValueError, AttributeError, TypeError):
                         raise HttpError(400, 'bad file')
@@ -1937,7 +2173,7 @@ def make_handler(app):
                 n = self._length()
                 if n > UPLOAD_MAX:
                     raise HttpError(413, f'That file is {_mb(n)}. Files up to {_mb(UPLOAD_MAX)} can be attached.')
-                return app.upload(parse_qs(u.query, keep_blank_values=True), self.rfile.read(n) if n else b'')
+                return app.upload(parse_qs(u.query, keep_blank_values=True), self._body(n))
             if path == '/api/upload':
                 return self._guarded(upload)
 
@@ -1948,7 +2184,7 @@ def make_handler(app):
                 if n > 1_000_000:
                     raise HttpError(413, 'too large')
                 try:
-                    body = json.loads(self.rfile.read(n) or b'{}')
+                    body = json.loads(self._body(n) or b'{}')
                 except ValueError:
                     raise HttpError(400, 'bad json')
                 if not isinstance(body, dict):
@@ -1970,6 +2206,49 @@ def apns_key_path(cfg, conf):
     return Path(cfg) / 'apns' / Path(str(name)).name
 
 
+class Pushers:
+    """What the app sends to phones through Apple: alerts, widget reloads, Live Activity updates. A token is dropped
+    only when Apple says it is gone (apns.Router), and from the file as it is at that moment (App.token_gone)."""
+
+    def __init__(self, apns, app=None, sleep=time.sleep):
+        import apns as apns_mod
+        self.apns, self.app, self.m = apns, app, apns_mod
+        self.router = apns_mod.Router(apns, sleep) if apns else None
+
+    def attach(self, app):
+        self.app = app
+        app.push_ready = bool(self.apns)
+        if self.apns:
+            app.widget_pusher, app.live_pusher = self.widgets, self.live
+
+    def alert(self, title, body, url, kind='jobs', group=None):
+        if not self.apns:
+            return
+        for tok in list(self.app.devices()):
+            try:  # one phone's trouble never keeps the push from the others
+                got = self.router.send(tok, lambda sb: self.apns.push(tok, title, body, url, thread=kind, collapse=group, sandbox=sb),
+                                       lambda line: log('apns ' + line))
+                if got == self.m.GONE:
+                    self.app.token_gone('devices.json', tok)
+            except Exception as e:
+                log(f'apns {str(tok)[:8]} failed: {e}')
+
+    def widgets(self):
+        for tok in list(self.app.widget_tokens()):
+            try:
+                got = self.router.send(tok, lambda sb: self.apns.push_widgets(tok, sandbox=sb), lambda line: log('widget push ' + line))
+                if got == self.m.GONE:
+                    self.app.token_gone('widget_tokens.json', tok)
+            except Exception as e:
+                log(f'widget push {str(tok)[:8]} failed: {e}')
+
+    def live(self, tok, state, end, dismiss_after):
+        """True: the token is gone. 'retry': Apple was not reached, worth another try (App._live). Else False."""
+        got = self.router.send(tok, lambda sb: self.apns.push_activity(tok, state, end=end, dismiss_after=dismiss_after, sandbox=sb),
+                               lambda line: log('live activity push ' + line))
+        return True if got == self.m.GONE else 'retry' if got == self.m.RETRY else False
+
+
 def main():
     from apns import Apns
     home = Path.home()
@@ -1982,43 +2261,13 @@ def main():
     except Exception as e:
         log(f'push disabled: {e}')
 
-    app_ref = {}
-
-    def pusher(title, body, url, kind='jobs', group=None):
-        if not apns:
-            return
-        app = app_ref['app']
-        devs = app.devices()
-        for tok in list(devs):
-            status, resp = apns.push(tok, title, body, url, thread=kind, collapse=group)
-            log(f'apns {tok[:8]} -> {status} {resp[:120]}')
-            if status == 410 or 'BadDeviceToken' in resp or 'Unregistered' in resp:
-                devs.pop(tok, None)
-                (app.state_dir / 'devices.json').write_text(json.dumps(devs, indent=1))
+    push = Pushers(apns)
 
     server_cfg = ServerConfig(cfg, state)
     fleet_cfg = fleet_mod.FleetConfig(cfg / 'fleet.json', seed=state / 'machines.json')
     app = App(fleet_mod.Fleet(fleet_cfg.load(), transport=nodes_mod.transport), state, Path(__file__).resolve().parent / 'web',
-              pusher=pusher, cfg_dir=cfg, server_cfg=server_cfg)
-    app_ref['app'] = app
-    app.push_ready = bool(apns)
-
-    def widget_pusher():
-        toks = app.widget_tokens()
-        for tok in list(toks):
-            status, resp = apns.push_widgets(tok)
-            log(f'widget push {tok[:8]} -> {status} {resp[:120]}')
-            if status == 410 or 'BadDeviceToken' in resp or 'Unregistered' in resp:
-                toks.pop(tok, None)
-                app._save_json('widget_tokens.json', toks)
-    if apns:
-        app.widget_pusher = widget_pusher
-
-        def live_pusher(tok, state, end, dismiss_after):
-            status, resp = apns.push_activity(tok, state, end=end, dismiss_after=dismiss_after)
-            log(f'live activity push {tok[:8]} -> {status} {resp[:120]}')
-            return status == 410 or 'BadDeviceToken' in resp or 'Unregistered' in resp
-        app.live_pusher = live_pusher
+              pusher=push.alert, cfg_dir=cfg, server_cfg=server_cfg)
+    push.attach(app)
     import bonjour  # noqa: E402  the iPhone app finds the server on the network
     bonjour.announce(PORT, server_cfg, log)
     app.addresses.get()  # start working out the addresses, so the first app to connect gets them

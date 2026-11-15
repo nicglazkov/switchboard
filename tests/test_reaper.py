@@ -237,6 +237,44 @@ class CleanupTest(unittest.TestCase):
                 app.post('/api/tabs', b)
             self.assertEqual(cm.exception.code, 400, b)
 
+    def test_a_hub_that_does_not_answer_forgets_no_open_terminal(self):
+        # Audit, server 18: while the hub restarted, "which terminals are open" came back empty, and a chat open in
+        # a terminal was offered for stopping.
+        app = self.make()
+        self.m.sessions['desk'] = [bg(1, 'idle', 99), bg(2, 'idle', 99)]
+        app.fleet.poll()
+        r, said = app.feat.reaper, [{('desk', sid(1)[:8])}]
+        r.opened = lambda: said[0]
+        again = lambda: setattr(r, '_open', (0, r._open[1]))  # the 10 s between two questions have passed
+        self.assertEqual([d['sid'] for d in r.decisions()], [sid(2)])
+        said[0] = None
+        again()
+        self.assertEqual([d['sid'] for d in r.decisions()], [sid(2)], 'no answer: what it said last still counts')
+        r._open_at -= features.OPEN_TRUST + 1
+        again()
+        self.assertEqual(len(r.decisions()), 2, 'but not for ever')
+        said[0] = set()
+        again()
+        self.assertEqual(len(r.decisions()), 2)
+        self.assertIsNone(features.hub_open_known('http://127.0.0.1:9/internal/open', timeout=0.5))
+
+    def test_an_app_gone_for_a_month_is_dropped_from_the_tabs_file(self):
+        app = self.make()
+        app.post('/api/tabs', {'device': 'laptop', 'tabs': [f'desk/{sid(2)}']})
+        (self.state / 'tabs.json').write_text(json.dumps(dict(json.loads((self.state / 'tabs.json').read_text()), odd='x')))
+        self.now[0] += 31 * 86400
+        app.post('/api/tabs', {'device': 'studio', 'tabs': []})
+        self.assertEqual(list(json.loads((self.state / 'tabs.json').read_text())), ['studio'])
+
+    def test_the_notice_is_written_down_before_it_is_sent(self):
+        app = self.make()
+        self.m.sessions['desk'] = [bg(1, 'idle', 99)]
+        app.fleet.poll()
+        at_push = []
+        app._push = lambda *a: at_push.append(json.loads(app.feat.reaper.seen_path.read_text()).get('pushed'))
+        app.feat.after_poll()
+        self.assertEqual(at_push, [self.now[0]])
+
     def test_star_toggles_and_shows_on_the_row(self):
         app = self.make()
         self.m.sessions['desk'] = [bg(1, 'idle', 1), bg(2, 'idle', 1)]

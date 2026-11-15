@@ -78,6 +78,16 @@ impl Saved {
         self.note(url).is_some_and(|n| n.learned)
     }
 
+    /// An address the user typed that has never once answered (a typo, most likely): the board offers to remove
+    /// it. Never the one being tried for the first time right now (`trying`): it has had no time to answer.
+    pub fn never_answered(&self, trying: Option<&str>) -> Option<&String> {
+        self.servers.iter().find(|u| {
+            !self.is_learned(u)
+                && self.note(u).is_none_or(|n| n.last_ok.is_none())
+                && trying.is_none_or(|t| key(t) != key(u))
+        })
+    }
+
     /// An address the user typed: first in the list, and never dropped. Already there (typed or learned), it moves
     /// to the front and counts as typed.
     pub fn add_typed(&mut self, base: &str) {
@@ -345,6 +355,26 @@ mod tests {
         // bad entries from the server are skipped
         s.learn(&[adv("lan", "ftp://192.0.2.30"), adv("lan", "")], 1000.0);
         assert_eq!(s.servers.len(), 4);
+    }
+
+    #[test]
+    fn an_address_still_on_its_first_try_is_not_called_one_that_never_answered() {
+        let mut s = Saved::default();
+        s.add_typed("http://192.0.2.10:8130");
+        // typed a moment ago, the first try is on its way
+        assert_eq!(s.never_answered(Some("http://192.0.2.10:8130/")), None);
+        // that try is over and nothing answered
+        assert_eq!(s.never_answered(None).map(String::as_str), Some("http://192.0.2.10:8130"));
+        // an older typo is still offered while a new address is tried
+        s.add_typed("http://192.0.2.11:8130");
+        assert_eq!(
+            s.never_answered(Some("http://192.0.2.11:8130")).map(String::as_str),
+            Some("http://192.0.2.10:8130")
+        );
+        // one that worked once is never offered
+        s.worked("http://192.0.2.10:8130", 500.0);
+        s.worked("http://192.0.2.11:8130", 600.0);
+        assert_eq!(s.never_answered(None), None);
     }
 
     #[test]

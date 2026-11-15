@@ -198,11 +198,68 @@ pub fn created(topic: &str, mode: &str) -> String {
 /// The longest name a chat can be given (the machines refuse longer ones).
 pub const NAME_MAX: usize = 64;
 
-/// What a typed name becomes: letters, digits, spaces and . , : ' + # ( ) - _ only (anything else turns into a space,
-/// as the machines do), spaces squeezed, cut at a word to fit `room`.
+/// An accented Latin letter as the plain letters the machines accept ("é" is "e", "ß" is "ss"). None for anything
+/// else. The server and the machines keep names to English letters (they go on a command line and into the
+/// transcript), so "Café notes" is kept as "Cafe notes" and not "Caf notes".
+fn plain_letters(c: char) -> Option<&'static str> {
+    Some(match c {
+        'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' | 'ā' | 'ă' | 'ą' => "a",
+        'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' | 'Ā' | 'Ă' | 'Ą' => "A",
+        'ç' | 'ć' | 'č' => "c",
+        'Ç' | 'Ć' | 'Č' => "C",
+        'ď' | 'đ' => "d",
+        'Ď' | 'Đ' => "D",
+        'è' | 'é' | 'ê' | 'ë' | 'ē' | 'ė' | 'ę' | 'ě' => "e",
+        'È' | 'É' | 'Ê' | 'Ë' | 'Ē' | 'Ė' | 'Ę' | 'Ě' => "E",
+        'ğ' => "g",
+        'Ğ' => "G",
+        'ì' | 'í' | 'î' | 'ï' | 'ī' | 'į' | 'ı' => "i",
+        'Ì' | 'Í' | 'Î' | 'Ï' | 'Ī' | 'Į' | 'İ' => "I",
+        'ł' | 'ľ' => "l",
+        'Ł' | 'Ľ' => "L",
+        'ñ' | 'ń' | 'ň' => "n",
+        'Ñ' | 'Ń' | 'Ň' => "N",
+        'ò' | 'ó' | 'ô' | 'õ' | 'ö' | 'ø' | 'ō' | 'ő' => "o",
+        'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' | 'Ø' | 'Ō' | 'Ő' => "O",
+        'ř' => "r",
+        'Ř' => "R",
+        'ś' | 'š' | 'ş' | 'ș' => "s",
+        'Ś' | 'Š' | 'Ş' | 'Ș' => "S",
+        'ť' | 'ț' => "t",
+        'Ť' | 'Ț' => "T",
+        'ù' | 'ú' | 'û' | 'ü' | 'ū' | 'ů' | 'ű' | 'ų' => "u",
+        'Ù' | 'Ú' | 'Û' | 'Ü' | 'Ū' | 'Ů' | 'Ű' | 'Ų' => "U",
+        'ý' | 'ÿ' => "y",
+        'Ý' | 'Ÿ' => "Y",
+        'ź' | 'ż' | 'ž' => "z",
+        'Ź' | 'Ż' | 'Ž' => "Z",
+        'ß' => "ss",
+        'æ' => "ae",
+        'Æ' => "AE",
+        'œ' => "oe",
+        'Œ' => "OE",
+        '\u{2019}' | '\u{2018}' => "'",
+        '\u{2013}' | '\u{2014}' => "-",
+        _ => return None,
+    })
+}
+
+/// Whether a typed name has letters a name can't keep (another alphabet), so the caller can say so.
+pub fn drops_letters(typed: &str) -> bool {
+    typed.chars().any(|c| c.is_alphabetic() && !c.is_ascii() && plain_letters(c).is_none())
+}
+
+/// What a typed name becomes: letters, digits, spaces and . , : ' + # ( ) - _ only (accented letters lose their
+/// accents; anything else turns into a space, as the machines do), spaces squeezed, cut at a word to fit `room`.
 pub fn clean_name(typed: &str, room: usize) -> String {
-    let ok: String =
-        typed.chars().map(|c| if c.is_ascii_alphanumeric() || " .,:'+#()-_".contains(c) { c } else { ' ' }).collect();
+    let mut ok = String::with_capacity(typed.len());
+    for c in typed.chars() {
+        if c.is_ascii_alphanumeric() || " .,:'+#()-_".contains(c) {
+            ok.push(c);
+        } else {
+            ok.push_str(plain_letters(c).unwrap_or(" "));
+        }
+    }
     let t = ok.split_whitespace().collect::<Vec<_>>().join(" ");
     if t.len() <= room {
         return t;
@@ -243,7 +300,14 @@ mod tests {
         assert_eq!(given("Widget fix", "Old topic (copy)"), "Widget fix (copy)");
         assert_eq!(given("Widget fix", "Fix (the) thing (v2)"), "Widget fix");
         assert_eq!(given("Widget/fix & more", "x"), "Widget fix more");
-        assert_eq!(given("Caf\u{e9} notes", "x"), "Caf notes");
+        assert_eq!(given("Caf\u{e9} notes", "x"), "Cafe notes");
+        assert_eq!(given("Stra\u{df}e \u{2013} \u{141}\u{f3}d\u{17a}", "x"), "Strasse - Lodz");
+        assert_eq!(given("Sam\u{2019}s plan", "x"), "Sam's plan");
+        assert!(!drops_letters("Caf\u{e9} notes 2"));
+        // Another alphabet can't be kept (the server and the machines take English letters only).
+        assert!(drops_letters("\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442} plan"));
+        assert_eq!(given("\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442} plan", "x"), "plan");
+        assert_eq!(given("\u{43f}\u{440}\u{438}\u{432}\u{435}\u{442}", "x"), "");
         assert_eq!(given("   ", "Old (part 2)"), "");
         let long = given(&"word ".repeat(30), "Old (part 12)");
         assert!(long.len() <= NAME_MAX && long.ends_with("word (part 12)"), "{long}");

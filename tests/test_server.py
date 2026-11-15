@@ -174,6 +174,17 @@ class GuardTimerTest(unittest.TestCase):
         self.assertFalse(self.g.held('desk', 'S1'))
 
 
+    def test_old_pushes_are_forgotten(self):
+        # Audit, server 20: one entry per chat ever held stayed for as long as the server ran.
+        for n in range(50):
+            self.g.block(dict(self.evt, session_id=f'S{n}'))
+            self.timers[-1].fn()
+        self.assertEqual(len(self.g.pushed), 50)
+        self.now += guard.REPEAT_QUIET
+        self.g.held('desk', 'S1')
+        self.assertEqual(self.g.pushed, {})
+
+
 class ApnsTest(unittest.TestCase):
     def setUp(self):
         try:
@@ -311,6 +322,7 @@ class HttpTest(unittest.TestCase):
         st, body = self.req('/api/new', {'machine': 'desk', 'folder': '~/Documents/site', 'prompt': 'hi'})
         self.assertEqual(st, 409)
         self.app.fleet.state['desk']['features'] = ['places']
+        self.t.replies['desk']['features'] = ['places']  # a list reply that lands mid-test says the same
         answers = {'trust': 'ask'}
         real = self.t.__call__
         def call(target, req, timeout, real=real):
@@ -339,6 +351,7 @@ class HttpTest(unittest.TestCase):
             self.assertEqual(self.req('/api/privacy_settings', {'machine': 'desk'})[0], 200)
             self.assertIn('privacy_settings', [c[1]['verb'] for c in self.t.calls])
         finally:
+            self.t.replies['desk'].pop('features', None)
             self.app.fleet.state['desk']['features'] = had
 
     def test_roam_setting(self):
@@ -469,3 +482,195 @@ class ContinueTest(HttpTest):
             self.assertEqual([(c[0], c[1]['sid'], c[1]['by']['machine']) for c in sup], [('desk', 'S1', 'tower')])
         finally:
             self.app.fleet.transport = t
+
+    def test_flags_come_along_where_the_other_machine_can_take_them(self):
+        import server
+        app, st = self.app, self.app.fleet.state.setdefault('tower', {})
+        had, call = dict(st), app._call
+        asked = []
+
+        def folder_check(name, req, timeout=40):
+            asked.append((name, req['verb'], req['folder']))
+            if req['folder'] != 'proj':
+                raise server.HttpError(400, 'no such folder')
+            return {'ok': True}
+        app._call = folder_check
+        carry = [['--add-dir', 'proj'], ['--add-dir', 'only-there'], ['--agent', 'reviewer'], ['--worktree', 'fix'],
+                 ['--append-system-prompt', 'Be brief, and kind'], ['--evil'], ['--permission-mode', 'default'], 'junk']
+        try:
+            st.update(features=['flags', 'places'], models={'perms': ['acceptEdits', 'manual', 'plan']})
+            self.assertEqual(app._carried_flags('tower', carry), [
+                ['--add-dir', 'proj'], ['--agent', 'reviewer'], ['--append-system-prompt', 'Be brief, and kind'],
+                ['--permission-mode', 'manual']])
+            self.assertEqual(asked, [('tower', 'folder_check', 'proj'), ('tower', 'folder_check', 'only-there')])
+            st.update(features=['flags'], models={})  # an older Switchboard there: no folder check, no mode by name
+            self.assertEqual(app._carried_flags('tower', carry), [['--agent', 'reviewer'],
+                                                                  ['--append-system-prompt', 'Be brief, and kind']])
+            # ... and nothing its own check would refuse: a full model id for the fallback
+            grown = [['--fallback-model', 'claude-sonnet-4-5'], ['--autocompact', '1000k'], ['--agent', 'reviewer']]
+            self.assertEqual(app._carried_flags('tower', grown), [['--autocompact', '1000k'], ['--agent', 'reviewer']])
+            self.assertEqual(app._carried_flags('tower', [['--fallback-model', 'sonnet,haiku']]), [['--fallback-model', 'sonnet,haiku']])
+            st.update(models={'perms': ['manual']})
+            self.assertEqual(app._carried_flags('tower', grown), grown)
+            st.update(features=[])  # one from before flags takes none
+            self.assertEqual(app._carried_flags('tower', carry), [])
+            self.assertEqual(app._carried_flags('tower', None), [])
+        finally:
+            app._call = call
+            st.clear()
+            st.update(had)
+
+
+class WireTest(unittest.TestCase):
+    """What goes over the socket: a request answered before its body was read, and the live stream on a quiet day."""
+    @classmethod
+    def setUpClass(cls):
+        cls.app = server.App(fleet.Fleet(MACH, FakeTransport()), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()), cfg_dir=Path(mkdtemp()),
+                             poll_every=0)
+        cls.app.fleet.poll()
+        cls.httpd = server.make_server('127.0.0.1', 0, cls.app)
+        cls.port = cls.httpd.server_address[1]
+        threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.httpd.shutdown()
+        cls.httpd.server_close()
+
+    def talk(self, raw, more=b''):
+        """Everything the server says back on one connection, until it closes it or goes quiet."""
+        import socket
+        c = socket.create_connection(('127.0.0.1', self.port), timeout=5)
+        self.addCleanup(c.close)
+        c.sendall(raw)
+        if more:
+            try:
+                c.sendall(more)
+            except OSError:
+                pass
+        c.settimeout(1.5)
+        got = b''
+        try:
+            while chunk := c.recv(65536):
+                got += chunk
+        except OSError:
+            pass
+        return got
+
+    def test_a_body_left_unread_is_never_read_as_the_next_request(self):
+        # Audit, server 7: the POST is refused for its missing header before its body is read; the body, left in
+        # the socket of a kept-alive connection, was then served as a request of its own.
+        host = f'Host: 127.0.0.1:{self.port}\r\n'.encode()
+        inner = b'GET /api/summary HTTP/1.1\r\n' + host + b'\r\n'
+        got = self.talk(b'POST /api/action HTTP/1.1\r\n' + host + b'Content-Type: application/json\r\nContent-Length: '
+                        + str(len(inner)).encode() + b'\r\n\r\n' + inner)
+        self.assertEqual(got.count(b'HTTP/1.1 '), 1, got[:400])
+        self.assertTrue(got.startswith(b'HTTP/1.1 403'))
+        self.assertIn(b'Connection: close', got)
+
+    def test_a_request_that_was_read_keeps_its_connection(self):
+        host = f'Host: 127.0.0.1:{self.port}\r\n'.encode()
+        one = b'POST /api/prefs HTTP/1.1\r\n' + host + b'Content-Type: application/json\r\nX-Switchboard: 1\r\nContent-Length: 2\r\n\r\n{}'
+        got = self.talk(one + one)
+        self.assertEqual(got.count(b'HTTP/1.1 200'), 2)
+        self.assertNotIn(b'Connection: close', got)
+
+    def test_a_file_that_is_too_big_gets_its_answer_while_still_sending(self):
+        host = f'Host: 127.0.0.1:{self.port}\r\n'.encode()
+        n = server.UPLOAD_MAX + 1
+        head = (b'POST /api/upload?machine=desk&name=x HTTP/1.1\r\n' + host + b'Content-Type: application/octet-stream\r\nX-Switchboard: 1\r\n'
+                b'Content-Length: ' + str(n).encode() + b'\r\n\r\n')
+        got = self.talk(head, b'x' * (3 * 1024 * 1024))
+        self.assertTrue(got.startswith(b'HTTP/1.1 413'), got[:200])
+        self.assertIn(b'Files up to', got)
+        for odd in (b'Content-Length: -5\r\n', b'Transfer-Encoding: chunked\r\n'):  # a length this server does not read: answered, then closed
+            got = self.talk(b'POST /api/action HTTP/1.1\r\n' + host + b'Content-Type: application/json\r\n' + odd + b'\r\n5\r\nhello\r\n0\r\n\r\n')
+            self.assertEqual(got.count(b'HTTP/1.1 '), 1)
+            self.assertIn(b'Connection: close', got)
+
+    def test_a_quiet_stream_still_says_to_load_again(self):
+        # Audit, iOS 7: the phone loads the list only when told of a change; with nothing changing, its copy went
+        # stale and every chat greyed out.
+        import http.client
+        old = server.STREAM_BEAT, server.STREAM_IDLE
+        server.STREAM_BEAT, server.STREAM_IDLE = 0.05, 0.2
+        self.addCleanup(lambda: setattr(server, 'STREAM_BEAT', old[0]) or setattr(server, 'STREAM_IDLE', old[1]))
+        c = http.client.HTTPConnection('127.0.0.1', self.port, timeout=5)
+        self.addCleanup(c.close)
+        c.request('GET', '/api/stream')
+        r = c.getresponse()
+        seen, v = [], self.app.version
+        while seen.count('change') < 2:
+            line = r.fp.readline().decode().strip()
+            if line.startswith('event: '):
+                seen.append(line[7:])
+            elif line == ': beat':
+                seen.append('beat')
+        self.assertEqual(seen[0], 'hello')
+        self.assertIn('beat', seen[1:seen.index('change')], 'beats first, then the nudge')
+        self.assertEqual(self.app.version, v, 'nothing changed')
+
+
+class OddBodiesTest(unittest.TestCase):
+    """Audit, server 11 and 19: a field of the wrong type is a 400 that says so, never a server error."""
+    # /api/machines comes last: it removes the machine the other routes are tried on
+    PATHS = {'/api/relaunch': ['machine', 'sid', 'flags', 'other', 'model', 'effort', 'when', 'computer'],
+             '/api/action': ['machine', 'verb', 'sid', 'when', 'flags', 'name', 'to', 'on'],
+             '/api/new': ['machine', 'folder', 'model', 'mode', 'effort', 'flags', 'other', 'tools', 'chrome_machine', 'name', 'prompt'],
+             '/api/continue': ['machine', 'to', 'sid', 'folder', 'model'],
+             '/api/prefs': ['chrome_machine', 'presets', 'last', 'appearance', 'notify'],
+             '/api/event': ['machine', 'session_id', 'event', 'why', 'ctx', 'ts', 'cache_expires_at', 'title', 'idle'],
+             '/api/term': ['machine', 'sid', 'bg'], '/api/setup_fix': ['machine', 'fix'], '/api/chrome': ['machine', 'sid', 'chrome_machine'],
+             '/api/compact': ['machine', 'sid'], '/api/dispatch': ['from', 'machine', 'task', 'folder', 'mode'],
+             '/api/cleanup': ['action', 'items', 'machine', 'sid', 'pid'], '/api/tabs': ['device', 'tabs'],
+             '/api/groups': ['op', 'id', 'name', 'color', 'members', 'thread', 'index'], '/api/route': ['prompt', 'folder', 'chrome_machine'],
+             '/api/library/connect': ['tool', 'machine', 'on'], '/api/library/attach': ['machine', 'sid', 'tools'],
+             '/api/library/update': ['tool', 'auto', 'when'], '/api/live': ['job', 'token'], '/api/job/cancel': ['job'],
+             '/api/flags': ['machine', 'sid', 'want'], '/api/devices': ['token', 'name'], '/api/widget-token': ['token', 'name'],
+             '/api/privacy_settings': ['machine'],
+             '/api/machines': ['op', 'machine', 'label', 'root', 'names', 'name', 'target', 'roam', 'os']}
+
+    def test_no_wrong_type_is_a_server_error(self):
+        sid = 'aa' * 4 + '-1111-2222-3333-444444444444'
+        st = Path(mkdtemp())
+        app = server.App(fleet.Fleet(MACH, FakeTransport()), state_dir=st, web_dir=st, cfg_dir=Path(mkdtemp()), sleep=lambda s: None,
+                         poll_every=0, retry_waits=(0, 0))
+        app._refresh_soon = lambda *a, **k: None
+        app._drive = lambda jid: None
+        app.fleet.poll()
+        good = {'machine': 'desk', 'sid': sid, 'verb': 'resume', 'to': 'desk', 'op': 'rename', 'event': 'ping', 'session_id': sid,
+                'why': 'status', 'action': 'stop', 'items': [{'machine': 'desk', 'sid': sid}], 'task': 't', 'from': {'machine': 'desk'},
+                'label': 'x', 'names': ['desk', 'tower']}
+        bad = [[], {}, 5, 'x', None, True, [1, 'a'], {'a': []}]
+        for path, keys in self.PATHS.items():
+            for op in {'/api/machines': ['rename', 'root', 'roam', 'order', 'remove'], '/api/groups': ['create', 'update', 'add', 'move']}.get(path, [None]):
+                for verb in ['resume', 'keep', 'star', 'link', 'rename', 'handoff', 'stop', 'fresh'] if path == '/api/action' else [None]:
+                    for event in ['ping', 'held', 'prompt'] if path == '/api/event' else [None]:
+                        for k in keys:
+                            for b in bad:
+                                body = {x: good[x] for x in keys if x in good}
+                                body.update({n: v for n, v in (('op', op), ('verb', verb), ('event', event)) if v})
+                                body[k] = b
+                                try:
+                                    app.post(path, body, 'x', 'localhost')
+                                except server.HttpError as e:
+                                    self.assertLess(e.code, 500, (path, body))
+                                except Exception as e:
+                                    self.fail(f'{path} {k}={b!r}: {type(e).__name__}: {e}')
+
+    def test_a_machine_nobody_knows_is_a_400(self):
+        app = server.App(fleet.Fleet(MACH, FakeTransport()), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()), cfg_dir=Path(mkdtemp()), poll_every=0)
+        for path, body in (('/api/setup_fix', {'machine': 'mars', 'fix': 'hooks'}), ('/api/event', {'machine': ['desk'], 'session_id': 'S1', 'event': 'ping'}),
+                           ('/api/action', {'machine': {'a': 1}, 'verb': 'stop', 'sid': 'x'})):
+            with self.assertRaises(server.HttpError) as e:
+                app.post(path, body)
+            self.assertEqual(e.exception.code, 400, path)
+
+    def test_a_held_event_with_odd_numbers_still_makes_its_notice(self):
+        sent = []
+        app = server.App(fleet.Fleet(MACH, FakeTransport()), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()), cfg_dir=Path(mkdtemp()),
+                         poll_every=0, pusher=lambda *a: sent.append(a))
+        for ctx, idle in (('lots', None), ([1], {'a': 1}), (float('inf'), float('nan')), (True, -5)):
+            app._push_guard({'machine': 'desk', 'session_id': 'S1', 'title': 7, 'ctx': ctx, 'idle': idle})
+        self.assertEqual(len(sent), 4)
+        self.assertTrue(all(body.startswith('7 has 0k of context') for _, body, *_ in sent), sent)

@@ -10,7 +10,7 @@ The kit's SHA-256 comes from the app, which read it from the release's signed la
 with the key compiled into it: this server only downloads the file the app named, from the release the app named,
 and installs it only if it matches.
 """
-import json, os, platform, re, shutil, socket, subprocess, sys, time, urllib.request
+import json, os, platform, re, shutil, socket, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 
 import releases as releases_mod
@@ -235,19 +235,60 @@ def start_update(state, want, sha, busy_ok=False, now=None):
     if cur and vkey(want) < vkey(cur):
         raise ValueError(f'This server already has {cur}.')
     now = now or time.time()
-    s = update_state(state, now)
-    if s and s.get('ok') is None and not busy_ok:
-        raise RuntimeError('An update is already running.')
     d = update_dir(state)
-    d.mkdir(parents=True, exist_ok=True)
-    first = {'step': 'starting', 'version': want, 'from': cur, 'started': now, 'at': now, 'ok': None, 'error': None}
-    (d / 'state.json').write_text(json.dumps(first))
-    # The updater runs from a copy: the installer replaces the folder this one is in.
-    tool = d / 'selfupdate.py'
-    shutil.copyfile(HERE / 'selfupdate.py', tool)
-    argv = [sys.executable or 'python3', '-I', str(tool), '--version', want, '--sha256', sha, '--repo', r,
-            '--dir', str(d), '--url', releases_mod.asset(r, want, KIT)]
-    if not (BIN / 'switchboard-hub').is_file():
-        argv.append('--no-hub')
-    detach(argv, 'switchboard-update', log_to=d / 'update.log')
+    # One updater at a time: two taps (the desktop and the phone) must not start two, each clearing the other's
+    # download from the folder they share. The check and the start are one step here, and the lock file holds for
+    # as long as the updater runs.
+    with _starting:
+        s = update_state(state, now)
+        running = bool(s and s.get('ok') is None)
+        if running and not busy_ok:
+            raise RuntimeError('An update is already running.')
+        d.mkdir(parents=True, exist_ok=True)
+        _take_lock(d, now, running, busy_ok)
+        first = {'step': 'starting', 'version': want, 'from': cur, 'started': now, 'at': now, 'ok': None, 'error': None}
+        try:
+            (d / 'state.json').write_text(json.dumps(first))
+            # The updater runs from a copy: the installer replaces the folder this one is in.
+            tool = d / 'selfupdate.py'
+            shutil.copyfile(HERE / 'selfupdate.py', tool)
+            argv = [sys.executable or 'python3', '-I', str(tool), '--version', want, '--sha256', sha, '--repo', r,
+                    '--dir', str(d), '--url', releases_mod.asset(r, want, KIT)]
+            if not (BIN / 'switchboard-hub').is_file():
+                argv.append('--no-hub')
+            detach(argv, 'switchboard-update', log_to=d / 'update.log')
+        except BaseException as e:  # it never started: nothing is left that says an update is running
+            try:
+                (d / 'state.json').write_text(json.dumps(dict(first, ok=False, error=f"The update couldn't start ({e}).")))
+            except OSError:
+                pass
+            (d / LOCK).unlink(missing_ok=True)
+            raise
     return {'ok': True, 'update': first}
+
+
+LOCK = 'lock'    # <state>/update/lock: there while an updater runs (selfupdate.py takes it away when it ends)
+LOCK_FRESH = 60  # a lock this new is never taken over, whatever state.json says
+_starting = threading.Lock()
+
+
+def _take_lock(d, now, running, force):
+    """Makes the lock file, or RuntimeError when another start holds it. One left behind by an updater that died
+    (nothing running by state.json, or the user said to go ahead anyway) is taken over."""
+    lock = d / LOCK
+    for _ in range(2):
+        try:
+            fd = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            try:
+                age = time.time() - lock.stat().st_mtime
+            except OSError:
+                continue  # gone this moment: try again
+            if not force and (running or age < LOCK_FRESH):
+                break
+            lock.unlink(missing_ok=True)
+            continue
+        with os.fdopen(fd, 'w') as f:
+            f.write(str(int(now)))
+        return
+    raise RuntimeError('An update is already running.')

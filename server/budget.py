@@ -2,8 +2,8 @@
 cap on the 5-hour window, and an optional hard limit that blocks new prompts and stops busy background chats.
 
 Settings live in <config>/budget.json; what happened (the hard limit's crossings, a lift) in <state>/budget_state.json
-and <state>/budget_events.json. The status is worked out here from what the server already keeps: the newest plan
-limits a machine reported and the week's samples (fleet.WeekHistory). Every poll carries it to the agents, which keep
+and <state>/budget_events.json. The status is worked out here from what the server already keeps: the plan limits
+the machines reported (fleet.Fleet.limits) and the week's samples (fleet.WeekHistory). Every poll carries it to the agents, which keep
 it for their hooks (agent/sb.py budget_status)."""
 import json, math, os, threading, time, traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 import fleet as fleet_mod
+import notes
 
 DEFAULTS = {'daily': 14.3, 'five_hour': None, 'hard': {'on': False, 'daily': 20.0, 'five_hour': None}, 'lifted_until': None}
 EVENTS_KEEP = 50
@@ -124,6 +125,10 @@ def fmt_pair(a, b):
     return fmt(a), fmt(b)
 
 
+ROOM_NEAR = 48 * 3600   # the daily caps give way only this close to the weekly reset
+OLD_NUMBERS = 600       # plan numbers older than this say how old they are (the apps' LIMITS_FRESH)
+
+
 def room_today(week, today, week_reset, now):
     """How much of the week today can use without running out before the reset: what was left when today began,
     shared evenly over the days left (today counts as one, and so does a part of a day). With 45% left and the
@@ -140,15 +145,37 @@ def _with_room(cap, room):
     return None if cap is None else max(cap, room) if room is not None else cap
 
 
+def when(ts, now, tz):
+    """A reset time in the server's zone: '4:10pm' today, else 'Mon 9am'."""
+    try:
+        zone = fleet_mod._zone(tz)
+        t, today = datetime.fromtimestamp(ts, zone), datetime.fromtimestamp(now, zone).date()
+    except (TypeError, ValueError, OverflowError, OSError):
+        return None
+    clock = t.strftime('%I:%M%p').lstrip('0').lower().replace(':00', '')
+    return clock if t.date() == today else f'{t.strftime("%a")} {clock}'
+
+
 def compute(settings, week, week_reset, five, five_reset, today, now, tz, updated=None):
     """The budget's status from the plan limits (pure: the tests drive it directly)."""
     s, h = settings, settings['hard']
     known = week is not None and bool(week_reset) and week_reset > now
+    week_over = week is not None and bool(week_reset) and week_reset <= now
     if not known:
         week, today = None, None
+    # The 5-hour number counts only while its window is open. One from a window that has reset is not true any
+    # more, and a blocked prompt brings no reply to replace it, so it must never keep a cap or the hard limit tripped.
+    if five is not None and five_reset and five_reset > now:
+        five_state = 'open'
+    else:
+        # 'reset': the last window anybody saw this week is over (fleet.merge_limits keeps it that long).
+        # 'none': a reply showed the week and nobody saw a 5-hour window all week, so the plan does not report one
+        five_state = 'reset' if five is not None and five_reset else 'none' if five is None and known else 'unknown'
+        five, five_reset = None, None
     lifted = bool(s.get('lifted_until')) and now < s['lifted_until']
     pace = fleet_mod._projected(week, week_reset, now) if known else None
-    room = room_today(week, today, week_reset, now) if known else None
+    # Near the weekly reset, and only there, a day may use whatever the week still has left.
+    room = room_today(week, today, week_reset, now) if known and week_reset - now <= ROOM_NEAR else None
     daily = _with_room(s['daily'], room)
     over_daily = today is not None and daily is not None and today >= daily
     over_five = five is not None and s['five_hour'] is not None and five >= s['five_hour']
@@ -157,57 +184,78 @@ def compute(settings, week, week_reset, five, five_reset, today, now, tz, update
     hard_five = h['on'] and five is not None and h['five_hour'] is not None and five >= h['five_hour']
     over_hard = bool(hard_daily or hard_five)
     day = datetime.fromtimestamp(now, fleet_mod._zone(tz)).date().isoformat()
-    st = {'known': known, 'day': day, 'tz': tz if isinstance(tz, str) else str(tz),
+    st = {'known': known, 'day': day, 'tz': tz if isinstance(tz, str) else str(tz), 'now': now,
           'today': today, 'room': room, 'daily': daily, 'hard_daily': hard_cap, 'week': week, 'week_reset': week_reset if known else None, 'projected': pace,
-          'five_hour': five, 'five_hour_reset': five_reset if five is not None else None, 'updated': updated,
+          'week_over': week_over, 'five_hour': five, 'five_hour_reset': five_reset, 'five_hour_state': five_state, 'updated': updated,
           'over_daily': over_daily, 'over_five_hour': over_five, 'over_budget': over_daily or over_five,
           'over_hard': over_hard, 'hard_reason': 'daily' if hard_daily else 'five_hour' if hard_five else None,
           'lifted': lifted, 'blocking': over_hard and not lifted}
-    st['summary'] = summary_text(settings, st)
+    st['summary'] = summary_text(settings, st, tz)
     st['notice'] = notice_text(settings, st) if st['over_budget'] else None
-    st['block'] = block_text(settings, st) if st['blocking'] else None
+    st['block'] = block_text(settings, st, tz) if st['blocking'] else None
     return st
 
 
-def summary_text(s, st):
-    """What the usage MCP tool says: one short paragraph."""
+def _hit(used, cap):
+    """', over' or ', reached' after a cap, or nothing while under it."""
+    return '' if used is None or cap is None or used < cap else ', reached' if used == cap else ', over'
+
+
+def summary_text(s, st, tz=None):
+    """What the usage MCP tool says: one short paragraph. Reset times are in `tz`, the server's zone."""
+    now, tz = st['now'], st['tz'] if tz is None else tz
     if not st['known'] and st['five_hour'] is None:
+        if st['week_over']:
+            return ('The week has reset and no chat has replied since, so Switchboard has no new plan numbers yet. '
+                    'They come with the next reply.')
         return 'Switchboard cannot tell the plan usage yet: no Claude session has reported the plan limits recently.'
     parts = []
+    raised = ', raised to use what is left before the reset'
     if st['today'] is None:
-        parts.append('Today: not known yet' + (f' (budget {fmt(s["daily"])}).' if s['daily'] is not None else '.'))
+        parts.append('Today: not known yet' + (f' (daily budget {fmt(s["daily"])}).' if s['daily'] is not None else '.'))
     elif s['daily'] is None:
-        parts.append(f'Today: {fmt(st["today"])} of the week (no daily budget).')
+        parts.append(f'Today used {fmt(st["today"])} of the weekly limit (no daily budget).')
     else:
         a, b = fmt_pair(st['today'], st['daily'])
-        roomy = st['daily'] is not None and st['daily'] > s['daily']
-        parts.append(f'Today: {a} of the week (budget {b}' + (', raised to use what is left before the reset' if roomy else '')
-                     + (', over' if st['over_daily'] else '') + ').')
+        parts.append(f'Today used {a} of the weekly limit (daily budget {b}' + (raised if st['daily'] > s['daily'] else '')
+                     + _hit(st['today'], st['daily']) + ').')
     if st['week'] is None:
-        parts.append('Week: not known.')
-    elif st['projected'] is not None:
-        parts.append(f'Week: {fmt(st["week"])}, on pace for {fmt(st["projected"])}.')
+        parts.append('Week: the week has reset; new numbers come with the next reply.' if st['week_over'] else 'Week: not known.')
     else:
-        parts.append(f'Week: {fmt(st["week"])}.')
-    if st['five_hour'] is None:
-        parts.append('5 hours: not known.')
-    elif s['five_hour'] is not None:
-        a, b = fmt_pair(st['five_hour'], s['five_hour'])
-        parts.append(f'5 hours: {a} (cap {b}' + (', over' if st['over_five_hour'] else '') + ').')
-    else:
-        parts.append(f'5 hours: {fmt(st["five_hour"])}.')
+        at = when(st['week_reset'], now, tz)
+        parts.append(f'Week: {fmt(st["week"])} used' + (f', on pace for {fmt(st["projected"])}' if st['projected'] is not None else '')
+                     + (f', resets {at}' if at else '') + '.')
     h = s['hard']
+    unchecked = st['five_hour_state'] == 'none'  # a 5-hour cap with no 5-hour number to hold it against
+    if st['five_hour_state'] == 'open':
+        at = when(st['five_hour_reset'], now, tz)
+        a, b = fmt_pair(st['five_hour'], s['five_hour']) if s['five_hour'] is not None else (fmt(st['five_hour']), None)
+        parts.append(f'5 hours: {a} used' + (f' (cap {b}{_hit(st["five_hour"], s["five_hour"])})' if b else '')
+                     + (f', resets {at}' if at else '') + '.')
+    elif st['five_hour_state'] == 'reset':
+        parts.append('5 hours: no 5-hour window open; the next reply starts a new one.')
+    elif unchecked:
+        parts.append('5 hours: not reported on this plan' + (f', so the {fmt(s["five_hour"])} cap cannot be checked'
+                                                               if s['five_hour'] is not None else '') + '.')
+    else:
+        parts.append('5 hours: not known.')
     if not h['on'] or (h['daily'] is None and h['five_hour'] is None):
         parts.append('Hard limit: off.')
     else:
-        lim = ', '.join(x for x in ((f'{fmt(h["daily"])} a day' if h['daily'] is not None else ''),
-                                    (f'{fmt(h["five_hour"])} of 5 hours' if h['five_hour'] is not None else '')) if x)
+        # The daily limit as it is enforced: near the reset it gives way like the budget does.
+        day = st['hard_daily']
+        lim = ', '.join(x for x in ((f'{fmt(day)} a day' + (raised if day > h['daily'] else '') if day is not None else ''),
+                                    (f'{fmt(h["five_hour"])} of 5 hours' + (' (cannot be checked)' if unchecked else '')
+                                     if h['five_hour'] is not None else '')) if x)
         if st['lifted']:
             parts.append(f'Hard limit: {lim}, lifted for today.')
         elif st['over_hard']:
             parts.append(f'Hard limit: {lim}, reached; new prompts are blocked.')
         else:
             parts.append(f'Hard limit: {lim}.')
+    age = now - st['updated'] if isinstance(st['updated'], (int, float)) and st['updated'] > 0 else None
+    if age is not None and age >= OLD_NUMBERS:
+        parts.append(f'These numbers are from {notes._left(age)} ago; they update when a chat replies.')
     return ' '.join(parts)
 
 
@@ -216,29 +264,30 @@ def notice_text(s, st):
     pace = f'; week on pace for {fmt(st["projected"])}' if st['projected'] is not None else ''
     if st['over_daily']:
         a, b = fmt_pair(st['today'], st['daily'])
-        why = f'over their daily usage budget (today {a} of the week, budget {b}{pace})'
+        why = f'over their daily usage budget (today used {a} of the weekly limit, daily budget {b}{pace})'
     else:
         a, b = fmt_pair(st['five_hour'], s['five_hour'])
         why = f'over their 5-hour usage cap (5-hour window at {a}, cap {b}{pace})'
     return f'Switchboard: the user is {why}. Mention this to them once, briefly, then carry on.'
 
 
-def block_text(s, st):
+def block_text(s, st, tz=None):
     """Why a prompt was blocked, shown to the user in the chat."""
     h = s['hard']
     if st['hard_reason'] == 'daily':
         a, b = fmt_pair(st['today'], st['hard_daily'])
-        return (f"Switchboard hard limit: you've used {a} of the week today (limit {b}). "
+        return (f"Switchboard hard limit: you've used {a} of your weekly limit today (daily limit {b}). "
                 'Lift it for today in Switchboard Settings, or wait until tomorrow.')
     a, b = fmt_pair(st['five_hour'], h['five_hour'])
+    at = when(st['five_hour_reset'], st['now'], st['tz'] if tz is None else tz)
     return (f'Switchboard hard limit: your 5-hour window is at {a} (limit {b}). Lift it for today in Switchboard '
-            'Settings, or wait for the window to reset.')
+            'Settings, or wait for the window to reset' + (f' at {at}.' if at else '.'))
 
 
 def stop_text(n, st):
     """The notification and event when the hard limit stops chats."""
     chats = 'No background chats were running' if n == 0 else f'Stopped {n} chat' + ('s' if n != 1 else '')
-    where = (f"You've used {fmt(st['today'])} of the week today" if st['hard_reason'] == 'daily'
+    where = (f"You've used {fmt(st['today'])} of your weekly limit today" if st['hard_reason'] == 'daily'
              else f'Your 5-hour window is at {fmt(st["five_hour"])}')
     return f'{chats}. {where}.'
 
@@ -294,7 +343,7 @@ class Budget:
     def status(self, now=None):
         now = self.app.clock() if now is None else now
         f = self.app.fleet
-        lim = f._newest_limits(f.snapshot()['machines']) if hasattr(f, '_newest_limits') else {}
+        lim = f.limits(now) if hasattr(f, 'limits') else {}
         week, reset = lim.get('seven_day'), lim.get('seven_day_reset')
         h = getattr(f, 'history', None)
         today = h.today(week, reset, now) if h is not None and hasattr(h, 'today') else None

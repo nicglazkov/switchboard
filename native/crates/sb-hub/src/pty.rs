@@ -34,6 +34,12 @@ pub struct Spawn<'a> {
 }
 
 const CHUNK: usize = 32 * 1024;
+/// Output is sent at most this often while it keeps coming, each time with everything read since (up to about
+/// `CHUNK`). A program that writes in hundreds of tiny pieces a second (ConPTY repainting on Windows) then costs a
+/// handful of messages instead of one each; the first piece after a quiet moment still goes out at once.
+const GATHER: Duration = Duration::from_millis(5);
+/// How far into the output ConPTY's cursor request is looked for before giving up on it.
+const ASK_WITHIN: usize = 4096;
 /// Input is queued in pieces of at most this much.
 pub const INPUT_PIECE: usize = 16 * 1024;
 /// Input pieces waiting for the process to read them (4 MiB).
@@ -70,38 +76,63 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(INPUT_BACKLOG);
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
     let rate = s.rate.max(1) as f64;
-    // Only the first read needs to answer; the clone goes after it, so dropping the Term still closes the input.
-    let mut answer = cfg!(windows).then(|| in_tx.clone());
+    // Only the start of the output needs an answer; the clone goes once it is given (or given up on), so dropping
+    // the Term still closes the input.
+    let mut answer = cfg!(windows).then(|| (in_tx.clone(), Asked::default()));
+    // The reader hands what it reads to a second thread, which sends it on in fewer, larger messages (`GATHER`).
+    let (read_tx, read_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
     std::thread::Builder::new().name("pty-read".into()).spawn(move || {
         let burst = (rate / 4.0).max(CHUNK as f64);
         let (mut tokens, mut last) = (burst, Instant::now());
         let mut buf = vec![0u8; CHUNK];
         loop {
-            let mut n = match reader.read(&mut buf) {
+            let n = match reader.read(&mut buf) {
                 Ok(0) | Err(_) => break, // EOF, or EIO once the process is gone
                 Ok(n) => n,
             };
-            if let Some(tx) = answer.take()
-                && let Some(at) = buf[..n].windows(CONPTY_ASKS.len()).position(|w| w == CONPTY_ASKS)
-            {
-                // ConPTY asks where the cursor is and holds the process until it hears back. Nobody may be
-                // watching yet, and a viewer's answer would be a second one, so answer here and pass nothing on.
-                let _ = tx.try_send(b"\x1b[1;1R".to_vec());
-                buf.copy_within(at + CONPTY_ASKS.len()..n, at);
-                n -= CONPTY_ASKS.len();
-                if n == 0 {
+            let mut out = buf[..n].to_vec();
+            if let Some((tx, asked)) = answer.as_mut() {
+                let (rest, found) = asked.take(&out);
+                out = rest;
+                if found == Some(true) {
+                    // ConPTY asks where the cursor is and holds the process until it hears back. Nobody may be
+                    // watching yet, and a viewer's answer would be a second one, so answer here and pass nothing on.
+                    let _ = tx.try_send(b"\x1b[1;1R".to_vec());
+                }
+                if found.is_some() {
+                    answer = None;
+                }
+                if out.is_empty() {
                     continue;
                 }
             }
-            let out = &buf[..n];
             let now = Instant::now();
             tokens = (tokens + now.duration_since(last).as_secs_f64() * rate).min(burst) - out.len() as f64;
             last = now;
-            if out_tx.blocking_send(out.to_vec()).is_err() {
+            if read_tx.send(out).is_err() {
                 break; // nobody is listening any more
             }
             if tokens < 0.0 {
                 std::thread::sleep(Duration::from_secs_f64(-tokens / rate));
+            }
+        }
+        // the output ended while the start of a request was held back: those bytes were output after all
+        if let Some((_, asked)) = answer
+            && !asked.held.is_empty()
+        {
+            let _ = read_tx.send(asked.held);
+        }
+    })?;
+
+    std::thread::Builder::new().name("pty-out".into()).spawn(move || {
+        let mut sent = None::<Instant>;
+        while let Ok(first) = read_rx.recv() {
+            // right after a send, wait out the rest of its `GATHER`; after a quiet moment, send at once
+            let until = sent.map_or_else(Instant::now, |t| t + GATHER);
+            let out = gather(first, &read_rx, until, CHUNK);
+            sent = Some(Instant::now());
+            if out_tx.blocking_send(out).is_err() {
+                break; // nobody is listening any more
             }
         }
     })?;
@@ -128,6 +159,49 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     })?;
 
     Ok((Term { master, killer, input: in_tx }, TermIo { output: out_rx, exited: exit_rx }))
+}
+
+/// `out` and everything else read before `until`, as one piece. It stops early at `max` bytes (the piece may run
+/// over by less than one read) and when the output ends. Past `until` it still takes what is already waiting, but
+/// waits for nothing.
+fn gather(mut out: Vec<u8>, more: &std::sync::mpsc::Receiver<Vec<u8>>, until: Instant, max: usize) -> Vec<u8> {
+    while out.len() < max {
+        match more.recv_timeout(until.saturating_duration_since(Instant::now())) {
+            Ok(b) => out.extend_from_slice(&b),
+            Err(_) => break, // the time is up with nothing waiting, or the output ended
+        }
+    }
+    out
+}
+
+/// Looks for ConPTY's cursor request at the start of the output. It is usually the first thing written, but may
+/// come in a later read, or split across two.
+#[derive(Default)]
+struct Asked {
+    /// The end of the last read, when it could be the start of the request.
+    held: Vec<u8>,
+    seen: usize,
+}
+
+impl Asked {
+    /// The output to pass on from this read, and whether the search is over: Some(true) when the request was found
+    /// (and taken out), Some(false) when it was not in the first `ASK_WITHIN` bytes.
+    fn take(&mut self, data: &[u8]) -> (Vec<u8>, Option<bool>) {
+        let mut all = std::mem::take(&mut self.held);
+        all.extend_from_slice(data);
+        if let Some(at) = all.windows(CONPTY_ASKS.len()).position(|w| w == CONPTY_ASKS) {
+            all.drain(at..at + CONPTY_ASKS.len());
+            return (all, Some(true));
+        }
+        self.seen += data.len();
+        if self.seen >= ASK_WITHIN {
+            return (all, Some(false));
+        }
+        // keep back an end that could be the request's first bytes, until the next read shows
+        let keep = (1..CONPTY_ASKS.len()).rev().find(|&k| all.ends_with(&CONPTY_ASKS[..k])).unwrap_or(0);
+        self.held = all.split_off(all.len() - keep);
+        (all, None)
+    }
 }
 
 impl Term {
@@ -208,6 +282,98 @@ mod tests {
         assert_eq!(io.exited.await.unwrap(), Some(3));
         assert!(term.killer.lock().unwrap().is_none(), "its PID may be someone else's now");
         drop(term); // hangs up nothing
+    }
+
+    #[test]
+    fn many_small_writes_go_out_as_a_few_pieces() {
+        // what ConPTY does on Windows: hundreds of tiny writes a second
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        let writer = std::thread::spawn(move || {
+            for i in 0..400u32 {
+                tx.send(format!("\x1b[{};1Hx", i % 24 + 1).into_bytes()).unwrap();
+                if i % 40 == 39 {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+            }
+        });
+        let (mut pieces, mut bytes, mut sent) = (0, 0, None::<Instant>);
+        while let Ok(first) = rx.recv() {
+            let until = sent.map_or_else(Instant::now, |t| t + GATHER);
+            let out = gather(first, &rx, until, CHUNK);
+            sent = Some(Instant::now());
+            pieces += 1;
+            bytes += out.len();
+        }
+        writer.join().unwrap();
+        let wrote: usize = (0..400u32).map(|i| format!("\x1b[{};1Hx", i % 24 + 1).len()).sum();
+        assert_eq!(bytes, wrote, "nothing lost, nothing doubled");
+        assert!(pieces <= 100, "{pieces} pieces for 400 writes");
+    }
+
+    #[test]
+    fn gathering_keeps_the_order_and_stops_at_the_size_and_the_time() {
+        let (tx, rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
+        for part in ["b", "c", "d"] {
+            tx.send(part.as_bytes().to_vec()).unwrap();
+        }
+        // the time is already up: what is waiting is still taken, and nothing is waited for
+        let began = Instant::now();
+        assert_eq!(gather(b"a".to_vec(), &rx, Instant::now(), CHUNK), b"abcd");
+        assert!(began.elapsed() < Duration::from_millis(100));
+        // a full piece is sent without looking further
+        tx.send(b"later".to_vec()).unwrap();
+        assert_eq!(gather(vec![b'x'; 8], &rx, Instant::now() + Duration::from_secs(5), 8), vec![b'x'; 8]);
+        assert_eq!(gather(b"".to_vec(), &rx, Instant::now(), 8), b"later");
+        // a single keystroke's echo waits no longer than the window
+        let began = Instant::now();
+        assert_eq!(gather(b"k".to_vec(), &rx, Instant::now() + GATHER, CHUNK), b"k");
+        assert!(began.elapsed() < Duration::from_millis(250), "{:?}", began.elapsed());
+        // the end of the output ends the wait
+        drop(tx);
+        let began = Instant::now();
+        assert_eq!(gather(b"z".to_vec(), &rx, Instant::now() + Duration::from_secs(5), CHUNK), b"z");
+        assert!(began.elapsed() < Duration::from_secs(1));
+    }
+
+    #[test]
+    fn the_cursor_request_is_found_in_a_later_read_or_split_in_two() {
+        // in the first read, among other output
+        let mut a = Asked::default();
+        assert_eq!(a.take(b"ab\x1b[6ncd"), (b"abcd".to_vec(), Some(true)));
+        // in the second read
+        let mut a = Asked::default();
+        assert_eq!(a.take(b"\x1b[?25l"), (b"\x1b[?25l".to_vec(), None));
+        assert_eq!(a.take(b"\x1b[6n"), (vec![], Some(true)));
+        // split two and two: the first half is held back, then both are taken out
+        let mut a = Asked::default();
+        assert_eq!(a.take(b"hi\x1b["), (b"hi".to_vec(), None));
+        assert_eq!(a.take(b"6nthere"), (b"there".to_vec(), Some(true)));
+        // a held end that turns out to be something else is passed on, in order
+        let mut a = Asked::default();
+        assert_eq!(a.take(b"x\x1b"), (b"x".to_vec(), None));
+        assert_eq!(a.take(b"[2J"), (b"\x1b[2J".to_vec(), None));
+        // never asked: the search stops, and nothing is kept back
+        let mut a = Asked::default();
+        assert_eq!(a.take(&vec![b'.'; ASK_WITHIN - 1]).1, None);
+        let (out, found) = a.take(b"\x1b");
+        assert_eq!((out, found), (b"\x1b".to_vec(), Some(false)));
+        assert!(a.held.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_program_writing_in_tiny_pieces_reaches_the_viewer_whole_and_in_few_messages() {
+        let script = "i=0; while [ $i -lt 300 ]; do printf 'line %03d;' $i; i=$((i+1)); done; printf END";
+        let (_term, mut io) = run(&["/bin/sh".into(), "-c".into(), script.into()]);
+        let (mut all, mut pieces) = (Vec::new(), 0);
+        while let Some(b) = io.output.recv().await {
+            all.extend_from_slice(&b);
+            pieces += 1;
+        }
+        let text = String::from_utf8_lossy(&all);
+        let want: String = (0..300).map(|i| format!("line {i:03};")).collect::<String>() + "END";
+        assert_eq!(text, want);
+        assert!(pieces < 150, "{pieces} messages for 300 writes");
     }
 
     #[tokio::test]

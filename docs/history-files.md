@@ -46,7 +46,8 @@ Nothing in History is ever deleted.
 - **A folder's files** in the middle, with a preview of a text file (its first 64 KB) and quick look
   (++space++).
 - **The chats in that folder** on the right, with **Open terminal** or **Resume**, **New chat here**, and **Paste the
-  path** to put a file's path into a chat.
+  path** to put a file's path into a chat (in quotes when it has a space). Six chats are listed, and a line
+  under them says how many more there are.
 
 Each folder says whether Claude can work there, or will ask first.
 

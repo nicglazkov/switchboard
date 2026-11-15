@@ -110,7 +110,13 @@ fn main() {
                 MenuItem::separator(),
                 MenuItem::action("Quit Switchboard", view::Quit),
             ]),
+            Menu::new("File").items([
+                MenuItem::action("New chat...", view::NewSession),
+                MenuItem::separator(),
+                MenuItem::action("Close tab", view::CloseTab),
+            ]),
             Menu::new("View").items([
+                MenuItem::action("Command palette", view::TogglePalette),
                 MenuItem::action("History", view::Browse),
                 MenuItem::action("Switch light and dark", view::ToggleTheme),
             ]),

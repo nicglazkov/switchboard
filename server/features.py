@@ -8,6 +8,8 @@ import json, os, re, threading, time, traceback, urllib.request
 from pathlib import Path
 
 import budget as budget_mod
+import flags as flags_mod
+import fleet as fleet_mod
 import library as library_mod
 import nodes as nodes_mod
 
@@ -35,16 +37,28 @@ def jsave(p, obj):
     os.replace(tmp, p)
 
 
-def hub_open(url=None, timeout=1.5):
-    """{(machine, bg)} with a terminal open on the hub right now. Empty when the hub is down or says nothing.
+def hub_open_known(url=None, timeout=1.5):
+    """{(machine, bg)} with a terminal open on the hub right now; None when the hub could not be asked.
     The hub is the one nodes.py talks to, so a hub on SWITCHBOARD_HUB_PORT or SWITCHBOARD_HUB_URL is found too."""
     try:
         with urllib.request.urlopen(url or nodes_mod.HUB + '/internal/open', timeout=timeout) as r:
             d = json.loads(r.read() or b'[]')
     except Exception:
-        return set()
+        return None
     rows = d.get('open') if isinstance(d, dict) else d
-    return {(x.get('machine'), x.get('bg')) for x in rows or [] if isinstance(x, dict)}
+    return {(x.get('machine'), x.get('bg')) for x in (rows if isinstance(rows, list) else []) if isinstance(x, dict)}
+
+
+def hub_open(url=None, timeout=1.5):
+    """hub_open_known, empty when the hub is down or says nothing."""
+    return hub_open_known(url, timeout) or set()
+
+
+def query_words(q):
+    """The words of a search, lower case, in any script. A search made only of signs (C++, a path) is looked for as
+    it was typed, so it never matches everything."""
+    q = q.lower() if isinstance(q, str) else ''
+    return re.findall(r'\w+', q) or ([q.strip()] if q.strip() else [])
 
 
 def quiet_s(s, now):
@@ -60,6 +74,7 @@ REAPER_DEFAULTS = {'enabled': True, 'idle_h': 72, 'stalled_h': 12, 'replaced_h':
 IDLE_MIN_H = 72          # an idle background chat younger than three days is never suggested
 ORPHAN_H = 6
 TABS_KEEP = 30 * 86400   # an app that has not sent its tabs for this long is gone; its tabs stop counting
+OPEN_TRUST = 300         # while the hub does not answer, the terminals it last listed still count as open for this long
 REAPED_KEEP = 200
 STOPPED_SHOW = 86400     # a chat stopped from the card stays there for a day, with Resume
 PUSH_EVERY = 86400       # the "not in use" notification comes at most once a day
@@ -111,19 +126,24 @@ def why_text(reason, s, now):
 
 
 class Reaper:
-    def __init__(self, app, cfg_path, opened=hub_open):
+    def __init__(self, app, cfg_path, opened=hub_open_known):
         self.app, self.cfg_path, self.opened = app, Path(cfg_path), opened
         self.keep_path, self.log_path = app.state_dir / 'keep.json', app.state_dir / 'reaped.json'
         self.seen_path = app.state_dir / 'cleanup_seen.json'
         self.tabs_path = app.state_dir / 'tabs.json'
         self.lock, self.busy = threading.Lock(), threading.Lock()
-        self._open = (0, set())
+        self._open, self._open_at = (0, set()), 0  # (asked when, what it said), and when the hub last answered
 
     def open_now(self):
         """Terminals open on the hub, asked at most every 10 s (every session list reads it)."""
         t = time.time()
         if t - self._open[0] > 10:
-            self._open = (t, self.opened())
+            got = self.opened()
+            if got is None:  # the hub did not say (it is restarting): a terminal seen open a moment ago still counts
+                got = self._open[1] if t - self._open_at < OPEN_TRUST else set()
+            else:
+                self._open_at = t
+            self._open = (t, got)
         return self._open[1]
 
     def config(self):
@@ -162,8 +182,11 @@ class Reaper:
             if m:  # anything else (an older key, a tab still starting) is left out, not the whole list
                 out.append(f'{m.group(1)}/{m.group(2)}')
         with self.lock:
+            now = self.app.clock()
             d = jload(self.tabs_path, {})
-            d[device] = {'at': self.app.clock(), 'keys': sorted(set(out))}
+            d = {k: v for k, v in (d.items() if isinstance(d, dict) else ())  # an app not seen for weeks is forgotten
+                 if isinstance(v, dict) and isinstance(v.get('at'), (int, float)) and now - v['at'] < TABS_KEEP}
+            d[device] = {'at': now, 'keys': sorted(set(out))}
             jsave(self.tabs_path, d)
         return len(out)
 
@@ -272,10 +295,12 @@ class Reaper:
             keys = {self.key(d) for d in items}
             new = [d for d in items if self.key(d) not in seen.get('keys', {})]
             seen['keys'] = {k: seen.get('keys', {}).get(k, now) for k in keys}  # forget what went away
-            if new and now - (seen.get('pushed') or 0) >= PUSH_EVERY:
+            tell = new and now - (seen.get('pushed') or 0) >= PUSH_EVERY
+            if tell:
                 seen['pushed'] = now
+            jsave(self.seen_path, seen)  # written down first: a push that fails is not sent again at every poll
+            if tell:
                 self.app._push(*self.notice(items), 'cleanup', 'cleanup')
-            jsave(self.seen_path, seen)
         except Exception:
             log('cleanup failed: ' + traceback.format_exc())
         finally:
@@ -313,7 +338,7 @@ class Reaper:
             raise ValueError('too many items')
         for name in {k.split('/', 1)[0] for k in want}:
             self.app.fleet.poll_one(name)
-        self._open = (0, set())  # a terminal opened a moment ago counts
+        self._open = (0, self._open[1])  # asked again: a terminal opened a moment ago counts
         now = self.app.clock()
         now_items = {self.key(d): d for d in self.decisions()}
         out = {'stopped': [], 'skipped': [], 'failed': []}
@@ -387,7 +412,7 @@ class Reaper:
                 if d:
                     s['cleanup'] = {'reason': d['reason'], 'why': d['why']}
                 r = reaped.get((m['name'], s.get('sid')))
-                if r and s.get('status') in (None, 'stopped') and (s.get('active') or 0) <= r['at'] + 60:
+                if r and m.get('agents_ok') is not False and s.get('status') in (None, 'stopped') and (s.get('active') or 0) <= r['at'] + 60:
                     s['reaped'] = {'at': r['at'], 'reason': r['reason'], 'idle_h': r.get('idle_h')}
         snap['cleanup'] = {k: rep[k] for k in ('items', 'count', 'mb', 'stopped')}
 
@@ -863,13 +888,14 @@ class Threads:
 
     def search(self, q='', exclude=None, limit=40):
         """Chats for "This continues...": older than `exclude` (the chat being linked), its own folder first."""
-        words = [w for w in re.findall(r'[a-z0-9]+', (q or '').lower())]
+        words = query_words(q)
         _, _, roots, _ = self.graph()
         mine = roots.get(exclude)
-        me = self.chats.get(exclude) or {}
+        chats = dict(self.chats)  # a poll adds chats while this reads
+        me = chats.get(exclude) or {}
         before, home = me.get('started'), (me.get('machine'), repo_key(me.get('cwd')))
         rows = []
-        for k, c in self.chats.items():
+        for k, c in chats.items():
             if k == exclude or (before and (c.get('started') or 0) >= before):
                 continue
             hay = f'{c.get("title") or ""} {c.get("cwd") or ""} {c["machine"]} {self.app._label(c["machine"])}'.lower()
@@ -881,12 +907,12 @@ class Threads:
                  'in_thread': bool(mine) and roots.get(ck(c['machine'], c['sid'])) == mine} for c in rows[:limit]]
 
     def link(self, child, to):
-        chats = self.chats
+        chats = dict(self.chats)  # a poll adds chats while this reads
         if child not in chats or to not in chats:
             raise ValueError("Switchboard hasn't seen that chat.")
         if child == to:
             raise ValueError("A chat can't continue itself.")
-        parents = self.parents()
+        parents = self.parents(chats)
         cur = to
         for _ in range(500):  # the older chat must not already come after this one
             if cur == child:
@@ -1400,6 +1426,8 @@ class Auto:
                           chrome_machine=plan.get('chrome_machine'))
         if req.get('flags') and 'flags' not in (app.fleet.state.get(pick['machine'], {}).get('features') or []):
             raise self.HttpError(400, f'{pick["label"]} needs the Switchboard update before it can take these flags.')
+        if req.get('flags'):  # "Asks first" by the name the picked machine's Claude Code takes
+            req['flags'] = flags_mod.fit_perm(req['flags'], app.ask_mode(pick['machine']))
         req['folder'] = pick['folder']
         plan = dict(plan, req=req, mkdir=pick['folder'] if pick['create'] else None)
         picked = f'Auto picked {pick["label"]}. {pick["why"]}'
@@ -1488,10 +1516,33 @@ class Dispatch:
         with self.lock:
             self.d[did] = rec
             self._save()
+        with app.jobs_lock:
+            j = dict(app.jobs.get(r['job']) or {})
+        if j.get('state') in ('done', 'error'):  # it finished before the task was written down
+            self.launched(r['job'], j)
         out = {'ok': True, 'id': did, 'machine': target, 'label': app._label(target), 'job': r['job']}
         if pick:
             out['why'] = pick['why']
         return out
+
+    @staticmethod
+    def _took(rec, j, now):
+        """What a finished launch says goes into the task: the chat it started, or why it did not."""
+        rec['machine'] = j.get('machine') if isinstance(j.get('machine'), str) else rec['machine']
+        if j.get('state') == 'error':
+            rec.update(state='failed', error=j.get('error') or "It didn't start.", done_at=now)
+        elif j.get('state') == 'done' and j.get('sid'):
+            rec.update(sid=j['sid'], url=j.get('url'), launched=rec.get('launched') or j.get('finished') or now)
+
+    def launched(self, jid, j):
+        """The launch job ended (App._finish). Its outcome is kept with the task right away: jobs are forgotten after
+        an hour, tasks are kept a week, and a check() that comes later than the job must still find the chat."""
+        with self.lock:
+            hit = [r for r in self.d.values() if r.get('job') == jid and r.get('state') == 'starting' and not r.get('sid')]
+            for rec in hit:
+                self._took(rec, j, self.app.clock())
+            if hit:
+                self._save()
 
     def _poll_soon(self, name):
         now = time.time()
@@ -1513,19 +1564,16 @@ class Dispatch:
                 if j:
                     j['watched'] = now  # the session that sent it is following along; no push for the launch
                     j = dict(j)
-            if j:
-                rec['machine'] = j.get('machine') or rec['machine']
-                if j.get('state') == 'error':
-                    rec.update(state='failed', error=j.get('error') or "It didn't start.", done_at=now)
-                elif j.get('state') == 'done' and j.get('sid'):
-                    rec.update(sid=j['sid'], url=j.get('url'), launched=rec.get('launched') or j.get('finished') or now)
+            if j and not rec.get('sid'):
+                self._took(rec, j, now)
             if rec.get('sid') and rec['state'] not in ('done', 'failed'):
                 self._follow(rec, now)
             elif not j and rec['state'] == 'starting':
                 rec.update(state='failed', error='Switchboard lost track of the launch. Check the list.', done_at=now)
             with self.lock:
-                self.d[did] = rec
-                self._save()
+                if did in self.d:
+                    self.d[did] = rec
+                    self._save()
         label = app._label(rec['machine'])
         out = {'ok': True, 'id': did, 'state': rec['state'], 'machine': rec['machine'], 'label': label, 'sid': rec.get('sid'),
                'url': rec.get('url'), 'report': rec.get('report') if rec['state'] == 'done' else None,
@@ -1535,14 +1583,40 @@ class Dispatch:
                 out[k] = rec[k]
         return out
 
+    def _still_working(self, rec, row, now):
+        """Its turn is over, but the work may not be: subagents and background commands it started can still run, and
+        a report read now would be the one written before they finished. A note saying what is left, or None when
+        it really is done.
+
+        Two things end the wait, so a task can never be "working" for good: a machine that has not said what is
+        running for 15 minutes, and a command left running on purpose (a dev server) that has written nothing for
+        15 minutes."""
+        b = self.app.busy(rec['machine'], rec['sid'])
+        if b.get('unknown'):
+            rec.setdefault('blind', now)
+            if now - rec['blind'] > fleet_mod.CHILD_WORK:
+                return None
+            return f"{self.app._label(rec['machine'])} isn't answering, so it's not clear yet whether its work is finished."
+        rec.pop('blind', None)
+        if not b['live']:
+            return None
+        quiet = now - max(last_use(row), rec.get('launched') or 0)
+        if not (b['subagents'] or b['pending'] or b['replying']) and quiet > fleet_mod.CHILD_WORK:
+            return None
+        return b['summary'] or 'Its subagents or commands are still running.'
+
     def _follow(self, rec, now):
         """A launched chat: working until it is idle after a reply (or stopped); then its last message is the report."""
-        row = None
+        row, blind = None, False
         for m in self.app.fleet.snapshot()['machines']:
             if m['name'] == rec['machine']:
                 row = next((s for s in m['sessions'] if s.get('sid') == rec['sid']), None)
+                blind = m.get('agents_ok') is False
         rec.pop('note', None)
         rec['state'] = 'working'
+        if blind:  # its machine could not say what runs: a row without a status is not a chat that stopped
+            self._poll_soon(rec['machine'])
+            return
         if row is None:
             if now - rec['launched'] > SHOW_LIST_S:
                 rec.update(state='failed', error=f'The chat isn\'t in {self.app._label(rec["machine"])}\'s list anymore.', done_at=now)
@@ -1554,6 +1628,12 @@ class Dispatch:
             rec['note'] = f'Waiting for an answer or a permission on {self.app._label(rec["machine"])}.'
         replied = (row.get('ctx') or 0) > 0
         if (status == 'idle' and replied) or (status not in LIVE and (replied or now - rec['launched'] > 60)):
+            left = self._still_working(rec, row, now) if status == 'idle' else None
+            if left:
+                rec['note'] = left
+                self._poll_soon(rec['machine'])
+                return
+            rec.pop('blind', None)
             rec.update(state='done', done_at=now)
             try:
                 r = self.app._call(rec['machine'], {'verb': 'report', 'sid': rec['sid']}, timeout=20)
@@ -1633,6 +1713,9 @@ class Browse:
 
     def refresh_all(self, force=False, wait=None):
         ts = []
+        with self.lock:  # a machine removed in Settings: its index goes too
+            for name in [n for n in self.idx if n not in self.app.fleet.machines]:
+                del self.idx[name]
         for m in self.app.fleet.snapshot()['machines']:
             if m.get('online') and 'browse' in (m.get('features') or []):
                 t = threading.Thread(target=self.refresh, args=(m['name'], force), daemon=True)
@@ -1681,7 +1764,7 @@ class Browse:
         """GET /api/browse: q, machine, folder, from, to, state, thread=1 (group), offset, limit."""
         one = lambda k, d='': (q.get(k) or [d])[0]
         rows = self.rows()
-        text = [w for w in re.findall(r'[a-z0-9]+', one('q').lower())]
+        text = query_words(one('q'))
         machine, folder, state = one('machine'), one('folder').strip('/').lower(), one('state')
         try:
             t_from, t_to = float(one('from', '0') or 0), float(one('to', '0') or 0)
@@ -1719,7 +1802,10 @@ class Browse:
                 if g in seen:
                     continue
                 seen.add(g)
-                head, *older = groups[g]
+                # The row is the newest chat that matches the filters, not the thread's newest: a thread continued on
+                # another machine must not show under a machine, a folder or words it does not match.
+                at = next((i for i, o in enumerate(groups[g]) if o['key'] == r['key']), 0)
+                head, older = r, groups[g][at + 1:]
                 order.append(dict(head, history=[{k: o.get(k) for k in OLDER_KEYS if o.get(k) is not None}
                                                  for o in older[:20]], history_count=len(older)))
             found = order
@@ -1807,7 +1893,9 @@ class Features:
         if path == '/api/caps':
             return self.auto.all()
         if path == '/api/browse':
-            if not any(v.get('rows') for v in self.browse.idx.values()):
+            with self.browse.lock:  # a refresh writes it from its own thread
+                empty = not any(v.get('rows') for v in self.browse.idx.values())
+            if empty:
                 self.browse.refresh_all(wait=8)  # the first look: give the machines a moment
             else:
                 self.browse.refresh_all()  # in the background; this answer uses what is indexed
@@ -1946,10 +2034,15 @@ class Features:
             return dict(self.threads.thread(name, sid) or {'thread': sid, 'chats': []}, ok=True)
         raise self.HttpError(400, 'unknown action')
 
-    def job_done(self, job):
+    def job_done(self, job, jid=None):
         """A server job finished: a fresh, resume or continue links the new chat to the one it came from, and the new
         chat keeps the tools it started with."""
         self.library.job_done(job)
+        try:
+            if jid:
+                self.dispatch.launched(jid, job)
+        except Exception:
+            log('job_done failed: ' + traceback.format_exc())
         try:
             kind, plan = job.get('kind'), job.get('plan') or {}
             if job.get('state') != 'done' or not job.get('sid') or kind not in ('fresh', 'resume', 'continue', 'relaunch', 'compact'):

@@ -198,12 +198,29 @@ async fn node(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>, headers: Header
         return err(403, "Pages cannot link machines.");
     }
     let Some(n) = hub.nodes.find(bearer(&headers)) else {
+        if hub.nodes.unread() {
+            // not a 401: a node told its token is unknown stops trying until it is paired again
+            return err(503, "The hub cannot read its list of linked machines right now.");
+        }
         return err(401, "This machine is not linked to the hub. Pair it again with a new code.");
     };
     ws.max_message_size(4 << 20).max_frame_size(4 << 20).on_upgrade(move |socket| serve_link(hub, socket, n.name))
 }
 
+/// Sends one message on a link. False if the node left, or took nothing for `patience`. A large message (a piece
+/// of a file) gets a second more for each 32 KB, so a slow link that is still moving is not dropped.
+async fn send(ws: &mut WebSocket, m: Message, patience: Duration) -> bool {
+    let size = match &m {
+        Message::Text(t) => t.len(),
+        Message::Binary(b) => b.len(),
+        _ => 0,
+    };
+    let patience = patience + Duration::from_secs((size / (32 << 10)) as u64);
+    matches!(tokio::time::timeout(patience, ws.send(m)).await, Ok(Ok(())))
+}
+
 async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
+    let patience = hub.cfg.link_patience;
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::link::LINK_BACKLOG);
     let link = Arc::new(Link::new(&name, hub.links.next_era(), unix_now(), tx));
     hub.links.insert(link.clone());
@@ -214,7 +231,7 @@ async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
     let why = loop {
         tokio::select! {
             m = rx.recv() => match m {
-                Some(m) => if ws.send(m).await.is_err() { break "send failed" },
+                Some(m) => if !send(&mut ws, m, patience).await { break "send failed" },
                 None => break "closed",
             },
             m = ws.recv() => {
@@ -230,13 +247,13 @@ async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
                 if heard.elapsed() > PING_EVERY * 3 {
                     break "went quiet";
                 }
-                if ws.send(Message::Ping(Vec::new().into())).await.is_err() {
+                if !send(&mut ws, Message::Ping(Vec::new().into()), patience).await {
                     break "send failed";
                 }
             }
             _ = link.closing.notified() => {
                 let (code, reason) = link.close_reason();
-                let _ = ws.send(Message::Close(Some(CloseFrame { code, reason: reason.into() }))).await;
+                send(&mut ws, Message::Close(Some(CloseFrame { code, reason: reason.into() })), patience).await;
                 // Wait a moment for the node's answering close before dropping the socket. Dropping it at once can
                 // reset the connection on Windows, and the node then never reads why it was closed.
                 let _ = tokio::time::timeout(Duration::from_secs(2), async {

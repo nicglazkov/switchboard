@@ -153,6 +153,10 @@ def main():
                 subprocess.run([str(BIN / 'switchboard'), 'start'], stdout=log, stderr=log, timeout=120, check=False)
         finally:
             shutil.rmtree(work, ignore_errors=True)
+            try:
+                (d / 'lock').unlink()  # serverctl.start_update made it: the next update may start
+            except OSError:
+                pass
 
 
 if __name__ == '__main__':

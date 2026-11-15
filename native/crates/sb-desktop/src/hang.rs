@@ -92,7 +92,7 @@ pub fn start(cx: &mut gpui::App) {
                     stuck_at = beat;
                     log::warn!("main thread stuck for {}s", age.as_secs());
                     if sample {
-                        capture();
+                        capture("hang");
                     }
                 }
                 Step::Back => {
@@ -107,14 +107,15 @@ pub fn start(cx: &mut gpui::App) {
     }
 }
 
-/// Samples this process for three seconds into the log folder (macOS), keeping the newest `KEEP`.
-fn capture() {
+/// Samples this process for three seconds into the log folder (macOS) as <kind>-<time>.txt, keeping the newest
+/// `KEEP` of that kind: "hang" for a stuck main thread, "frames" for a window that stopped drawing with it alive.
+pub fn capture(kind: &str) {
     if !cfg!(target_os = "macos") {
         return;
     }
     let Some(dir) = crate::logs::dir() else { return };
     let stamp = chrono_stamp();
-    let path = dir.join(format!("hang-{stamp}.txt"));
+    let path = dir.join(format!("{kind}-{stamp}.txt"));
     let ok = std::process::Command::new("/usr/bin/sample")
         .arg(std::process::id().to_string())
         .arg("3")
@@ -129,16 +130,17 @@ fn capture() {
     } else {
         log::warn!("could not sample the stuck app");
     }
-    prune(&dir);
+    prune(&dir, kind);
 }
 
-fn prune(dir: &std::path::Path) {
+fn prune(dir: &std::path::Path, kind: &str) {
     let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let start = format!("{kind}-");
     let mut hangs: Vec<_> = rd
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .filter(|p| {
-            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("hang-") && n.ends_with(".txt"))
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with(&start) && n.ends_with(".txt"))
         })
         .collect();
     hangs.sort();

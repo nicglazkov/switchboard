@@ -81,9 +81,39 @@ Copy-Item -Recurse (Join-Path $Repo 'server') (Join-Path $New 'server')
 Get-ChildItem -Recurse -Directory -Filter __pycache__ (Join-Path $New 'server') | Remove-Item -Recurse -Force
 Copy-Item (Join-Path $Repo 'agent\sb.py') (Join-Path $New 'agent\sb.py')
 Copy-Item (Join-Path $Here 'setup.py') (Join-Path $New 'install\setup.py')
+# The server that is here is moved aside (app.old), not deleted, and stays until the new one has answered. Deleting
+# it first left half a server when a file was still in use, and no server when the new one did not start.
+$Old = Join-Path $Base 'app.old'
+$HadOld = $false
+function PutBack {
+    if (-not $HadOld -or -not (Test-Path $Old)) { return $false }
+    try {
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl stop | Out-Null
+        Start-Sleep 1
+        Remove-Item -Recurse -Force $App -ErrorAction SilentlyContinue
+        Move-Item $Old $App
+        & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl start | Out-Null
+        return $true
+    } catch { return $false }
+}
+# (a run cut short between the two moves below left no server, only app.old: that one goes back first)
+if (-not (Test-Path $App) -and (Test-Path $Old)) { Move-Item $Old $App }
+Remove-Item -Recurse -Force $Old -ErrorAction SilentlyContinue
 if (Test-Path $Ctl) { & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl stop | Out-Null }
-Remove-Item -Recurse -Force $App -ErrorAction SilentlyContinue
-Move-Item $New $App
+if (Test-Path $App) {
+    # The server was stopped a moment ago and may hold its files a little longer: ask a few times.
+    foreach ($i in 1..10) {
+        try { Move-Item $App $Old; $HadOld = $true; break } catch { Start-Sleep 1 }
+    }
+    if (-not $HadOld) {
+        if (Test-Path $Ctl) { & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl start | Out-Null }
+        Die 'the server that is here could not be moved aside (is a program using its files?). Nothing was changed.'
+    }
+}
+try { Move-Item $New $App } catch {
+    if ($HadOld) { Move-Item $Old $App; & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl start | Out-Null }
+    Die "could not put the new server in place ($($_.Exception.Message)). Nothing was changed."
+}
 Copy-Item (Join-Path $Here 'switchboard.ps1') $Ctl -Force
 Set-Content -Path (Join-Path $Base 'python.txt') -Value $Py -Encoding ascii
 Say "Server in $App"
@@ -110,14 +140,21 @@ function Task([string]$name, [string]$cmdline, [string]$log) {
 Task 'SwitchboardServer' """$pyw"" -u ""$App\server\server.py""" (Join-Path $Logs 'server.log')
 Task 'SwitchboardDownloads' """$pyw"" -m http.server 8131 --directory ""$Dl""" (Join-Path $Logs 'downloads.log')
 
-if ($NoStart) { Say "Installed. Start it with: powershell -File `"$Ctl`" start"; exit 0 }
+if ($NoStart) {
+    Remove-Item -Recurse -Force $Old -ErrorAction SilentlyContinue
+    Say "Installed. Start it with: powershell -File `"$Ctl`" start"; exit 0
+}
 & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl restart | Out-Null
 $ok = $false
 foreach ($i in 1..30) {
     try { Invoke-WebRequest -UseBasicParsing -Uri 'http://127.0.0.1:8130/api/summary' -TimeoutSec 2 | Out-Null; $ok = $true; break } catch { Start-Sleep 1 }
 }
 & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl status
-if (-not $ok) { Die "the server did not start. See: powershell -File `"$Ctl`" logs" }
+if (-not $ok) {
+    if (PutBack) { Die "the new server did not start, so the one that was here before was put back and started again. See: powershell -File `"$Ctl`" logs" }
+    Die "the server did not start. See: powershell -File `"$Ctl`" logs"
+}
+Remove-Item -Recurse -Force $Old -ErrorAction SilentlyContinue
 Say ''
 Say 'Other devices reach the server only if Windows Firewall lets them. In PowerShell opened with "Run as administrator":'
 Say '  New-NetFirewallRule -DisplayName Switchboard -Direction Inbound -Protocol TCP -LocalPort 8130,8131 -Action Allow -Profile Private'

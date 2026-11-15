@@ -272,7 +272,9 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         let msg = format!("{} terminals are open, the most at once. Close one, then try again.", hub.cfg.max_terms);
         return refuse(&mut ws, proto::CLOSE_LIMIT, &msg).await;
     }
-    let claims = match ticket::redeem(&hub.key, &hub.nonces, q.t.as_deref().unwrap_or(""), unix_now()) {
+    // Checked here, spent further down: a ticket works once, and a machine that is not linked this second (or a
+    // hub with no machine list yet) must not use that one time up.
+    let claims = match ticket::verify(&hub.key, q.t.as_deref().unwrap_or(""), unix_now()) {
         Ok(c) => c,
         Err(e) => {
             log(format!("term refused: ticket {e:?}"));
@@ -312,6 +314,11 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
             }
         },
     };
+    if !hub.nonces.spend(&claims, unix_now()) {
+        let e = ticket::TicketError::Used;
+        log(format!("term refused: ticket {e:?}"));
+        return refuse(&mut ws, proto::CLOSE_TICKET, e.message()).await;
+    }
     let Some(slot) = hub.admit(&claims) else {
         log(format!("term refused: {} terminals open", hub.cfg.max_terms));
         let msg = format!("{} terminals are open, the most at once. Close one, then try again.", hub.cfg.max_terms);
@@ -324,34 +331,40 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         return;
     }
     let key = (claims.m.clone(), claims.b.clone());
-    let (shared, seat) = {
+    let mut started: Option<(Term, pty::TermIo)> = None;
+    let (shared, seat) = loop {
         // under the map's lock: a viewer joining and the last one leaving never cross
         let mut map = hub.sessions.lock().await;
-        let shared = match map.get(&key).filter(|s| s.alive()) {
-            Some(s) => s.clone(),
-            None => {
-                let (backend, io, label, via) = match route {
-                    Route::Node(link, label) => {
-                        let (t, io) = link.open_term(&claims.b, cols, rows);
-                        (Backend::Node(t), io, label, "node")
+        if let Some(s) = map.get(&key).filter(|s| s.alive()).cloned() {
+            // (an ssh started for this viewer while another viewer opened the same chat is dropped: it hangs up)
+            let seat = s.join(hello);
+            break (s, seat);
+        }
+        let (backend, io, label, via) = match (&route, started.take()) {
+            (Route::Node(link, label), _) => {
+                let (t, io) = link.open_term(&claims.b, cols, rows);
+                (Backend::Node(t), io, label.clone(), "node")
+            }
+            (Route::Ssh(machine), Some((t, io))) => (Backend::Ssh(t), io, machine.label().to_string(), "ssh"),
+            (Route::Ssh(machine), None) => {
+                // Starting ssh can take a moment. Not under the lock, which every terminal opening or closing
+                // needs; then look again, in case another viewer opened this chat meanwhile.
+                drop(map);
+                match spawn_ssh(&hub, machine, &claims.b, cols, rows).await {
+                    Ok(x) => started = Some(x),
+                    Err(e) => {
+                        log(format!("term failed: spawn: {e}"));
+                        return refuse(&mut ws, proto::CLOSE_INTERNAL, "The hub could not start ssh.").await;
                     }
-                    Route::Ssh(machine) => match spawn_ssh(&hub, &machine, &claims.b, cols, rows).await {
-                        Ok((t, io)) => (Backend::Ssh(t), io, machine.label().to_string(), "ssh"),
-                        Err(e) => {
-                            drop(map);
-                            log(format!("term failed: spawn: {e}"));
-                            return refuse(&mut ws, proto::CLOSE_INTERNAL, "The hub could not start ssh.").await;
-                        }
-                    },
-                };
-                let s = Shared::new(&claims.m, &claims.b, label, via, backend, cols, rows);
-                tokio::spawn(pump(hub.clone(), s.clone(), io));
-                map.insert(key.clone(), s.clone());
-                s
+                }
+                continue;
             }
         };
-        let seat = shared.join(hello);
-        (shared, seat)
+        let s = Shared::new(&claims.m, &claims.b, label, via, backend, cols, rows);
+        tokio::spawn(pump(hub.clone(), s.clone(), io));
+        map.insert(key.clone(), s.clone());
+        let seat = s.join(hello);
+        break (s, seat);
     };
     let started = Instant::now();
     log(format!(
@@ -476,7 +489,7 @@ async fn send_out(ws: &mut WebSocket, o: Out, sent_open: &mut bool) -> bool {
             *sent_open = true;
             send_text(ws, proto::status("open")).await
         }
-        Out::Bytes(b) => send(ws, Message::Binary(b)).await,
+        Out::Bytes(b) => send(ws, Message::Binary(b.into())).await,
         Out::Size(c, r) => send_text(ws, proto::size(c, r)).await,
         Out::Owner(o) => send_text(ws, proto::owner(o)).await,
         Out::Snapshot(bytes) => {
@@ -493,8 +506,52 @@ async fn send_out(ws: &mut WebSocket, o: Out, sent_open: &mut bool) -> bool {
     }
 }
 
+/// Input one viewer has sent that the program has not taken yet. Past this the relay stops reading that viewer's
+/// socket until there is room again, so a paste the program never reads cannot grow without limit.
+const INPUT_WAITING: usize = 4 << 20;
+
+/// Typed and pasted bytes on their way to the program, written by a task of their own: a program that is slow to
+/// read (a big paste) then holds up neither this viewer's output nor the answers to its pings.
+struct Input {
+    tx: tokio::sync::mpsc::UnboundedSender<axum::body::Bytes>,
+    waiting: Arc<std::sync::atomic::AtomicUsize>,
+    room: Arc<tokio::sync::Notify>,
+}
+
+impl Input {
+    fn start(shared: &Arc<Shared>, id: u64) -> Input {
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<axum::body::Bytes>();
+        let waiting = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let room = Arc::new(tokio::sync::Notify::new());
+        let (shared, w, r) = (shared.clone(), waiting.clone(), room.clone());
+        tokio::spawn(async move {
+            // ends when the viewer's relay does; what it already sent is still written
+            while let Some(b) = rx.recv().await {
+                // waits while the machine is slow to read; if the terminal is gone, its output ends too and the
+                // exit follows
+                shared.input(id, &b).await;
+                w.fetch_sub(b.len(), Ordering::Relaxed);
+                r.notify_one();
+            }
+        });
+        Input { tx, waiting, room }
+    }
+
+    fn send(&self, b: axum::body::Bytes) {
+        self.waiting.fetch_add(b.len(), Ordering::Relaxed);
+        if let Err(e) = self.tx.send(b) {
+            self.waiting.fetch_sub(e.0.len(), Ordering::Relaxed);
+        }
+    }
+
+    fn full(&self) -> bool {
+        self.waiting.load(Ordering::Relaxed) >= INPUT_WAITING
+    }
+}
+
 async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) -> End {
-    let Seat { id, mut rx, behind } = seat;
+    let Seat { id, rx, behind } = seat;
+    let input = Input::start(shared, id);
     let mut sent_open = false;
     let mut last = tokio::time::Instant::now();
     // pings at the WebSocket level, which every client answers by itself, so a viewer that went away is noticed
@@ -502,6 +559,8 @@ async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) 
     ping.tick().await;
     let mut heard = tokio::time::Instant::now();
     let end = loop {
+        // too much input waiting: this viewer's socket is not read (so not counted as silent either) until some went
+        let full = input.full();
         tokio::select! {
             out = rx.recv() => match out {
                 Some(o) => {
@@ -525,14 +584,12 @@ async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) 
                 // the program ended and this viewer has read everything it wrote
                 None => break End::Exited(shared.exit_code().flatten()),
             },
-            msg = ws.recv() => {
+            msg = ws.recv(), if !full => {
                 heard = tokio::time::Instant::now();
                 match msg {
                     Some(Ok(Message::Binary(b))) => {
                         last = tokio::time::Instant::now();
-                        // waits while the machine is slow to read (a big paste); if the terminal is gone, its output
-                        // ends too and the exit follows
-                        shared.input(id, &b).await;
+                        input.send(b);
                     }
                     Some(Ok(Message::Text(t))) => match proto::parse_control(t.as_str()) {
                         Some(Control::Resize { cols, rows }) => {
@@ -549,12 +606,17 @@ async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) 
                     Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break End::ClientLeft,
                 }
             }
+            _ = input.room.notified(), if full => {
+                heard = tokio::time::Instant::now();
+                last = heard;
+            }
             _ = ping.tick() => {
-                if heard.elapsed() > hub.cfg.silence || !send(ws, Message::Ping(Vec::new().into())).await {
+                if (!full && heard.elapsed() > hub.cfg.silence) || !send(ws, Message::Ping(Vec::new().into())).await {
                     break End::ClientLeft;
                 }
             }
-            _ = tokio::time::sleep_until(last + hub.cfg.idle) => break End::Idle,
+            // (an idle time of 0 means never)
+            _ = tokio::time::sleep_until(last + hub.cfg.idle), if !hub.cfg.idle.is_zero() => break End::Idle,
         }
     };
     if !matches!(end, End::Exited(_)) {

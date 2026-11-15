@@ -5,7 +5,8 @@ description: What each section of Switchboard's Settings holds, from your comput
 # Settings
 
 ++cmd+comma++ opens **Settings**. Most of it lives on the server, so it's the same on every computer you use the
-app on.
+app on. The few settings kept on one computer say **This computer only**: the default shell, the terminal's text
+size, **Stop a chat when its tab closes**, that computer's own notifications and the server's addresses.
 
 ## Appearance
 
@@ -13,7 +14,8 @@ Light, dark, or the system's. Synced, so your other computers match.
 
 ## Terminal
 
-The color scheme, the default shell for new terminals, the text size, and the cursor's shape and blink.
+The color scheme, the default shell for new terminals, the text size, the cursor's shape and blink, and **Stop a
+chat when its tab closes**. The text size is kept on each computer, since screens differ.
 [Terminals](terminals.md#look)
 
 ## New sessions
@@ -21,6 +23,7 @@ The color scheme, the default shell for new terminals, the text size, and the cu
 - **Summaries:** who writes them for Start fresh and Continue: **Opus** (the most careful) or **Sonnet** (quicker,
   and less of your plan).
 - **Saved setups:** the combinations you saved in New chat, which it offers along with Defaults and Last used.
+  **Remove** asks you to click again.
 
 ## Machines
 
@@ -33,9 +36,6 @@ Every computer Switchboard watches, in board order: rename, reorder, remove, and
   for anything else it can do that Switchboard can't find by itself.
 - **MCP servers:** read from Claude Code's settings there (names and commands only; secrets never leave the
   computer), with **Add to library** to share one with every chat.
-
-**Server addresses** lists every address the app knows for the server, marks the ones it learned, and lets you
-remove any of them.
 
 ## Library
 
@@ -63,7 +63,7 @@ adds to Claude Code.
 
 Toasts that leave the corner wait in **Notices**, at the right of the status bar, until you ignore them.
 
-## Chrome machine
+## Chrome
 
 For chats that use [Claude in Chrome](https://claude.ai/chrome). It lists which computers have Chrome, the
 extension, and a live connection. Each chat picks its own Chrome computer, in New chat's **Claude in Chrome**
@@ -72,7 +72,8 @@ computer.
 
 ## Budget
 
-A daily share of your weekly limit, a 5-hour cap, and the hard limit. [Usage and budget](usage.md)
+A daily share of your weekly limit, a 5-hour cap, and the hard limit. The − and + buttons move to whole numbers.
+[Usage and budget](usage.md)
 
 ## Updates
 
@@ -82,6 +83,11 @@ Whether this build gets updates, what it last found, and **Check now**. [Updates
 
 The computer that runs Switchboard: its version, whether each part is running, free disk space, **Update
 server** when a newer one is out, **Restart**, its logs, and **Copy details**. [Updates](updates.md#the-server)
+
+**Server addresses** lists every address this app knows for the server and marks the ones it learned. Type one
+more in the field under the list, such as a Tailscale name: paste a whole link and the app keeps only the
+address. Addresses start with `http://`; an `https://` address is not accepted, because the app does not connect
+over https. Any address can be removed; the one in use asks you to click again first.
 
 ## AI and your Claude setup
 

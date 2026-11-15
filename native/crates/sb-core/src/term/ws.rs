@@ -16,6 +16,7 @@
 //! for a sign of life (`ASK_AFTER`), the UI hears `Quiet` if none comes (`QUIET_AFTER`), and the link counts as lost
 //! after `GONE_AFTER`, so the tab comes back by itself.
 
+use std::collections::VecDeque;
 use std::net::{SocketAddr, TcpStream};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -361,13 +362,14 @@ async fn run(
     let mut last_in = Instant::now();
     let mut next_ping = Instant::now() + PING_EVERY;
     let mut ask = Ask::default();
-    // One event the UI had no room for. While it waits, the socket is not read (the hub sees this viewer fall behind),
-    // but typing, pings and a close still go out.
-    let mut held: Option<FromHub> = None;
+    // What the UI had no room for (one event, or `Quiet(false)` and the event that ended the silence). While it
+    // waits, the socket is not read (the hub sees this viewer fall behind), but typing, pings and a close still go
+    // out: nothing here waits on the UI.
+    let mut held: VecDeque<FromHub> = VecDeque::new();
     let lost = || Closed::Lost("The connection to the terminal hub dropped.".into());
     loop {
         let wake = ask.due().map_or(next_ping, |d| d.min(next_ping));
-        let waiting = held.is_some();
+        let waiting = !held.is_empty();
         let ev = smol::future::or(
             async { Ev::Out(to_rx.recv().await.ok()) },
             smol::future::or(
@@ -408,7 +410,7 @@ async fn run(
                 }
                 // typed into a silent link: is the hub there? (Not while the UI is behind: its answer would wait
                 // unread, and the silence would be this side's.)
-                if ask.since.is_none() && held.is_none() && last_in.elapsed() > ASK_AFTER {
+                if ask.since.is_none() && held.is_empty() && last_in.elapsed() > ASK_AFTER {
                     if sink.send(Message::text(PING_FRAME)).await.is_err() {
                         return lost();
                     }
@@ -427,17 +429,15 @@ async fn run(
                 }
             }
             Ev::Room => {
-                if let Some(ev) = held.take() {
-                    hand(from_tx, ev, &mut held);
-                }
-                if held.is_none() {
+                room(from_tx, &mut held);
+                if held.is_empty() {
                     // the silence was the UI's, not the hub's
                     last_in = Instant::now();
                 }
             }
             Ev::Tick => {
                 let now = Instant::now();
-                if held.is_some() {
+                if !held.is_empty() {
                     // not reading the socket: nothing to judge the hub by
                     ask = Ask::default();
                     next_ping = now + PING_EVERY;
@@ -480,7 +480,7 @@ async fn run(
                     }
                     Message::Close(frame) => {
                         // what the UI had no room for comes first
-                        if let Some(ev) = held.take() {
+                        for ev in held.drain(..) {
                             let _ = from_tx.send(ev).await;
                         }
                         return match frame {
@@ -491,12 +491,6 @@ async fn run(
                     _ => None,
                 };
                 if let Some(ev) = ev {
-                    if held.is_some() {
-                        // only after `Quiet(false)` found no room: keep the order, waiting like the UI's reader does
-                        if let Some(first) = held.take() {
-                            let _ = from_tx.send(first).await;
-                        }
-                    }
                     hand(from_tx, ev, &mut held);
                 }
             }
@@ -504,10 +498,27 @@ async fn run(
     }
 }
 
-/// Hands the UI an event, or keeps it in `held` when the UI has no room for it yet.
-fn hand(from_tx: &Sender<FromHub>, ev: FromHub, held: &mut Option<FromHub>) {
-    if let Err(smol::channel::TrySendError::Full(ev)) = from_tx.try_send(ev) {
-        *held = Some(ev);
+/// Hands the UI an event, or keeps it in `held` (after what already waits there) when the UI has no room for it yet.
+fn hand(from_tx: &Sender<FromHub>, ev: FromHub, held: &mut VecDeque<FromHub>) {
+    if !held.is_empty() {
+        held.push_back(ev);
+    } else if let Err(smol::channel::TrySendError::Full(ev)) = from_tx.try_send(ev) {
+        held.push_back(ev);
+    }
+}
+
+/// Hands the UI what waits in `held`, in order, as far as it has room.
+fn room(from_tx: &Sender<FromHub>, held: &mut VecDeque<FromHub>) {
+    while let Some(ev) = held.pop_front() {
+        match from_tx.try_send(ev) {
+            Ok(()) => {}
+            Err(smol::channel::TrySendError::Full(ev)) => {
+                held.push_front(ev);
+                return;
+            }
+            // the UI is gone: nothing to keep
+            Err(smol::channel::TrySendError::Closed(_)) => {}
+        }
     }
 }
 
@@ -852,6 +863,48 @@ mod tests {
             assert_eq!(l, &format!("line {i}\r\n"));
         }
         assert_eq!(evs.last(), Some(&FromHub::Closed(Closed::ByClient)), "{evs:?}");
+        reader.join().unwrap();
+    }
+
+    #[test]
+    fn typing_goes_out_when_a_quiet_hub_answers_into_a_full_ui_queue() {
+        // fills the UI's queue exactly, goes silent on the first key, answers late, then reports what it is sent
+        let (url, hub) = hub_that(|mut ws| {
+            // `Connected` and the status are the first two events
+            for i in 0..UI_BACKLOG - 2 {
+                ws.send(Message::binary(format!("line {i}\r\n").into_bytes())).unwrap();
+            }
+            while !matches!(ws.read(), Ok(Message::Binary(_))) {}
+            thread::sleep(QUIET_AFTER + QUIET_AFTER / 2);
+            ws.send(Message::binary(b"late".to_vec())).unwrap();
+            let (tx, rx) = std::sync::mpsc::channel();
+            let t = thread::spawn(move || {
+                while let Ok(m) = ws.read() {
+                    if let Message::Binary(b) = m {
+                        let _ = tx.send(String::from_utf8_lossy(&b).to_string());
+                    }
+                }
+            });
+            (rx, t)
+        });
+        let c = connect(url, "t".into());
+        let start = Instant::now();
+        while c.rx.len() < UI_BACKLOG && start.elapsed() < Duration::from_secs(5) {
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(c.rx.len(), UI_BACKLOG);
+        thread::sleep(ASK_AFTER * 3);
+        c.tx.try_send(ToHub::Input(b"a".to_vec())).unwrap();
+        let (seen, reader) = hub.join().unwrap();
+        // "late" is in: the news that the hub is back and the output both wait for room, and typing still goes out
+        thread::sleep(QUIET_AFTER / 2);
+        c.tx.try_send(ToHub::Input(b"b".to_vec())).unwrap();
+        assert_eq!(seen.recv_timeout(Duration::from_secs(2)).as_deref(), Ok("b"), "typing waited on the UI");
+        // once the UI reads again, both arrive, in order
+        let evs: Vec<FromHub> = (0..UI_BACKLOG + 2).map(|_| c.rx.recv_blocking().unwrap()).collect();
+        assert_eq!(evs[UI_BACKLOG..], [FromHub::Quiet(false), FromHub::Data(b"late".to_vec())]);
+        c.tx.try_send(ToHub::Close).unwrap();
+        assert_eq!(collect(&c.rx).last(), Some(&FromHub::Closed(Closed::ByClient)));
         reader.join().unwrap();
     }
 

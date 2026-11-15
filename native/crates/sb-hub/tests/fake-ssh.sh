@@ -12,6 +12,7 @@ while IFS= read -r line; do
     size) echo "SIZE $(stty size)" ;;
     flood\ *) head -c "${line#flood }" /dev/zero | tr '\0' 'x'; echo; echo FLOOD-DONE ;;
     swallow\ *) sleep 2; head -c "${line#swallow }" > /dev/null; echo SWALLOWED ;;
+    stall\ *) sleep 6; head -c "${line#stall }" > /dev/null; echo SWALLOWED ;;
     *) echo "GOT $line" ;;
   esac
 done

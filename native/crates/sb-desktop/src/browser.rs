@@ -43,7 +43,7 @@ pub fn open(cx: &mut App) {
     let opts = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("Sessions, Switchboard".into()),
+            title: Some("History, Switchboard".into()),
             appears_transparent: false,
             traffic_light_position: None,
         }),
@@ -93,6 +93,8 @@ pub struct BrowserView {
     rows: Vec<ApiBrowseRow>,
     total: u64,
     loading: bool,
+    /// When the list last came back from the server.
+    loaded_at: f64,
     error: Option<String>,
     seq: u64,
     /// The chat shown on the right ("machine:sid"), and its row (a row of the list or an older chat of its thread).
@@ -155,6 +157,7 @@ impl BrowserView {
             seq: 0,
             sel: None,
             sel_row: None,
+            loaded_at: 0.,
             sums: HashMap::new(),
             head: None,
             notes: HashMap::new(),
@@ -180,6 +183,13 @@ impl BrowserView {
             });
         })
         .detach();
+    }
+
+    /// History came back on screen: a list read a while ago is read again, so yesterday's is not shown as today's.
+    pub fn shown_again(&mut self, cx: &mut Context<Self>) {
+        if !self.loading && is_old(self.loaded_at, AppState::now()) {
+            self.load(false, cx);
+        }
     }
 
     fn load(&mut self, more: bool, cx: &mut Context<Self>) {
@@ -216,6 +226,7 @@ impl BrowserView {
                 match res {
                     Ok(b) => {
                         s.error = None;
+                        s.loaded_at = AppState::now();
                         if let Some(f) = &b.facets {
                             s.folders = f.folders.clone();
                         }
@@ -226,6 +237,15 @@ impl BrowserView {
                             s.rows = b.rows;
                             // a new result: measure every row again, from the top
                             s.list.reset(0);
+                        }
+                        // The chat on the right is drawn from its own copy of the row: give it the new one.
+                        if let Some(fresh) = s
+                            .sel_row
+                            .as_ref()
+                            .map(|r| key(&r.machine, &r.sid))
+                            .and_then(|k| s.rows.iter().find(|r| key(&r.machine, &r.sid) == k))
+                        {
+                            s.sel_row = Some(fresh.clone());
                         }
                         let still =
                             s.sel.as_ref().is_some_and(|k| s.rows.iter().any(|r| key(&r.machine, &r.sid) == *k));
@@ -252,7 +272,15 @@ impl BrowserView {
                             }
                         }
                     }
-                    Err(e) => s.error = Some(e.to_string()),
+                    Err(e) => {
+                        s.error = Some(e.to_string());
+                        // A new search or filter that failed: the rows under the error would be the old one's.
+                        if !more {
+                            s.rows.clear();
+                            s.total = 0;
+                            s.list.reset(0);
+                        }
+                    }
                 }
                 cx.notify();
             });
@@ -598,7 +626,7 @@ impl BrowserView {
     }
 
     fn said(t: &Theme, label: &str, text: &str, when: Option<String>) -> AnyElement {
-        let text: String = text.chars().take(700).collect();
+        let text = clipped(text, 700);
         div()
             .flex()
             .flex_col()
@@ -1182,8 +1210,28 @@ impl BrowserView {
 impl Render for BrowserView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = self.body(window, cx);
-        crate::frame::framed(window, &Theme::get(cx), "Sessions", body)
+        if self.embedded {
+            // Inside the main window, which has its own frame and title bar.
+            return body.into_any_element();
+        }
+        crate::frame::framed(window, &Theme::get(cx), "History", body).into_any_element()
     }
+}
+
+/// A list read this long ago (seconds) is read again when History is shown.
+const OLD_AFTER: f64 = 30.;
+
+fn is_old(loaded_at: f64, now: f64) -> bool {
+    now - loaded_at > OLD_AFTER || now < loaded_at
+}
+
+/// The first `max` characters of a message, with "…" when there was more.
+fn clipped(text: &str, max: usize) -> String {
+    let mut out: String = text.chars().take(max).collect();
+    if text.chars().nth(max).is_some() {
+        out.push('\u{2026}');
+    }
+    out
 }
 
 impl BrowserView {
@@ -1425,13 +1473,7 @@ impl BrowserView {
                             .flex()
                             .items_center()
                             .gap(px(12.))
-                            .child(
-                                div()
-                                    .flex_none()
-                                    .text_size(px(17.))
-                                    .font_weight(FontWeight::BOLD)
-                                    .child(if self.embedded { "History" } else { "Sessions" }),
-                            )
+                            .child(div().flex_none().text_size(px(17.)).font_weight(FontWeight::BOLD).child("History"))
                             .child(search)
                             .child(div().flex_1())
                             .child(div().flex_none().text_size(px(12.5)).text_color(t.faint).child(count))
@@ -1481,4 +1523,24 @@ enum HistLine {
     /// A chat: its index in the loaded rows.
     Row(usize),
     More,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clipped, is_old};
+
+    #[test]
+    fn a_cut_message_says_it_was_cut() {
+        assert_eq!(clipped("hello", 5), "hello");
+        assert_eq!(clipped("hello there", 5), "hello\u{2026}");
+        assert_eq!(clipped("\u{e9}\u{e9}\u{e9}", 2), "\u{e9}\u{e9}\u{2026}");
+    }
+
+    #[test]
+    fn history_shown_later_is_read_again() {
+        assert!(!is_old(1000., 1010.), "flipping back and forth does not reload");
+        assert!(is_old(1000., 1031.));
+        assert!(is_old(0., 1000.), "never loaded");
+        assert!(is_old(1000., 900.), "the clock moved back");
+    }
 }

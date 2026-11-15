@@ -118,9 +118,69 @@ class PhoneServerTest(unittest.TestCase):
         r = self.relaunch({'dirs': ['notes', 'site'], 'chrome': ['on'], 'model': ['sonnet'], 'remove': []})
         self.wait(r['job'])
         req = self.verbs('resume')[0]
-        self.assertEqual(req['flags'], [['--permission-mode', 'acceptEdits'], ['--add-dir', 'notes'],
+        # the phone sends only the folders it adds: the one the chat was launched with stays
+        self.assertEqual(req['flags'], [['--permission-mode', 'acceptEdits'], ['--add-dir', 'docs'], ['--add-dir', 'notes'],
                                         ['--add-dir', 'site'], ['--chrome']])
         self.assertEqual(req['model'], 'sonnet')
+
+    def test_a_folder_sent_twice_is_added_once(self):
+        r = self.relaunch({'dirs': ['docs', 'notes'], 'remove': []})
+        self.wait(r['job'])
+        self.assertEqual(self.verbs('resume')[0]['flags'], [['--permission-mode', 'acceptEdits'], ['--add-dir', 'docs'],
+                                                            ['--add-dir', 'notes']])
+
+    def test_a_chat_in_the_machines_own_default_is_not_told_to_ask_first(self):
+        # Nothing in its launch said a mode, and the agent fills `now` with the machine's default: an explicit
+        # "Asks first" is never added for it (an older Switchboard there refuses the name, and it is the default anyway).
+        self.sess['launch']['flags'] = [['--remote-control'], ['--add-dir', 'docs']]
+        for perm, want in (('default', []), ('manual', []), ('plan', [['--permission-mode', 'plan']])):
+            self.calls.clear()
+            self.sess['now'] = dict(self.sess['now'], perm=perm)
+            self.app.fleet.poll()
+            r = self.relaunch({'effort': ['max'], 'remove': []})
+            self.wait(r['job'])
+            self.assertEqual(self.verbs('resume')[0].get('flags', []), [['--add-dir', 'docs']] + want, perm)
+
+    def test_bypass_comes_along_only_when_it_was_launched_so(self):
+        self.sess['now'] = dict(self.sess['now'], perm='bypassPermissions')
+        for launch, want in (([], []), ([['--permission-mode', 'acceptEdits']], []),
+                             ([['--permission-mode', 'bypassPermissions']], [['--permission-mode', 'bypassPermissions']]),
+                             ([['--dangerously-skip-permissions']], [['--permission-mode', 'bypassPermissions']])):
+            self.calls.clear()
+            self.sess['launch']['flags'] = launch
+            self.app.fleet.poll()
+            r = self.relaunch({'effort': ['max'], 'remove': []})
+            self.wait(r['job'])
+            got = [f for f in self.verbs('resume')[0].get('flags', []) if f[0] == '--permission-mode']
+            self.assertEqual(got, want, launch)
+
+    def test_asks_first_that_cannot_be_sent_is_said(self):
+        r = self.relaunch({'perm': ['default'], 'remove': []})  # this machine's Switchboard does not say its modes
+        self.assertIn("Studio can't be told to ask first until Switchboard is updated there", r['note'])
+        self.wait(r['job'])
+        self.assertEqual(self.verbs('resume')[0]['flags'], [['--add-dir', 'docs']])
+        self.app.fleet.state['studio']['models'] = {'perms': ['acceptEdits', 'auto', 'manual', 'plan']}
+        self.assertNotIn('note', self.relaunch({'perm': ['default'], 'remove': []}))
+
+    def test_a_pinned_model_and_the_mode_it_runs_in_now_are_kept(self):
+        self.sess['now'] = dict(self.sess['now'], perm='plan')  # Shift+Tab since the launch
+        self.sess['launch']['flags'] += [['--model', 'claude-opus-4-8'], ['--worktree', 'fix'], ['--no-chrome']]
+        self.app.fleet.poll()
+        r = self.relaunch({'effort': ['max'], 'remove': []})
+        self.wait(r['job'])
+        req = self.verbs('resume')[0]
+        self.assertEqual(req['model'], 'claude-opus-4-8')
+        self.assertEqual(req['flags'], [['--permission-mode', 'plan'], ['--add-dir', 'docs'], ['--no-chrome']])  # no worktree
+
+    def test_asks_first_goes_by_name_only_where_the_machine_lists_it(self):
+        r = self.relaunch({'remove': ['perm']})
+        self.wait(r['job'])
+        self.assertEqual(self.verbs('resume')[0]['flags'], [['--add-dir', 'docs']])  # an agent that names no modes
+        self.calls.clear()
+        self.app.fleet.state['studio']['models'] = {'perms': ['acceptEdits', 'auto', 'manual', 'plan']}
+        r = self.relaunch({'perm': ['default'], 'remove': []})
+        self.wait(r['job'])
+        self.assertEqual(self.verbs('resume')[0]['flags'], [['--add-dir', 'docs'], ['--permission-mode', 'manual']])
 
     def test_bad_changes_are_refused(self):
         for flags in ({'dangerously': ['x'], 'remove': []}, {'perm': 'plan'}, {'perm': ['a', 'b']}, {'remove': 'perm'}, ['perm']):
@@ -165,6 +225,34 @@ class PhoneServerTest(unittest.TestCase):
         steps = [s['step'] for _, s, end in sent if not end]
         self.assertIn('1 subagent is still running.', steps)
         self.assertNotIn('live', self.app.jobs[r['job']])  # nothing more goes to an ended activity
+
+    def test_the_push_that_ends_an_activity_is_tried_again_when_apple_is_not_reached(self):
+        # Audit, iOS 15: one failed push, and the Lock Screen said "Starting..." until the system gave up on it.
+        sent = []
+        answers = ['retry', 'retry', False]
+        self.app.live_pusher = lambda tok, state, end, after: sent.append(end) or (answers.pop(0) if end else False)
+        r = self.relaunch({'effort': ['low'], 'remove': []})
+        self.app.post('/api/live', {'job': r['job'], 'token': TOK})
+        self.wait(r['job'])
+        for _ in range(200):
+            if 'live' not in self.app.jobs[r['job']]:
+                break
+            time.sleep(0.01)
+        self.assertEqual([e for e in sent if e], [True, True, True], 'twice not reached, then through')
+        self.assertNotIn('live', self.app.jobs[r['job']])
+
+    def test_an_ending_push_that_never_gets_through_stops_after_a_few_tries(self):
+        sent = []
+        self.app.live_pusher = lambda tok, state, end, after: sent.append(end) or 'retry'
+        r = self.relaunch({'effort': ['low'], 'remove': []})
+        self.app.post('/api/live', {'job': r['job'], 'token': TOK})
+        self.wait(r['job'])
+        for _ in range(200):
+            if 'live' not in self.app.jobs[r['job']]:
+                break
+            time.sleep(0.01)
+        self.assertEqual(len([e for e in sent if e]), 1 + len(server.LIVE_END_RETRY))
+        self.assertNotIn('live', self.app.jobs[r['job']])
 
     def test_live_tokens_are_checked(self):
         with self.assertRaises(server.HttpError):
@@ -215,6 +303,130 @@ class PhoneServerTest(unittest.TestCase):
             self.assertEqual(post({'machine': 'studio', 'name': 'x', 'data': ''})[0], 400)  # empty
         finally:
             httpd.shutdown()
+
+
+class FakeApple:
+    """Apple's two push services. `good`: token -> the service it belongs to (True: development builds)."""
+    def __init__(self, good, sandbox=True):
+        self.good, self.sandbox, self.sent, self.down = good, sandbox, [], set()
+
+    def _answer(self, tok, sandbox):
+        sb = self.sandbox if sandbox is None else sandbox
+        self.sent.append((tok[:2], sb))
+        if sb in self.down:
+            return 0, 'curl: (7) Failed to connect'
+        if self.good.get(tok) == 'old':
+            return 410, '{"reason":"Unregistered"}'
+        if self.good.get(tok) == 'busy':
+            return 429, '{"reason":"TooManyRequests"}'
+        return (200, '') if self.good.get(tok) is sb else (400, '{"reason":"BadDeviceToken"}')
+
+    def push(self, tok, title, body, url, thread=None, collapse=None, sandbox=None):
+        return self._answer(tok, sandbox)
+
+    def push_widgets(self, tok, sandbox=None):
+        return self._answer(tok, sandbox)
+
+    def push_activity(self, tok, state, end=False, dismiss_after=240, sandbox=None):
+        return self._answer(tok, sandbox)
+
+
+class PushTokensTest(unittest.TestCase):
+    """Audit, server 6: when a phone's token is forgotten, and that two phones registering at once both stay."""
+    DEV, STORE, DEAD, OLD, BUSY = 'aa' * 32, 'bb' * 32, 'cc' * 32, 'dd' * 32, 'ee' * 32
+
+    def make(self, sandbox=True):
+        self.apple = FakeApple({self.DEV: True, self.STORE: False, self.OLD: 'old', self.BUSY: 'busy'}, sandbox)
+        self.app = server.App(fleet.Fleet([], lambda t, r, to: {'ok': True}), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()),
+                              cfg_dir=Path(mkdtemp()), poll_every=0)
+        self.push = server.Pushers(self.apple, sleep=lambda s: None)
+        self.push.attach(self.app)
+        for t in (self.DEV, self.STORE, self.DEAD, self.OLD, self.BUSY):
+            self.app.post('/api/devices', {'token': t, 'name': 'iPhone'})
+            self.app.post('/api/widget-token', {'token': t})
+
+    def test_a_token_is_tried_on_the_other_service_before_it_is_forgotten(self):
+        for sandbox in (True, False):
+            self.make(sandbox)
+            self.push.alert('t', 'b', '/')
+            self.assertEqual(set(self.app.devices()), {self.DEV, self.STORE, self.BUSY}, 'only the token both refuse, and the one Apple unregistered, go')
+            self.assertIn((self.STORE[:2], False), self.apple.sent)
+            self.assertIn((self.DEV[:2], True), self.apple.sent)
+            self.apple.sent.clear()
+            self.push.alert('t', 'b', '/')  # where each one worked is remembered: one try each from now on
+            self.assertEqual(sorted(self.apple.sent), [(self.DEV[:2], True), (self.STORE[:2], False), (self.BUSY[:2], sandbox)])
+
+    def test_a_service_that_cannot_be_reached_forgets_nobody(self):
+        self.make()
+        self.apple.down = {False}  # the other service: the token could be good there, nobody can tell
+        self.push.alert('t', 'b', '/')
+        self.assertIn(self.STORE, self.app.devices())
+        self.apple.down = {True, False}
+        self.push.alert('t', 'b', '/')
+        self.push.widgets()
+        self.assertEqual(set(self.app.devices()), {self.DEV, self.STORE, self.DEAD, self.BUSY}, 'only the one Apple unregistered went')
+        self.assertEqual(len(self.app.widget_tokens()), 5)
+
+    def test_widget_and_activity_tokens_follow_the_same_rule(self):
+        self.make()
+        self.push.widgets()
+        self.assertEqual(set(self.app.widget_tokens()), {self.DEV, self.STORE, self.BUSY})
+        self.assertEqual(self.push.live(self.STORE, {}, True, 60), False)
+        self.assertEqual(self.push.live(self.DEAD, {}, True, 60), True)
+        self.assertEqual(self.push.live(self.OLD, {}, True, 60), True)
+        self.assertEqual(self.push.live(self.BUSY, {}, True, 60), 'retry')
+        self.apple.down = {True, False}
+        self.assertEqual(self.push.live(self.DEV, {}, True, 60), 'retry')
+
+    def test_a_phone_that_registers_while_a_push_is_out_is_kept(self):
+        self.make()
+        new, real = 'ff' * 32, self.apple.push
+
+        def slow(tok, *a, **k):
+            if tok == self.OLD:  # between reading the phones and forgetting this one, another registers
+                self.app.post('/api/devices', {'token': new, 'name': 'New phone'})
+            return real(tok, *a, **k)
+        self.apple.push = slow
+        self.push.alert('t', 'b', '/')
+        self.assertIn(new, self.app.devices())
+        self.assertNotIn(self.OLD, self.app.devices())
+
+    def test_phones_registering_at_the_same_moment_all_stay(self):
+        self.make()
+        toks = [f'{i:064x}' for i in range(1, 9)]
+        start = threading.Event()
+
+        def reg(t):
+            start.wait()
+            self.app.post('/api/devices', {'token': t, 'name': 'iPhone'})
+            self.app.post('/api/widget-token', {'token': t})
+        ts = [threading.Thread(target=reg, args=(t,)) for t in toks]
+        for t in ts:
+            t.start()
+        start.set()
+        for t in ts:
+            t.join()
+        self.assertTrue(set(toks) <= set(self.app.devices()))
+        self.assertEqual(len(self.app.widget_tokens()), 8, 'the newest eight')
+        self.assertEqual(list(self.app.state_dir.glob('*.tmp')), [])
+
+    def test_settings_saved_at_the_same_moment_all_land(self):
+        self.make()
+        self.app.fleet.add_machine({'name': 'studio', 'label': 'Studio', 'target': 'me@x', 'os': 'mac'})
+        start = threading.Event()
+        changes = [{'chrome_machine': 'studio'}, {'notify': {'held': False}}, {'ai_auto_machine': True}] * 4
+
+        def save(body):
+            start.wait()
+            self.app.post('/api/prefs', body)
+        ts = [threading.Thread(target=save, args=(b,)) for b in changes]
+        for t in ts:
+            t.start()
+        start.set()
+        for t in ts:
+            t.join()
+        d = json.loads((self.app.state_dir / 'prefs.json').read_text())
+        self.assertEqual((d['chrome_machine'], d['notify']['held'], d['ai_auto_machine']), ('studio', False, True))
 
 
 class TailTest(unittest.TestCase):

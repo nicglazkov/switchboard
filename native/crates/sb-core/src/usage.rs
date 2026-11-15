@@ -33,10 +33,13 @@ fn local_date(epoch: f64, tz: &FixedOffset) -> Option<NaiveDate> {
 
 /// This week as day slots, oldest first: from the day the week began (the reset a week before `week_reset`) to the
 /// last day of the week, today included. Days the server has no row for are None; days after today are `future`.
-/// `offset_secs`: the local UTC offset (the server counts days in America/Los_Angeles, like the Mac it runs for).
+///
+/// The server counts the days in its own time zone and its rows run from the week's first day to its today, so the
+/// rows say which day is today and where the week starts. `offset_secs`, this computer's UTC offset, stands in only
+/// when there are no rows, or they are too far from this computer's date to be current.
 pub fn week_days(u: &ApiUsage, week_reset: Option<f64>, now: f64, offset_secs: i32) -> Vec<DaySlot> {
     let Some(tz) = FixedOffset::east_opt(offset_secs) else { return Vec::new() };
-    let Some(today) = local_date(now, &tz) else { return Vec::new() };
+    let Some(here) = local_date(now, &tz) else { return Vec::new() };
     let rows: Vec<(NaiveDate, Option<f64>)> = u
         .days
         .iter()
@@ -44,10 +47,16 @@ pub fn week_days(u: &ApiUsage, week_reset: Option<f64>, now: f64, offset_secs: i
             NaiveDate::parse_from_str(d.day.trim(), "%Y-%m-%d").ok().map(|day| (day, d.used.map(|x| x.max(0.0))))
         })
         .collect();
+    // Two places are never more than a day apart on the calendar: a last row further off is an old report.
+    let server_today = rows.iter().map(|r| r.0).max().filter(|d| (*d - here).num_days().abs() <= 1);
+    let today = server_today.unwrap_or(here);
     let reset = week_reset.or(u.week.as_ref().and_then(|w| w.reset)).filter(|r| *r > 0.0);
-    let mut start = match reset.and_then(|r| local_date(r - 7.0 * 86400.0, &tz)) {
-        Some(d) => d,
-        None => rows.iter().map(|r| r.0).min().unwrap_or(today),
+    let first_row = rows.iter().map(|r| r.0).min();
+    let mut start = match (server_today.and(first_row), reset.and_then(|r| local_date(r - 7.0 * 86400.0, &tz))) {
+        // The reset's day in this computer's zone can be a day off the server's: its first row, when next to it, wins.
+        (Some(f), Some(d)) if (f - d).num_days().abs() <= 1 => f,
+        (_, Some(d)) => d,
+        (_, None) => first_row.unwrap_or(today),
     };
     // A reset that has passed (numbers not caught up yet) or a far-off first row: keep to the last week.
     if start > today {
@@ -142,6 +151,27 @@ mod tests {
         assert!(s[5].today && s[5].label == "Tue" && s[5].used == Some(4.5));
         assert!(s[6].future && !s[4].future);
         assert_eq!(s[5].long_label(), "Tue Oct 13");
+    }
+
+    #[test]
+    fn today_is_the_servers_day_not_this_computers() {
+        // The server (Los Angeles) says it is still Tue Oct 13; this computer is nine hours ahead, in Wed Oct 14.
+        const AHEAD: i32 = 2 * 3600;
+        let u = usage(&[("2026-10-08", Some(3.0)), ("2026-10-12", Some(2.0)), ("2026-10-13", Some(4.5))], &[]);
+        let now = epoch(2026, 10, 13, 22);
+        let s = week_days(&u, Some(epoch(2026, 10, 15, 10)), now, AHEAD);
+        assert_eq!(s.len(), 7);
+        assert!(s[5].today && s[5].used == Some(4.5), "the server's last row is today");
+        assert!(s[6].future, "tomorrow there is still to come, though it has begun here");
+        // The week began Thu Oct 8 at 10:00 there, which is already Oct 8 evening here: the first row sets the start.
+        const BEHIND: i32 = -12 * 3600;
+        let s = week_days(&u, Some(epoch(2026, 10, 15, 0)), now, BEHIND);
+        assert_eq!(s[0].date, NaiveDate::from_ymd_opt(2026, 10, 8).unwrap());
+        assert!(s[5].today);
+        // An old report (its last row days back) does not decide today.
+        let old = usage(&[("2026-10-08", Some(3.0)), ("2026-10-09", Some(1.0))], &[]);
+        let s = week_days(&old, Some(epoch(2026, 10, 15, 10)), epoch(2026, 10, 13, 15), PT);
+        assert!(s[5].today && s[5].used.is_none());
     }
 
     #[test]

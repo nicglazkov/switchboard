@@ -66,7 +66,8 @@ function SumsOk([string]$file, [string]$name) {
         $p = $l.Trim() -split '\s+', 2
         if ($p.Count -eq 2 -and $p[1].TrimStart('*') -eq $name) { $want = $p[0] }
     }
-    if (-not $want) { return $true }
+    # A list with no line for this file does not vouch for it: whoever can change the file can drop its line.
+    if (-not $want) { Say "(the server's SHA256SUMS has no line for $name)"; return $false }
     return (Get-FileHash -Algorithm SHA256 $file).Hash.ToLower() -eq $want.ToLower()
 }
 
@@ -93,7 +94,9 @@ try {
         if (-not (SumsOk $new 'sb.py')) { Die "the agent from $Dl did not match its checksum; nothing was changed." }
         & $Py -m py_compile $new
         if ($LASTEXITCODE -ne 0) { Die "the agent did not compile with $Py." }
-        Copy-Item $new $SbPath -Force
+        # In one step, so a copy cut short never leaves half an agent where Claude Code's hooks run it.
+        Copy-Item $new "$SbPath.new" -Force
+        Move-Item "$SbPath.new" $SbPath -Force
         & $Py $SbPath install
         if ($LASTEXITCODE -ne 0) { Die "the agent's installer failed (see above)." }
         Say "Agent installed: Claude Code's hooks, status line and the switchboard MCP server are set up in $HOME\.claude."

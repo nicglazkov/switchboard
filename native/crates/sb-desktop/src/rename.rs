@@ -89,16 +89,34 @@ impl BoardView {
             return;
         }
         let name = names::given(&typed, &e.raw);
+        // The server and the machines keep names to English letters; say that, not "needs letters", to someone who
+        // typed letters of another alphabet.
+        let lost = names::drops_letters(&typed);
         if name.is_empty() && !typed.trim().is_empty() {
             self.app.update(cx, |s, cx| {
                 s.toast(
-                    "A name needs letters or digits.",
-                    Some("Use letters, digits, spaces and . , : ' + # ( ) - _".into()),
+                    if lost {
+                        "Chat names can only use English letters for now."
+                    } else {
+                        "A name needs letters or digits."
+                    },
+                    Some("Use English letters, digits, spaces and . , : ' + # ( ) - _".into()),
                     true,
                     cx,
                 )
             });
             return;
+        }
+        if lost {
+            let kept = names::split(&name).0;
+            self.app.update(cx, |s, cx| {
+                s.toast(
+                    format!("Saved as \u{201c}{kept}\u{201d}"),
+                    Some("Chat names can only use English letters for now, so the other letters were left out.".into()),
+                    false,
+                    cx,
+                )
+            });
         }
         if name == e.raw || (!name.is_empty() && names::split(&name).0 == names::split(&e.raw).0) {
             return;
@@ -197,7 +215,8 @@ impl BoardView {
                 .inset_0()
                 .bg(t.scrim)
                 .occlude()
-                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.cancel_chat_name(cx)))
+                // Clicking away saves, here as everywhere else the field shows (Escape and Cancel put it back).
+                .on_mouse_down(MouseButton::Left, cx.listener(|this, _, _, cx| this.commit_chat_name(false, cx)))
                 .child(
                     div().absolute().top(px(ui::header())).left_0().right_0().flex().justify_center().child(
                         div()

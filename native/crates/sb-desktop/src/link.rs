@@ -107,6 +107,8 @@ impl LinkSheet {
     fn search(&mut self, now: bool, cx: &mut Context<Self>) {
         let q = self.q.read(cx).value().trim().to_string();
         if !now && self.rows.is_some() && q == self.shown {
+            // Back to what the list already shows: a search still waiting for the keys in between is dropped.
+            self.seq += 1;
             return;
         }
         self.seq += 1;
@@ -158,7 +160,8 @@ impl LinkSheet {
     }
 
     fn pick(&mut self, i: usize, cx: &mut Context<Self>) {
-        if self.sending.is_some() {
+        // While the list shows only an error, the rows of the search before are not there to be picked.
+        if self.sending.is_some() || self.failed.is_some() {
             return;
         }
         let Some(c) = self.rows.as_ref().and_then(|r| r.get(i)).cloned() else { return };
@@ -438,7 +441,30 @@ impl Render for LinkSheet {
                     .child(foot(vec!["↵"], "link"))
                     .child(foot(vec!["esc"], "close"))
                     .child(ui::spacer())
-                    .when(n > 0, |d| d.child(ui::num(if n == 1 { "1 chat".to_string() } else { format!("{n} chats") }, 11.5, t.faint))),
+                    .when(n > 0, |d| d.child(ui::num(count_words(n), 11.5, t.faint))),
             )
+    }
+}
+
+/// The most chats the server sends for one search (server/features.py, Threads.search).
+const MOST: usize = 40;
+
+/// The count under the list. At the server's limit it says there are more, and how to reach them.
+fn count_words(n: usize) -> String {
+    match n {
+        1 => "1 chat".into(),
+        n if n >= MOST => format!("The {n} newest. Search to find older ones."),
+        n => format!("{n} chats"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn a_full_list_says_there_are_more() {
+        use super::count_words;
+        assert_eq!(count_words(1), "1 chat");
+        assert_eq!(count_words(39), "39 chats");
+        assert_eq!(count_words(40), "The 40 newest. Search to find older ones.");
     }
 }

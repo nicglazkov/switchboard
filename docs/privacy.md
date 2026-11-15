@@ -70,7 +70,8 @@ What it does protect:
 - **Updates are signed.** The app installs only builds signed with the release key, and checks each file's
   SHA-256. [Why you can trust an update](updates.md#why-you-can-trust-an-update)
 - **Downloads are checked for damage.** `install-agent.sh` checks `sb.py` and `switchboard-node` against the
-  server's `SHA256SUMS` when it has one, and `get-server.sh` checks the server kit against the `.sha256` beside it
+  server's `SHA256SUMS` when it has one (a file that list does not name is refused), and `get-server.sh` checks
+  the server kit against the `.sha256` beside it
   (or the one you pass with `--sha256`). The sums come from the same place as the files, so they catch a broken
   download, not a server that lies.
 - **Nothing runs as an administrator.** The server, the helper, the node and the app install for your own

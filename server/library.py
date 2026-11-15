@@ -190,7 +190,27 @@ class Library:
 
     # ---- the store
     def _load(self):
-        d = jload(self.file, {})
+        """library.json. One that cannot be read is not an empty library: taken for one, every machine would be told
+        to drop every tool, and the next save would write over the file. It is put aside (library.json.bad), and
+        until a readable library.json is back and the server starts again, nothing is dropped from any machine."""
+        bad = self.file.with_name(self.file.name + '.bad')
+        try:
+            d = json.loads(self.file.read_text())
+        except FileNotFoundError:
+            d = {}
+            self.broken = bad.exists()  # put aside by an earlier start, and nobody has looked at it yet
+        except (OSError, ValueError):
+            d = None
+        else:
+            self.broken = False
+        if not isinstance(d, dict):
+            self.broken = True
+            try:
+                os.replace(self.file, bad)
+                log(f"library: library.json could not be read, so it is kept as {bad.name} and no machine's tools are touched")
+            except OSError as e:
+                log(f'library: library.json could not be read ({e})')
+            d = {}
         d['tools'] = d.get('tools') if isinstance(d.get('tools'), dict) else {}
         d['defaults'] = [t for t in d.get('defaults') or [] if t in d['tools']] if isinstance(d.get('defaults'), list) else []
         for k in ('machines', 'chats', 'modes'):  # modes: {machine/sid: 'auto'} for chats whose tools are picked at launch
@@ -321,7 +341,11 @@ class Library:
             v = t and t.get('latest')
         if not v:
             raise self._err(404, f"There's no tool {tool} in the library.")
-        data = self._bundle(tool, v).read_bytes()
+        try:
+            data = self._bundle(tool, v).read_bytes()
+        except OSError as e:
+            log(f'library: {tool} v{v} cannot be read: {e}')
+            raise self._err(500, "That tool's files are missing on the server. Publish it again.")
         sha, step = hashlib.sha256(data).hexdigest(), self._step(name)
         with self.lock:
             lk = self.push_locks.setdefault((name, tool), threading.Lock())
@@ -364,6 +388,8 @@ class Library:
             want = [t for t in self.d['machines'].get(name) or [] if t in self.d['tools']]
             latest = {t: self.d['tools'][t].get('latest') for t in want}
         for tool in list(st.get('tools') or {}):  # a copy: _drop takes each one out of this dict
+            if self.broken:  # the list of tools was lost (_load): what a machine has stays where it is
+                break
             if valid_tool(tool) and tool not in want:
                 self._try(self._drop, name, tool)
         for tool in want:

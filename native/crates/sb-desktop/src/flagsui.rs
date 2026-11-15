@@ -1,6 +1,7 @@
 //! The flags drawer (the web app's, 1491dec): what a chat runs with ("Active now"), what can change ("Can add": model,
 //! effort, permissions, Claude in Chrome, extra folders, other flags) and the changes waiting ("Pending").
-//! Model, effort, plan mode and folders change live: they are typed into the chat (/model, /effort, /add-dir, /plan).
+//! Model, effort, plan mode (on) and folders change live: they are typed into the chat (/model, /effort, /add-dir,
+//! /plan). Leaving plan mode is a permissions change like any other.
 //! Anything else relaunches the chat with `--resume` through POST /api/relaunch, after a notice, and the subagent
 //! safety check ("busy": wait for its work, or go now) the rest of the app uses. Opened from a card's flag button, the
 //! inspector, the right-click menu and the terminal's bar.
@@ -40,6 +41,40 @@ pub const FLAGS_W: f32 = 460.;
 
 /// Never removable from the drawer: the model, effort and permissions always have a value; Remote Control is Switchboard's.
 const FIXED: [&str; 4] = ["--model", "--effort", "--permission-mode", "--remote-control"];
+
+/// A row with no remove button: one of the fixed four, or one the server marks locked (a worktree is made once,
+/// when the chat starts, and a relaunch runs inside it).
+pub fn row_fixed(x: &sb_core::api::ApiFlagItem) -> bool {
+    FIXED.contains(&x.name.as_str()) || x.how == "locked"
+}
+
+/// The permission modes the drawer's list offers. Plan has its own chip (turning it on is typed into the chat),
+/// unless the chat is in plan mode now: leaving it is a relaunch, so then Plan sits in the list as what is picked.
+pub fn perm_choices(now: &str) -> Vec<(&'static str, &'static str)> {
+    PERMS.iter().copied().filter(|(k, _)| *k != "plan" || now == "plan").collect()
+}
+
+/// The lines under "Changes live" and "Needs a relaunch", for a chat in that state.
+pub fn group_notes(kind: Option<&str>, status: Option<&str>) -> (&'static str, &'static str) {
+    if status == Some("stopped") {
+        return (
+            "Typed straight into a running chat. This one is stopped, so they go in when it resumes.",
+            "Claude Code reads these when it starts, so the chat resumes with them and carries on with its history.",
+        );
+    }
+    if kind == Some("interactive") {
+        // open in a terminal Switchboard does not own: nothing can be typed into it from here
+        return (
+            "This chat is open in a terminal of its own, so Switchboard can't type into it. You get one command \
+             to run there instead.",
+            "Claude Code reads these when it starts. You get the command that resumes the chat with them.",
+        );
+    }
+    (
+        "Typed straight into the chat (/model, /effort, /add-dir, /plan). No restart.",
+        "Claude Code reads these when it starts, so the chat relaunches with --resume and carries on with its history.",
+    )
+}
 const DIRS_MAX: usize = 8;
 
 /// What the user wants the chat to run with, as POST /api/flags takes it.
@@ -74,6 +109,7 @@ impl Want {
                 "--computer-use" => w.computer = true,
                 "--add-dir" => w.dirs.extend(x.value.clone()),
                 "--remote-control" => {}
+                _ if x.how == "locked" => {} // shown, never the user's to change (and never sent back)
                 n => w.extra.push(std::iter::once(n.to_string()).chain(x.value.clone()).collect()),
             }
         }
@@ -136,6 +172,18 @@ pub struct Drawer {
     pub dir: Option<Entity<InputState>>,
 }
 
+/// The drawer holds changes that were not applied (`was`: what the chat runs with, as the drawer opened with it):
+/// closing it would lose them.
+fn unsaved(stage: &Stage, want: &Want, was: Option<&Want>) -> bool {
+    *stage == Stage::Edit && was.is_some_and(|w| Want { other: want.other.trim().into(), ..want.clone() } != *w)
+}
+
+/// Esc on the drawer: with changes not applied it only says "Press Esc again", unless it said so within the last
+/// two seconds (as Cmd+W does before it closes Switchboard).
+fn discard_asks_again(unsaved: bool, hinted: Option<f64>, now: f64) -> bool {
+    unsaved && !hinted.is_some_and(|at| now >= at && now - at <= crate::view::CLOSE_AGAIN_SECS)
+}
+
 /// The drawer still waits to type into chat `key`: it was not closed or switched to another chat meanwhile.
 fn still_waits(d: Option<&Drawer>, key: &str) -> bool {
     d.is_some_and(|d| d.key == key && d.stage == Stage::WaitLive)
@@ -146,6 +194,7 @@ impl BoardView {
     pub fn open_flags(&mut self, key: String, cx: &mut Context<Self>) {
         let Some(s) = self.app.read(cx).snap.session(&key) else { return };
         self.menu = None;
+        self.flags_hint = None;
         self.flags = Some(Drawer {
             key: key.clone(),
             machine: s.machine.clone(),
@@ -163,6 +212,31 @@ impl BoardView {
             dir: None,
         });
         self.flags_load(false, cx);
+        cx.notify();
+    }
+
+    /// Esc, or a click beside the drawer: it closes, but changes that were not applied are not lost to one stray
+    /// key. The first press says so; a second one within two seconds discards them.
+    pub fn flags_dismiss(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = &self.flags else { return };
+        let now = crate::state::AppState::now();
+        let pending = unsaved(&d.stage, &d.want, d.view.as_ref().map(Want::of).as_ref());
+        if !discard_asks_again(pending, self.flags_hint, now) {
+            self.flags = None;
+            self.flags_hint = None;
+            return cx.notify();
+        }
+        self.flags_hint = Some(now);
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs_f64(crate::view::CLOSE_AGAIN_SECS)).await;
+            let _ = this.update(cx, |v, cx| {
+                if v.flags_hint == Some(now) {
+                    v.flags_hint = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
         cx.notify();
     }
 
@@ -322,13 +396,7 @@ impl BoardView {
                 .absolute()
                 .inset_0()
                 .occlude()
-                .on_mouse_down(
-                    MouseButton::Left,
-                    c.cx.listener(|this, _, _, cx| {
-                        this.flags = None;
-                        cx.notify();
-                    }),
-                )
+                .on_mouse_down(MouseButton::Left, c.cx.listener(|this, _, _, cx| this.flags_dismiss(cx)))
                 .child(
                     div()
                         .id("flags-drawer")
@@ -477,6 +545,7 @@ impl BoardView {
                 "live" => ("Live", t.warm),
                 "key" => ("Shift+Tab", t.warm),
                 "locked" => ("Kept on", t.faint),
+                "start" => ("Set at start", t.faint),
                 _ => ("Relaunch", t.cold),
             };
             div()
@@ -495,8 +564,8 @@ impl BoardView {
         // Active now: what, its value, how it changes, and remove (or keep it, once removed).
         let mut active = div().flex().flex_col();
         for (i, x) in v.active.iter().enumerate() {
-            let kept = w.keeps(&x.name, x.value.as_deref());
-            let fixed = FIXED.contains(&x.name.as_str());
+            let fixed = row_fixed(x);
+            let kept = fixed || w.keeps(&x.name, x.value.as_deref());
             let (name, val) = (x.name.clone(), x.value.clone());
             active = active.child(
                 div()
@@ -517,7 +586,7 @@ impl BoardView {
                             .font_weight(FontWeight::SEMIBOLD)
                             .text_color(t.ink),
                     )
-                    .child(tag(&x.how))
+                    .child(tag(if x.how == "locked" && x.name != "--remote-control" { "start" } else { &x.how }))
                     .child(if fixed {
                         div().w(px(26.)).into_any_element()
                     } else {
@@ -615,7 +684,7 @@ impl BoardView {
                 ));
         }
         // Two groups, so what changes live and what relaunches the chat can never be mistaken for each other.
-        let running = v.status.as_deref() != Some("stopped");
+        let notes = group_notes(v.kind.as_deref(), v.status.as_deref());
         let group = |live: bool, title: &str, sub: &str, rows: gpui::Div| {
             let col = if live { t.warm } else { t.cold };
             div()
@@ -659,7 +728,8 @@ impl BoardView {
                 let back = if orig_perm == "plan" { "default".to_string() } else { orig_perm.clone() };
                 this.flags_pick(move |w| w.perm = if w.perm == "plan" { back } else { "plan".into() }, cx)
             }));
-        let perms: Vec<(&'static str, &'static str)> = PERMS.iter().copied().filter(|(k, _)| *k != "plan").collect();
+        let in_plan = Want::of(v).perm == "plan";
+        let perms = perm_choices(if in_plan { "plan" } else { "" });
         let efforts = ui::choice(
             &t,
             cx,
@@ -689,7 +759,7 @@ impl BoardView {
             .flex_col()
             .child(orow("Model", div().flex().child(models).into_any_element()))
             .child(orow("Effort", div().flex().child(efforts).into_any_element()))
-            .child(orow("Plan", div().flex().child(plan_chip).into_any_element()))
+            .children((!in_plan).then(|| orow("Plan", div().flex().child(plan_chip).into_any_element())))
             .child(orow("Also open", dirs.into_any_element()));
         let relaunch_rows = div()
             .flex()
@@ -728,22 +798,8 @@ impl BoardView {
         let can = div()
             .flex()
             .flex_col()
-            .child(group(
-                true,
-                "Changes live",
-                if running {
-                    "Typed straight into the chat (/model, /effort, /add-dir, plan mode with Shift+Tab). No restart."
-                } else {
-                    "Typed straight into a running chat. This one is stopped, so they go in when it resumes."
-                },
-                live_rows,
-            ))
-            .child(group(
-                false,
-                "Needs a relaunch",
-                "Claude Code reads these when it starts, so the chat relaunches with --resume and carries on with its history.",
-                relaunch_rows,
-            ))
+            .child(group(true, "Changes live", notes.0, live_rows))
+            .child(group(false, "Needs a relaunch", notes.1, relaunch_rows))
             .children(d.plan_err.clone().map(|e| ui::wrap(e).mt(px(6.)).text_size(px(12.)).text_color(t.bad)));
         let changes = d.plan.as_ref().map(|p| p.changes.clone()).unwrap_or_default();
         let mut pend = div().flex().flex_col();
@@ -849,7 +905,11 @@ impl BoardView {
             .h(px(32.))
             .px(px(10.))
             .text_size(px(13.))
-            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                // the Other flags field too: left filled, it would show flags that are no longer sent
+                if let Some(inp) = this.flags.as_ref().and_then(|d| d.other.clone()) {
+                    inp.update(cx, |i, cx| i.set_value("", window, cx));
+                }
                 if let Some(d) = this.flags.as_mut() {
                     if let Some(v) = &d.view {
                         d.want = Want::of(v);
@@ -1098,6 +1158,24 @@ mod tests {
     use super::*;
     use sb_core::api::ApiFlagItem;
 
+    #[test]
+    fn esc_does_not_lose_flag_changes_that_were_not_applied() {
+        let was = Want { perm: "default".into(), ..Default::default() };
+        let mut want = was.clone();
+        assert!(!unsaved(&Stage::Edit, &want, Some(&was)), "nothing changed: Esc closes at once");
+        want.other = "  ".into();
+        assert!(!unsaved(&Stage::Edit, &want, Some(&was)), "a space typed in Other flags is no change");
+        want.model = Some("opus".into());
+        assert!(unsaved(&Stage::Edit, &want, Some(&was)));
+        assert!(!unsaved(&Stage::Sent, &want, Some(&was)), "sent: there is nothing left to lose");
+        assert!(!unsaved(&Stage::Load, &want, None), "still loading");
+        // the first press says so, a second one within two seconds discards
+        assert!(discard_asks_again(true, None, 50.));
+        assert!(!discard_asks_again(true, Some(49.), 50.));
+        assert!(discard_asks_again(true, Some(47.), 50.), "too late: it says so again");
+        assert!(!discard_asks_again(false, None, 50.));
+    }
+
     fn item(name: &str, value: Option<&str>) -> ApiFlagItem {
         ApiFlagItem {
             name: name.into(),
@@ -1125,6 +1203,35 @@ mod tests {
             other: None,
             dir: None,
         }
+    }
+
+    #[test]
+    fn a_locked_row_is_shown_and_never_sent_back() {
+        let wt = ApiFlagItem { how: "locked".into(), ..item("--worktree", Some("fix")) };
+        let v = ApiFlagsView {
+            active: vec![item("--permission-mode", Some("manual")), wt.clone(), item("--verbose", None)],
+            ..Default::default()
+        };
+        let w = Want::of(&v);
+        assert_eq!(w.extra, vec![vec!["--verbose".to_string()]]);
+        assert_eq!(w.perm, "default", "one mode, two names");
+        assert!(row_fixed(&wt) && row_fixed(&item("--model", Some("opus"))) && !row_fixed(&item("--verbose", None)));
+        assert_eq!(w.body()["flags"], serde_json::json!([["--verbose"]]));
+    }
+
+    #[test]
+    fn plan_is_in_the_list_only_while_the_chat_is_in_it() {
+        let names = |now: &str| perm_choices(now).iter().map(|p| p.0).collect::<Vec<_>>();
+        assert_eq!(names("auto"), ["default", "acceptEdits", "auto", "bypassPermissions", "dontAsk"]);
+        assert_eq!(names("plan"), ["default", "acceptEdits", "plan", "auto", "bypassPermissions", "dontAsk"]);
+    }
+
+    #[test]
+    fn a_terminal_chat_is_not_told_its_changes_are_typed_in() {
+        let (live, relaunch) = group_notes(Some("interactive"), Some("idle"));
+        assert!(live.contains("can't type into it") && relaunch.contains("command"));
+        assert!(group_notes(Some("background"), Some("idle")).0.contains("No restart"));
+        assert!(group_notes(Some("interactive"), Some("stopped")).0.contains("stopped"));
     }
 
     #[test]

@@ -108,6 +108,72 @@ pub fn slots(infos: &[TabInfo], groups: &[Group], folded: &[String]) -> Vec<Slot
     out
 }
 
+/// Where Cmd/Ctrl+`n` goes (0 the board, else a tab's number): 1 the board, 2 to 8 the terminal tabs the row shows, in
+/// its order, and 9 the last of them. A folded group's tabs are out of sight and not counted.
+pub fn tab_for_key(infos: &[TabInfo], groups: &[Group], folded: &[String], n: usize) -> Option<usize> {
+    let seen: Vec<usize> = slots(infos, groups, folded)
+        .into_iter()
+        .filter_map(|s| match s {
+            Slot::Tab(i) => Some(i + 1),
+            Slot::Chip(_) => None,
+        })
+        .collect();
+    match n {
+        1 => Some(0),
+        9 => seen.last().copied(),
+        2..=8 => seen.get(n - 2).copied(),
+        _ => None,
+    }
+}
+
+/// Where a tab dragged over tab `over` (`right`: its right half) would drop: the gap, and the group it would join
+/// (over a group's tabs it joins that group; over the tabs in no group, it leaves its group). A starred tab moves
+/// only among starred ones, and nothing else drops among them. A tab that knows no chat (your own shell, a chat still
+/// starting) can be in no group, so over a group's tabs or the starred ones it has no place: None.
+pub fn drag_target(
+    infos: &[TabInfo],
+    groups: &[Group],
+    from: usize,
+    over: usize,
+    right: bool,
+) -> Option<(usize, Option<String>)> {
+    let (f, o) = (infos.get(from)?, infos.get(over)?);
+    let gap = if right { over + 1 } else { over };
+    let n_star = infos.iter().take_while(|x| x.star).count();
+    if f.star {
+        return Some((gap.min(n_star), None));
+    }
+    if f.thread.is_none() && (o.star || o.group.is_some()) {
+        return None;
+    }
+    Some(if o.star {
+        (n_star, infos.get(n_star).and_then(|x| x.group).map(|g| groups[g].id.clone()))
+    } else {
+        (gap, o.group.map(|g| groups[g].id.clone()))
+    })
+}
+
+/// Asked before "Close group" when closing its tabs would stop chats (`stops`: per tab, its own Close stops its
+/// chat). None when every chat keeps running: the group just closes.
+pub fn close_group_confirm(name: &str, stops: &[bool]) -> Option<sb_core::actions::Confirm> {
+    let plural = |n: usize, one: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {one}s") };
+    let m = stops.iter().filter(|s| **s).count();
+    if m == 0 {
+        return None;
+    }
+    let what = if name.is_empty() { "this group".to_string() } else { format!("the group {name}") };
+    Some(sb_core::actions::Confirm {
+        title: format!("Close {} and stop {}?", plural(stops.len(), "tab"), plural(m, "chat")),
+        body: format!(
+            "Closing {what} stops {}, because \"Stop a chat when its tab closes\" is on in Settings. Chats marked \
+             Keep running are left alone.",
+            if m == 1 { "that chat" } else { "those chats" }
+        ),
+        ok: "Close group".into(),
+        cancel: "Cancel".into(),
+    })
+}
+
 /// The note beside "Close group", from whether closing each of its tabs stops that tab's chat.
 pub fn close_group_note(stops: &[bool]) -> &'static str {
     match (stops.iter().any(|s| *s), stops.iter().all(|s| *s)) {
@@ -279,6 +345,26 @@ impl BoardView {
         cx.notify();
     }
 
+    /// The tab that shows is in a folded group: the group unfolds, so the tab row shows where you are (a shortcut,
+    /// the tab list, a chat reopened, a neighbour closed, or its chat put in a folded group on another computer).
+    pub fn unfold_shown(&mut self, cx: &mut gpui::Context<Self>) {
+        let Some(i) = self.tab.checked_sub(1) else { return };
+        let folded = self.folded(cx);
+        if folded.is_empty() {
+            return;
+        }
+        let (infos, groups) = self.tab_infos(cx);
+        let Some(gid) = infos.get(i).and_then(|x| x.group).and_then(|g| groups.get(g)).map(|g| g.id.clone()) else {
+            return;
+        };
+        if folded.contains(&gid) {
+            self.app.update(cx, |s, _| {
+                s.settings.folded_groups.retain(|g| *g != gid);
+                s.save_settings();
+            });
+        }
+    }
+
     /// Folds or unfolds a group (on this Mac only). Folding the group of the tab that shows moves to the nearest tab
     /// still in sight, else the board.
     pub fn toggle_fold(&mut self, gid: &str, cx: &mut gpui::Context<Self>) {
@@ -352,10 +438,41 @@ impl BoardView {
         cx.notify();
     }
 
-    /// "Close group": its tabs close here, each as its own Close would (a running chat stops unless kept running), and
-    /// the group stays (other Macs keep theirs).
+    /// What closing group `gi` does to its chats: per tab, whether its own Close stops its chat.
+    fn group_stops(&self, gi: usize, infos: &[TabInfo], cx: &gpui::App) -> Vec<bool> {
+        (0..infos.len())
+            .filter(|i| infos[*i].group == Some(gi))
+            .map(|i| {
+                let t = &self.tabs[i];
+                t.read(cx).key.as_deref().is_some_and(|k| self.close_stops(k, t.entity_id(), cx))
+            })
+            .collect()
+    }
+
+    /// "Close group": asks first when closing its tabs would stop chats (one click must not stop several working
+    /// chats); otherwise the tabs just close.
     pub fn close_group(&mut self, gid: &str, cx: &mut gpui::Context<Self>) {
         self.group_menu = None;
+        let (infos, groups) = self.tab_infos(cx);
+        let Some(gi) = groups.iter().position(|g| g.id == gid) else { return };
+        let stops = self.group_stops(gi, &infos, cx);
+        if let Some(c) = close_group_confirm(&groups[gi].name, &stops) {
+            self.confirm = Some((String::new(), c));
+            self.confirm_chrome = false;
+            self.confirm_here = false;
+            self.confirm_close = None;
+            self.confirm_leave = Some(crate::view::Leave::Group(gid.to_string()));
+            // The keyboard leaves the terminal, so Enter and Esc answer the question.
+            self.focus_tab = true;
+            cx.notify();
+            return;
+        }
+        self.close_group_now(gid, cx);
+    }
+
+    /// Its tabs close here, each as its own Close would (a running chat stops unless kept running), and the group
+    /// stays (other computers keep theirs).
+    pub fn close_group_now(&mut self, gid: &str, cx: &mut gpui::Context<Self>) {
         let (infos, groups) = self.tab_infos(cx);
         let Some(gi) = groups.iter().position(|g| g.id == gid) else { return };
         for i in (0..infos.len()).rev() {
@@ -373,27 +490,33 @@ impl BoardView {
     /// tab moves only among starred ones, and nothing else drops among them.
     pub fn tab_drag_over(&mut self, from: usize, over: usize, right: bool, cx: &mut gpui::Context<Self>) {
         let (infos, groups) = self.tab_infos(cx);
-        let (Some(f), Some(o)) = (infos.get(from), infos.get(over)) else { return };
-        let gap = if right { over + 1 } else { over };
-        let n_star = infos.iter().take_while(|x| x.star).count();
-        let (gap, into) = if f.star {
-            (gap.min(n_star), None)
-        } else if o.star {
-            (n_star, infos.get(n_star).and_then(|x| x.group).map(|g| groups[g].id.clone()))
-        } else {
-            (gap, o.group.map(|g| groups[g].id.clone()))
+        if from >= infos.len() || over >= infos.len() {
+            return;
+        }
+        // No place there for this tab (drag_target): no gap is marked, so the drop moves nothing.
+        let (drop, into) = match drag_target(&infos, &groups, from, over, right) {
+            Some((gap, into)) => (Some((from, gap)), into),
+            None => (None, None),
         };
         if self.drop_group != into {
             self.drop_group = into;
             cx.notify();
         }
-        self.set_tab_drop(Some((from, gap)), cx);
+        self.set_tab_drop(drop, cx);
     }
 
     /// A tab dragged over a group's chip: it would join that group, before its first tab.
     pub fn tab_drag_over_chip(&mut self, from: usize, g: usize, cx: &mut gpui::Context<Self>) {
         let (infos, groups) = self.tab_infos(cx);
         if infos.get(from).is_none_or(|x| x.star) {
+            return;
+        }
+        // A tab that knows no chat (your own shell) can be in no group: the chip marks no place for it.
+        if infos[from].thread.is_none() {
+            if self.drop_group.take().is_some() {
+                cx.notify();
+            }
+            self.set_tab_drop(None, cx);
             return;
         }
         let first = infos.iter().position(|x| x.group == Some(g)).unwrap_or(infos.len());
@@ -685,13 +808,7 @@ impl BoardView {
         let (id1, id2, id3, id4, id5) = (g.id.clone(), g.id.clone(), g.id.clone(), g.id.clone(), g.id.clone());
         // What closing the group does to its chats, as each tab's own Close says it.
         let (infos, _) = self.tab_infos(cx);
-        let stops: Vec<bool> = (0..infos.len())
-            .filter(|i| infos[*i].group == Some(gi))
-            .map(|i| {
-                let t = &self.tabs[i];
-                t.read(cx).key.as_deref().is_some_and(|k| self.close_stops(k, t.entity_id(), cx))
-            })
-            .collect();
+        let stops = self.group_stops(gi, &infos, cx);
         let close_note = close_group_note(&stops);
         let n = groups.len();
         let title = if g.name.is_empty() { "Unnamed group".to_string() } else { g.name.clone() };
@@ -762,7 +879,7 @@ impl BoardView {
                                 .text_size(px(12.))
                                 .line_height(relative(1.4))
                                 .text_color(t.faint)
-                                .child("Groups are the same on every Mac. Which tabs are open, and folding, stay on this one."),
+                                .child("Groups are the same on every computer. Which tabs are open, and folding, stay on this one."),
                         ),
                 )
                 .into_any_element(),
@@ -907,6 +1024,55 @@ mod tests {
         let infos = vec![info(false, "t9", None), info(false, "t1", Some(0)), info(false, "t2", Some(0))];
         assert_eq!(group_add_index(&infos, &grp, 0, "t9", 0, 2), 1, "between t1 and t2");
         assert_eq!(group_add_index(&infos, &grp, 0, "t9", 0, 5), 2, "a gap from before two tabs closed");
+    }
+
+    #[test]
+    fn the_number_keys_count_the_tabs_in_sight() {
+        let groups = vec![g("a", &["t1", "t2"])];
+        let infos =
+            vec![info(true, "s", None), info(false, "t1", Some(0)), info(false, "t2", Some(0)), info(false, "x", None)];
+        let open = |n| tab_for_key(&infos, &groups, &[], n);
+        assert_eq!((open(1), open(2), open(3), open(5)), (Some(0), Some(1), Some(2), Some(4)));
+        assert_eq!((open(6), open(9)), (None, Some(4)));
+        // group "a" folded: its two tabs are skipped, so the third key is the tab after them
+        let shut = |n| tab_for_key(&infos, &groups, &["a".into()], n);
+        assert_eq!((shut(1), shut(2), shut(3), shut(4), shut(9)), (Some(0), Some(1), Some(4), None, Some(4)));
+        // everything folded away or no tabs: only the board answers
+        let only = vec![info(false, "t1", Some(0))];
+        assert_eq!(tab_for_key(&only, &groups, &["a".into()], 2), None);
+        assert_eq!(tab_for_key(&only, &groups, &["a".into()], 9), None);
+        assert_eq!(tab_for_key(&[], &[], &[], 1), Some(0));
+    }
+
+    #[test]
+    fn a_tab_with_no_chat_marks_no_place_in_a_group() {
+        let groups = vec![g("a", &["t1"])];
+        let shell = TabInfo::default();
+        let infos = vec![info(true, "s", None), info(false, "t1", Some(0)), info(false, "x", None), shell];
+        // a chat's tab: joins the group over its tabs, leaves it over the rest, lands after the stars
+        assert_eq!(drag_target(&infos, &groups, 2, 1, false), Some((1, Some("a".into()))));
+        assert_eq!(drag_target(&infos, &groups, 1, 2, true), Some((3, None)));
+        assert_eq!(drag_target(&infos, &groups, 2, 0, false), Some((1, Some("a".into()))));
+        // a starred tab stays among the stars
+        assert_eq!(drag_target(&infos, &groups, 0, 2, true), Some((1, None)));
+        // your own shell: among the tabs in no group only
+        assert_eq!(drag_target(&infos, &groups, 3, 2, false), Some((2, None)));
+        assert_eq!(drag_target(&infos, &groups, 3, 1, true), None, "over a group's tab");
+        assert_eq!(drag_target(&infos, &groups, 3, 0, false), None, "over a starred tab");
+        assert_eq!(drag_target(&infos, &groups, 9, 0, false), None, "a tab closed during the drag");
+    }
+
+    #[test]
+    fn close_group_asks_only_when_chats_would_stop() {
+        assert!(close_group_confirm("Work", &[]).is_none());
+        assert!(close_group_confirm("Work", &[false, false]).is_none());
+        let c = close_group_confirm("Work", &[true, false, true]).unwrap();
+        assert_eq!(c.title, "Close 3 tabs and stop 2 chats?");
+        assert!(c.body.starts_with("Closing the group Work stops those chats, because"), "{}", c.body);
+        assert_eq!((c.ok.as_str(), c.cancel.as_str()), ("Close group", "Cancel"));
+        let one = close_group_confirm("", &[true]).unwrap();
+        assert_eq!(one.title, "Close 1 tab and stop 1 chat?");
+        assert!(one.body.starts_with("Closing this group stops that chat, because"), "{}", one.body);
     }
 
     #[test]

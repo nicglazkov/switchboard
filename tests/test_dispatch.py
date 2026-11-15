@@ -17,7 +17,8 @@ class Box(Fake):
     """Fake machines where the started chat shows up in the Desk's list and can be moved along by the test."""
     def __init__(self):
         super().__init__()
-        self.row = None
+        self.row, self.extra = None, {}
+        self.busy = None  # what the busy verb says; None: an agent from before it had one
         self.report = 'Did it.\n\nChanged: app/Widget.swift\n\nLeft: nothing.'
 
     def __call__(self, target, req, timeout):
@@ -27,7 +28,14 @@ class Box(Fake):
                 self.calls.append((name, req))
             rows = [dict(self.row)] if self.row and name == self.row['_m'] else []
             return {'ok': True, 'sessions': [{k: v for k, v in r.items() if k != '_m'} for r in rows], 'limits': None,
-                    'launcher': {'alive': True} if name == 'desk' else {'alive': None}}
+                    'launcher': {'alive': True} if name == 'desk' else {'alive': None},
+                    'features': ['busy'] if self.busy is not None else [], **self.extra}
+        if req['verb'] == 'busy' and self.busy is not None:
+            with self.lock:
+                self.calls.append((name, req))
+            if isinstance(self.busy, Exception):
+                raise self.busy
+            return dict(self.busy, ok=True)
         if req['verb'] == 'report':
             with self.lock:
                 self.calls.append((name, req))
@@ -41,12 +49,12 @@ class Box(Fake):
 
 
 class DispatchServer(unittest.TestCase):
-    def make(self):
+    def make(self, clock=time.time):
         self.f = Box()
         self.state, cfg = Path(mkdtemp()), Path(mkdtemp())
         (cfg / 'caps.json').write_text(json.dumps({'desk': True, 'tower': True}))
         app = server.App(fleet.Fleet(MACH, self.f), state_dir=self.state, web_dir=self.state, sleep=lambda s: None, poll_every=0,
-                         retry_waits=(0, 0), cfg_dir=cfg, pusher=lambda *a: None)
+                         retry_waits=(0, 0), cfg_dir=cfg, pusher=lambda *a: None, clock=clock)
         app._refresh_soon = lambda *a, **k: None
         app.post('/api/prefs', {'ai_auto_machine': True})
         app.fleet.poll()
@@ -101,12 +109,115 @@ class DispatchServer(unittest.TestCase):
         saved = json.loads((self.state / 'dispatch.json').read_text())[r['id']]
         self.assertEqual((saved['state'], saved['from']), ('done', {'machine': 'tower', 'sid': FROM}))
 
+    def test_a_check_that_comes_after_the_launch_was_forgotten_still_finds_the_chat(self):
+        # Audit, server 2: launches are kept an hour, tasks a week. A first check() later than that answered
+        # "Switchboard lost track of the launch" for a chat that was running fine.
+        now = [1_800_000_000.0]
+        app = self.make(clock=lambda: now[0])
+        r = self.send()
+        for _ in range(300):
+            if app.jobs[r['job']]['state'] == 'done':
+                break
+            time.sleep(0.01)
+        for _ in range(300):  # the task takes the chat as the launch ends, with nobody asking
+            if json.loads((self.state / 'dispatch.json').read_text())[r['id']].get('sid') == CHILD:
+                break
+            time.sleep(0.01)
+        now[0] += server.JOB_KEEP + 100
+        with app.jobs_lock:
+            app._jobs_save()  # any later job saves, and the old one goes
+        self.assertNotIn(r['job'], json.loads((self.state / 'jobs.json').read_text()))
+        app.jobs.pop(r['job'], None)
+        self.f.row.update(status='busy', mtime=now[0], last_ts=now[0])
+        app.fleet.poll()
+        w = app.get(f'/api/dispatch/{r["id"]}')
+        self.assertEqual((w['state'], w['sid'], w['url']), ('working', CHILD, 'https://claude.ai/code/session_CHILD'))
+        self.f.row.update(status='idle', ctx=21000)
+        app.fleet.poll()
+        self.assertEqual(self.until(r['id'], 'done')['report'], self.f.report)
+
+    def test_a_failed_launch_is_kept_with_the_task_too(self):
+        app = self.make()
+        real = self.f.__call__
+        app.fleet.transport = lambda t, req, to: {'ok': True, 'state': 'error', 'error': 'folder does not exist'} if req['verb'] == 'job' else real(t, req, to)
+        r = self.send()
+        for _ in range(300):
+            if json.loads((self.state / 'dispatch.json').read_text())[r['id']]['state'] == 'failed':
+                break
+            time.sleep(0.01)
+        app.jobs.clear()
+        self.assertEqual(app.get(f'/api/dispatch/{r["id"]}')['error'], 'folder does not exist')
+
+    def test_done_waits_for_its_subagents_and_commands(self):
+        # Audit, server 4: the turn ended, so check() said done and handed over a report written before the
+        # subagents finished.
+        app = self.make()
+        self.f.busy = {'live': False}
+        r = self.send()
+        self.until(r['id'], 'working')
+        self.f.busy = {'live': True, 'subagents': ['Audit'], 'commands': [], 'replying': False, 'pending': [],
+                       'summary': '1 subagent is still running.'}
+        self.f.row.update(status='idle', ctx=21000)
+        app.fleet.poll()
+        w = app.get(f'/api/dispatch/{r["id"]}')
+        self.assertEqual((w['state'], w['note'], w['report']), ('working', '1 subagent is still running.', None))
+        self.assertEqual(self.f.verbs('report'), [])
+        self.f.busy = {'live': False}
+        self.assertEqual(self.until(r['id'], 'done')['report'], self.f.report)
+
+    def test_a_machine_that_does_not_say_is_still_working_for_a_while(self):
+        now = [1_800_000_000.0]
+        app = self.make(clock=lambda: now[0])
+        self.f.busy = {'live': False}
+        r = self.send()
+        self.until(r['id'], 'working')
+        self.f.row.update(status='idle', ctx=21000)
+        app.fleet.poll()
+        self.f.busy = fleet.MaybeDelivered('The link to Desk dropped before it answered.')
+        w = app.get(f'/api/dispatch/{r["id"]}')
+        self.assertEqual(w['state'], 'working')
+        self.assertIn("Desk isn't answering", w['note'])
+        now[0] += fleet.CHILD_WORK + 5  # it never is "working" for good
+        self.assertEqual(app.get(f'/api/dispatch/{r["id"]}')['state'], 'done')
+
+    def test_a_command_left_running_does_not_hold_the_report_for_ever(self):
+        now = [1_800_000_000.0]
+        app = self.make(clock=lambda: now[0])
+        self.f.busy = {'live': True, 'subagents': [], 'commands': ['npm run dev'], 'replying': False, 'pending': [],
+                       'summary': '1 command is still running.'}
+        r = self.send()
+        self.until(r['id'], 'working')
+        self.f.row.update(status='idle', ctx=21000, mtime=now[0], last_ts=now[0], child_ts=now[0])
+        app.fleet.poll()
+        self.assertEqual(app.get(f'/api/dispatch/{r["id"]}')['state'], 'working')
+        now[0] += fleet.CHILD_WORK + 5  # a dev server: nothing written for 15 minutes
+        self.assertEqual(self.until(r['id'], 'done')['report'], self.f.report)
+
     def test_stopped_counts_as_done(self):
         app = self.make()
         r = self.send()
         self.until(r['id'], 'working')
         self.f.row.update(status='stopped', ctx=4000)
         app.fleet.poll()
+        self.assertEqual(self.until(r['id'], 'done')['report'], self.f.report)
+
+    def test_a_machine_that_cannot_say_what_runs_has_not_stopped_it(self):
+        # Claude Code there could not be asked: its rows carry no kind or status. That is not "stopped".
+        app = self.make()
+        r = self.send()
+        self.until(r['id'], 'working')
+        self.f.extra = {'agents_ok': False}
+        self.f.row.update(status=None, kind=None, ctx=4000)
+        app.fleet.poll()
+        self.assertIs({m['name']: m for m in app.sessions()['machines']}['desk']['agents_ok'], False)
+        for _ in range(3):
+            self.assertEqual(app.get(f'/api/dispatch/{r["id"]}')['state'], 'working')
+        b = app.busy('desk', CHILD)
+        self.assertTrue(b['live'] and b['unknown'], 'and nothing is cut off on the strength of its list')
+        self.f.extra = {}
+        self.f.row.update(status='idle', kind='background')
+        app.fleet.poll()
+        self.assertIs({m['name']: m for m in app.sessions()['machines']}['desk']['agents_ok'], True)
         self.assertEqual(self.until(r['id'], 'done')['report'], self.f.report)
 
     def test_auto_dispatch_says_where_and_why(self):

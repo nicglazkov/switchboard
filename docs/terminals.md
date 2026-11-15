@@ -35,15 +35,17 @@ The **+** at the end of the tab row lists every shell it found:
 - **Windows:** PowerShell 7, Windows PowerShell, Command Prompt, Git Bash, and each WSL distribution.
 
 Pick the default in **Settings, Terminal**. On a Mac and Linux, closing a shell that's running a program asks
-first.
+first, and so does quitting Switchboard.
 
 ## Tabs
 
 Right-click a tab for **Star tab**, **Rename chat**, the group options, **Move to a new window**, **Show as a
 floating sheet** and **Close tab**. Drag a tab to reorder it, or down out of the row to give it its own window.
-++cmd+1++ is the board, ++cmd+2++ to ++cmd+8++ the tabs in order, ++cmd+9++ the last one.
+++cmd+1++ is the board, ++cmd+2++ to ++cmd+8++ the tabs in the row's order (a folded group's tabs are skipped),
+++cmd+9++ the last one.
 
-With more tabs than fit, the row scrolls sideways, with an arrow at each end, and the one you're on stays in sight.
+Tabs narrow as the row fills. With more than fit, the row scrolls sideways, with an arrow at each end, and the one
+you're on stays in sight.
 The list button just before **+** (it shows how many tabs are open) lists every tab, starred first, then each
 group under its name: click one to go to it (a folded group opens), or its **x** to close it.
 
@@ -51,7 +53,8 @@ group under its name: click one to go to it (a folded group opens), or its **x**
 
 **Add to new group** in a tab's menu starts a group in the next free color: Blue, Red, Yellow, Green, Pink,
 Purple, Cyan or Grey. Type its name on the chip. Click the chip to fold the group; right-click it to rename, recolor,
-move, ungroup or close it. Groups follow a chat through Start fresh, Continue and Resume, and are the same on
+move, ungroup or close it (closing asks first when it would stop chats). Going to a tab in a folded group opens
+the group. Groups follow a chat through Start fresh, Continue and Resume, and are the same on
 every computer you use the app on (which tabs are open, and folding, stay on each one).
 
 ### Rename a chat
@@ -78,8 +81,10 @@ files, or use **Attach**.
 ## When the connection drops
 
 A dropped terminal reconnects by itself, trying for about five minutes, and keeps what you could see and scroll
-back to. **Reconnect now** tries right away. If the screen ever looks wrong, **Redraw** (++cmd+shift+r++) asks for
-a fresh copy of it.
+back to. **Reconnect now** tries right away (so does ++enter++, when you've typed nothing). What you type while it
+reconnects is sent when it's back, if that's within five seconds; after that it isn't sent, and the bar says so.
+A paste waits for you to make it again. If the screen ever looks wrong, **Redraw** (++cmd+shift+r++) asks for a
+fresh copy of it.
 
 ## Look
 
@@ -87,4 +92,4 @@ a fresh copy of it.
 24, or ++cmd+plus++ and ++cmd+minus++ in a terminal), the cursor shape (block, bar or underline) and blinking.
 Schemes: Converge Dark and Light, Tokyo Night and Tokyo Night Day, Nord, Dracula, Gruvbox Dark and Light,
 Solarized Dark and Light, GitHub Light, Catppuccin Latte, or **Match the app**. These follow you to your other
-computers.
+computers, except the text size, which each computer keeps for itself.

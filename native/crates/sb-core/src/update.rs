@@ -59,6 +59,8 @@ pub struct Latest {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct LatestFile {
+    /// Empty when an entry leaves it out: that entry is never offered, and the rest of the list still reads.
+    #[serde(default)]
     pub file: String,
     #[serde(default)]
     pub sha256: String,
@@ -261,11 +263,15 @@ pub fn offer(
     mine_build: &str,
     bad_build: Option<&str>,
 ) -> Result<Option<Offer>, CoreError> {
-    let (Some(feed), Some(base)) = (app.feed.as_ref(), app.base.as_deref()) else {
+    let Some(feed) = app.feed.as_ref() else {
         return match &app.error {
             Some(e) => Err(CoreError::Bad(e.clone())),
             None => Ok(None),
         };
+    };
+    // A list with nowhere to download from is not "up to date": say the look failed.
+    let Some(base) = app.base.as_deref().map(str::trim).filter(|b| !b.is_empty()) else {
+        return Err(CoreError::Bad("The server didn't say where its download page is.".into()));
     };
     let latest = verify(key, &feed.manifest, feed.sig.as_deref()).map_err(CoreError::Bad)?;
     let page = app.page.as_ref().filter(|p| p.starts_with("https://") && !p.contains(char::is_whitespace));
@@ -407,7 +413,8 @@ pub fn download(
         let _ = std::fs::remove_file(&part);
         have = 0;
     }
-    let a = agent(user_agent, 900);
+    // An hour for the whole file: a slow link gets there, and what came before a cut is kept for the next try.
+    let a = agent(user_agent, 3600);
     // Two tries at most: the second starts over when the page refused the range.
     for _ in 0..2 {
         if have == o.size {
@@ -507,9 +514,15 @@ pub fn check_due(now: f64, started: f64, last: Option<f64>, busy: bool) -> bool 
 pub struct UpdState {
     #[serde(default)]
     pub pending: Option<Pending>,
-    /// A build that failed its first run; it is not offered again.
+    /// A build that failed its first run; it is not offered again (until the user asks to try it again).
     #[serde(default)]
     pub bad_build: Option<String>,
+    /// That build's version, for "Version 0.9.0 didn't start here".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bad_version: Option<String>,
+    /// The app has said once that it put the previous version back.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub bad_told: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -527,6 +540,10 @@ pub struct Pending {
     /// Times the new build has started without reporting healthy.
     #[serde(default)]
     pub starts: u32,
+    /// The process that is the new build's first start. While it is still running, another start of the app (a
+    /// double click, a login item racing a manual open) is not a crash.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trial_pid: Option<u32>,
 }
 
 /// What a starting app does about a pending install.
@@ -536,8 +553,10 @@ pub enum Launch {
     Nothing,
     /// The new build's first start: count it, and report healthy once it has run a while.
     Trial,
-    /// The new build started before and never reported healthy (it crashed or would not start): put the old one
-    /// back and open it.
+    /// The new build's first start is still running: this is a second window of it, not a crash. Change nothing.
+    Second,
+    /// The new build started before and that start ended without reporting healthy (it crashed or would not
+    /// start): put the old one back and open it.
     RollBack,
     /// Forget the record and keep whatever is there (the old build is running, or there is nothing to go back to).
     Forget,
@@ -545,11 +564,13 @@ pub enum Launch {
     DropOld,
 }
 
-pub fn on_launch(p: Option<&Pending>, running: Option<&str>, old_exists: bool) -> Launch {
+/// `trial_alive`: the process noted as the new build's first start is still running (and is not this one).
+pub fn on_launch(p: Option<&Pending>, running: Option<&str>, old_exists: bool, trial_alive: bool) -> Launch {
     let Some(p) = p else { return Launch::Nothing };
     match running {
         Some(b) if b == p.to_build => match (p.starts, old_exists) {
             (0, _) => Launch::Trial,
+            _ if trial_alive => Launch::Second,
             (_, true) => Launch::RollBack,
             (_, false) => Launch::Forget,
         },
@@ -562,6 +583,45 @@ pub fn on_launch(p: Option<&Pending>, running: Option<&str>, old_exists: bool) -
 /// When the running build reports healthy: true when it is the pending one, so the old copy can go.
 pub fn healthy_drops_old(p: Option<&Pending>, running: Option<&str>) -> bool {
     p.is_some_and(|p| running == Some(p.to_build.as_str()))
+}
+
+/// Whether process `pid` is running now. A number the system gave to some other program since (after a restart,
+/// say) also counts, so this errs towards not rolling back.
+pub fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        unsafe extern "C" {
+            fn kill(pid: i32, sig: i32) -> i32;
+        }
+        // SAFETY: signal 0 sends nothing; it only asks whether the process is there and ours.
+        i32::try_from(pid).is_ok_and(|p| p > 0 && unsafe { kill(p, 0) } == 0)
+    }
+    #[cfg(windows)]
+    {
+        #[link(name = "kernel32")]
+        unsafe extern "system" {
+            fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut std::ffi::c_void;
+            fn WaitForSingleObject(handle: *mut std::ffi::c_void, ms: u32) -> u32;
+            fn CloseHandle(handle: *mut std::ffi::c_void) -> i32;
+        }
+        const SYNCHRONIZE: u32 = 0x0010_0000;
+        const WAIT_TIMEOUT: u32 = 0x102;
+        // SAFETY: the handle is checked, used for one wait of no time, and closed.
+        unsafe {
+            let h = OpenProcess(SYNCHRONIZE, 0, pid);
+            if h.is_null() {
+                return false;
+            }
+            let running = WaitForSingleObject(h, 0) == WAIT_TIMEOUT;
+            CloseHandle(h);
+            running
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = pid;
+        false
+    }
 }
 
 /// Where update.json lives.
@@ -727,6 +787,7 @@ pub fn swap_in(kind: Kind, new: &Path, target: &Path, state: &Path, o: &Offer, f
         from_version: o.from.clone(),
         to_version: o.version.clone(),
         starts: 0,
+        trial_pid: None,
     };
     let mut st = load_state(state);
     st.pending = Some(p.clone());
@@ -779,17 +840,32 @@ pub fn put_back(kind: Kind, p: &Pending) -> Result<(), String> {
 /// old build back after a start that never reported healthy, or tidy up. Answers the app to open instead of this
 /// one when it rolled back.
 pub fn at_launch(kind: Kind, state: &Path, running: Option<&str>) -> Option<PathBuf> {
+    let me = std::process::id();
+    at_launch_as(kind, state, running, me, &|pid| pid != me && pid_alive(pid))
+}
+
+/// `at_launch` for process `me`, with `alive` saying whether another process is still running.
+fn at_launch_as(
+    kind: Kind,
+    state: &Path,
+    running: Option<&str>,
+    me: u32,
+    alive: &dyn Fn(u32) -> bool,
+) -> Option<PathBuf> {
     let mut st = load_state(state);
     let p = st.pending.clone()?;
-    match on_launch(Some(&p), running, p.old.exists()) {
+    match on_launch(Some(&p), running, p.old.exists(), p.trial_pid.is_some_and(alive)) {
         Launch::Nothing => {}
-        Launch::Trial => st.pending = Some(Pending { starts: p.starts + 1, ..p }),
+        Launch::Trial => st.pending = Some(Pending { starts: p.starts + 1, trial_pid: Some(me), ..p }),
+        Launch::Second => return None,
         Launch::RollBack => {
             st.pending = None;
             match put_back(kind, &p) {
                 Ok(()) => {
                     log::warn!("update: {} did not start cleanly, so {} is back", p.to_version, p.from_version);
                     st.bad_build = Some(p.to_build.clone());
+                    st.bad_version = Some(p.to_version.clone()).filter(|v| !v.is_empty());
+                    st.bad_told = false;
                     let _ = save_state(state, &st);
                     return Some(p.target);
                 }
@@ -816,6 +892,58 @@ pub fn report_healthy(state: &Path, running: Option<&str>) {
         remove_any(&p.old);
     }
     let _ = save_state(state, &st);
+}
+
+/// The version that was rolled back and not yet mentioned ("" when an older app noted only its build), marking
+/// it mentioned. The app says so once, at its next start.
+pub fn take_rollback_news(state: &Path) -> Option<String> {
+    let mut st = load_state(state);
+    if st.bad_build.is_none() || st.bad_told {
+        return None;
+    }
+    st.bad_told = true;
+    let _ = save_state(state, &st);
+    Some(st.bad_version.unwrap_or_default())
+}
+
+/// "Try it again": the build that was rolled back may be offered once more.
+pub fn forget_bad(state: &Path) -> std::io::Result<()> {
+    let mut st = load_state(state);
+    st.bad_build = None;
+    st.bad_version = None;
+    st.bad_told = false;
+    save_state(state, &st)
+}
+
+/// The app that the kept copy `old` stands in for: the inverse of `old_path`.
+fn target_of_old(kind: Kind, old: &Path) -> Option<PathBuf> {
+    let name = old.file_name()?.to_str()?;
+    let (stem, ext) = match kind {
+        Kind::Bundle => (name.strip_prefix('.')?.strip_suffix("-old.app")?, ".app"),
+        Kind::Exe => (name.strip_suffix(".old.exe")?, ".exe"),
+        Kind::Bin => (name.strip_suffix(".old")?, ""),
+    };
+    (!stem.is_empty() && !stem.starts_with('.')).then(|| old.with_file_name(format!("{stem}{ext}")))
+}
+
+/// A swap that died between its two renames leaves the app under its kept-copy name and nothing under its own.
+/// When `running` (this app: the bundle on a Mac, the program elsewhere) is such a copy, it gets its own name
+/// back. Answers the restored path.
+pub fn restore_if_stranded(kind: Kind, running: &Path) -> Option<PathBuf> {
+    let target = target_of_old(kind, running)?;
+    if target.exists() {
+        return None;
+    }
+    match std::fs::rename(running, &target) {
+        Ok(()) => {
+            log::warn!("update: an interrupted update left no app at {}; put it back", target.display());
+            Some(target)
+        }
+        Err(e) => {
+            log::error!("update: couldn't put the app back at {}: {e}", target.display());
+            None
+        }
+    }
 }
 
 #[cfg(test)]
@@ -956,6 +1084,9 @@ mod tests {
         assert!(offer(&good, &k.verifying_key(), "mac", "20261012090000", None).unwrap().is_some());
         assert!(offer(&app(None), &k.verifying_key(), "mac", "20261012090000", None).is_err());
         assert_eq!(offer(&ApiApp::default(), &k.verifying_key(), "mac", "20261012090000", None).unwrap(), None);
+        // A list with no download page is a failed look, not "this is the newest version".
+        let nowhere = ApiApp { base: None, ..good.clone() };
+        assert!(offer(&nowhere, &k.verifying_key(), "mac", "20261012090000", None).is_err());
 
         // From GitHub: What's new opens the release page; a look that failed says why instead of "up to date".
         let gh = ApiApp { page: Some("https://github.com/acme/board/releases/tag/v99.0.0".into()), ..good.clone() };
@@ -987,17 +1118,25 @@ mod tests {
             from_version: "0.8.4".into(),
             to_version: "0.9.0".into(),
             starts: 0,
+            trial_pid: None,
         };
         let new = Some("20261013120000");
         let old = Some("20261012090000");
-        assert_eq!(on_launch(None, new, true), Launch::Nothing);
-        assert_eq!(on_launch(Some(&p), new, true), Launch::Trial, "the first start of the new build");
-        let crashed = Pending { starts: 1, ..p.clone() };
-        assert_eq!(on_launch(Some(&crashed), new, true), Launch::RollBack, "started before, never healthy");
-        assert_eq!(on_launch(Some(&crashed), new, false), Launch::Forget, "nothing to go back to");
-        assert_eq!(on_launch(Some(&p), old, true), Launch::Forget, "the old build is the one running");
-        assert_eq!(on_launch(Some(&p), Some("20261020000000"), true), Launch::DropOld, "installed by hand since");
-        assert_eq!(on_launch(Some(&p), None, false), Launch::Forget);
+        assert_eq!(on_launch(None, new, true, false), Launch::Nothing);
+        assert_eq!(on_launch(Some(&p), new, true, false), Launch::Trial, "the first start of the new build");
+        let crashed = Pending { starts: 1, trial_pid: Some(41), ..p.clone() };
+        assert_eq!(on_launch(Some(&crashed), new, true, false), Launch::RollBack, "started before, never healthy");
+        assert_eq!(on_launch(Some(&crashed), new, false, false), Launch::Forget, "nothing to go back to");
+        assert_eq!(on_launch(Some(&crashed), new, true, true), Launch::Second, "the first start is still running");
+        assert_eq!(on_launch(Some(&crashed), new, false, true), Launch::Second);
+        assert_eq!(on_launch(Some(&p), old, true, false), Launch::Forget, "the old build is the one running");
+        assert_eq!(on_launch(Some(&p), old, true, true), Launch::Forget);
+        assert_eq!(
+            on_launch(Some(&p), Some("20261020000000"), true, false),
+            Launch::DropOld,
+            "installed by hand since"
+        );
+        assert_eq!(on_launch(Some(&p), None, false, false), Launch::Forget);
         assert!(healthy_drops_old(Some(&p), new));
         assert!(!healthy_drops_old(Some(&p), old));
         assert!(!healthy_drops_old(None, new));
@@ -1007,7 +1146,7 @@ mod tests {
     fn state_file_round_trips_and_an_empty_one_is_removed() {
         let dir = std::env::temp_dir().join(format!("sb-upd-state-{}", std::process::id()));
         let path = dir.join("update.json");
-        let s = UpdState { pending: None, bad_build: Some("20261013120000".into()) };
+        let s = UpdState { bad_build: Some("20261013120000".into()), ..Default::default() };
         save_state(&path, &s).unwrap();
         assert_eq!(load_state(&path), s);
         save_state(&path, &UpdState::default()).unwrap();
@@ -1222,6 +1361,12 @@ mod tests {
             let st = load_state(&state);
             assert_eq!((st.pending, st.bad_build.as_deref()), (None, Some(to.as_str())));
             assert_eq!(at_launch(kind, &state, Some(from)), None, "{kind:?}: and then it starts as usual");
+            // The app says so once, and "Try it again" lets the build be offered again.
+            assert_eq!(take_rollback_news(&state).as_deref(), Some("0.9.0"));
+            assert_eq!(take_rollback_news(&state), None, "{kind:?}: said once");
+            assert_eq!(load_state(&state).bad_build.as_deref(), Some(to.as_str()), "still not offered");
+            forget_bad(&state).unwrap();
+            assert_eq!(load_state(&state), UpdState::default());
 
             // Install again, and this time it reports healthy: the old copy goes and nothing is left pending.
             std::fs::create_dir_all(new.parent().unwrap()).unwrap();
@@ -1240,6 +1385,68 @@ mod tests {
             assert_eq!(std::fs::read_to_string(&settings).unwrap(), r#"{"theme": "dark", "first_run": "done"}"#);
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    #[test]
+    fn a_second_launch_while_the_first_start_still_runs_is_not_a_crash() {
+        let kind = Kind::Bin;
+        let root = tmp("swap-second");
+        std::fs::create_dir_all(&root).unwrap();
+        let (target, new, state) = (root.join("Switchboard"), root.join("Switchboard.new"), root.join("update.json"));
+        app_at(kind, &target, "old");
+        app_at(kind, &new, "new");
+        let o = offer_for(b"x", String::new());
+        swap_in(kind, &new, &target, &state, &o, "20261012090000").unwrap();
+        let to = Some(o.build.as_str());
+        // Process 500 is the first start; 501 is a double click while 500 is still open.
+        assert_eq!(at_launch_as(kind, &state, to, 500, &|_| false), None);
+        let noted = load_state(&state);
+        assert_eq!(noted.pending.as_ref().map(|p| (p.starts, p.trial_pid)), Some((1, Some(500))));
+        assert_eq!(at_launch_as(kind, &state, to, 501, &|pid| pid == 500), None);
+        assert_eq!(load_state(&state), noted, "nothing is touched");
+        assert_eq!(says(kind, &target), "new");
+        assert!(old_path(kind, &target).exists(), "the old build is still kept until one reports healthy");
+        // 500 died without reporting healthy: the next start puts the old build back.
+        assert_eq!(at_launch_as(kind, &state, to, 502, &|_| false), Some(target.clone()));
+        assert_eq!(says(kind, &target), "old");
+        assert_eq!(load_state(&state).bad_build.as_deref(), to);
+        // This very process is running; nothing has pid 0 for us to ask about.
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(0));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_swap_cut_between_its_renames_gets_the_app_back_under_its_name() {
+        for kind in [Kind::Bundle, Kind::Exe] {
+            let root = tmp(&format!("swap-stranded-{kind:?}"));
+            std::fs::create_dir_all(&root).unwrap();
+            let target = root.join(if kind == Kind::Bundle { "Switchboard.app" } else { "Switchboard.exe" });
+            let old = old_path(kind, &target);
+            assert_eq!(target_of_old(kind, &old).as_deref(), Some(target.as_path()), "{kind:?}");
+            assert_eq!(target_of_old(kind, &target), None, "{kind:?}: the app itself is not a kept copy");
+            // Only the kept copy is there, and it is the one running.
+            app_at(kind, &old, "old");
+            assert_eq!(restore_if_stranded(kind, &old), Some(target.clone()), "{kind:?}");
+            assert_eq!(says(kind, &target), "old");
+            assert!(!old.exists());
+            // With the app in place a kept copy is left alone.
+            app_at(kind, &old, "older");
+            assert_eq!(restore_if_stranded(kind, &old), None);
+            assert_eq!((says(kind, &target), says(kind, &old)), ("old".to_string(), "older".to_string()));
+            let _ = std::fs::remove_dir_all(&root);
+        }
+    }
+
+    #[test]
+    fn an_entry_without_a_file_name_does_not_sink_the_list() {
+        let m = format!(
+            r#"{{"version": "0.9.0", "files": {{"plan9": {{"sha256": "x"}}, "mac": {{"file": "Switchboard-mac.zip", "sha256": "{}", "build": "20261013120000", "size": 10}}}}}}"#,
+            "AB".repeat(32)
+        );
+        let latest: Latest = serde_json::from_str(&m).unwrap();
+        assert!(offer_from(&latest, "http://10.0.0.5:8131/app", "mac", "0.8.4", "20261012090000", None).is_some());
+        assert!(offer_from(&latest, "http://10.0.0.5:8131/app", "plan9", "0.8.4", "20261012090000", None).is_none());
     }
 
     #[test]

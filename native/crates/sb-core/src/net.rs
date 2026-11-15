@@ -38,35 +38,75 @@ pub fn is_lan(base: &str) -> bool {
     host.parse::<std::net::Ipv4Addr>().is_ok_and(|ip| ip.is_private() || ip.is_link_local())
 }
 
-/// A server address as typed ("192.0.2.10", "studio.local:8130", "https://sb.example.com/") as a base URL:
-/// http:// when no scheme is given, the default port when none is, no trailing slash. None when it cannot be one.
-pub fn normalize_base(typed: &str) -> Option<String> {
-    let t = typed.trim().trim_end_matches('/');
-    let (scheme, rest) = match t.split_once("://") {
-        Some((s, r)) if s.eq_ignore_ascii_case("http") || s.eq_ignore_ascii_case("https") => {
-            (s.to_ascii_lowercase(), r)
+/// Why what was typed can't be the server's address.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BadAddress {
+    /// An https:// address. The apps talk to the server over plain http, on the home network or Tailscale.
+    Https,
+    /// Not an address.
+    NotOne,
+}
+
+impl BadAddress {
+    /// The words for the person who typed it.
+    pub fn says(self) -> &'static str {
+        match self {
+            BadAddress::Https => "Switchboard connects over http. Use the http:// address.",
+            BadAddress::NotOne => "That's not an address. Try something like 192.0.2.10:8130 or studio.local.",
         }
-        Some(_) => return None,
-        None => ("http".to_string(), t),
+    }
+}
+
+/// A server address as typed ("192.0.2.10", "studio.local:8130", "http://studio.local:8130/#board", "[fd7a::1]") as
+/// a base URL: http://, the default port when none is given, and nothing after the port (a pasted link's path or
+/// query is dropped). An IPv6 address goes in brackets.
+pub fn parse_base(typed: &str) -> Result<String, BadAddress> {
+    let t = typed.trim();
+    let rest = match t.split_once("://") {
+        Some((s, r)) if s.eq_ignore_ascii_case("http") => r,
+        Some((s, _)) if s.eq_ignore_ascii_case("https") => return Err(BadAddress::Https),
+        Some(_) => return Err(BadAddress::NotOne),
+        None => t,
     };
-    if rest.is_empty() || rest.contains(char::is_whitespace) || rest.contains(['/', '?', '#', '@']) {
-        return None;
+    let rest = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if rest.is_empty() || rest.contains(char::is_whitespace) || rest.contains('@') {
+        return Err(BadAddress::NotOne);
+    }
+    let port = |p: &str| p.parse::<u16>().ok().filter(|p| *p > 0).ok_or(BadAddress::NotOne);
+    if let Some(v6) = rest.strip_prefix('[') {
+        let (h, tail) = v6.split_once(']').ok_or(BadAddress::NotOne)?;
+        let ip = h.parse::<std::net::Ipv6Addr>().map_err(|_| BadAddress::NotOne)?;
+        let p = match tail.strip_prefix(':') {
+            Some(p) => port(p)?,
+            None if tail.is_empty() => PORT,
+            None => return Err(BadAddress::NotOne),
+        };
+        return Ok(format!("http://[{ip}]:{p}"));
+    }
+    if let Ok(ip) = rest.parse::<std::net::Ipv6Addr>() {
+        return Ok(format!("http://[{ip}]:{PORT}"));
     }
     let host_ok =
         |h: &str| !h.is_empty() && h.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'));
     match rest.rsplit_once(':') {
-        Some((h, p)) if host_ok(h) && p.parse::<u16>().is_ok_and(|p| p > 0) => Some(format!("{scheme}://{h}:{p}")),
-        Some(_) => None,
-        None if host_ok(rest) && scheme == "https" => Some(format!("https://{rest}")),
-        None if host_ok(rest) => Some(format!("http://{rest}:{PORT}")),
-        None => None,
+        Some((h, p)) if host_ok(h) => Ok(format!("http://{h}:{}", port(p)?)),
+        None if host_ok(rest) => Ok(format!("http://{rest}:{PORT}")),
+        _ => Err(BadAddress::NotOne),
     }
+}
+
+/// `parse_base`, for callers that only need to know whether it is an address the app can use.
+pub fn normalize_base(typed: &str) -> Option<String> {
+    parse_base(typed).ok()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CoreError {
     /// No candidate answered, or the connection dropped.
     Unreachable,
+    /// The server was reached but its answer did not come in time (a machine it had to ask is slow). What was
+    /// asked for may still happen.
+    Timeout,
     /// The server answered with an error.
     Server { status: u16, message: String },
     /// The reply was not what Switchboard sends.
@@ -112,6 +152,13 @@ impl std::fmt::Display for CoreError {
                 write!(
                     f,
                     "Can't reach Switchboard. Check that the computer running it is on and that this one can reach it."
+                )
+            }
+            CoreError::Timeout => {
+                write!(
+                    f,
+                    "Switchboard is taking a long time to answer. It may still be working on it, so give it a moment \
+                     before trying again."
                 )
             }
             CoreError::Server { message, .. } => write!(f, "{message}"),
@@ -418,8 +465,35 @@ struct RouteBody<'a> {
 pub struct Client {
     resolver: Resolver,
     agent: ureq::Agent,
-    /// v2: for /api/stream, which stays open for ten minutes at a time.
+    /// For uploads and library changes, which the server may take minutes over.
     stream_agent: ureq::Agent,
+    /// How long a call waits for its answer: `quick` for what the server knows by itself, `patient` for what it has
+    /// to ask a machine for.
+    quick: Duration,
+    patient: Duration,
+    user_agent: String,
+}
+
+/// The board's own polls: the server answers these from what it already has.
+const QUICK: Duration = Duration::from_secs(20);
+/// Longer than the server waits for a machine (40 s by default, 60 s for a setup fix), so its own answer, good or
+/// bad, gets here before this side gives up.
+const PATIENT: Duration = Duration::from_secs(65);
+
+/// Whether the server answers `path` by itself, without asking a machine.
+fn quick_path(path: &str) -> bool {
+    let p = path.split('?').next().unwrap_or(path);
+    const OWN: [&str; 8] = [
+        "/api/sessions",
+        "/api/summary",
+        "/api/prefs",
+        "/api/tabs",
+        "/api/app",
+        "/api/models",
+        "/api/groups",
+        "/api/budget",
+    ];
+    OWN.contains(&p) || p == "/api/server" || p.starts_with("/api/server/")
 }
 
 /// The server ends a live stream after ten minutes; past this, a silent one counts as gone.
@@ -447,12 +521,23 @@ fn before_send(e: &ureq::Error) -> bool {
     }
 }
 
-/// A POST that failed: `Unreachable`, noted as maybe done unless it failed before anything was sent.
-fn post_failed(e: Option<&ureq::Error>) -> CoreError {
-    if !e.is_some_and(before_send) {
+/// What a request that got no answer says: `Timeout` when the server was reached and then took too long (so the
+/// address is fine and nothing is asked twice), `Unreachable` otherwise.
+fn failed(e: &ureq::Error) -> CoreError {
+    match e {
+        ureq::Error::Timeout(t) if !matches!(t, ureq::Timeout::Resolve | ureq::Timeout::Connect) => CoreError::Timeout,
+        ureq::Error::Io(e) if e.kind() == std::io::ErrorKind::TimedOut => CoreError::Timeout,
+        ureq::Error::BodyExceedsLimit(_) => CoreError::Bad("The server's answer was too big to read.".into()),
+        _ => CoreError::Unreachable,
+    }
+}
+
+/// A POST that failed, noted as maybe done unless it failed before anything was sent.
+fn post_failed(e: &ureq::Error) -> CoreError {
+    if !before_send(e) {
         MAYBE_SENT.with(|m| m.set(true));
     }
-    CoreError::Unreachable
+    failed(e)
 }
 
 fn agent(timeout: Duration, user_agent: &str) -> ureq::Agent {
@@ -497,20 +582,25 @@ impl Client {
             found.push(format!("http://127.0.0.1:{PORT}"));
             found
         });
-        Client {
-            resolver: Resolver::new(candidates, Duration::from_secs(60), http_probe(user_agent.to_string()))
-                .with_discovery(discover),
-            agent: agent(Duration::from_secs(20), user_agent),
-            stream_agent: agent(STREAM_FOR, user_agent),
-        }
+        let resolver = Resolver::new(candidates, Duration::from_secs(60), http_probe(user_agent.to_string()))
+            .with_discovery(discover);
+        Client::with_resolver(resolver, user_agent)
     }
 
     pub fn with_resolver(resolver: Resolver, user_agent: &str) -> Client {
         Client {
             resolver,
-            agent: agent(Duration::from_secs(20), user_agent),
+            agent: agent(QUICK, user_agent),
             stream_agent: agent(STREAM_FOR, user_agent),
+            quick: QUICK,
+            patient: PATIENT,
+            user_agent: user_agent.to_string(),
         }
+    }
+
+    /// How long a call to `path` waits for its answer.
+    fn patience(&self, path: &str) -> Duration {
+        if quick_path(path) { self.quick } else { self.patient }
     }
 
     /// The server in use, if one was found.
@@ -523,7 +613,8 @@ impl Client {
     }
 
     /// Runs `f` against the resolved server; on a dropped connection it looks for the server again once. A POST that
-    /// may have reached the server is not sent again, so a timeout never runs an action twice.
+    /// may have reached the server is not sent again, so a timeout never runs an action twice. An answer that was
+    /// only slow (`Timeout`) is not asked for again either, and the server stays the one in use.
     fn with_base<T>(&self, f: impl Fn(&str) -> Result<T, CoreError>) -> Result<T, CoreError> {
         let base = self.resolver.resolve().ok_or(CoreError::Unreachable)?;
         MAYBE_SENT.with(|m| m.set(false));
@@ -544,12 +635,14 @@ impl Client {
         let mut r = self
             .agent
             .get(&format!("{base}{path}"))
+            .config()
+            .timeout_global(Some(self.patience(path)))
+            .build()
             .header("X-Switchboard", "1")
             .call()
-            .map_err(|_| CoreError::Unreachable)?;
+            .map_err(|e| failed(&e))?;
         let status = r.status().as_u16();
-        let body =
-            r.body_mut().with_config().limit(64 * 1024 * 1024).read_to_vec().map_err(|_| CoreError::Unreachable)?;
+        let body = r.body_mut().with_config().limit(64 * 1024 * 1024).read_to_vec().map_err(|e| failed(&e))?;
         check(status, &body)?;
         Ok(body)
     }
@@ -560,12 +653,15 @@ impl Client {
         let mut r = self
             .agent
             .post(&format!("{base}{path}"))
+            .config()
+            .timeout_global(Some(self.patience(path)))
+            .build()
             .header("X-Switchboard", "1")
             .header("Content-Type", "application/json")
             .send_json(body)
-            .map_err(|e| post_failed(Some(&e)))?;
+            .map_err(|e| post_failed(&e))?;
         let status = r.status().as_u16();
-        let out = r.body_mut().read_to_vec().map_err(|_| post_failed(None))?;
+        let out = r.body_mut().read_to_vec().map_err(|e| post_failed(&e))?;
         Ok((status, out))
     }
 
@@ -790,9 +886,9 @@ impl Client {
                 .header("Content-Type", "application/octet-stream")
                 .header("Content-Length", &data.len().to_string())
                 .send(ureq::SendBody::from_reader(&mut reader))
-                .map_err(|e| post_failed(Some(&e)))?;
+                .map_err(|e| post_failed(&e))?;
             let status = r.status().as_u16();
-            let out = r.body_mut().read_to_vec().map_err(|_| post_failed(None))?;
+            let out = r.body_mut().read_to_vec().map_err(|e| post_failed(&e))?;
             check(status, &out)?;
             let u: crate::api::ApiUpload =
                 serde_json::from_slice(&out).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
@@ -1024,48 +1120,38 @@ impl Client {
         self.stream_idle(STREAM_IDLE, seen)
     }
 
-    /// `stream`, given up as a dead link once nothing came for `idle`.
+    /// `stream`, given up as a dead link once nothing came for `idle`. The stream is read from a socket of its own
+    /// (see `open_stream`), which closes the moment this returns: nothing is left reading a dead link.
     fn stream_idle(&self, idle: Duration, mut seen: impl FnMut(u64) -> bool) -> Result<(), CoreError> {
         use std::io::BufRead;
         let base = self.resolver.resolve().ok_or(CoreError::Unreachable)?;
-        let r = self
-            .stream_agent
-            .get(&format!("{base}/api/stream"))
-            .header("X-Switchboard", "1")
-            .header("Accept", "text/event-stream")
-            .call()
-            .map_err(|_| {
-                self.resolver.invalidate();
-                CoreError::Unreachable
-            })?;
-        let status = r.status().as_u16();
-        if status != 200 {
-            return Err(CoreError::Bad(format!("The live stream answered {status}.")));
-        }
-        // A read can't time out on its own, so lines come from a thread of their own and this side stops waiting.
-        // That thread ends with the connection, at the latest when STREAM_FOR runs out.
-        let (tx, rx) = mpsc::sync_channel::<std::io::Result<String>>(16);
-        let reader = r.into_body().into_reader();
-        thread::Builder::new()
-            .name("sb-live-read".into())
-            .spawn(move || {
-                for line in std::io::BufReader::new(reader).lines() {
-                    if tx.send(line).is_err() {
-                        break;
-                    }
+        let mut lines = match open_stream(&base, &self.user_agent, idle) {
+            Ok(l) => l,
+            Err(e) => {
+                if e == CoreError::Unreachable {
+                    self.resolver.invalidate();
                 }
-            })
-            .map_err(|_| CoreError::Unreachable)?;
+                return Err(e);
+            }
+        };
+        let began = Instant::now();
+        let mut line = String::new();
         loop {
-            let line = match rx.recv_timeout(idle) {
-                Ok(line) => line.map_err(|_| CoreError::Unreachable)?,
-                Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                Err(mpsc::RecvTimeoutError::Timeout) => {
+            line.clear();
+            match lines.read_line(&mut line) {
+                Ok(0) => break,
+                Ok(_) => {}
+                // Silent for `idle` (the read timed out), or the link broke.
+                Err(_) => {
                     self.resolver.invalidate();
                     return Err(CoreError::Unreachable);
                 }
-            };
-            if let Some(data) = line.strip_prefix("data:") {
+            }
+            // The server ends a stream itself well before this; one that runs on is started over.
+            if began.elapsed() > STREAM_FOR {
+                break;
+            }
+            if let Some(data) = line.trim_end().strip_prefix("data:") {
                 let v = serde_json::from_str::<serde_json::Value>(data.trim())
                     .ok()
                     .and_then(|j| j.get("v").and_then(|v| v.as_u64()));
@@ -1086,9 +1172,9 @@ impl Client {
             .header("X-Switchboard", "1")
             .header("Content-Type", "application/json")
             .send_json(body)
-            .map_err(|_| CoreError::Unreachable)?;
+            .map_err(|e| failed(&e))?;
         let status = r.status().as_u16();
-        let out = r.body_mut().read_to_vec().map_err(|_| CoreError::Unreachable)?;
+        let out = r.body_mut().read_to_vec().map_err(|e| failed(&e))?;
         check(status, &out)?;
         Ok(out)
     }
@@ -1129,6 +1215,112 @@ impl Client {
 
     pub fn continue_session(&self, req: &ContinueRequest) -> Result<ApiPostReply, CoreError> {
         self.with_base(|base| parse_reply(&self.post_json(base, "/api/continue", req)?))
+    }
+}
+
+/// Opens GET /api/stream at `base` and answers a reader of its lines, the headers already read. Done by hand over a
+/// plain socket because the socket's own read timeout is what ends a silent stream: a read gives up after `idle`,
+/// and dropping the reader closes the connection. (The HTTP client's reads can't be interrupted, so it took a
+/// thread per stream that stayed blocked on a dead link for up to eleven minutes.)
+fn open_stream(base: &str, user_agent: &str, idle: Duration) -> Result<Box<dyn std::io::BufRead>, CoreError> {
+    use std::io::{BufRead, Write};
+    use std::net::{TcpStream, ToSocketAddrs};
+    let Some(rest) = base.strip_prefix("http://") else {
+        return Err(CoreError::Bad("The live stream needs an http:// address.".into()));
+    };
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    // An address always carries its port (normalize_base writes it); one without gets the web's.
+    let v6_no_port = hostport.starts_with('[') && hostport.ends_with(']');
+    let target = if v6_no_port || !hostport.contains(':') { format!("{hostport}:80") } else { hostport.to_string() };
+    let addrs = target.to_socket_addrs().map_err(|_| CoreError::Unreachable)?;
+    let mut sock = addrs
+        .into_iter()
+        .find_map(|a| TcpStream::connect_timeout(&a, Duration::from_secs(6)).ok())
+        .ok_or(CoreError::Unreachable)?;
+    let io = |_| CoreError::Unreachable;
+    sock.set_read_timeout(Some(idle)).map_err(io)?;
+    sock.set_write_timeout(Some(Duration::from_secs(6))).map_err(io)?;
+    let _ = sock.set_nodelay(true);
+    let ask = format!(
+        "GET /api/stream HTTP/1.1\r\nHost: {hostport}\r\nUser-Agent: {user_agent}\r\nX-Switchboard: 1\r\n\
+         Accept: text/event-stream\r\nConnection: close\r\n\r\n"
+    );
+    sock.write_all(ask.as_bytes()).map_err(io)?;
+    let mut r = std::io::BufReader::new(sock);
+    let mut line = String::new();
+    r.read_line(&mut line).map_err(io)?;
+    // "HTTP/1.1 200 OK"
+    let status: u16 = line
+        .strip_prefix("HTTP/1.")
+        .and_then(|l| l.split_whitespace().nth(1))
+        .and_then(|s| s.parse().ok())
+        .ok_or(CoreError::Unreachable)?;
+    let mut chunked = false;
+    loop {
+        line.clear();
+        if r.read_line(&mut line).map_err(io)? == 0 {
+            return Err(CoreError::Unreachable);
+        }
+        let l = line.trim_end();
+        if l.is_empty() {
+            break;
+        }
+        if let Some((k, v)) = l.split_once(':')
+            && k.eq_ignore_ascii_case("transfer-encoding")
+            && v.to_ascii_lowercase().contains("chunked")
+        {
+            chunked = true;
+        }
+    }
+    if status != 200 {
+        return Err(CoreError::Bad(format!("The live stream answered {status}.")));
+    }
+    // The server writes the stream as it is; something in between (a proxy) may send it in chunks.
+    Ok(if chunked {
+        Box::new(std::io::BufReader::new(Dechunk { inner: r, left: 0, done: false }))
+    } else {
+        Box::new(r)
+    })
+}
+
+/// The body of a "Transfer-Encoding: chunked" answer.
+struct Dechunk<R> {
+    inner: R,
+    /// Bytes left of the chunk being read.
+    left: usize,
+    done: bool,
+}
+
+impl<R: std::io::BufRead> std::io::Read for Dechunk<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let bad = || std::io::Error::from(std::io::ErrorKind::InvalidData);
+        if self.done || buf.is_empty() {
+            return Ok(0);
+        }
+        if self.left == 0 {
+            // "<hex size>[;extension]", after the blank line that ends the chunk before it.
+            let mut line = String::new();
+            while line.trim().is_empty() {
+                line.clear();
+                if self.inner.read_line(&mut line)? == 0 {
+                    self.done = true;
+                    return Ok(0);
+                }
+            }
+            let size = line.trim().split(';').next().unwrap_or("");
+            self.left = usize::from_str_radix(size.trim(), 16).map_err(|_| bad())?;
+            if self.left == 0 {
+                self.done = true;
+                return Ok(0);
+            }
+        }
+        let want = buf.len().min(self.left);
+        let n = self.inner.read(&mut buf[..want])?;
+        if n == 0 {
+            self.done = true;
+        }
+        self.left -= n;
+        Ok(n)
     }
 }
 
@@ -1427,13 +1619,19 @@ mod tests {
         use std::io::{Read, Write};
         let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let base = format!("http://{}", l.local_addr().unwrap());
+        let (closed_tx, closed_rx) = mpsc::channel::<String>();
         thread::spawn(move || {
             let Ok((mut s, _)) = l.accept() else { return };
-            let _ = s.read(&mut [0u8; 4096]);
+            let mut asked = [0u8; 4096];
+            let n = s.read(&mut asked).unwrap_or(0);
             let head = "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n";
             let _ = s.write_all(format!("{head}event: hello\ndata: {{\"v\": 7}}\n\n").as_bytes());
-            // Then nothing, and the connection stays open: a link that died without a word.
-            thread::sleep(Duration::from_secs(5));
+            // Then nothing, and the connection stays open: a link that died without a word. The next read here
+            // ends when the other side hangs up.
+            let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
+            if matches!(s.read(&mut [0u8; 16]), Ok(0)) {
+                let _ = closed_tx.send(String::from_utf8_lossy(&asked[..n]).into_owned());
+            }
         });
         let client = client_at(&base);
         let mut heard = Vec::new();
@@ -1445,6 +1643,109 @@ mod tests {
         assert_eq!(res, Err(CoreError::Unreachable), "given up, so the caller opens it again");
         assert_eq!(heard, vec![7]);
         assert!(t.elapsed() < Duration::from_secs(3), "waited {:?}", t.elapsed());
+        // Giving up hangs up at once: nothing stays behind reading the dead link.
+        let asked = closed_rx.recv_timeout(Duration::from_secs(2)).expect("the socket was closed");
+        assert!(asked.starts_with("GET /api/stream HTTP/1.1\r\n"), "{asked}");
+        assert!(asked.contains(&format!("\r\nHost: {}\r\n", base.trim_start_matches("http://"))), "{asked}");
+        assert!(asked.contains("\r\nX-Switchboard: 1\r\n") && asked.ends_with("\r\n\r\n"), "{asked}");
+    }
+
+    #[test]
+    fn a_live_stream_is_read_to_its_end_plain_or_in_chunks() {
+        use std::io::{Read, Write};
+        let serve = |body: &'static str, extra: &'static str| {
+            let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let base = format!("http://{}", l.local_addr().unwrap());
+            thread::spawn(move || {
+                let Ok((mut s, _)) = l.accept() else { return };
+                let _ = s.read(&mut [0u8; 4096]);
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\n{extra}Connection: close\r\n\r\n{body}").as_bytes());
+            });
+            base
+        };
+        let hear = |base: &str| {
+            let mut heard = Vec::new();
+            let res = client_at(base).stream_idle(Duration::from_secs(2), |v| {
+                heard.push(v);
+                true
+            });
+            (res, heard)
+        };
+        let plain = "retry: 2000\nevent: hello\ndata: {\"v\": 3}\n\n: beat\n\nevent: change\ndata: {\"v\": 4}\n\n";
+        assert_eq!(hear(&serve(plain, "")), (Ok(()), vec![3, 4]));
+        // The same split across chunks, one of them in the middle of a line.
+        let chunked = "15\r\nevent: hello\ndata: {\"\r\n8\r\nv\": 3}\n\n\r\nf\r\ndata: {\"v\": 4}\n\r\n0\r\n\r\n";
+        assert_eq!(hear(&serve(chunked, "Transfer-Encoding: chunked\r\n")), (Ok(()), vec![3, 4]));
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        thread::spawn(move || {
+            let Ok((mut s, _)) = l.accept() else { return };
+            let _ = s.read(&mut [0u8; 4096]);
+            let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 2\r\n\r\n{}");
+        });
+        assert_eq!(hear(&base).0, Err(CoreError::Bad("The live stream answered 503.".into())));
+    }
+
+    /// A server that reads each request and answers `{"ok":true}` only after `wait`. Counts the requests.
+    fn answers_late(wait: Duration) -> (String, Arc<AtomicUsize>) {
+        use std::io::{Read, Write};
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", l.local_addr().unwrap());
+        let n = Arc::new(AtomicUsize::new(0));
+        let k = n.clone();
+        thread::spawn(move || {
+            for s in l.incoming() {
+                let Ok(mut s) = s else { continue };
+                k.fetch_add(1, Ordering::SeqCst);
+                thread::spawn(move || {
+                    let _ = s.read(&mut [0u8; 4096]);
+                    thread::sleep(wait);
+                    let _ =
+                        s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\n{\"ok\":true}");
+                });
+            }
+        });
+        (base, n)
+    }
+
+    #[test]
+    fn a_slow_answer_is_a_timeout_not_an_unreachable_server() {
+        let (base, n) = answers_late(Duration::from_millis(1500));
+        let mut client = client_at(&base);
+        (client.quick, client.patient) = (Duration::from_millis(300), Duration::from_millis(300));
+        assert_eq!(client.resolver.resolve().as_deref(), Some(base.as_str()));
+        // A read: asked once, and the server stays the one in use.
+        assert_eq!(client.summary().err(), Some(CoreError::Timeout));
+        assert_eq!(n.load(Ordering::SeqCst), 1, "a slow answer is not asked for twice");
+        assert_eq!(client.resolver.current().as_deref(), Some(base.as_str()), "the address is fine");
+        // An action: the same, and it says it may still be going through.
+        let e = client.setup_fix("studio", "hooks").unwrap_err();
+        assert_eq!(e, CoreError::Timeout);
+        assert!(e.to_string().contains("may still be working"), "{e}");
+        assert_eq!(n.load(Ordering::SeqCst), 2);
+        // What the server has to ask a machine for gets the longer wait.
+        client.patient = Duration::from_secs(5);
+        assert!(client.setup_fix("studio", "hooks").is_ok(), "waited for the machine's answer");
+        assert_eq!(client.summary().err(), Some(CoreError::Timeout), "the board's own polls stay quick");
+    }
+
+    #[test]
+    fn only_the_servers_own_answers_are_quick() {
+        for p in ["/api/sessions", "/api/summary", "/api/prefs", "/api/server", "/api/server/logs?part=hub&lines=5"] {
+            assert!(quick_path(p), "{p}");
+        }
+        for p in [
+            "/api/summary/studio/abc",
+            "/api/files/studio?folder=",
+            "/api/setup_fix",
+            "/api/action",
+            "/api/new",
+            "/api/folders/studio",
+            "/api/serverless",
+        ] {
+            assert!(!quick_path(p), "{p}");
+        }
+        assert!(PATIENT > Duration::from_secs(60), "longer than the server's longest wait for a machine");
     }
 
     #[test]
@@ -1453,9 +1754,20 @@ mod tests {
         assert_eq!(normalize_base(" 192.0.2.10:8130/ ").as_deref(), Some("http://192.0.2.10:8130"));
         assert_eq!(normalize_base("studio.local:9000").as_deref(), Some("http://studio.local:9000"));
         assert_eq!(normalize_base("HTTP://studio.local:8130").as_deref(), Some("http://studio.local:8130"));
-        assert_eq!(normalize_base("https://sb.example.com").as_deref(), Some("https://sb.example.com"));
-        for bad in ["", "   ", "ftp://x", "a b", "host:port", "host:0", "http://", "x.com/path", "you@x"] {
-            assert_eq!(normalize_base(bad), None, "{bad}");
+        // A pasted link: only the host and port are the address.
+        assert_eq!(normalize_base("http://studio.local:8130/#board").as_deref(), Some("http://studio.local:8130"));
+        assert_eq!(normalize_base("studio.local/api/summary?x=1").as_deref(), Some("http://studio.local:8130"));
+        // IPv6, with or without brackets and a port.
+        assert_eq!(normalize_base("[fd7a:115c:a1e0::1]:9000").as_deref(), Some("http://[fd7a:115c:a1e0::1]:9000"));
+        assert_eq!(normalize_base("http://[::1]/").as_deref(), Some("http://[::1]:8130"));
+        assert_eq!(normalize_base("FD7A:115C:A1E0::1").as_deref(), Some("http://[fd7a:115c:a1e0::1]:8130"));
+        // The apps have no TLS: an https address is refused with its own words, not saved to fail forever.
+        assert_eq!(parse_base("https://sb.example.com"), Err(BadAddress::Https));
+        assert_eq!(parse_base("HTTPS://sb.example.com:8443/x"), Err(BadAddress::Https));
+        assert!(BadAddress::Https.says().contains("http://"));
+        let bad = ["", "   ", "ftp://x", "a b", "host:port", "host:0", "http://", "you@x", "[::1", "[::1]x", "[x]:1"];
+        for bad in bad {
+            assert_eq!(parse_base(bad), Err(BadAddress::NotOne), "{bad}");
         }
         assert!(is_lan("http://10.0.0.5:8130") && is_lan("http://studio.local:8130"));
         assert!(!is_lan("http://100.64.0.10:8130"));

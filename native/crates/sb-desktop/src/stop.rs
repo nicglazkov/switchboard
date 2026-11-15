@@ -16,6 +16,15 @@ use crate::view::{BoardView, Ctx};
 /// How long the confirm stays armed.
 pub const ARM_SECS: f64 = 3.0;
 
+/// How long "Confirm stop" ignores clicks after it appears: it comes up under the pointer, where the second half of a
+/// double-click would land on it.
+pub const GUARD_SECS: f64 = 0.4;
+
+/// A click on "Confirm stop", armed for `armed` seconds, counts.
+pub fn confirm_counts(armed: f64) -> bool {
+    (GUARD_SECS..ARM_SECS).contains(&armed)
+}
+
 #[derive(Clone, Debug)]
 pub struct Armed {
     pub id: String,
@@ -140,6 +149,11 @@ impl BoardView {
                     )
                     .on_click(c.cx.listener(move |this, ev: &ClickEvent, _, cx| {
                         cx.stop_propagation();
+                        // Too soon after the first click (a double-click), or just timed out: nothing stops.
+                        let now = crate::state::AppState::now();
+                        if !this.stop_armed.as_ref().is_some_and(|a| confirm_counts(now - a.at)) {
+                            return;
+                        }
                         this.stop_armed = None;
                         let p = ev.position();
                         this.flight = Some(Flight {
@@ -223,5 +237,19 @@ impl BoardView {
                 )
                 .into_any_element(),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::confirm_counts;
+
+    #[test]
+    fn a_double_click_on_stop_does_not_confirm_it() {
+        assert!(!confirm_counts(0.0));
+        assert!(!confirm_counts(0.25), "the second click of a double-click");
+        assert!(confirm_counts(0.4));
+        assert!(confirm_counts(2.9));
+        assert!(!confirm_counts(3.0), "the countdown ran out");
     }
 }

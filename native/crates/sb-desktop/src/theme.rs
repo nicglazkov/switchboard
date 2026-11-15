@@ -254,6 +254,16 @@ pub fn save_look(cx: &mut App, f: impl FnOnce(&mut crate::state::Settings)) {
     cx.refresh_windows();
 }
 
+/// Changes a part of the look that each computer keeps for itself (the terminal's text size) and repaints every
+/// window. Nothing is sent: the server does not hold it.
+pub fn save_look_here(cx: &mut App, f: impl FnOnce(&mut crate::state::Settings)) {
+    crate::state::app(cx).update(cx, |s, _| {
+        f(&mut s.settings);
+        s.save_settings();
+    });
+    cx.refresh_windows();
+}
+
 /// Saves the terminal's color scheme and repaints every window.
 pub fn set_term_colors(id: &str, cx: &mut App) {
     let id = id.to_string();

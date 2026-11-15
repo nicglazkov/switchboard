@@ -19,6 +19,7 @@ def sess(sid, **kw):
 class Transport:
     def __init__(self):
         self.down = set()
+        self.replaced = {'desk': [], 'tower': []}
         self.sessions = {
             'desk': [sess(SID['a'], kind='background', status='busy', bg_id='aaaaaaaa', title='Tax summary'),
                      sess(SID['b'], kind='interactive', status='idle'),
@@ -31,7 +32,7 @@ class Transport:
         name = 'desk' if target == 'me@x' else 'tower'
         if name in self.down:
             raise OSError('ssh: connect timed out')
-        return {'ok': True, 'sessions': self.sessions[name], 'replaced': []}
+        return {'ok': True, 'sessions': self.sessions[name], 'replaced': self.replaced[name]}
 
 
 def unpack(ticket):
@@ -83,6 +84,37 @@ class TicketTest(unittest.TestCase):
         r = self.ticket({'machine': 'tower', 'sid': SID['f']})
         self.assertEqual((r['ok'], r['need']), (False, 'offline'))
         self.assertIn('Tower is offline', r['error'])
+
+    def test_a_tab_on_a_replaced_chat_gets_the_chat_that_carries_on(self):
+        # Audit, iOS 5: after a relaunch the phone's tab still asks for the old chat. "Resume it" was the answer, and
+        # resuming brought back the old copy next to the new one.
+        old, older, moved = (f'{k * 8}-9999-2222-3333-444444444444' for k in 'abc')
+        odd = lambda n, **kw: sess(SID['d'][:-1] + n, **dict({'how': 'resumed'}, **kw))
+        self.t.replaced['desk'] = [
+            sess(old, kind='background', status='stopped', bg_id='11111111', how='resumed', by={'machine': 'desk', 'sid': SID['a']}),
+            sess(older, how='resumed', by={'sid': old}),                             # two steps back, no machine named
+            sess(moved, how='resumed', by={'machine': 'tower', 'sid': SID['f']}),
+            odd('0', by={'machine': 'desk', 'sid': SID['c']}),                        # what replaced it is stopped too
+            odd('1', by={'machine': 'desk', 'sid': SID['b']}),                        # carries on in a terminal window
+            odd('2', by={'machine': 'mars', 'sid': SID['a']}),
+            odd('3', by={'sid': SID['d'][:-1] + '3'}),
+            odd('4', how='fresh', by={'machine': 'desk', 'sid': SID['a']}),           # Start fresh: a new conversation,
+            odd('5', how='continued', by={'machine': 'tower', 'sid': SID['f']})]      # and so is Continue: the old chat is its own
+        self.fleet.poll()
+        for sid in (old, older):
+            r = self.ticket({'machine': 'desk', 'sid': sid})
+            self.assertEqual((r['ok'], r['bg'], r['sid'], r['machine'], r['title']), (True, 'aaaaaaaa', SID['a'], 'desk', 'Tax summary'))
+            self.assertEqual(unpack(r['ws'].split('t=', 1)[1])[0]['b'], 'aaaaaaaa')
+        r = self.ticket({'machine': 'desk', 'sid': moved})
+        self.assertEqual((r['bg'], r['sid'], r['machine'], r['label']), ('ffffffff', SID['f'], 'tower', 'Tower'))
+        self.assertEqual(unpack(r['ws'].split('t=', 1)[1])[0]['m'], 'tower')
+        for n in '012345':
+            r = self.ticket({'machine': 'desk', 'sid': SID['d'][:-1] + n})
+            self.assertEqual((r['ok'], r['need'], r['sid']), (False, 'resume', SID['d'][:-1] + n), n)
+        self.assertNotIn('sid', self.ticket({'machine': 'desk', 'sid': SID['a']}), 'the chat that was asked for: nothing more to say')
+        self.t.down.add('tower')
+        self.fleet.poll()
+        self.assertEqual(self.ticket({'machine': 'desk', 'sid': moved})['need'], 'resume')
 
     def test_after_resume_the_bg_id_is_enough(self):
         r = self.ticket({'machine': 'desk', 'bg': 'cccccccc'})   # the list still says stopped; the resume job knows better

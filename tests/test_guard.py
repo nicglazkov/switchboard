@@ -58,6 +58,25 @@ class GuardTest(unittest.TestCase):
         table = {10: (9, 'python.exe'), 9: (8, 'cmd.exe'), 8: (2, 'claude.exe'), 2: (0, 'explorer.exe')}
         self.assertEqual(self.sb.find_claude_pid(10, table), 8)
 
+    def test_find_claude_pid_under_another_name(self):
+        """An npm install runs as node, the native one as its version file: still found, and never the shell."""
+        find = self.sb.find_claude_pid
+        self.assertEqual(find(10, {10: (9, 'python3'), 9: (8, '/bin/sh'), 8: (7, 'node'), 7: (1, '/bin/zsh'), 1: (0, 'launchd')}), 8)
+        self.assertEqual(find(10, {10: (9, 'python.exe'), 9: (8, 'cmd.exe'), 8: (2, 'node.exe'), 2: (0, 'explorer.exe')}), 8)
+        self.assertEqual(find(10, {10: (9, 'python3'), 9: (8, '/bin/sh'), 8: (1, '/Users/you/.local/share/claude/versions/2.1.0')}), 8)
+        self.assertEqual(find(10, {10: (9, 'python3'), 9: (8, 'claude bg-session'), 8: (1, 'launchd')}), 9)
+        # a real claude further up wins over a node nearer by (a wrapper script), as it always did
+        self.assertEqual(find(10, {10: (9, 'python3'), 9: (8, 'node'), 8: (7, '/Users/you/.local/bin/claude'), 7: (1, 'node')}), 8)
+        # the version file wins over a node below it
+        self.assertEqual(find(10, {10: (9, 'node'), 9: (8, '/opt/claude/versions/2.1.0'), 8: (1, 'zsh')}), 9)
+        # a background chat under the service that started it: the chat, never the service every chat hangs under
+        daemon = {10: (9, 'python3'), 9: (8, '/bin/sh'), 8: (5, '/Users/you/.local/share/claude/versions/2.1.0'), 5: (1, 'claude'),
+                  11: (5, '/Users/you/.local/share/claude/versions/2.1.0'), 12: (5, 'claude bg-session'), 1: (0, 'launchd')}
+        self.assertEqual(find(10, daemon), 8)
+        self.assertEqual(find(13, {**daemon, 13: (12, 'sh')}), 12)
+        self.assertIsNone(find(10, {10: (9, 'python3'), 9: (8, '/bin/sh'), 8: (1, 'zsh')}), 'no guess from a shell')
+        self.assertIsNone(find(10, {10: (1, 'node'), 1: (0, 'launchd')}), 'this process itself is never it')
+
     def test_find_claude_pid_none_and_cycles(self):
         self.assertIsNone(self.sb.find_claude_pid(10, {10: (9, 'python3'), 9: (10, 'sh')}))
 

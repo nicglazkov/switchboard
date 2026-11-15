@@ -104,7 +104,9 @@ def pick(machines, sm, now=None, held=lambda m, sid: False):
         return {'kind': 'five', 'tone': 'bad' if five >= 95 else 'warn',
                 'text': aged(f'Your 5-hour window is at {round(five)}%. It frees up in {_left(five_reset - now)}.')}
     if proj is not None and proj > 100 and reset and reset > now:
-        return {'kind': 'week', 'tone': 'bad', 'text': aged(f"At this rate you'll run out {_left(reset - now)} before the week resets. "
+        # At this pace the week is used up 100/proj of the way through it; the rest of the week is the shortfall.
+        short = min(WEEK * (1 - 100 / proj), reset - now)
+        return {'kind': 'week', 'tone': 'bad', 'text': aged(f"At this rate you'll run out {_left(short)} before the week resets. "
                 'Lighter chats make it last.')}
     if proj is not None and proj > 85:
         return {'kind': 'week', 'tone': 'warn', 'text': aged(f"At this rate you'll end the week around {proj}%, so there's not much room for long runs.")}

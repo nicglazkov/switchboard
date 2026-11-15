@@ -99,15 +99,20 @@ On the board the chat moves to **Needs you** with **Message on hold**, and its d
 | **Mode** | **Normal**, **Max effort** (deepest reasoning on every turn) or **UltraCode** (multi-agent workflows for big builds, on Opus at extra high effort; uses your plan faster) |
 | **Model** | **Default**, or the models your computers' Claude Code takes |
 | **Effort** | Default, Low, Medium, High, Extra high |
-| **Permissions** | Asks first, Accept edits, Plan, Auto, Bypass |
+| **Permissions** | **Machine default** (whatever that computer's own Claude Code settings say), Asks first, Accept edits, Plan, Auto, Bypass, Never asks |
 | **Browser** | Claude in Chrome |
 | **Tools** | **Auto**, or pick tools from your [library](settings.md#library) |
 | **Folders** | Up to 8 extra folders Claude may work in, each added with the same chooser |
-| **Other flags** | Any other Claude Code flags |
+| **Other flags** | More Claude Code flags, from the ones Switchboard passes on: an agent, a worktree, extra instructions, allowed and disallowed tools, a fallback model and the like. The field says so when a flag isn't one of them |
 | **First message** | What it should work on, or empty to start idle. Your draft is kept for a week |
 
-**Save setup** keeps a combination of these by name; **Last used** brings back the last one. Leave
-**Open its terminal** checked to watch it start.
+**Save setup** keeps a combination of these by name; **Last used** brings back the last one, and **Defaults**
+goes back to nothing picked. On the desktop the last setup's effort, permissions, browser and other flags are
+filled in when the window opens. Extra folders belong to the computer they were picked on, so changing the
+computer clears them. Leave **Open its terminal** checked to watch it start.
+
+**Asks first** is sent by name to a computer whose Switchboard is up to date. An older one starts the chat in
+that computer's own default mode instead.
 
 ### Choosing a folder
 
@@ -134,10 +139,28 @@ Before Claude works in a folder outside the Claude folder for the first time, Sw
 question Claude Code would: **Let Claude work in this folder?** If you say yes, Claude can read and change the
 files in it and run commands there, in that folder and the ones inside it.
 
+## Change a chat's flags
+
+**Flags** (on a card, in its details, its right-click menu and its terminal's bar) shows what a chat runs with
+and lets you change it.
+
+- **Changes live:** the model, the effort, turning plan mode on, and extra folders are typed into the chat.
+  Nothing restarts.
+- **Needs a relaunch:** permissions, Claude in Chrome, computer use and other flags are read when Claude Code
+  starts, so the chat relaunches and carries on with its history. It keeps everything else it was started with,
+  including a pinned model version.
+- A **worktree** is set when a chat starts and can't be changed afterwards.
+- A chat open in a terminal of its own can't be typed into or relaunched from here. You get one command to run
+  in that terminal instead.
+
+Resume and Start fresh also keep what the chat ran with: its model, effort, permission mode, extra folders,
+agent, extra instructions and Chrome setting.
+
 ## Continue on another computer
 
 **Continue on another machine** (++c++, or **Continue on <computer>** in a card's menu) writes a summary on this
-computer and starts the chat on another one, in the same folder, with the same model, effort and Chrome setting.
+computer and starts the chat on another one, in the same folder, with the same model, effort, permission mode,
+agent, extra instructions and Chrome setting. Extra folders come along when the other computer has them too.
 The old chat shows **Continued on <computer>**.
 
 ## Names

@@ -61,6 +61,9 @@ impl Geo {
     }
 }
 
+/// The machine column's narrowest width that still fits a name beside its two buttons.
+const NAME_ROOM: f32 = 160.;
+
 /// Column names as the board heads say them.
 pub fn col_name(c: Column) -> &'static str {
     match c {
@@ -664,7 +667,34 @@ impl BoardView {
             .map(|x| format!("Claude {}", fmt::mem(x.claude_mb)));
         let can = m.and_then(|m| m.can.clone()).filter(|x| !x.is_empty());
         let (m1, m2, m3) = (machine.to_string(), machine.to_string(), machine.to_string());
+        // A narrow column (beside the details, or a small window) leaves the name about 40 px next to its two
+        // buttons: there the name gets the whole line, and the buttons show over its end under the pointer.
+        let roomy = g.label >= NAME_ROOM;
+        let cell: SharedString = format!("machine-{machine}").into();
+        let buttons = div()
+            .flex_none()
+            .flex()
+            .items_center()
+            .child(
+                ui::icon_btn(&t, SharedString::from(format!("tear-{machine}")), "popout", 22.)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.tear(m2.clone(), cx))),
+            )
+            .child(
+                ui::icon_btn(
+                    &t,
+                    SharedString::from(format!("fold-{machine}")),
+                    if shut { "chev" } else { "down" },
+                    22.,
+                )
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    let s = this.app.read(cx).is_shut(&m3);
+                    let m = m3.clone();
+                    this.app.update(cx, |a, cx| a.set_shut(&m, !s, cx));
+                })),
+            );
         div()
+            .group(cell.clone())
+            .relative()
             .w(px(g.label))
             .flex_none()
             .pt(px(14.))
@@ -691,23 +721,22 @@ impl BoardView {
                             .text_color(t.ink)
                             .child(label),
                     ) // one line, never broken mid-word
-                    .child(
-                        ui::icon_btn(&t, SharedString::from(format!("tear-{machine}")), "popout", 22.)
-                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.tear(m2.clone(), cx))),
-                    )
-                    .child(
-                        ui::icon_btn(
-                            &t,
-                            SharedString::from(format!("fold-{machine}")),
-                            if shut { "chev" } else { "down" },
-                            22.,
-                        )
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            let s = this.app.read(cx).is_shut(&m3);
-                            let m = m3.clone();
-                            this.app.update(cx, |a, cx| a.set_shut(&m, !s, cx));
-                        })),
-                    ),
+                    .map(|d| {
+                        if roomy {
+                            d.child(buttons)
+                        } else {
+                            d.child(
+                                buttons
+                                    .absolute()
+                                    .top(px(12.))
+                                    .right(px(8.))
+                                    .rounded(px(ui::R_ITEM))
+                                    .bg(t.bg)
+                                    .opacity(0.)
+                                    .group_hover(cell, |s| s.opacity(1.)),
+                            )
+                        }
+                    }),
             )
             .when(!shut, |d| {
                 d.child(

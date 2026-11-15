@@ -268,6 +268,18 @@ class AutoServer(unittest.TestCase):
         self.assertEqual((j['state'], j['machine'], j['by']), ('done', 'tower', 'rules'))
         self.assertEqual([r['folder'] for _, r in self.f.verbs('mkdir')], ['runs'])
 
+    def test_new_session_on_auto_with_flags(self):
+        app = self.make()
+        for n in ('desk', 'tower'):
+            app.fleet.state[n].update(features=['flags', 'places'], models={'perms': ['acceptEdits', 'manual', 'plan']})
+        r = app.post('/api/new', {'machine': 'auto', 'prompt': 'Fix the switchboard iOS widget', 'folder': '',
+                                  'flags': [['--permission-mode', 'default'], ['--verbose']]})
+        j = self.wait(r['job'])
+        self.assertEqual((j['state'], j.get('error'), j['machine']), ('done', None, 'desk'))
+        (where, start), = self.f.verbs('start')
+        # "Asks first" goes by the name the picked machine's Claude Code takes
+        self.assertEqual((where, start['flags']), ('desk', [['--permission-mode', 'manual'], ['--verbose']]))
+
     def test_auto_with_nothing_online_says_so_at_once(self):
         app = self.make()
         self.f.down.update({'desk', 'tower'})

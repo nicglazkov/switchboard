@@ -1,4 +1,4 @@
-import json, os, plistlib, tempfile, time, unittest
+import json, os, plistlib, re, tempfile, time, unittest
 from pathlib import Path
 from unittest import mock
 from tests.test_rpc import RpcBase, NOW, SID_A
@@ -208,7 +208,8 @@ class CarryOverTest(JobBase):
         self.job({'verb': 'resume', 'sid': SID_A})
         self.drain()
         a = self.argv()
-        self.assertEqual((a[a.index('--effort') + 1], a[a.index('--model') + 1]), ('ultracode', 'opus'))
+        self.assertEqual(a[a.index('--effort') + 1], 'ultracode')
+        self.assertNotIn('--model', a)  # the machine's own Opus (opus[1m] in settings stays 1M), never one forced on it
         p = self.old_chat([{'type': 'attachment', 'attachment': {'type': 'ultra_effort_enter'}},
                            {'type': 'attachment', 'attachment': {'type': 'ultra_effort_exit'}}], model='claude-sonnet-5-5')
         self.assertEqual(self.sb.carry_over(p, 'claude-sonnet-5-5'), {'effort': 'medium', 'model': 'sonnet'})
@@ -648,3 +649,47 @@ class WakeRetryTest(WakeTest):
         self.assertEqual(len(ran), 2)
         self.assertIn(['rm', 'aaaa1111'], self.calls)
         self.assertIn(['rm', 'bbbb2222'], self.calls)
+
+
+class MessageByFileTest(JobBase):
+    """A first message the command line cannot carry on this machine reaches the new chat by file instead."""
+
+    def hook(self, prompt):
+        return self.sb.handle_hook({'hook_event_name': 'UserPromptSubmit', 'session_id': 'S9', 'transcript_path': '/none',
+                                    'prompt': prompt}, NOW + 10, None)
+
+    def test_a_message_that_fits_goes_as_it_is(self):
+        self.assertEqual(self.sb.prompt_for_argv('say "hi" & 100%\nplease', NOW, exe='/usr/bin/claude'), 'say "hi" & 100%\nplease')
+        self.assertEqual(self.sb.prompt_for_argv('plain words', NOW, exe='C:\\Users\\you\\npm\\claude.cmd'), 'plain words')
+        self.assertEqual(list(self.sb.paths_q()['seeds'].glob('*')), [])
+
+    def test_text_a_cmd_shim_cannot_take_goes_by_file(self):
+        said = 'say "hi" & 100%\nplease'
+        stub = self.sb.prompt_for_argv(said, NOW, exe='C:\\Users\\you\\npm\\claude.cmd')
+        self.assertRegex(stub, r'^\[switchboard:[0-9a-f]{12}\] ')
+        self.assertEqual(self.sb.cmd_safe(['claude.cmd', stub]), ['claude.cmd', stub])  # the stand-in itself is safe
+        ctx = self.hook(stub)['hookSpecificOutput']['additionalContext']
+        self.assertIn(said, ctx)
+        self.assertIn('current request', ctx)
+        self.assertNotIn('fresh session', ctx, 'a plain first message is not a handoff')
+
+    def test_a_very_long_message_is_read_from_its_file(self):
+        said = 'word ' * 30_000
+        self.sb.ARG_MAX = 24_000  # as on Windows
+        stub = self.sb.prompt_for_argv(said, NOW, exe='claude.exe')
+        self.assertLess(len(stub), 200)
+        ctx = self.hook(stub)['hookSpecificOutput']['additionalContext']
+        self.assertLess(len(ctx), self.sb.INJECT_MAX)
+        path = re.search(r'Read the whole file (\S+)', ctx).group(1)
+        self.assertEqual(Path(path).read_text(), said)
+
+    def test_start_fresh_with_a_held_message_keeps_both(self):
+        self.transcript(SID_A, str(self.root / 'proj'), NOW - 9 * 3600)
+        self.sb._claude_exe = lambda: 'C:\\Users\\you\\npm\\claude.cmd'
+        self.job({'verb': 'fresh', 'sid': SID_A, 'held': 'fix the "lights" & more'})
+        self.drain()
+        prompt = self.launched[0]['argv'][-1]
+        self.assertNotIn('"', prompt)
+        ctx = self.hook(prompt)['hookSpecificOutput']['additionalContext']
+        self.assertIn('HANDOFF ' + SID_A, ctx)
+        self.assertIn('fix the "lights" & more', ctx)

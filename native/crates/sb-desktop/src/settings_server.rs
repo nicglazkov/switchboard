@@ -20,9 +20,19 @@ use crate::ui;
 /// back before it says something went wrong.
 const POLL: Duration = Duration::from_millis(1500);
 const BACK_WITHIN: f64 = 180.;
-/// Restart asks twice: the second click within this many seconds.
-const ARM_FOR: f64 = 4.;
 const LOG_LINES: u32 = 300;
+
+/// Whether the update being watched is over. `after` is the server's own start time of the update record that was
+/// there before this one was asked for (0 when none), so the two clocks are never compared: a new record, with an
+/// outcome, is the end.
+fn update_finished(u: Option<&ApiServerUpdate>, after: f64) -> bool {
+    u.is_some_and(|u| u.ok.is_some() && u.started > after)
+}
+
+/// An update the server is in the middle of (whoever started it).
+fn update_running(i: &ApiServer) -> bool {
+    i.update.as_ref().is_some_and(|u| u.ok.is_none() && u.started > 0.)
+}
 
 #[derive(Default)]
 pub(super) struct Pane {
@@ -143,7 +153,13 @@ impl SettingsView {
                 v.srv.loading = false;
                 v.srv.old = matches!(&res, Err(sb_core::net::CoreError::Server { status: 404, .. }));
                 let ver = res.as_ref().map(|i| i.version.clone()).unwrap_or_default();
+                // An update already under way (started from this page before it was left, or from another device)
+                // is followed to its end, or its progress row would sit on one step.
+                let running = res.as_ref().is_ok_and(update_running);
                 v.srv.info = Some(res.map_err(|e| e.to_string()));
+                if running && v.srv.waiting.is_none() {
+                    v.server_watch(Kind::Update, true, cx);
+                }
                 if offer_too {
                     v.server_check(ver, cx);
                 }
@@ -194,7 +210,7 @@ impl SettingsView {
             let _ = this.update(cx, |v, cx| {
                 v.srv.sending = false;
                 match res {
-                    Ok(()) => v.server_watch(Kind::Update, cx),
+                    Ok(()) => v.server_watch(Kind::Update, false, cx),
                     Err(e) => v.srv.error = Some(e.to_string()),
                 }
                 cx.notify();
@@ -205,10 +221,15 @@ impl SettingsView {
 
     fn server_restart(&mut self, cx: &mut Context<Self>) {
         let now = AppState::now();
-        if !self.srv.restart_armed.is_some_and(|at| now - at < ARM_FOR) {
-            self.srv.restart_armed = Some(now);
-            cx.notify();
-            return;
+        match super::arm_click(self.srv.restart_armed, now) {
+            super::ArmClick::Go => {}
+            super::ArmClick::Wait => return,
+            super::ArmClick::Arm => {
+                self.srv.restart_armed = Some(now);
+                self.disarm_later(cx);
+                cx.notify();
+                return;
+            }
         }
         self.srv.restart_armed = None;
         self.srv.sending = true;
@@ -220,7 +241,7 @@ impl SettingsView {
             let _ = this.update(cx, |v, cx| {
                 v.srv.sending = false;
                 match res {
-                    Ok(()) => v.server_watch(Kind::Restart, cx),
+                    Ok(()) => v.server_watch(Kind::Restart, false, cx),
                     Err(e) => v.srv.error = Some(e.to_string()),
                 }
                 cx.notify();
@@ -230,10 +251,13 @@ impl SettingsView {
     }
 
     /// Asks every POLL until the update has finished (or the restart is over) and the server answers again.
-    fn server_watch(&mut self, kind: Kind, cx: &mut Context<Self>) {
+    /// `resume`: the update on the page is the one to follow (it was already running), not one just asked for.
+    fn server_watch(&mut self, kind: Kind, resume: bool, cx: &mut Context<Self>) {
         self.srv.watch += 1;
         let ticket = self.srv.watch;
         let since = AppState::now();
+        let shown = self.srv.info.as_ref().and_then(|i| i.as_ref().ok()).and_then(|i| i.update.as_ref());
+        let after = shown.map_or(0., |u| if resume { u.started - 0.001 } else { u.started });
         self.srv.waiting = Some((kind, since));
         self.srv.away = false;
         let core = self.app.read(cx).core.clone();
@@ -257,7 +281,7 @@ impl SettingsView {
                                 // Over once it has an answer, and has been away (or long enough that it went
                                 // and came back between two looks).
                                 Kind::Restart => v.srv.away || now - since > 12.,
-                                Kind::Update => i.update.as_ref().is_some_and(|u| u.ok.is_some() && u.at >= since - 5.),
+                                Kind::Update => update_finished(i.update.as_ref(), after),
                             };
                             v.srv.info = Some(Ok(i.clone()));
                             v.srv.old = false;
@@ -735,8 +759,8 @@ impl SettingsView {
     fn server_care(&self, t: &Theme, i: &ApiServer, addr: &str, now: f64, cx: &Context<Self>) -> AnyElement {
         let mut rows = vec![];
         if i.can_manage {
-            let armed = self.srv.restart_armed.is_some_and(|at| now - at < ARM_FOR);
-            let busy = self.srv.waiting.is_some() || self.srv.sending;
+            let armed = self.srv.restart_armed.is_some_and(|at| now - at < super::ARM_FOR);
+            let busy = self.srv.waiting.is_some() || self.srv.sending || update_running(i);
             let btn = ui::line_btn(t, "srv-restart", 32.)
                 .when(armed, |d| d.text_color(t.bad))
                 .when(busy, |d| d.opacity(0.5))
@@ -931,6 +955,28 @@ fn server_details(i: &ApiServer, addr: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_update_is_over_when_its_own_record_has_an_outcome() {
+        let rec = |started: f64, ok: Option<bool>| ApiServerUpdate { started, ok, ..Default::default() };
+        // Asked for just now; the page still showed last week's finished update.
+        assert!(!update_finished(Some(&rec(1000., Some(true))), 1000.), "that is the old one");
+        assert!(!update_finished(Some(&rec(5000., None)), 1000.), "the new one is still going");
+        assert!(update_finished(Some(&rec(5000., Some(true))), 1000.));
+        assert!(update_finished(Some(&rec(5000., Some(false))), 1000.), "a failed one is over too");
+        assert!(!update_finished(None, 0.));
+        // Found running when the page opened: followed from just before its start.
+        assert!(update_finished(Some(&rec(5000., Some(true))), 5000. - 0.001));
+        // The server's clock an hour off this one's changes nothing: only its own times are compared.
+        assert!(update_finished(Some(&rec(5000. - 3600., Some(true))), 1000. - 3600.));
+
+        let mut i = ApiServer::default();
+        assert!(!update_running(&i));
+        i.update = Some(rec(5000., None));
+        assert!(update_running(&i), "Restart waits for it");
+        i.update = Some(rec(5000., Some(true)));
+        assert!(!update_running(&i));
+    }
 
     #[test]
     fn steps_follow_the_updater() {

@@ -111,7 +111,8 @@ python3 ~/.claude/switchboard/sb.py places roam on    # anywhere in the home fol
 
 ## Removing a computer
 
-Remove it in **Settings, Machines**. On the computer itself:
+Remove it in **Settings, Machines**. A linked computer that loses its link stays in the list, offline and with its
+settings, until you remove it there or link it again. On the computer itself:
 
 ```sh
 python3 ~/.claude/switchboard/sb.py uninstall   # takes the helper out of Claude Code's settings

@@ -263,9 +263,90 @@ fn sh(cmd: &str, args: &[&str]) -> Result<String, String> {
     }
 }
 
+/// The node's own program file, for telling an update's leftover process from a second node (Windows).
+///
+/// An update there cannot stop or replace a node that is running: it moves the file aside
+/// (switchboard-node.<pid>.old) and starts the new one, which takes the link. The old process then held on for
+/// good, one more with every update, each keeping a file the next update could not clear.
+pub struct Own {
+    /// where this process's program was when it started
+    started: PathBuf,
+    installed: PathBuf,
+}
+
+impl Own {
+    fn here() -> Option<Own> {
+        Some(Own { started: std::env::current_exe().ok()?, installed: install_path() })
+    }
+
+    /// True when this process is one an update moved aside. A moved-aside file that can be deleted is a leftover
+    /// from a node that has already gone; one that cannot be is a program still running, this one.
+    pub fn superseded(&self) -> bool {
+        let Some(dir) = self.installed.parent() else { return false };
+        let names: Vec<String> = std::fs::read_dir(dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        match moved_aside(&self.started, &self.installed, &names) {
+            Aside::Yes => true,
+            Aside::No => false,
+            Aside::IfRunning(files) => files.iter().any(|n| {
+                let p = dir.join(n);
+                std::fs::remove_file(&p).is_err() && p.exists()
+            }),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq)]
+enum Aside {
+    /// this program's own path is a moved-aside file
+    Yes,
+    /// it did not start from where the node is installed, or nothing there was moved aside
+    No,
+    /// it started from where the node is installed, and these files next to it were moved aside
+    IfRunning(Vec<String>),
+}
+
+/// The decision behind `Own::superseded`, from the names in the install folder.
+fn moved_aside(started: &Path, installed: &Path, names: &[String]) -> Aside {
+    let same = |a: &Path, b: &Path| a.to_string_lossy().eq_ignore_ascii_case(&b.to_string_lossy());
+    let stem = installed.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    // "switchboard-node.<pid>.old", as `install` names the one it moves aside
+    let is_aside = |name: &str| {
+        let name = name.to_lowercase();
+        name.strip_prefix(&format!("{stem}."))
+            .and_then(|r| r.strip_suffix(".old"))
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let own = started.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    if started.parent().zip(installed.parent()).is_some_and(|(a, b)| same(a, b)) && is_aside(&own) {
+        return Aside::Yes;
+    }
+    if !same(started, installed) {
+        return Aside::No;
+    }
+    let files: Vec<String> = names.iter().filter(|n| is_aside(n)).cloned().collect();
+    if files.is_empty() { Aside::No } else { Aside::IfRunning(files) }
+}
+
+/// A path as text inside a plist.
+fn xml(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;")
+}
+
+/// A path as one quoted word of a systemd `ExecStart=`: systemd reads `%` and `$` specially there, and `\` and
+/// `"` inside the quotes.
+fn unit_word(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\"").replace('%', "%%").replace('$', "$$"))
+}
+
 /// The user service text for each OS (LaunchAgent plist, systemd unit, the hidden launcher a logon task runs).
 fn service_text(exe: &str, home: &str) -> String {
     if cfg!(target_os = "macos") {
+        let (exe, home) = (xml(exe), xml(home));
         format!(
             r#"<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -285,7 +366,8 @@ fn service_text(exe: &str, home: &str) -> String {
     } else {
         format!(
             "[Unit]\nDescription=Switchboard node (links this machine to the hub)\nAfter=network-online.target\n\n[Service]\n\
-             ExecStart=\"{exe}\" run\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n"
+             ExecStart={} run\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=default.target\n",
+            unit_word(exe)
         )
     }
 }
@@ -378,7 +460,11 @@ fn install() -> i32 {
                 }
                 std::thread::sleep(Duration::from_millis(500));
             }
-            up?;
+            if let Err(e) = up {
+                // Still refused: the old service never left. Starting that one again runs the new program, which
+                // is already in its place, and beats leaving this machine with no node at all.
+                sh("launchctl", &["kickstart", "-k", &format!("gui/{uid}/{LABEL}")]).map_err(|_| e)?;
+            }
             Ok(format!("Runs at login (LaunchAgent {LABEL}); log in ~/Library/Logs/switchboard-node.log."))
         } else if cfg!(windows) {
             let vbs = dest.with_file_name("switchboard-node.vbs");
@@ -428,13 +514,14 @@ fn install() -> i32 {
 /// (KeepAlive, Restart=always) would only start it again at once, over and over. A node that was replaced does not
 /// link again by itself: two with one token would take the link from each other for good.
 async fn run(path: &Path, every: Duration) -> i32 {
+    let own = Own::here();
     let mut tried = None::<String>;
     let mut said = false;
     loop {
         match load_from(path) {
             Ok(c) if tried.as_deref() != Some(c.token.as_str()) => {
                 said = false;
-                match link::run(c.clone()).await {
+                match link::run(c.clone(), own.as_ref()).await {
                     link::UNPAIRED | link::REPLACED => tried = Some(c.token),
                     code => return code,
                 }
@@ -502,6 +589,95 @@ mod tests {
         assert!(t.contains("switchboard-node"));
         assert!(t.contains("run"));
         assert!(install_path().ends_with(if cfg!(windows) { "switchboard-node.exe" } else { "switchboard-node" }));
+    }
+
+    #[test]
+    fn service_text_keeps_odd_folder_names_whole() {
+        // a home folder with a space, an ampersand and a percent sign
+        let t = service_text("/opt/R&D <lab> 100%/.local/bin/switchboard-node", "/opt/R&D <lab> 100%");
+        if cfg!(target_os = "macos") {
+            assert!(t.contains("<string>/opt/R&amp;D &lt;lab&gt; 100%/.local/bin/switchboard-node</string>"), "{t}");
+            assert!(t.contains("<string>/opt/R&amp;D &lt;lab&gt; 100%/Library/Logs/switchboard-node.log</string>"));
+            assert!(!t.contains("R&D"), "{t}");
+        }
+        assert_eq!(xml("/opt/a&b/<c>"), "/opt/a&amp;b/&lt;c&gt;");
+        assert_eq!(unit_word("/home/you/.local/bin/switchboard-node"), "\"/home/you/.local/bin/switchboard-node\"");
+        assert_eq!(unit_word("/srv/R&D 100%/a$b/c\"d\\e"), "\"/srv/R&D 100%%/a$$b/c\\\"d\\\\e\"");
+    }
+
+    #[test]
+    fn a_node_an_update_moved_aside_knows_it() {
+        let names = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let dir = Path::new(r"C:\Users\you\AppData\Local\Switchboard");
+        let installed = dir.join("switchboard-node.exe");
+        let (installed, dir_s) = if cfg!(windows) {
+            (installed, String::new())
+        } else {
+            // (off Windows the folder and file are one name with backslashes in it; give it a real folder)
+            (Path::new("/opt/sb/switchboard-node.exe").to_path_buf(), "/opt/sb".to_string())
+        };
+        let at = |name: &str| if cfg!(windows) { dir.join(name) } else { Path::new(&dir_s).join(name) };
+        // the node the update started: nothing moved aside is running beside it
+        assert_eq!(
+            moved_aside(&installed, &installed, &names(&["switchboard-node.exe", "switchboard-node.vbs"])),
+            Aside::No
+        );
+        // the node that was running through an update: its file is now the .old one
+        let after = names(&["switchboard-node.exe", "switchboard-node.4242.old", "switchboard-node.vbs", "notes.old"]);
+        assert_eq!(
+            moved_aside(&installed, &installed, &after),
+            Aside::IfRunning(names(&["switchboard-node.4242.old"]))
+        );
+        // letter case does not matter there
+        let shouted = at("SWITCHBOARD-NODE.EXE");
+        assert_eq!(
+            moved_aside(&shouted, &installed, &names(&["Switchboard-Node.77.OLD"])),
+            Aside::IfRunning(names(&["Switchboard-Node.77.OLD"]))
+        );
+        // a system that reports the path it was moved to
+        assert_eq!(moved_aside(&at("switchboard-node.4242.old"), &installed, &[]), Aside::Yes);
+        // a second node run by hand from somewhere else is a second node, not a leftover
+        let other = Path::new(if cfg!(windows) {
+            r"C:\Users\you\Downloads\switchboard-node.exe"
+        } else {
+            "/tmp/dl/switchboard-node.exe"
+        });
+        assert_eq!(moved_aside(other, &installed, &after), Aside::No);
+        let other_old = Path::new(if cfg!(windows) {
+            r"C:\Users\you\Downloads\switchboard-node.1.old"
+        } else {
+            "/tmp/dl/switchboard-node.1.old"
+        });
+        assert_eq!(moved_aside(other_old, &installed, &after), Aside::No);
+        // names that only look alike
+        for n in ["switchboard-node.old", "switchboard-node.x1.old", "switchboard-node.12.old.txt", "other.12.old"] {
+            assert_eq!(moved_aside(&installed, &installed, &names(&[n])), Aside::No, "{n}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_leftover_file_from_a_node_that_is_gone_does_not_count() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = scratch("aside");
+        let installed = d.join("switchboard-node");
+        std::fs::write(&installed, "new").unwrap();
+        let old = d.join("switchboard-node.4242.old");
+        std::fs::write(&old, "old").unwrap();
+        let own = Own { started: installed.clone(), installed: installed.clone() };
+        // the file can be deleted, so nothing runs from it: a stale leftover, cleared
+        assert!(!own.superseded());
+        assert!(!old.exists());
+        // one that cannot be deleted (here: a folder that refuses; on Windows: a program that is running)
+        std::fs::write(&old, "old").unwrap();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let stuck = std::fs::remove_file(&old).is_err();
+        let said = own.superseded();
+        std::fs::set_permissions(&d, std::fs::Permissions::from_mode(0o755)).unwrap();
+        if stuck {
+            assert!(said); // (as root nothing refuses, and there is nothing to check)
+        }
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

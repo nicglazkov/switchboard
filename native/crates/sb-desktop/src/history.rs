@@ -24,6 +24,10 @@ impl BoardView {
         self.main = Main::History;
         self.tab = 0;
         self.add_open = false;
+        // Shown again after a while: read the list again.
+        if let Some(v) = &self.hist.view {
+            v.update(cx, |b, cx| b.shown_again(cx));
+        }
         cx.notify();
     }
 

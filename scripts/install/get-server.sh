@@ -69,17 +69,19 @@ main() {
   trap 'rm -rf "$TMP_KIT"' EXIT
   [ "$fancy" = 1 ] && printf '\n'
 
-  local file="$tmp/kit.tar.gz"
+  local file="$tmp/kit.tar.gz" listed=0
   if [ -f "$kit" ]; then
     cp "$kit" "$file"
-    [ -n "$sum" ] || { [ -f "$kit.sha256" ] && sum=$(cut -d ' ' -f 1 <"$kit.sha256"); } || true
+    [ -n "$sum" ] || { [ -f "$kit.sha256" ] && listed=1 && sum=$(cut -d ' ' -f 1 <"$kit.sha256"); } || true
     say "Server kit from $kit"
   else
     case "$kit" in http://*|https://*) ;; *) die "--kit is neither a file here nor an http(s) address: $kit" ;; esac
     fetch "$kit" "$file" || die "could not download the server kit from $kit"
-    [ -n "$sum" ] || { fetch "$kit.sha256" "$tmp/kit.sha256" 2>/dev/null && sum=$(cut -d ' ' -f 1 <"$tmp/kit.sha256"); } || true
+    [ -n "$sum" ] || { fetch "$kit.sha256" "$tmp/kit.sha256" 2>/dev/null && listed=1 && sum=$(cut -d ' ' -f 1 <"$tmp/kit.sha256"); } || true
     say "Downloaded the server kit ($(($(wc -c <"$file") / 1024)) KB) from ${kit%/*}"
   fi
+  # A .sha256 that is there but empty is a failed check, not a missing one.
+  [ -n "$sum" ] || [ "$listed" = 0 ] || die "the .sha256 next to the kit has no SHA-256 in it. Nothing was installed."
   if [ -n "$sum" ]; then
     [ "$(sha "$file")" = "$sum" ] || die "the kit's SHA-256 does not match ($sum expected). Nothing was installed."
     say "Its SHA-256 matches"

@@ -29,6 +29,10 @@ impl Drop for Lab {
 }
 
 async fn lab() -> Lab {
+    lab_with(|_| {}).await
+}
+
+async fn lab_with(tweak: impl FnOnce(&mut Config)) -> Lab {
     static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
     let dir = std::env::temp_dir().join(format!(
         "sbnode-{}-{}",
@@ -45,6 +49,7 @@ async fn lab() -> Lab {
     cfg.nodes_path = dir.join("nodes.json");
     cfg.key_path = dir.join("cfg/term.key");
     cfg.ssh = "/bin/false".into();
+    tweak(&mut cfg);
     let hub = Hub::new(cfg.clone()).unwrap();
     let key = std::fs::read(&cfg.key_path).unwrap();
     let listener = TcpListener::bind(cfg.listen).await.unwrap();
@@ -347,4 +352,67 @@ async fn internal_routes_refuse_pages() {
         200,
         "other routes as before"
     );
+}
+
+async fn open_with(lab: &Lab, t: &str) -> Ws {
+    let mut req = format!("ws://{}/term?t={t}&cols=90&rows=30", lab.addr).into_client_request().unwrap();
+    req.headers_mut().insert("Origin", "http://10.0.0.5:8130".parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.unwrap().0
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_terminal_link_is_not_used_up_while_the_machine_is_not_linked() {
+    let lab = lab().await;
+    let token = lab.pair("lab").await;
+    let t = ticket::mint(&lab.key, "lab", "c03ef0d9", server::unix_now(), ticket::TTL);
+    // the node is not linked yet: refused, with the reason
+    let mut term = open_with(&lab, &t).await;
+    let (texts, _, close) = viewer(&mut term, |_, _| false).await;
+    assert_eq!(close, Some(1011));
+    assert!(texts[0]["error"].as_str().unwrap().contains("is not linked to the hub right now"), "{texts:?}");
+    // it links a moment later: the same link opens the terminal
+    let mut node = lab.node(&token).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut term = open_with(&lab, &t).await;
+    let Got::Msg(ToNode::TermOpen { ch, .. }) = from_hub(&mut node).await else { panic!("expected term.open") };
+    node.send(Message::Binary(link_proto::frame(ch, b"here\r\n").into())).await.unwrap();
+    let (_, out, close) = viewer(&mut term, |_, o| o.contains("here")).await;
+    assert!(out.contains("here"), "{close:?}");
+    // ... once
+    let mut again = open_with(&lab, &t).await;
+    let (texts, _, close) = viewer(&mut again, |_, _| false).await;
+    assert_eq!(close, Some(4401), "{texts:?}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_node_that_stopped_reading_is_unlinked() {
+    let lab = lab_with(|c| c.link_patience = Duration::from_millis(500)).await;
+    let token = lab.pair("lab").await;
+    let mut node = lab.node(&token).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut term = lab.term("c03ef0d9").await;
+    let Got::Msg(ToNode::TermOpen { ch, .. }) = from_hub(&mut node).await else { panic!("expected term.open") };
+    node.send(Message::Binary(link_proto::frame(ch, b"up\r\n").into())).await.unwrap();
+    viewer(&mut term, |_, o| o.contains("up")).await;
+    // The machine goes to sleep with its socket open: nothing is read from here on. A viewer keeps typing, which
+    // fills the connection. The hub must give the link up, not wait on it for as long as the system does.
+    let typing = tokio::spawn(async move {
+        let piece = vec![b'x'; 256 * 1024];
+        for _ in 0..128 {
+            if term.send(Message::Binary(piece.clone().into())).await.is_err() {
+                break;
+            }
+        }
+        term
+    });
+    let end = std::time::Instant::now() + Duration::from_secs(15);
+    let mut online = true;
+    while online && std::time::Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_, v) = lab.http("GET", "/internal/nodes", "").await;
+        online = v["nodes"][0]["online"] == json!(true);
+    }
+    assert!(!online, "still shown as linked");
+    typing.abort();
+    drop(node);
 }

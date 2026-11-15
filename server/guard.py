@@ -51,6 +51,8 @@ class GuardTimer:
     def _lapse(self, now):
         for k in [k for k, at in self.held_set.items() if now - at > HELD_FOR]:
             del self.held_set[k]
+        for k in [k for k, at in self.pushed.items() if now - at >= REPEAT_QUIET]:  # no longer holds anything back
+            del self.pushed[k]
 
     def held(self, machine, sid):
         with self.lock:

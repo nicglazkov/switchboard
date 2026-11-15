@@ -16,7 +16,7 @@ use gpui::{
     StatefulInteractiveElement, Styled, div, prelude::*, px, relative,
 };
 use sb_core::hostsetup::{
-    self, Check, Facts, Install, Key, Kit, LOCAL_URL, Mark, Os, PORTS, Power, Python, StepState, Verdict,
+    self, Check, Facts, Install, Key, Kit, LOCAL_URL, Mark, Os, Power, Python, StepState, Verdict,
 };
 
 use crate::theme::{NUM, Theme};
@@ -43,6 +43,8 @@ pub struct Setup {
     kit: Option<Kit>,
     /// The kit was looked for (None before the first check).
     kit_looked: bool,
+    /// An earlier setup left the server's files on this computer.
+    installed: bool,
     laptop_yes: bool,
     install: Install,
     /// Counts check runs, so a slow one that was overtaken is dropped.
@@ -73,8 +75,9 @@ impl Setup {
             busy: None,
             kit: None,
             kit_looked: false,
+            installed: false,
             laptop_yes: false,
-            install: Install::new(&hostsetup::plan(true)),
+            install: Install::new(&hostsetup::plan(shown_os(), true)),
             pass: 0,
             shot: false,
             hub_shot: None,
@@ -132,14 +135,21 @@ impl BoardView {
         s.python = None;
         s.busy = None;
         let os = s.os;
-        if !self.find.started() {
+        // "Check again" looks for other servers again too: one that was switched off since is no longer in the way.
+        if !self.find.started() || (pass > 1 && !self.find.searching()) {
             self.start_search(cx);
         }
         cx.spawn(async move |this, cx| {
             let looked = cx
                 .background_executor()
                 .spawn(async move {
-                    (hostsetup::detect_power(), hostsetup::find_python(os), hostsetup::busy_ports(&PORTS), Kit::find())
+                    (
+                        hostsetup::detect_power(),
+                        hostsetup::find_python(os),
+                        hostsetup::busy_ports(hostsetup::ports(os)),
+                        Kit::find(),
+                        hostsetup::server_installed(os),
+                    )
                 })
                 .await;
             // Long enough to see that each row was looked at.
@@ -150,7 +160,8 @@ impl BoardView {
                 {
                     (s.power, s.python, s.busy, s.kit) = (Some(looked.0), Some(looked.1), Some(looked.2), looked.3);
                     s.kit_looked = true;
-                    s.install = Install::new(&hostsetup::plan(s.hub()));
+                    s.installed = looked.4;
+                    s.install = Install::new(&hostsetup::plan(s.os, s.hub()));
                     cx.notify();
                 }
             });
@@ -167,6 +178,7 @@ impl BoardView {
             others: self.find.others(),
             here: self.find.here(),
             kit: s.kit.is_some() || !s.kit_looked,
+            installed: s.installed,
         }
     }
 
@@ -174,7 +186,7 @@ impl BoardView {
     fn run_install(&mut self, cx: &mut Context<Self>) {
         let Some(s) = &mut self.setup else { return };
         s.page = Page::Running;
-        s.install = Install::new(&hostsetup::plan(s.hub()));
+        s.install = Install::new(&hostsetup::plan(s.os, s.hub()));
         cx.notify();
         if s.shot {
             return;
@@ -636,7 +648,15 @@ impl BoardView {
                                 .into(),
                         )
                     })
-                    .child(item("globe", "It answers on ports 8130, 8131 and 8132, on your network only.".into())),
+                    .child(item(
+                        "globe",
+                        format!(
+                            "It answers on ports {}, on your network only.",
+                            hostsetup::and_list(
+                                &hostsetup::ports(s.os).iter().map(|p| p.to_string()).collect::<Vec<_>>()
+                            )
+                        ),
+                    )),
             )
             .child(footer(
                 &t,
@@ -905,7 +925,7 @@ impl BoardView {
             _ => {}
         }
         s.hub_shot = Some(what != "nohub");
-        s.install = Install::new(&hostsetup::plan(s.hub()));
+        s.install = Install::new(&hostsetup::plan(s.os, s.hub()));
         match what {
             "running" => {
                 for l in

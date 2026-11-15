@@ -253,3 +253,61 @@ class GuardEventTest(unittest.TestCase):
         with mock.patch.object(self.sb.urllib.request, 'urlopen', fake_open):
             self.sb.notify_server({'event': 'x'})
         self.assertEqual([u.split('/api')[0] for u in tried], ['http://10.0.0.5:8130', 'http://100.64.0.5:8130'])
+
+    def test_a_late_summary_is_not_lost(self):
+        """The summary was not ready when the new chat's wait ran out: the new chat is told where it will be."""
+        self.sb.pending_put(77, {'session_id': 'OLD1', 'transcript_path': self.t, 'held': 'do the thing', 'ts': self.now})
+        with mock.patch.object(self.sb, 'HANDOFF_WAIT', 0):
+            out = self.sb.handle_hook({'hook_event_name': 'SessionStart', 'source': 'clear', 'session_id': 'NEW1'},
+                                      self.now, 77, spawn=lambda *a: None, notify=lambda e: None)
+        text = out['hookSpecificOutput']['additionalContext']
+        self.assertIn(str(self.sb.handoff_path('OLD1')), text)
+        self.assertIn('do the thing', text)
+
+    def test_the_summary_starts_as_the_old_chat_ends(self):
+        """/clear after a held message: the old chat's SessionEnd starts the summary, before the new chat asks."""
+        spawned = []
+        self.sb.pending_put(77, {'session_id': 'OLD1', 'transcript_path': self.t, 'held': 'x', 'ts': self.now})
+        self.sb.handle_hook({'hook_event_name': 'SessionEnd', 'reason': 'clear', 'session_id': 'OLD1', 'transcript_path': self.t},
+                            self.now, 77, spawn=lambda *a: spawned.append(a), notify=lambda e: None)
+        self.assertEqual(spawned, [(self.t, 'OLD1')])
+        self.assertTrue(self.sb._jget(self.sb.paths()['pending'] / '77.json'), 'the new chat still finds its record')
+        self.sb.handle_hook({'hook_event_name': 'SessionEnd', 'reason': 'clear', 'session_id': 'OTHER', 'transcript_path': self.t},
+                            self.now, 78, spawn=lambda *a: spawned.append(a), notify=lambda e: None)
+        self.assertEqual(len(spawned), 1, 'a plain /clear writes no summary')
+
+    def test_a_server_that_is_not_there_costs_a_prompt_about_a_second(self):
+        """Two addresses that never answer, a guard event and the ping after it: one allowance for all of it."""
+        import threading, time
+        self.sb.remember_identity({'verb': 'list', 'as': 'desk', 'servers': ['http://10.0.0.5:8130', 'http://100.64.0.5:8130']})
+        hang, tried = threading.Event(), []
+
+        def never(req, timeout):
+            tried.append(req.full_url)
+            hang.wait(10)
+            raise OSError('timed out')
+        t0 = time.time()
+        with mock.patch.object(self.sb.urllib.request, 'urlopen', never):
+            self.assertFalse(self.sb.notify_server({'event': 'guard'}))
+            self.assertFalse(self.sb.notify_server({'event': 'guard_answer'}))
+            self.sb.hook_ping({'hook_event_name': 'UserPromptSubmit', 'session_id': 'S1'}, None, self.now)
+        took = time.time() - t0
+        hang.set()
+        self.assertLess(took, 1.6)
+        self.assertEqual(len([u for u in tried if '10.0.0.5' in u]), 3, 'every send is still tried')
+
+    def test_an_event_reaches_the_second_address_when_the_first_is_silent(self):
+        import threading
+        self.sb.remember_identity({'verb': 'list', 'as': 'desk', 'servers': ['http://10.0.0.5:8130', 'http://100.64.0.5:8130']})
+        hang, got = threading.Event(), []
+
+        def one_up(req, timeout):
+            if '10.0.0.5' in req.full_url:
+                hang.wait(10)
+                raise OSError('timed out')
+            got.append(json.loads(req.data))
+            return mock.Mock()
+        with mock.patch.object(self.sb.urllib.request, 'urlopen', one_up):
+            self.assertTrue(self.sb.notify_server({'event': 'guard'}))
+        hang.set()
+        self.assertEqual(got, [{'event': 'guard'}])

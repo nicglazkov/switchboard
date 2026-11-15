@@ -2,7 +2,9 @@
 //! (who writes summaries, saved setups), Machines (rename, reorder, remove, add one over SSH or with Add a machine) with
 //! a page for each machine (its Claude folder, picked by browsing it; its versions; what Auto may count on it for; its
 //! MCP servers, each one a click from the library), Library (settings_library.rs), Notifications and the Chrome
-//! machine. All of it lives on the server, so every device agrees.
+//! machine. Most of it lives on the server, so every device agrees; what is kept on this computer alone (the default
+//! terminal, the terminal's text size, Stop a chat when its tab closes, this computer's notifications, the server's
+//! addresses) says "This computer only".
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable, FontWeight, InteractiveElement,
@@ -46,12 +48,53 @@ const SECTIONS: [(Section, &str, &str); 11] = [
     (Section::Machines, "Machines", "mac"),
     (Section::Library, "Library", "cube"),
     (Section::Notifications, "Notifications", "bolt"),
-    (Section::Chrome, "Chrome machine", "globe"),
+    (Section::Chrome, "Chrome", "globe"),
     (Section::Budget, "Budget", "gauge"),
     (Section::Updates, "Updates", "update"),
     (Section::Server, "Server", "tower"),
     (Section::Privacy, "AI and your Claude setup", "spark"),
 ];
+
+/// A "Click again to ..." button stays armed this long (seconds), then goes back to its first label.
+pub(crate) const ARM_FOR: f64 = 4.;
+/// The second click counts as the yes only after this long: sooner, it is the tail of a double-click.
+const ARM_WAIT: f64 = 0.4;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ArmClick {
+    /// Not armed (or no longer): this click arms it.
+    Arm,
+    /// Armed a moment ago: ignored.
+    Wait,
+    /// The confirming click.
+    Go,
+}
+
+/// What a click does on a button armed at `armed_at` (None: not armed).
+pub(crate) fn arm_click(armed_at: Option<f64>, now: f64) -> ArmClick {
+    match armed_at.map(|at| now - at) {
+        Some(d) if (0.0..ARM_WAIT).contains(&d) => ArmClick::Wait,
+        Some(d) if (ARM_WAIT..ARM_FOR).contains(&d) => ArmClick::Go,
+        _ => ArmClick::Arm,
+    }
+}
+
+/// A budget stepper's next values down and up from `x`: the nearest multiples of `step` on either side, so a
+/// default like 14.3 goes to 14 or 15 and round numbers can be reached. Never under 1 (or under `x`, when that is
+/// already smaller) nor over 100.
+fn pct_steps(x: f64, step: f64) -> (f64, f64) {
+    let r = |v: f64| (v * 10.).round() / 10.;
+    let k = x / step;
+    let dn = r(((k - 1e-9).ceil() - 1.) * step).max(1f64.min(x));
+    let up = r(((k + 1e-9).floor() + 1.) * step).min(100.);
+    (dn.min(x), up.max(x))
+}
+
+/// Why a tool's "When to use" line can't be saved (the server takes up to 300 characters), if it can't.
+fn when_problem(line: &str) -> Option<String> {
+    let n = line.chars().count();
+    (n > 300).then(|| format!("\u{201c}When to use\u{201d} can be up to 300 characters. This is {n}."))
+}
 
 /// Opens Settings, or brings it forward.
 pub fn open(cx: &mut App) {
@@ -154,6 +197,8 @@ pub struct SettingsView {
     error: Option<String>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
+    /// The Claude-folder picker's list of folders.
+    dir_scroll: ScrollHandle,
     /// Library: Import and New tool (one open at a time), their fields, open version lists, the Set key command
     /// showing (tool, machine, key), and Delete's first click.
     lib_import: Option<library_ui::Import>,
@@ -166,6 +211,13 @@ pub struct SettingsView {
     lib_secret: Entity<InputState>,
     lib_key_err: Option<String>,
     lib_deleting: Option<(String, f64)>,
+    /// Server addresses: the field for typing one, why what was typed can't be one, and the first click on the X
+    /// of the address in use (it asks twice).
+    addr: Entity<InputState>,
+    addr_err: Option<String>,
+    addr_removing: Option<(String, f64)>,
+    /// A saved setup's Remove asks twice too: (its place in the list, when).
+    preset_removing: Option<(usize, f64)>,
     /// The open dropdown (Terminal's default shell), if any.
     drop: ui::Drop,
     /// Settings > Server (settings_server.rs).
@@ -188,7 +240,16 @@ impl SettingsView {
                 .auto_grow(3, 8)
         });
         let lib_secret = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste the value"));
+        let addr = cx.new(|cx| InputState::new(window, cx).placeholder("192.0.2.10:8130 or studio.local"));
         let subs = vec![
+            cx.subscribe_in(&addr, window, |this, _, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.add_address(window, cx),
+                InputEvent::Change if this.addr_err.is_some() => {
+                    this.addr_err = None;
+                    cx.notify();
+                }
+                _ => {}
+            }),
             cx.observe(&app, |_, _, cx| cx.notify()),
             cx.observe_window_appearance(window, |_, _, cx| cx.notify()),
             cx.subscribe_in(&field, window, |this, _, ev: &InputEvent, _, cx| {
@@ -226,6 +287,10 @@ impl SettingsView {
             machines: None,
             edit: None,
             removing: None,
+            addr,
+            addr_err: None,
+            addr_removing: None,
+            preset_removing: None,
             adding: false,
             add_os: "mac",
             field,
@@ -235,6 +300,7 @@ impl SettingsView {
             error: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
+            dir_scroll: ScrollHandle::new(),
             lib_import: None,
             lib_new: None,
             lib_name,
@@ -315,8 +381,19 @@ impl SettingsView {
     }
 
     /// Opens the folder picker at `path` (home-relative, '' for the home folder).
+    /// Draws once more when an armed button's time is up, so "Click again to ..." goes back to its first label
+    /// (the label is worked out when drawn, and nothing else would draw just then).
+    pub(crate) fn disarm_later(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(std::time::Duration::from_secs_f64(ARM_FOR + 0.05)).await;
+            let _ = this.update(cx, |_, cx| cx.notify());
+        })
+        .detach();
+    }
+
     fn browse(&mut self, machine: String, path: String, cx: &mut Context<Self>) {
         self.picker = Some(Picker { machine: machine.clone(), path: path.clone(), dirs: None });
+        self.dir_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.edit = None;
         let core = self.app.read(cx).core.clone();
         cx.spawn(async move |this, cx| {
@@ -340,6 +417,8 @@ impl SettingsView {
 
     /// Auto for a machine: on or off, a tool left out, or the user's own lines. Shown at once, then saved.
     fn set_caps(&mut self, machine: String, body: serde_json::Value, cx: &mut Context<Self>) {
+        // As it was, to put back when the change doesn't go through.
+        let before = self.caps.get(&machine).and_then(|c| c.as_ref().ok()).cloned();
         if let Some(Ok(c)) = self.caps.get_mut(&machine) {
             if let Some(on) = body.get("on").and_then(|v| v.as_bool()) {
                 c.on = on;
@@ -367,7 +446,15 @@ impl SettingsView {
                         v.error = None;
                         v.load_machine(machine, cx);
                     }
-                    Err(e) => v.error = Some(e.to_string()),
+                    // The switch goes back, and the reason shows wherever the page is scrolled to.
+                    Err(e) => {
+                        if let Some(b) = before {
+                            v.caps.insert(machine, Ok(b));
+                        }
+                        let e = e.to_string();
+                        v.error = Some(e.clone());
+                        v.app.update(cx, |s, cx| s.toast("That change wasn't saved", Some(e), true, cx));
+                    }
                 }
                 cx.notify();
             });
@@ -442,13 +529,38 @@ impl SettingsView {
             Some(Edit::Name(n)) => self.send(serde_json::json!({"op": "rename", "machine": n, "label": v}), cx),
             Some(Edit::Root(n)) => self.send(serde_json::json!({"op": "root", "machine": n, "root": v}), cx),
             Some(Edit::When(tool)) => {
-                let auto = self.app.read(cx).lib().and_then(|l| l.tool(&tool)).and_then(|x| x.auto).unwrap_or(false);
-                self.app.update(cx, |s, cx| s.lib_auto(&tool, auto, &v, cx));
-                self.edit = None;
+                // The field stays open, with what was typed, until the line is one the server takes and it is
+                // on its way.
+                let why = when_problem(&v).or_else(|| {
+                    let auto =
+                        self.app.read(cx).lib().and_then(|l| l.tool(&tool)).and_then(|x| x.auto).unwrap_or(false);
+                    let sent = self.app.update(cx, |s, cx| s.lib_auto(&tool, auto, &v, cx));
+                    (!sent).then(|| "The last change to this tool is still being saved. Try again in a moment.".into())
+                });
+                match why {
+                    Some(e) => self.app.update(cx, |s, cx| s.toast("Not saved yet", Some(e), true, cx)),
+                    None => self.edit = None,
+                }
                 cx.notify();
             }
             None => {}
         }
+    }
+
+    /// Settings > Server, Add: what the field holds becomes a saved address, tried along with the others.
+    fn add_address(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let typed = self.addr.read(cx).value().trim().to_string();
+        if typed.is_empty() {
+            return;
+        }
+        match self.app.update(cx, |s, cx| s.use_server(&typed, cx)) {
+            Ok(()) => {
+                self.addr_err = None;
+                self.addr.update(cx, |f, cx| f.set_value("", window, cx));
+            }
+            Err(e) => self.addr_err = Some(e),
+        }
+        cx.notify();
     }
 
     fn move_machine(&mut self, i: usize, up: bool, cx: &mut Context<Self>) {
@@ -579,7 +691,7 @@ impl SettingsView {
             ui::icon_btn(t, id, ic, 28.).shadow(vec![Theme::ring(t.line2)]).on_click(cx.listener(
                 move |_, _: &ClickEvent, _, cx| {
                     let next = sb_core::term::scheme::step_size(colors::look(cx).size, up);
-                    crate::theme::save_look(cx, |s| s.term_size = Some(next));
+                    crate::theme::save_look_here(cx, |s| s.term_size = Some(next));
                 },
             ))
         };
@@ -648,13 +760,13 @@ impl SettingsView {
             .child(Self::row(
                 t,
                 "Default terminal",
-                Some(&format!("The shell {} opens on this computer. Every shell is also in the menu beside \"+\" and in {}.", ui::term_cap("T"), ui::mod_cap("K"))),
+                Some(&format!("This computer only. The shell {} opens here. Every shell is also in the menu beside \"+\" and in {}.", ui::term_cap("T"), ui::mod_cap("K"))),
                 shell,
             ))
             .child(Self::row(
                 t,
                 "Text size",
-                Some(&format!("{} and {} in a terminal.", ui::mod_cap("+"), ui::mod_cap("-"))),
+                Some(&format!("This computer only, since screens differ. {} and {} in a terminal.", ui::mod_cap("+"), ui::mod_cap("-"))),
                 div().flex().items_center().gap(px(8.)).child(step("st-smaller", "zoomout", false)).child(div().w(px(32.)).flex().justify_center().font_family(NUM).text_size(px(14.)).text_color(t.ink).child(size.to_string())).child(step("st-bigger", "zoomin", true)).into_any_element(),
             ))
             .child(Self::row(t, "Cursor", None, cursors.into_any_element()))
@@ -669,7 +781,7 @@ impl SettingsView {
             .child(Self::row(
                 t,
                 "Stop a chat when its tab closes",
-                Some("Off: closing a tab leaves its chat running, and Stop on the chat's card ends it. On: the chat stops with its tab, once its reply is done. Chats set to Keep running are never stopped this way."),
+                Some("This computer only. Off: closing a tab leaves its chat running, and Stop on the chat's card ends it. On: the chat stops with its tab, once its reply is done. Chats set to Keep running are never stopped this way."),
                 ui::switch(t, "st-close-stops", close_stops, false)
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         this.app.update(cx, |s, cx| {
@@ -1023,25 +1135,70 @@ impl SettingsView {
                     ),
             );
         }
-        body.child(self.server_group(t, cx)).into_any_element()
+        body.into_any_element()
     }
 
-    /// Where this app finds the server: the saved addresses, typed and learned, each with Remove.
+    /// Where this app finds the server (Settings > Server): the saved addresses, typed and learned, each with
+    /// Remove, and a field to type one more.
     fn server_group(&self, t: &Theme, cx: &Context<Self>) -> AnyElement {
         use gpui::AnimationExt;
-        let sub = "How this app finds the computer that runs Switchboard. Learned addresses come from the server, so it still connects when you're away from home. The last one that worked gets tried first.";
+        let sub = "This computer only. How this app finds the computer that runs Switchboard. Learned addresses come from the server, so it still connects when you're away from home. The last one that worked gets tried first.";
         let app = self.app.read(cx);
         let saved = &app.settings.saved;
         let in_use = app.core.server().map(|u| sb_core::servers::key(&u));
         let now = crate::state::AppState::now();
+        // Type an address: one the server doesn't list by itself (a Tailscale name, before leaving home).
+        let add_row = div()
+            .flex()
+            .flex_col()
+            .gap(px(6.))
+            .child(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(8.))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(160.))
+                            .h(px(32.))
+                            .px(px(10.))
+                            .flex()
+                            .items_center()
+                            .rounded(px(ui::R_CTRL))
+                            .border_1()
+                            .border_color(t.line2)
+                            .bg(t.panel)
+                            .text_size(px(13.))
+                            .text_color(t.ink)
+                            .overflow_hidden()
+                            .child(div().flex_1().min_w_0().child(gpui_base::Input::new(&self.addr))),
+                    )
+                    .child(
+                        ui::line_btn(t, "st-srv-add", 32.)
+                            .px(px(12.))
+                            .text_size(px(13.))
+                            .child("Add")
+                            .on_click(cx.listener(|this, _: &ClickEvent, window, cx| this.add_address(window, cx))),
+                    ),
+            )
+            .child(match &self.addr_err {
+                Some(e) => ui::wrap(e.clone()).text_size(px(12.)).text_color(t.bad),
+                None => {
+                    ui::wrap("Type an address the app should also try, like a Tailscale name for when you're away.")
+                        .text_size(px(12.))
+                        .text_color(t.faint)
+                }
+            })
+            .into_any_element();
         if saved.servers.is_empty() {
             let row = ui::wrap("No saved addresses yet. The app looks for the server on your local network and saves the addresses it learns once it connects.")
                 .text_size(px(13.))
                 .text_color(t.faint)
                 .into_any_element();
-            return Self::group(t, "Server addresses", Some(sub), vec![row]);
+            return Self::group(t, "Server addresses", Some(sub), vec![row, add_row]);
         }
-        let rows = saved
+        let mut rows: Vec<AnyElement> = saved
             .servers
             .iter()
             .enumerate()
@@ -1059,7 +1216,12 @@ impl SettingsView {
                 } else {
                     "Typed by you".to_string()
                 }];
-                if in_use.as_deref() == Some(sb_core::servers::key(url).as_str()) {
+                let using = in_use.as_deref() == Some(sb_core::servers::key(url).as_str());
+                let armed = self.addr_removing.as_ref().filter(|(u, _)| u == url).map(|(_, at)| *at);
+                let arming = armed.is_some_and(|at| now - at < ARM_FOR);
+                if using && arming {
+                    words = vec!["The app is connected through this one. Click the X again to remove it.".to_string()];
+                } else if using {
                     words.push("in use now".into());
                 } else if let Some(f) = note.and_then(|n| n.failing_since) {
                     words.push(format!("not answering since {}", sb_core::fmt::ago(f, now)));
@@ -1069,8 +1231,24 @@ impl SettingsView {
                 let shown = url.strip_prefix("http://").unwrap_or(url).to_string();
                 let gone = url.clone();
                 let ctl = ui::icon_btn(t, SharedString::from(format!("st-srv-x-{i}")), "x", 26.)
+                    .when(arming, |d| d.bg(t.bad.alpha(0.14)))
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let u = gone.clone();
+                        // The one in use asks first: without it the app has to find the server again.
+                        if using {
+                            let at = this.addr_removing.as_ref().filter(|(x, _)| *x == u).map(|(_, at)| *at);
+                            let now = crate::state::AppState::now();
+                            match arm_click(at, now) {
+                                ArmClick::Go => {}
+                                ArmClick::Wait => return,
+                                ArmClick::Arm => {
+                                    this.addr_removing = Some((u, now));
+                                    this.disarm_later(cx);
+                                    return cx.notify();
+                                }
+                            }
+                        }
+                        this.addr_removing = None;
                         this.app.update(cx, |s, cx| s.remove_server(&u, cx));
                     }))
                     .into_any_element();
@@ -1084,6 +1262,7 @@ impl SettingsView {
                     .into_any_element()
             })
             .collect();
+        rows.push(add_row);
         Self::group(t, "Server addresses", Some(sub), rows)
     }
 
@@ -1215,7 +1394,7 @@ impl SettingsView {
 
         // Remove
         let now = AppState::now();
-        let arming = self.removing.as_ref().is_some_and(|(n, at)| *n == name && now - at < 4.);
+        let arming = self.removing.as_ref().is_some_and(|(n, at)| *n == name && now - at < ARM_FOR);
         let (n3, n4) = (name.clone(), name.clone());
         body = body.child(Self::group(
             t,
@@ -1234,13 +1413,19 @@ impl SettingsView {
                         .child(if arming { "Click again to remove" } else { "Remove" })
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                             let now = AppState::now();
-                            if this.removing.as_ref().is_some_and(|(n, at)| *n == n3 && now - at < 4.) {
-                                this.removing = None;
-                                this.machine = None;
-                                this.send(serde_json::json!({"op": "remove", "machine": n4}), cx);
-                            } else {
-                                this.removing = Some((n3.clone(), now));
-                                cx.notify();
+                            let armed = this.removing.as_ref().filter(|(n, _)| *n == n3).map(|(_, at)| *at);
+                            match arm_click(armed, now) {
+                                ArmClick::Go => {
+                                    this.removing = None;
+                                    this.machine = None;
+                                    this.send(serde_json::json!({"op": "remove", "machine": n4}), cx);
+                                }
+                                ArmClick::Wait => {}
+                                ArmClick::Arm => {
+                                    this.removing = Some((n3.clone(), now));
+                                    this.disarm_later(cx);
+                                    cx.notify();
+                                }
                             }
                         }))
                         .into_any_element(),
@@ -1422,7 +1607,14 @@ impl SettingsView {
                     }),
             );
         }
-        let mut list = div().flex().flex_col().max_h(px(260.)).overflow_hidden();
+        // Scrolls: a home folder has more folders than fit here, and the ones past the edge must be reachable.
+        let mut list = div()
+            .id("st-dir-list")
+            .flex()
+            .flex_col()
+            .max_h(px(260.))
+            .overflow_y_scroll()
+            .track_scroll(&self.dir_scroll);
         match &p.dirs {
             None => list = list.child(ui::loading(t, "st-dirs-load", "Looking at its folders").py(px(10.))),
             Some(Err(e)) => {
@@ -1442,6 +1634,7 @@ impl SettingsView {
                     list = list.child(
                         div()
                             .id(SharedString::from(format!("st-dir-{i}")))
+                            .flex_none()
                             .h(px(32.))
                             .px(px(8.))
                             .flex()
@@ -1456,6 +1649,18 @@ impl SettingsView {
                             .on_click(
                                 cx.listener(move |this, _: &ClickEvent, _, cx| this.browse(m2.clone(), to.clone(), cx)),
                             ),
+                    );
+                }
+                // The machine lists at most this many.
+                if d.folders.len() >= 400 {
+                    list = list.child(
+                        div()
+                            .flex_none()
+                            .px(px(8.))
+                            .py(px(8.))
+                            .text_size(px(12.))
+                            .text_color(t.faint)
+                            .child("Showing the first 400 folders. For one that isn't here, use Type a path."),
                     );
                 }
             }
@@ -1784,6 +1989,7 @@ impl SettingsView {
                 None,
             ));
         }
+        let arming = self.preset_removing.filter(|(_, at)| AppState::now() - at < ARM_FOR).map(|(i, _)| i);
         for (i, p) in presets.iter().enumerate() {
             let mut bits = vec![];
             if let Some(m) = &p.model {
@@ -1802,20 +2008,38 @@ impl SettingsView {
                 p.name.clone().unwrap_or_else(|| "Setup".into()),
                 Some(if bits.is_empty() { "The defaults".into() } else { bits.join(", ") }),
                 Some(
-                    ui::ghost(t, SharedString::from(format!("st-preset-x-{i}")), Some("Remove"), None)
-                        .h(px(28.))
-                        .px(px(8.))
-                        .text_size(px(12.5))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            let rest = rest.clone();
-                            this.app.update(cx, |s, cx| {
-                                if let Some(p) = s.prefs.as_mut() {
-                                    p.presets = rest.clone();
-                                }
-                                s.save_prefs(serde_json::json!({"presets": rest}), Some("Removed".into()), cx)
-                            })
-                        }))
-                        .into_any_element(),
+                    ui::ghost(
+                        t,
+                        SharedString::from(format!("st-preset-x-{i}")),
+                        Some(if arming == Some(i) { "Click again to remove" } else { "Remove" }),
+                        None,
+                    )
+                    .h(px(28.))
+                    .px(px(8.))
+                    .text_size(px(12.5))
+                    .when(arming == Some(i), |d| d.text_color(t.bad))
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        // A saved setup can't be brought back, so Remove asks first.
+                        let now = AppState::now();
+                        let at = this.preset_removing.filter(|(j, _)| *j == i).map(|(_, at)| at);
+                        match arm_click(at, now) {
+                            ArmClick::Go => this.preset_removing = None,
+                            ArmClick::Wait => return,
+                            ArmClick::Arm => {
+                                this.preset_removing = Some((i, now));
+                                this.disarm_later(cx);
+                                return cx.notify();
+                            }
+                        }
+                        let rest = rest.clone();
+                        this.app.update(cx, |s, cx| {
+                            if let Some(p) = s.prefs.as_mut() {
+                                p.presets = rest.clone();
+                            }
+                            s.save_prefs(serde_json::json!({"presets": rest}), Some("Removed".into()), cx)
+                        })
+                    }))
+                    .into_any_element(),
                 ),
             ));
         }
@@ -1974,7 +2198,7 @@ impl SettingsView {
         let head = Self::head(
             t,
             "AI and your Claude setup",
-            "Everything here is off until you turn it on. Each switch says what it sends or changes.",
+            "Each switch says what it sends or changes. A newly set up server starts with all of them off.",
         );
         let prefs = self.app.read(cx).prefs.clone();
         let Some(prefs) = prefs.filter(|p| !p.options.is_empty()) else {
@@ -2018,7 +2242,12 @@ impl SettingsView {
             .child(head)
             .children(group("ai", "Sends chat text to Claude"))
             .children(group("setup", "Changes to each machine's Claude setup"))
-            .child(Self::group(t, "Notifications", None, vec![self.push_block(t, "st-pv-push", false, cx)]))
+            .child(Self::group(
+                t,
+                "iPhone notifications",
+                Some("The same switch as on the Notifications page: turning it on sends a line about the chat to your iPhone."),
+                vec![self.push_block(t, "st-pv-push", false, cx)],
+            ))
             .into_any_element()
     }
 
@@ -2040,8 +2269,7 @@ impl SettingsView {
         };
         let mut row = div().flex().items_center().gap(px(10.));
         if let Some(x) = v {
-            let dn = ((x - step).max(0.1) * 10.).round() / 10.;
-            let up = ((x + step).min(100.) * 10.).round() / 10.;
+            let (dn, up) = pct_steps(x, step);
             let btn = |sfx: &str, label: &'static str, off: bool| {
                 ui::seg_btn(t, SharedString::from(format!("{id}-{sfx}")), false, off || busy)
                     .w(px(28.))
@@ -2052,7 +2280,7 @@ impl SettingsView {
             row = row.child(
                 ui::seg_box(t)
                     .child(
-                        btn("dn", "\u{2212}", x <= 0.1)
+                        btn("dn", "\u{2212}", dn >= x)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, Some(dn), cx))),
                     )
                     .child(
@@ -2066,7 +2294,7 @@ impl SettingsView {
                             .child(pct(x)),
                     )
                     .child(
-                        btn("up", "+", x >= 100.)
+                        btn("up", "+", up <= x)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| send(this, Some(up), cx))),
                     ),
             );
@@ -2108,6 +2336,13 @@ impl SettingsView {
         let (s, st) = (b.settings(), b.status());
         let hard = s.hard();
         let hard_on = hard.on == Some(true);
+        // A plan that reports no 5-hour window gives a 5-hour cap nothing to check: say so, or it would never fire
+        // without a word.
+        let five_help = if app.snap.plan.five_unreported(AppState::now()) {
+            "Your plan reports no 5-hour window right now, so this cannot be checked."
+        } else {
+            "Percent of the 5-hour window. Off unless you set one."
+        };
         let mut body = div().child(head);
 
         // Where today stands: lifted (with Undo), or the hard limit reached (with Lift for today).
@@ -2236,7 +2471,7 @@ impl SettingsView {
                 Self::crow(
                     t,
                     "5-hour cap",
-                    Some("Percent of the 5-hour window. Off unless you set one.".into()),
+                    Some(five_help.into()),
                     Some(self.pct_ctl(
                         t,
                         "bud-five",
@@ -2283,7 +2518,7 @@ impl SettingsView {
             hard_rows.push(Self::crow(
                 t,
                 "5-hour limit",
-                Some("Percent of the 5-hour window. Off unless you set one.".into()),
+                Some(five_help.into()),
                 Some(self.pct_ctl(
                     t,
                     "bud-hfive",
@@ -2374,6 +2609,22 @@ impl SettingsView {
                 .text_size(px(13.))
                 .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.look_for_update(cx))))
                 .into_any_element()
+        };
+        // A version that was put back because it didn't start is not offered again until asked for.
+        let ctl = if !off && app.rolled_back.is_some() && app.update.is_none() {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(6.))
+                .child(
+                    ui::line_btn(t, "st-upd-retry", 32.).px(px(12.)).text_size(px(13.)).child("Try it again").on_click(
+                        cx.listener(|this, _: &ClickEvent, _, cx| this.app.update(cx, |s, cx| s.retry_rolled_back(cx))),
+                    ),
+                )
+                .child(ctl)
+                .into_any_element()
+        } else {
+            ctl
         };
         div()
             .child(Self::head(
@@ -2500,7 +2751,11 @@ impl SettingsView {
             Section::Chrome => self.chrome(&t, cx),
             Section::Budget => self.budget(&t, cx),
             Section::Updates => self.updates(&t, cx),
-            Section::Server => self.server(&t, cx),
+            Section::Server => div()
+                .child(self.server(&t, cx))
+                .child(div().h(px(18.)))
+                .child(self.server_group(&t, cx))
+                .into_any_element(),
             Section::Privacy => self.privacy(&t, cx),
         };
         div()
@@ -2539,4 +2794,38 @@ impl SettingsView {
 /// "14.3%", "20%".
 fn pct(x: f64) -> String {
     if (x - x.round()).abs() < 0.05 { format!("{}%", x.round() as i64) } else { format!("{x:.1}%") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_click_again_button_wants_a_real_second_click() {
+        assert_eq!(arm_click(None, 100.), ArmClick::Arm);
+        assert_eq!(arm_click(Some(100.), 100.1), ArmClick::Wait, "the second half of a double-click");
+        assert_eq!(arm_click(Some(100.), 100.5), ArmClick::Go);
+        assert_eq!(arm_click(Some(100.), 103.9), ArmClick::Go);
+        assert_eq!(arm_click(Some(100.), 104.1), ArmClick::Arm, "it went back to its first label: this arms again");
+        assert_eq!(arm_click(Some(100.), 99.), ArmClick::Arm, "the clock moved back");
+    }
+
+    #[test]
+    fn budget_steps_land_on_round_numbers() {
+        assert_eq!(pct_steps(14.3, 1.), (14., 15.));
+        assert_eq!(pct_steps(14., 1.), (13., 15.));
+        assert_eq!(pct_steps(50., 5.), (45., 55.));
+        assert_eq!(pct_steps(52.5, 5.), (50., 55.));
+        assert_eq!(pct_steps(100., 5.), (95., 100.));
+        assert_eq!(pct_steps(99.5, 1.), (99., 100.));
+        assert_eq!(pct_steps(1., 1.), (1., 2.), "not under 1");
+        assert_eq!(pct_steps(3., 5.), (1., 5.));
+        assert_eq!(pct_steps(0.5, 1.), (0.5, 1.), "a smaller value set elsewhere only goes up");
+    }
+
+    #[test]
+    fn when_to_use_fits_what_the_server_takes() {
+        assert_eq!(when_problem(&"x".repeat(300)), None);
+        assert!(when_problem(&"\u{e9}".repeat(301)).unwrap().ends_with("This is 301."));
+    }
 }

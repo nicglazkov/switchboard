@@ -7,7 +7,7 @@
 //! SWITCHBOARD_NODES        paired machines (default nodes.json next to the machine list)
 //! SWITCHBOARD_HUB_SSH      the ssh program (tests point it at a fake)
 //! SWITCHBOARD_HUB_MAX      terminals open at once (default 16)
-//! SWITCHBOARD_HUB_IDLE     seconds with no input or output before a terminal closes (default 7200)
+//! SWITCHBOARD_HUB_IDLE     seconds with no input or output before a terminal closes (default 7200; 0 = never)
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -28,6 +28,10 @@ pub struct Config {
     /// A viewer the hub has heard nothing from for this long (not even a pong) is gone: a laptop that slept, Wi-Fi
     /// that dropped. The hub pings each viewer three times in this span.
     pub silence: Duration,
+    /// How long one message to a linked machine may take to leave. A machine that stopped reading (it slept, or
+    /// its network went away) fills the socket; past this its link is dropped, so it shows as offline and its
+    /// terminals and jobs end instead of waiting until the system gives up on the connection, minutes later.
+    pub link_patience: Duration,
 }
 
 pub const PORT: u16 = 8132;
@@ -50,6 +54,7 @@ impl Config {
             rate: 2 * 1024 * 1024,
             idle: Duration::from_secs(2 * 3600),
             silence: Duration::from_secs(45),
+            link_patience: Duration::from_secs(20),
         }
     }
 

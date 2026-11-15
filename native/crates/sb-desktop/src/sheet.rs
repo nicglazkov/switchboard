@@ -369,7 +369,7 @@ impl NewSheet {
     fn take_prefs(&mut self, p: Option<ApiPrefs>, cx: &mut Context<Self>) {
         let Some(p) = p else { return };
         if let (false, Some(last)) = (self.touched, &p.last) {
-            self.opt = Opts::from_setup(last);
+            self.opt = Opts::from_last(last);
             self.pending_other = Some(self.opt.other.clone());
         }
         self.prefs = Some(p);
@@ -876,6 +876,7 @@ impl NewSheet {
         }
         self.machine = machine.clone();
         self.folder.clear();
+        self.opt.machine_changed();
         self.check = None;
         self.check_seq += 1;
         self.browsing = false;
@@ -1033,7 +1034,17 @@ impl NewSheet {
         names::created(&names::topic_from(&msg, &folder), self.mode)
     }
 
+    /// Nothing can start: the picked machine is off, or Auto has no machine it can use.
+    fn offline(&self, cx: &App) -> bool {
+        let snap = &self.app.read(cx).snap;
+        if self.is_auto() { !snap.auto_ready() } else { !snap.machine(&self.machine).is_some_and(|m| !m.is_offline()) }
+    }
+
     fn where_text(&self, cx: &App) -> String {
+        // Why Start is dimmed comes before where it would go.
+        if self.offline(cx) {
+            return offline_words(self.is_auto(), &self.label(cx));
+        }
         let Some((folder, create)) = self.target(cx) else {
             return if self.is_auto() { "Check the folder name" } else { "Check the new folder name" }.into();
         };
@@ -1064,13 +1075,7 @@ impl NewSheet {
     }
 
     fn can_start(&self, cx: &App) -> bool {
-        let snap = &self.app.read(cx).snap;
-        let online = if self.is_auto() {
-            snap.auto_ready()
-        } else {
-            snap.machine(&self.machine).is_some_and(|m| !m.is_offline())
-        };
-        !self.sending && online && self.target(cx).is_some() && self.other_error().is_none()
+        !self.sending && !self.offline(cx) && self.target(cx).is_some() && self.other_error().is_none()
     }
 
     pub fn start(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1125,6 +1130,12 @@ impl NewSheet {
         };
         let label = self.label(cx);
         let name = self.name(cx);
+        // What was typed is on disk before it is sent (the last keys may still be waiting to be written): if the
+        // sheet is closed and the start then fails, the message is there next time.
+        self.keep_draft(cx);
+        if let Some(p) = &self.draft_path {
+            self.draft_saved.save(p);
+        }
         self.sending = true;
         self.error = None;
         cx.notify();
@@ -1382,7 +1393,8 @@ impl NewSheet {
                 .text_size(px(12.))
                 .child(label)
         };
-        let mut row = div().flex_none().pt(px(2.)).flex().items_center().gap(px(6.));
+        // Every saved setup shows (the server keeps up to 12): the row wraps onto more lines.
+        let mut row = div().flex_none().pt(px(2.)).flex().flex_wrap().items_center().gap(px(6.));
         if self.naming {
             return row
                 .child(
@@ -1419,6 +1431,14 @@ impl NewSheet {
                 )
                 .into_any_element();
         }
+        // One click back to nothing picked (the setup used last fills the options in when the sheet opens).
+        if !flags::same_setup(&cur, &blank) {
+            let none = blank.clone();
+            row = row.child(
+                chip("nw-ps-none".into(), "Defaults".into(), false)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_setup(&none, cx))),
+            );
+        }
         if let Some(last) = p.last.clone().filter(|l| !flags::same_setup(l, &blank)) {
             let on = flags::same_setup(&cur, &last);
             row = row.child(
@@ -1426,7 +1446,7 @@ impl NewSheet {
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.apply_setup(&last, cx))),
             );
         }
-        for (i, ps) in p.presets.iter().enumerate().take(6) {
+        for (i, ps) in p.presets.iter().enumerate() {
             let on = flags::same_setup(&cur, ps);
             let ps2 = ps.clone();
             row = row.child(
@@ -2530,6 +2550,7 @@ impl Render for NewSheet {
         let name = self.name(cx);
         let (topic, tag) = names::split(&name);
         let where_text = self.where_text(cx);
+        let offline = self.offline(cx);
         let can = self.can_start(cx);
         let msg_focused = self.msg.focus_handle(cx).is_focused(window);
         let newf_focused = self.newf.focus_handle(cx).is_focused(window);
@@ -2794,7 +2815,7 @@ impl Render for NewSheet {
                                     .min_w_0()
                                     .child(ui::icon("x", 13., t.bad))
                                     .child(ui::wrap(format!("Didn't start. {e}")).text_size(px(12.)).text_color(t.bad)),
-                                None => ui::wrap(where_text).text_size(px(12.)).text_color(if bad_name {
+                                None => ui::wrap(where_text).text_size(px(12.)).text_color(if bad_name || offline {
                                     t.bad
                                 } else {
                                     t.dim
@@ -2807,17 +2828,20 @@ impl Render for NewSheet {
                             .px(px(12.))
                             .text_size(px(13.))
                             .child("Cancel")
-                            // Cancel throws the draft away; the X, Esc or a click outside keep it for next time.
-                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.drop_draft();
-                                cx.emit(SheetEvent::Close)
-                            })),
+                            // Cancel keeps the draft for next time, as the X, Esc and a click outside do: "not
+                            // now" should never cost a long first message.
+                            .on_click(cx.listener(|_, _: &ClickEvent, _, cx| cx.emit(SheetEvent::Close))),
                     )
                     .child(start),
             )
             .children(trust)
             .children(self.chooser_overlay(&t))
     }
+}
+
+/// Why a new chat can't start right now, said where the sheet otherwise says where it would go.
+fn offline_words(auto: bool, label: &str) -> String {
+    if auto { "No machine is online for Auto to pick".into() } else { format!("{label} is offline") }
 }
 
 /// What Auto says when its pick came from its rules, because Let Claude pick for Auto is off.
@@ -2828,6 +2852,12 @@ pub fn rules_note() -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_start_that_cannot_happen_says_why() {
+        assert_eq!(offline_words(false, "Studio"), "Studio is offline");
+        assert_eq!(offline_words(true, "Auto"), "No machine is online for Auto to pick");
+    }
 
     #[test]
     fn a_draft_comes_back_until_it_starts_or_a_week_passes() {

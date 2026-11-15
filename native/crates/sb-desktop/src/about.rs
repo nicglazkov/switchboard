@@ -19,6 +19,25 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.20",
+        &[
+            "Usage numbers hold still: the weekly and 5-hour figures are now worked out from every chat's latest reading for each window, so they no longer jump between old values when an idle chat redraws. A 5-hour window that has ended reads as empty instead of showing its last number, and a reading that cannot be right (a reset further away than the window is long) is ignored.",
+            "Daily budget: budgets set below an even pace now take effect (the rule that leaves room for the rest of the week only applies in the last 48 hours before the weekly reset), the − and + buttons land on whole numbers, and the usage tool's wording matches the numbers it reports.",
+            "Flags stay with the chat: Resume, Start fresh, Compact and Continue on another computer keep the chat's permission mode, extra folders, agent, extra instructions, model and Chrome setting. A flag the other computer cannot take is left out and named, and a chat always resumes even if an old flag is refused.",
+            "Permissions: \"Asks first\" is a choice of its own and the empty choice reads \"Machine default\". Long flag values are kept whole, a worktree is shown as set at start, and Esc on a flags drawer with unsaved changes asks for a second press.",
+            "No double starts: when a computer is slow to answer, Switchboard no longer sends the same start, resume or handoff again, and says the first one may have gone through. \"Auto\" with flags, checks on dispatched work, and waiting for a busy chat are fixed.",
+            "Linked computers keep their settings: a computer the hub stops listing stays in the list, offline, with a line on how to link it again, instead of losing its folder and name.",
+            "Smoother chats on Windows computers: the hub gathers a chat's output into fewer, larger pieces, so a PC chat that prints in tiny bursts no longer floods the app with redraws. Large pastes into a slow program no longer end the terminal.",
+            "Terminal: keys typed while a connection drops are held for a moment and sent only to the same chat, a chat on its alternate screen keeps its scrollback across a reconnect, a program can copy to the clipboard only from the tab you are looking at, and a window that stops drawing is nudged awake and noted in the log.",
+            "Board and keys: single-letter shortcuts no longer fire while you type or while a menu, drawer or question is open. Cmd/Ctrl+W on the board with tabs open asks for a second press, quitting asks when one of your own shells is running a program, tabs narrow before the row scrolls, a finished job no longer pulls the window forward, and New chat's Cancel keeps your draft.",
+            "Updates: the header shows Downloading with a percentage, Installing, Installs on quit or Update failed. Opening the app twice during an update no longer rolls it back, and a real rollback says so once and offers to try again. A server update keeps the old server until the new one answers and puts it back if it does not.",
+            "Settings: server addresses have their own page with a field to type one, removing things asks for a second click, switches that fail to save flip back, terminal text size is kept per computer, and Add a machine counts its code down and shows the computer when it links.",
+            "Files privacy: a private folder can no longer be reached under another name (different capitals, a link, or with your home folder as the Claude folder).",
+            "On each computer: one unreadable chat no longer blanks that computer's list, Switchboard never guesses that chats have stopped when Claude Code cannot be asked, changes to Claude Code's settings are written safely next to its own, very long first messages are delivered by file, and old leftover state is tidied.",
+            "iPhone: the app reconnects by itself when the network comes back, tabs follow a chat that was resumed under a new id, messages sent while connecting are queued and returned to the box if they cannot be sent, choice buttons work while scrolled up, Stop and dismiss does both, and rows no longer go grey on a quiet day.",
+        ],
+    ),
+    (
         "0.8.19",
         &[
             "Closing a tab leaves its chat running: closing a chat's tab (X, Cmd+W, closing its group) no longer stops the chat, so looking in on a background chat never ends it. Stop on the chat's card still ends it. To have chats stop with their tabs as before, turn on Settings > Terminal > Stop a chat when its tab closes.",

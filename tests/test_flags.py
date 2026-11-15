@@ -118,11 +118,12 @@ class SessionFlagsTest(RpcBase):
     def test_terminal_flags_come_from_the_command_line_once(self):
         self.write(SID_A, [assistant('2026-10-01T00:00:05Z', 'ok')])
         asked = []
-        self.sb._cmdlines = lambda pids: asked.append(sorted(pids)) or {4242: ['claude', '--resume', '--chrome']}
+        self.sb._cmdlines = lambda pids, loose=None: asked.append(sorted(pids)) or {4242: ['claude', '--resume', '--chrome']}
         agents = [{'sessionId': SID_A, 'kind': 'interactive', 'status': 'idle', 'pid': 4242, 'startedAt': 5}]
         self.assertTrue(self.flags(agents)['chrome'])
         self.assertTrue(self.flags(agents)['chrome'])
-        self.assertEqual(asked, [[4242]])                                     # remembered, not asked again
+        # remembered, not asked again (the list also asks about this machine's own stray processes: not this chat)
+        self.assertEqual([a for a in asked if 4242 in a], [[4242]])
 
     def test_a_broken_roster_or_settings_never_breaks_the_list(self):
         self.write(SID_A, [assistant('2026-10-01T00:00:05Z', 'ok')])
@@ -267,3 +268,268 @@ class ReplacedLinkTest(RpcBase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+from tests.test_jobs import JobBase  # noqa: E402
+
+
+class CarriedFlagsTest(JobBase):
+    """A chat that is resumed, started fresh, compacted or moved keeps the flags it was launched with."""
+    def old_chat(self, args, rows=()):
+        rows = [dict(user('2026-10-01T00:00:01Z', 'look at canvas'), cwd=str(self.root / 'proj')),
+                {'type': 'assistant', 'timestamp': '2026-10-01T00:00:02Z', 'effort': 'medium',
+                 'message': {'model': 'claude-opus-4-8', 'content': [{'type': 'text', 'text': 'ok'}], 'usage': {'input_tokens': 9}}},
+                *rows, {'type': 'ai-title', 'aiTitle': 'Canvas', 'sessionId': SID_A}]
+        p = write_transcript(self.cdir / 'projects' / 'p1', rows, name=f'{SID_A}.jsonl')
+        os.utime(p, (NOW - 60, NOW - 60))
+        (self.cdir / 'daemon').mkdir(exist_ok=True)
+        roster = {'workers': {'aaaaaaaa': {'sessionId': SID_A, 'dispatch': {'sessionId': SID_A, 'launch': {
+            'mode': 'prompt', 'args': ['--session-id', SID_A, '--remote-control'] + args + ['--name', 'x', 'hi']}}}}}
+        (self.cdir / 'daemon' / 'roster.json').write_text(json.dumps(roster))
+        self.sb.claude_flags = lambda refresh=False, runner=None: set(self.sb.START_FLAGS)
+        self.sb.claude_perms = lambda: ['acceptEdits', 'auto', 'bypassPermissions', 'manual', 'dontAsk', 'plan']
+        self.sb.rpc({'verb': 'list'}, NOW, agents=[])
+        return p
+
+    ARGS = ['--permission-mode', 'acceptEdits', '--add-dir', 'PROJ', '--add-dir', 'GONE', '--agent', 'reviewer',
+            '--append-system-prompt', 'Be brief, and kind', '--worktree', 'fix', '--model', 'claude-opus-4-8', '--no-chrome']
+
+    def args(self):
+        (self.root / 'gone').mkdir(exist_ok=True)
+        return [{'PROJ': str(self.root / 'proj'), 'GONE': str(self.root / 'gone')}.get(a, a) for a in self.ARGS]
+
+    def test_resume_and_fresh_keep_what_the_chat_ran_with(self):
+        for verb in ('resume', 'fresh'):
+            with self.subTest(verb=verb):
+                self.launched.clear()
+                self.old_chat(self.args(), [entry('permission-mode', '2026-10-01T00:00:03Z', permissionMode='plan')])
+                (self.root / 'gone').rmdir()  # a folder that is no longer there is left out, the rest still goes
+                self.job({'verb': verb, 'sid': SID_A})
+                self.drain()
+                a = self.launched[0]['argv']
+                self.assertIn('--permission-mode=plan', a)  # the mode it was last in, not the one it started in
+                self.assertIn(f'--add-dir={(self.root / "proj").resolve()}', a)
+                self.assertIn('--agent=reviewer', a)
+                self.assertIn('--append-system-prompt=Be brief, and kind', a)
+                self.assertIn('--no-chrome', a)
+                self.assertEqual(a[a.index('--model') + 1], 'claude-opus-4-8')  # the pinned version, not "opus"
+                self.assertFalse([x for x in a if x.startswith('--worktree') or 'gone' in x], a)
+
+    def test_the_brief_for_another_machine_carries_them_too(self):
+        self.old_chat(self.args())
+        self.sb.handoff_path(SID_A).write_text('NOTES')
+        c = self.sb.rpc({'verb': 'handoff_text', 'sid': SID_A}, NOW, agents=[])['carry']
+        self.assertEqual((c['effort'], c['model']), ('medium', 'claude-opus-4-8'))
+        self.assertEqual(c['flags'], [['--add-dir', 'proj'], ['--add-dir', 'gone'], ['--agent', 'reviewer'],
+                                      ['--append-system-prompt', 'Be brief, and kind'], ['--no-chrome'],
+                                      ['--permission-mode', 'acceptEdits']])
+
+    def test_the_default_model_and_mode_are_not_named(self):
+        p = self.old_chat([], [entry('permission-mode', '2026-10-01T00:00:03Z', permissionMode='default')])
+        self.assertEqual(self.sb.carry_over(p, 'claude-opus-4-8', SID_A), {'effort': 'medium'})  # --model opus would drop [1m]
+        (self.cdir / 'settings.json').write_text(json.dumps({'model': 'sonnet', 'permissions': {'defaultMode': 'auto'}}))
+        self.assertEqual(self.sb.carry_over(p, 'claude-opus-4-8', SID_A),
+                         {'effort': 'medium', 'model': 'opus', 'flags': [['--permission-mode', 'default']]})
+
+    def test_a_model_switched_since_the_launch_wins(self):
+        self.assertEqual(self.sb.model_arg('claude-opus-4-8', 'opus[1m]'), 'opus[1m]')
+        self.assertEqual(self.sb.model_arg('claude-sonnet-5-5', 'claude-opus-4-8'), 'sonnet')
+        self.assertIsNone(self.sb.model_arg('claude-opus-4-8', 'sonnet'))
+        self.assertIsNone(self.sb.model_arg('claude-opus-4-8', '--evil'))
+
+    def test_effort_is_the_chats_own_not_a_word_in_a_tool_call(self):
+        tool = {'type': 'assistant', 'timestamp': '2026-10-01T00:00:04Z',
+                'message': {'model': 'claude-opus-4-8', 'usage': {'input_tokens': 9},
+                            'content': [{'type': 'tool_use', 'name': 'Agent', 'input': {'effort': 'max', 'prompt': 'x'}}]}}
+        p = self.old_chat([], [tool])
+        self.assertEqual(self.sb.carry_over(p, 'claude-opus-4-8', SID_A)['effort'], 'medium')
+
+    def test_asks_first_is_only_carried_under_a_name_this_claude_takes(self):
+        self.sb.claude_flags = lambda refresh=False, runner=None: set(self.sb.START_FLAGS)
+        self.sb.claude_perms = lambda: ['acceptEdits', 'manual', 'plan']
+        self.assertEqual(self.sb.soft_flags([['--permission-mode', 'default'], ['--evil'], ['--brief']]),
+                         ['--permission-mode=manual', '--brief'])
+        self.sb.claude_perms = lambda: []
+        self.assertEqual(self.sb.soft_flags([['--permission-mode', 'manual']]), [])
+        self.assertEqual(self.sb.soft_flags([['--permission-mode', 'plan']]), ['--permission-mode=plan'])
+
+    def test_a_value_an_older_helper_cut_short_is_never_sent(self):
+        cut = {'launch': {}, 'all': [['--append-system-prompt', 'x' * 200], ['--agent', 'reviewer']], 'other': ['--mystery']}
+        self.assertEqual(self.sb.whole_flags(cut), ([['--agent', 'reviewer']], ['--mystery', '--append-system-prompt']))
+        self.assertEqual(self.sb.whole_flags(dict(cut, v=self.sb.FLAG_RECORD))[0], cut['all'])
+
+    def test_a_record_cut_at_its_spaces_sends_back_no_value_that_could_hold_one(self):
+        # An older helper, and `ps` today, cut "--append-system-prompt Always answer in French" and
+        # "--tools Bash Read" at the spaces: the short first word looks whole and is not.
+        fl = [['--append-system-prompt', 'Always'], ['--tools', 'Bash'], ['--allowed-tools', 'Read'], ['--disallowed-tools', 'Write'],
+              ['--add-dir', 'my'], ['--permission-mode', 'plan'], ['--agent', 'reviewer'], ['--model', 'claude-opus-4-8'],
+              ['--fallback-model', 'sonnet'], ['--autocompact', '200k'], ['--setting-sources', 'user,project'], ['--brief']]
+        safe = fl[5:]
+        wordy = ['--append-system-prompt', '--tools', '--allowed-tools', '--disallowed-tools', '--add-dir']
+        for rec in ({'all': fl}, {'all': fl, 'v': 1}, {'all': fl, 'v': self.sb.FLAG_RECORD, 'split': True, 'from': 'ps'}):
+            self.assertEqual(self.sb.whole_flags(dict(rec, other=['--ide'])), (safe, ['--ide'] + wordy), rec.get('v'))
+        self.assertEqual(self.sb.whole_flags({'all': fl, 'v': self.sb.FLAG_RECORD, 'from': 'ps'})[0], fl, 'read whole: sent whole')
+        # every flag not on the list takes one word by its own pattern, so it cannot have been cut
+        for name, spec in self.sb.START_FLAGS.items():
+            if name not in self.sb.WORDY_FLAGS and isinstance(spec, str):
+                self.assertNotIn(' ', spec, name)
+                self.assertNotEqual(spec, 'folder', name)
+
+    def test_a_command_line_read_through_ps_is_marked(self):
+        agents = [{'kind': 'interactive', 'sessionId': SID_A, 'pid': 4242, 'startedAt': 5}]
+
+        def ps(pids, loose=None):
+            loose.add(4242)
+            return {4242: ['claude', '--append-system-prompt', 'Always', 'answer', 'in', 'French', '--agent', 'reviewer']}
+        self.sb._cmdlines = ps
+        self.sb._roster_args = lambda: {}
+        full = {}
+        self.sb.launch_flags(agents, NOW, full)
+        rec = json.loads((self.sb.paths()['state'] / 'flags.json').read_text())[SID_A]
+        self.assertEqual((rec['v'], rec['split'], rec['from']), (self.sb.FLAG_RECORD, True, 'ps'))
+        self.assertEqual(full[SID_A]['flags'], [['--agent', 'reviewer']])
+        self.assertEqual(full[SID_A]['other'], ['--append-system-prompt'])
+        asked = []
+        self.sb._cmdlines = lambda pids, loose=None: asked.append(pids) or {}
+        self.sb.launch_flags(agents, NOW + 15, {})
+        self.assertEqual(asked, [], 'and it is not asked again at every poll')
+
+    def test_an_old_record_carries_no_half_value_into_a_resume(self):
+        p = self.old_chat([])
+        (self.cdir / 'daemon' / 'roster.json').unlink()
+        flags = self.sb.paths()['state'] / 'flags.json'
+        flags.write_text(json.dumps({SID_A: {'launch': {}, 'from': 'ps', 'all': [
+            ['--append-system-prompt', 'Always'], ['--tools', 'Bash'], ['--agent', 'reviewer']], 'other': []}}))
+        self.assertEqual(self.sb.carry_over(p, 'claude-opus-4-8', SID_A)['flags'], [['--agent', 'reviewer']])
+
+    def test_bypass_is_never_carried_from_the_transcript_alone(self):
+        last = [entry('permission-mode', '2026-10-01T00:00:03Z', permissionMode='bypassPermissions')]
+        p = self.old_chat([], last)
+        self.assertNotIn('flags', self.sb.carry_over(p, 'claude-opus-4-8', SID_A))
+        p = self.old_chat(['--permission-mode', 'acceptEdits'], last)   # back to what it was launched with
+        self.assertEqual(self.sb.carry_over(p, 'claude-opus-4-8', SID_A)['flags'], [['--permission-mode', 'acceptEdits']])
+        for args in (['--permission-mode', 'bypassPermissions'], ['--dangerously-skip-permissions'],
+                     ['--allow-dangerously-skip-permissions']):
+            p = self.old_chat(args, last)                               # launched so: it stays so
+            self.assertEqual(self.sb.carry_over(p, 'claude-opus-4-8', SID_A)['flags'], [['--permission-mode', 'bypassPermissions']], args)
+
+    def test_help_that_cannot_be_read_carries_no_flag(self):
+        self.sb.claude_flags = lambda refresh=False, runner=None: None
+        self.assertEqual(self.sb.soft_flags([['--permission-mode', 'plan'], ['--brief']]), [])
+
+    def test_a_carried_flag_claude_refuses_never_keeps_the_chat_from_coming_back(self):
+        for verb in ('resume', 'fresh'):
+            with self.subTest(verb=verb):
+                self.launched.clear()
+                self.old_chat(['--agent', 'reviewer', '--brief'])
+
+                def run(argv, cwd, env):
+                    self.launched.append({'argv': argv})
+                    if any(a.startswith('--agent') for a in argv):
+                        return 1, "error: unknown option '--agent'\n"
+                    return 0, '  claude stop 3022c163    stop this session\n'
+                jid = self.job({'verb': verb, 'sid': SID_A})
+                self.drain(runner=run)
+                self.assertEqual(len(self.launched), 2, 'once with them, once without, and never a third')
+                self.assertIn('--agent=reviewer', self.launched[0]['argv'])
+                again = self.launched[1]['argv']
+                self.assertFalse([a for a in again if a.startswith(('--agent', '--brief'))], again)
+                self.assertIn('--resume' if verb == 'resume' else '--bg', again)
+                r = self.sb.rpc({'verb': 'job', 'id': jid}, NOW + 9, agents=[])
+                self.assertEqual((r['state'], r['dropped_flags']), ('done', ['--agent', '--brief']))
+                self.assertIn('Started without --agent, --brief', r['note'])
+                self.assertIn('trying again without the carried --agent --brief', self.sb.paths()['log'].read_text())
+
+    def test_only_a_clear_refusal_is_tried_again(self):
+        for rc, out, why in ((1, 'boom\n  claude stop 3022c163    stop this session\n', 'it named a chat: something started'),
+                             (0, 'no id here\n', 'it did not fail')):
+            self.launched.clear()
+            self.old_chat(['--agent', 'reviewer'])
+            jid = self.job({'verb': 'resume', 'sid': SID_A})
+            self.drain(runner=self.runner(rc, out))
+            self.assertEqual(len(self.launched), 1, why)
+            self.assertEqual(self.sb.rpc({'verb': 'job', 'id': jid}, NOW + 9, agents=[])['state'], 'error')
+        # slow to fail: it may have started something
+        self.launched.clear()
+        self.old_chat(['--agent', 'reviewer'])
+        self.sb.CARRY_RETRY_S = 0
+        self.job({'verb': 'resume', 'sid': SID_A})
+        self.drain(runner=self.runner(1, 'boom\n'))
+        self.assertEqual(len(self.launched), 1)
+
+    def test_flags_the_user_just_picked_are_not_dropped_on_a_refusal(self):
+        self.old_chat([])
+        self.sb.rpc({'verb': 'list'}, NOW, agents=[])
+        jid = self.job({'verb': 'resume', 'sid': SID_A, 'relaunch': True, 'flags': [['--brief']]})
+        self.drain(runner=self.runner(1, "error: unknown option '--brief'\n"))
+        self.assertEqual(len(self.launched), 1)
+        r = self.sb.rpc({'verb': 'job', 'id': jid}, NOW + 9, agents=[])
+        self.assertEqual(r['state'], 'error')
+        self.assertIn('--brief', r['error'])
+
+    def test_long_values_are_kept_whole(self):
+        text = 'Be brief. ' * 150
+        self.assertEqual(self.sb.flag_list(['--append-system-prompt', text])[0], [['--append-system-prompt', text]])
+        self.assertEqual(self.sb.flag_list(['--append-system-prompt', 'x' * 2001]), ([], ['--append-system-prompt']))
+
+    def test_the_list_names_the_extra_folders(self):
+        self.old_chat(['--add-dir', str(self.root / 'proj')])
+        s = self.sb.rpc({'verb': 'list'}, NOW, agents=[])['sessions'][0]
+        self.assertEqual(s['flags']['dirs'], ['proj'])
+
+
+class LaunchWordsTest(RpcBase):
+    def test_a_bare_worktree_cannot_take_the_message(self):
+        argv = self.sb.launch_argv({'flags': ['--worktree', '--permission-mode=plan'], 'prompt': 'do it'}, exe='claude')
+        self.assertEqual(argv, ['claude', '--bg', '--worktree', '--remote-control', '--permission-mode=plan', 'do it'])
+        self.assertEqual(self.sb.check_flags([['--worktree']]), ['--worktree'])
+        self.assertEqual(self.sb.flag_list(['-w', '--chrome'])[0], [['--worktree'], ['--chrome']])
+
+    def test_ultracode_keeps_the_model_it_is_given(self):
+        a = self.sb.launch_argv({'effort': 'ultracode', 'model': 'fable', 'prompt': 'x'}, exe='claude')
+        self.assertEqual((a[a.index('--model') + 1], a[a.index('--effort') + 1]), ('fable', 'ultracode'))
+        a = self.sb.launch_argv({'mode': 'ultracode', 'prompt': 'x'}, exe='claude')  # the New sheet's mode: Opus
+        self.assertEqual((a[a.index('--model') + 1], a[a.index('--effort') + 1]), ('opus', 'ultracode'))
+        self.assertNotIn('--model', self.sb.launch_argv({'effort': 'ultracode', 'prompt': 'x'}, exe='claude'))
+
+    def test_permission_modes_go_by_the_name_this_claude_lists(self):
+        new, old = ['acceptEdits', 'manual', 'plan'], ['acceptEdits', 'default', 'plan']
+        self.assertEqual(self.sb.check_flags([['--permission-mode', 'default']], perms=new), ['--permission-mode=manual'])
+        self.assertEqual(self.sb.check_flags([['--permission-mode', 'manual']], perms=old), ['--permission-mode=default'])
+        self.assertEqual(self.sb.check_flags([['--permission-mode', 'manual']], perms=new), ['--permission-mode=manual'])
+        with self.assertRaises(ValueError):
+            self.sb.check_flags([['--permission-mode', 'auto']], perms=new)
+        self.assertEqual(self.sb.check_flags([['--permission-mode', 'auto']], perms=None), ['--permission-mode=auto'])
+
+    HELP = ('Usage: claude [options]\n\nOptions:\n'
+            '  --add-dir <directories...>            Additional directories\n'
+            '  --allowedTools, --allowed-tools <tools...>  Tools to allow\n'
+            '  --permission-mode <mode>              Permission mode to use for the session (choices: "acceptEdits",\n'
+            '                                        "auto", "manual", "plan")\n'
+            '  --restricted                          Like --tools "" with no --brief and no --add-dir\n'
+            '  -w, --worktree [name]                 Create a new git worktree\n')
+
+    def test_help_only_counts_a_flag_where_it_is_defined(self):
+        self.assertEqual(self.sb.help_flags(self.HELP),
+                         ['--add-dir', '--allowed-tools', '--allowedTools', '--permission-mode', '--restricted', '--worktree'])
+        self.assertEqual(self.sb.help_perm_modes(self.HELP), ['acceptEdits', 'auto', 'manual', 'plan'])
+        self.assertEqual(self.sb.help_perm_modes('Options:\n  --chrome  x\n'), [])
+        self.assertEqual((self.sb.ask_mode(['manual', 'default']), self.sb.ask_mode(['default']), self.sb.ask_mode([])),
+                         ('manual', 'default', None))
+
+    def test_a_macs_argument_block_gives_the_words_as_they_were(self):
+        words = [b'claude', b'--append-system-prompt', b'Be brief, and kind', b'--add-dir', b'/Users/you/My Stuff', b'']
+        raw = len(words).to_bytes(4, sys.byteorder) + b'/usr/local/bin/claude\0\0\0\0' + b'\0'.join(words) + b'\0HOME=/Users/you\0'
+        self.assertEqual(self.sb.parse_procargs2(raw), [w.decode() for w in words])
+        self.assertIsNone(self.sb.parse_procargs2(raw[:40]))   # cut short
+        self.assertIsNone(self.sb.parse_procargs2(b'\0\0'))
+
+    @unittest.skipUnless(sys.platform == 'darwin', 'kern.procargs2 is a Mac thing')
+    def test_a_mac_is_asked_for_exact_words_before_ps(self):
+        import subprocess
+        p = subprocess.Popen(['/bin/sleep', '30', 'a b'], stderr=subprocess.DEVNULL)
+        try:
+            self.assertEqual(self.sb._cmdlines([p.pid]), {p.pid: ['/bin/sleep', '30', 'a b']})
+        finally:
+            p.kill()
+            p.wait()

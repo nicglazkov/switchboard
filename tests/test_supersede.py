@@ -157,6 +157,14 @@ class SupersedeTest(RpcBase):
         self.sb.rpc({'verb': 'supersede', 'sid': SID_A, 'by': {'machine': 'a b;c', 'sid': 7}}, NOW, agents=[])
         self.assertIsNone(json.loads((self.sb.paths()['state'] / 'replaced.json').read_text())[SID_A]['by'])
 
+    def test_two_unnamed_chats_that_open_with_the_same_words_both_stay(self):
+        self.chat(SID_A, None, NOW - 90000, NOW - 80000, prompt='continue')
+        self.chat(SID_B, None, NOW - 9000, NOW - 100, prompt='continue')
+        shown, gone, r = self.listing()
+        self.assertEqual(shown, [SID_B, SID_A])
+        self.assertEqual(gone, {})
+        self.assertEqual([s['title'] for s in r['sessions']], ['continue', 'continue'])
+
     def test_cap_counts_only_shown_sessions(self):
         cap = self.sb.LIST_MAX
         for i in range(cap):

@@ -33,6 +33,10 @@ pub fn parent(addr: &str) -> Option<String> {
     if addr.is_empty() || addr == "~" || (addr.starts_with('@') && !addr.contains('/')) {
         return None;
     }
+    // iCloud Drive sits in Home as far as anyone can see: "up" from it is not ~/Library/Mobile Documents.
+    if addr == ICLOUD {
+        return Some("~".into());
+    }
     Some(match addr.rsplit_once('/') {
         Some((up, _)) => up.to_string(),
         None => String::new(),
@@ -170,6 +174,8 @@ mod tests {
         assert_eq!(parent(""), None);
         assert_eq!(parent("@Data/work").as_deref(), Some("@Data"));
         assert_eq!(parent("@Data"), None);
+        assert_eq!(parent(ICLOUD).as_deref(), Some("~"));
+        assert_eq!(parent(&format!("{ICLOUD}/Notes")).as_deref(), Some(ICLOUD));
     }
 
     #[test]

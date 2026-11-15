@@ -57,6 +57,9 @@ pub struct Nodes {
     path: PathBuf,
     list: Mutex<Vec<Node>>,
     codes: Mutex<Codes>,
+    /// Why the file could not be read when the hub started, if it was there. Until a read works, nothing is
+    /// written: saving the empty list this hub started with would unlink every machine for good.
+    unread: Mutex<Option<String>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -66,6 +69,8 @@ pub enum PairError {
     BadName,
     Taken(String),
     Store(String),
+    /// The list of linked machines could not be read, so it is not being changed.
+    Unread(String),
 }
 
 impl PairError {
@@ -76,6 +81,10 @@ impl PairError {
             PairError::BadName => "A machine name is 1 to 32 lowercase letters and digits.".into(),
             PairError::Taken(l) => format!("{l} already uses that name. Pick another with --name."),
             PairError::Store(e) => format!("The hub could not save the machine ({e})."),
+            PairError::Unread(e) => format!(
+                "The hub could not read its list of linked machines ({e}), so it is not changing it. Check that \
+                 file on the server, then try again."
+            ),
         }
     }
 
@@ -85,7 +94,7 @@ impl PairError {
             PairError::TooMany => 429,
             PairError::BadName => 400,
             PairError::Taken(_) => 409,
-            PairError::Store(_) => 500,
+            PairError::Store(_) | PairError::Unread(_) => 500,
         }
     }
 }
@@ -128,27 +137,47 @@ fn new_code() -> String {
 
 impl Nodes {
     /// The paired list from `path`. A file that does not parse is moved aside (nodes.json.bad) so it is never
-    /// overwritten, and the hub starts with no nodes.
+    /// overwritten, and the hub starts with no nodes. A file that is there but cannot be read (a disk or
+    /// permission error) is left alone and read again before anything is written.
     pub fn load(path: &Path) -> Nodes {
-        let list = match std::fs::read_to_string(path) {
-            Ok(t) => match serde_json::from_str::<NodeFile>(&t) {
-                Ok(f) => f.nodes.into_iter().filter(|n| crate::ticket::valid_machine(&n.name)).collect(),
-                Err(e) => {
-                    crate::server::log(format!(
-                        "{}: {e}; moved to .bad, starting with no linked machines",
-                        path.display()
-                    ));
-                    let _ = std::fs::rename(path, path.with_extension("json.bad"));
-                    vec![]
-                }
-            },
-            Err(_) => vec![],
+        let (list, unread) = match read(path) {
+            Ok(list) => (list, None),
+            Err(e) => {
+                crate::server::log(format!(
+                    "{}: {e}; no linked machines until it can be read, and it is not written until then",
+                    path.display()
+                ));
+                (vec![], Some(e))
+            }
         };
-        Nodes { path: path.to_path_buf(), list: Mutex::new(list), codes: Mutex::new(Codes::default()) }
+        Nodes {
+            path: path.to_path_buf(),
+            list: Mutex::new(list),
+            codes: Mutex::new(Codes::default()),
+            unread: Mutex::new(unread),
+        }
+    }
+
+    /// Before a write: if the file could not be read at the start, read it now. Err while it still cannot be.
+    fn readable(&self, list: &mut Vec<Node>) -> Result<(), String> {
+        let mut unread = self.unread.lock().unwrap_or_else(|e| e.into_inner());
+        if unread.is_some() {
+            *list = read(&self.path)?;
+            *unread = None;
+        }
+        Ok(())
     }
 
     pub fn list(&self) -> Vec<Node> {
-        self.list.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        let _ = self.readable(&mut list); // a file that could not be read at the start may be readable by now
+        list.clone()
+    }
+
+    /// The list could not be read (and still cannot): a token that matches nothing may be a good one.
+    pub fn unread(&self) -> bool {
+        let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        self.readable(&mut list).is_err()
     }
 
     pub fn get(&self, name: &str) -> Option<Node> {
@@ -230,12 +259,22 @@ impl Nodes {
         let node =
             Node { name: name.into(), label: clean(label, 40), os: clean(os, 16), token: hash(&token), paired: now };
         let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
-        let mut next: Vec<Node> = list.iter().filter(|n| n.name != name).cloned().collect();
-        next.push(node.clone());
-        if let Err(e) = save(&self.path, &next) {
-            self.codes.lock().unwrap_or_else(|e| e.into_inner()).live.insert(code, now + CODE_TTL);
-            return Err(PairError::Store(e.to_string()));
-        }
+        let saved = match self.readable(&mut list) {
+            Err(e) => Err(PairError::Unread(e)),
+            Ok(()) => {
+                let mut next: Vec<Node> = list.iter().filter(|n| n.name != name).cloned().collect();
+                next.push(node.clone());
+                save(&self.path, &next).map(|()| next).map_err(|e| PairError::Store(e.to_string()))
+            }
+        };
+        let next = match saved {
+            Ok(next) => next,
+            Err(e) => {
+                // the code was not used up: it works again once the file does
+                self.codes.lock().unwrap_or_else(|e| e.into_inner()).live.insert(code, now + CODE_TTL);
+                return Err(e);
+            }
+        };
         *list = next;
         Ok((node, token))
     }
@@ -269,6 +308,7 @@ impl Nodes {
     /// Forget a node: its token stops working at once.
     pub fn remove(&self, name: &str) -> std::io::Result<bool> {
         let mut list = self.list.lock().unwrap_or_else(|e| e.into_inner());
+        self.readable(&mut list).map_err(std::io::Error::other)?;
         if !list.iter().any(|n| n.name == name) {
             return Ok(false);
         }
@@ -276,6 +316,24 @@ impl Nodes {
         save(&self.path, &next)?;
         *list = next;
         Ok(true)
+    }
+}
+
+/// The nodes in the file at `path`: none when there is no file. A file that does not parse is moved aside
+/// (nodes.json.bad) and counts as none. Err only when the file is there and reading it failed.
+fn read(path: &Path) -> Result<Vec<Node>, String> {
+    let text = match std::fs::read(path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e.to_string()),
+    };
+    match serde_json::from_slice::<NodeFile>(&text) {
+        Ok(f) => Ok(f.nodes.into_iter().filter(|n| crate::ticket::valid_machine(&n.name)).collect()),
+        Err(e) => {
+            crate::server::log(format!("{}: {e}; moved to .bad, starting with no linked machines", path.display()));
+            let _ = std::fs::rename(path, path.with_extension("json.bad"));
+            Ok(vec![])
+        }
     }
 }
 
@@ -407,6 +465,42 @@ mod tests {
         }
         let (code, _) = n.mint(1);
         assert_eq!(n.pair(&code, "lab", "", "", None, 1), Err(PairError::TooMany), "every guess counted");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_written_over() {
+        use std::os::unix::fs::PermissionsExt;
+        let p = tmp("unread");
+        let n = Nodes::load(&p);
+        let (code, _) = n.mint(1);
+        let (_, token) = n.pair(&code, "lab", "Lab", "linux", None, 1).unwrap();
+        let before = std::fs::read(&p).unwrap();
+        let mode = |m: u32| std::fs::set_permissions(&p, std::fs::Permissions::from_mode(m)).unwrap();
+        mode(0o000);
+        if std::fs::read(&p).is_ok() {
+            return; // running as root: nothing is unreadable
+        }
+        // the hub starts while the file cannot be read: it knows no machines, and says so
+        let n = Nodes::load(&p);
+        assert!(n.list().is_empty());
+        assert!(n.unread());
+        assert!(n.find(&token).is_none());
+        // ... and it changes nothing: pairing another machine would have saved a list without "lab"
+        let (code, _) = n.mint(10);
+        let refused = n.pair(&code, "desk", "", "", None, 10);
+        assert!(matches!(refused, Err(PairError::Unread(_))), "{refused:?}");
+        assert_eq!(refused.unwrap_err().status(), 500);
+        assert!(n.remove("lab").is_err());
+        mode(0o600);
+        assert_eq!(std::fs::read(&p).unwrap(), before, "untouched");
+        // readable again: the machines are back without a restart, and the same code still pairs
+        assert_eq!(n.find(&token).map(|x| x.name), Some("lab".into()));
+        assert!(!n.unread());
+        n.pair(&code, "desk", "", "", None, 11).unwrap();
+        let names: Vec<String> = Nodes::load(&p).list().into_iter().map(|x| x.name).collect();
+        assert_eq!(names, ["lab", "desk"]);
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
     }
 

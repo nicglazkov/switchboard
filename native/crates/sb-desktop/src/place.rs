@@ -72,6 +72,13 @@ pub fn window_shows(key: &str, bg: Option<&str>, cx: &App) -> bool {
         .is_some_and(|w| w.0.iter().filter_map(|t| t.upgrade()).any(|t| t.read(cx).shows(key, bg)))
 }
 
+/// The programs running in local terminals that have a window of their own: quitting asks about them first.
+pub fn windows_busy(cx: &App) -> Vec<String> {
+    cx.try_global::<WindowTabs>()
+        .map(|w| w.0.iter().filter_map(|t| t.upgrade()).filter_map(|t| t.read(cx).busy()).collect())
+        .unwrap_or_default()
+}
+
 /// A terminal in a window of its own. Closing the window detaches; the chat keeps running.
 pub struct TermWindow {
     tab: Entity<TermTab>,
@@ -423,7 +430,7 @@ impl BoardView {
                                 } else {
                                     "Close tab (the chat keeps running)"
                                 },
-                                ui::mod_cap("W"),
+                                ui::term_cap("W"),
                             )
                             .on_hover(cx.listener(|this, h: &bool, _, cx| sub_off(this, *h, cx)))
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {

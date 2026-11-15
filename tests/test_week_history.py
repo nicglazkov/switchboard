@@ -151,6 +151,8 @@ class WeekHistoryTest(unittest.TestCase):
         moved = NOW + fleet.WEEK                                   # the limit was reset early, today
         self.assertTrue(self.h.record(0, moved, NOW + MIN))
         self.assertEqual(self.h.samples, [[NOW + MIN, 0.0]])
+        self.assertFalse(self.h.record(71, RESET, NOW + 20 * MIN), 'a stale number from the week that was cut short')
+        self.assertEqual((self.h.reset, self.h.samples), (moved, [[NOW + MIN, 0.0]]))
 
     def test_a_reset_that_wobbles_by_seconds_is_the_same_week(self):
         self.h.record(30, RESET, NOW)

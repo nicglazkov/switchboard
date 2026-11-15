@@ -4,10 +4,20 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'agent'))
 
+_ours = {}
+
+
 def fresh_sb(tmp):
-    """Import sb with SB_HOME pointed at a temp dir."""
+    """Import sb with SB_HOME pointed at a temp dir. Nothing of the computer the tests run on is read: its Claude
+    folder, its paired name and the terminal this run was started from all stay out (a test that sets one of these
+    itself keeps its own value)."""
     os.environ['SB_HOME'] = str(Path(tmp) / 'sbhome')
     os.environ.pop('SB_INTERNAL', None)
+    os.environ.pop('SSH_ORIGINAL_COMMAND', None)
+    for k, v in (('SB_CLAUDE_DIR', Path(tmp) / 'no-claude'), ('SB_CLAUDE_JSON', Path(tmp) / 'no-claude.json'),
+                 ('SB_NODE_JSON', Path(tmp) / '.config' / 'switchboard' / 'node.json')):
+        if os.environ.get(k) in (None, _ours.get(k)):
+            os.environ[k] = _ours[k] = str(v)
     import sb
     sb = importlib.reload(sb)
     sb.spawn_ask = lambda *a: None  # tests never start a real Haiku pass; test_ask swaps in its own

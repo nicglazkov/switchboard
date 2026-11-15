@@ -113,8 +113,20 @@ impl SettingsView {
             n.error = Some("Say what it should do, so the chat knows what to build.".into());
             return cx.notify();
         }
-        if n.machine.is_empty() {
-            n.error = Some("Pick a machine to build it on.".into());
+        let app = self.app.read(cx);
+        if app.lib().is_some_and(|l| l.tool(&name).is_some()) {
+            n.error = Some(format!(
+                "There's already a tool called {name}. Pick another name, or it would be published over that one."
+            ));
+            return cx.notify();
+        }
+        if n.machine.is_empty() || app.snap.machines.iter().any(|m| m.name == n.machine && m.is_offline()) {
+            n.error = Some(if app.snap.machines.iter().all(|m| m.is_offline()) {
+                "None of your machines is online, and a tool is built by a chat on one of them. Try again when one is."
+                    .into()
+            } else {
+                "Pick a machine that is online to build it on.".into()
+            });
             return cx.notify();
         }
         n.sending = true;
@@ -150,7 +162,8 @@ impl SettingsView {
     /// on success. A value the agent would refuse stays in the field to fix.
     pub(super) fn save_key(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let Some((tool, _, secret)) = self.lib_key.clone() else { return };
-        let value = self.lib_secret.read(cx).value().to_string();
+        // Trimmed, as `sb.py secret set` does: a pasted key often ends in a space or a line break.
+        let value = self.lib_secret.read(cx).value().trim().to_string();
         if let Err(e) = check_secret_value(&value) {
             self.lib_key_err = Some(if value.is_empty() { format!("Paste the value of {secret} first.") } else { e });
             return cx.notify();
@@ -422,7 +435,7 @@ impl SettingsView {
                     Some(
                         ui::switch(t, SharedString::from(format!("lib-auto-{name}")), auto, busy)
                             .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                                this.app.update(cx, |s, cx| s.lib_auto(&n2, !auto, &w2, cx))
+                                this.app.update(cx, |s, cx| s.lib_auto(&n2, !auto, &w2, cx));
                             }))
                             .into_any_element(),
                     ),
@@ -698,7 +711,7 @@ impl SettingsView {
         let n = tool.versions.len();
         let (n1, n2, n3) = (name.clone(), name.clone(), name.clone());
         let now = AppState::now();
-        let arming = self.lib_deleting.as_ref().is_some_and(|(x, at)| *x == name && now - at < 4.);
+        let arming = self.lib_deleting.as_ref().is_some_and(|(x, at)| *x == name && now - at < super::ARM_FOR);
         let deleting = app.lib_busy.contains(&format!("delete:{name}"));
         let head = div()
             .flex()
@@ -740,12 +753,19 @@ impl SettingsView {
                     })
                     .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
                         let now = AppState::now();
-                        if this.lib_deleting.as_ref().is_some_and(|(x, at)| *x == n2 && now - at < 4.) {
-                            this.lib_deleting = None;
-                            let n = n3.clone();
-                            this.app.update(cx, |s, cx| s.lib_delete(&n, cx));
-                        } else {
-                            this.lib_deleting = Some((n2.clone(), now));
+                        let armed = this.lib_deleting.as_ref().filter(|(x, _)| *x == n2).map(|(_, at)| *at);
+                        // A double-click must not delete a tool everywhere: the yes counts a moment after the ask.
+                        match super::arm_click(armed, now) {
+                            super::ArmClick::Go => {
+                                this.lib_deleting = None;
+                                let n = n3.clone();
+                                this.app.update(cx, |s, cx| s.lib_delete(&n, cx));
+                            }
+                            super::ArmClick::Wait => {}
+                            super::ArmClick::Arm => {
+                                this.lib_deleting = Some((n2.clone(), now));
+                                this.disarm_later(cx);
+                            }
                         }
                         cx.notify();
                     })),
@@ -949,7 +969,8 @@ impl SettingsView {
             Some(Ok(s)) => {
                 let row = |id: String, title: String, detail: String, kind: &'static str, source: String| {
                     let busy = app.lib_busy.contains(&format!("import:{machine}/{kind}/{source}"));
-                    let have = exists(&title);
+                    // The server files it under the name it makes from the source ("PDF_Tools" is pdf-tools).
+                    let have = exists(&crate::library::tool_slug(&source));
                     let m2 = machine.clone();
                     div()
                         .py(px(8.))

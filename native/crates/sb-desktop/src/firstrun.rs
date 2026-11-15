@@ -43,6 +43,9 @@ impl BoardView {
         }
         let t = c.t;
         let using = Some(c.app.core.servers().join(", ")).filter(|s| !s.is_empty());
+        // An address typed here that has never once answered (a typo, most likely) can be taken out again.
+        // Not the one typed a moment ago whose first try is still on its way.
+        let never = c.app.settings.saved.never_answered(c.app.trying.as_deref()).cloned();
         let again = ui::line_btn(&t, "server-search", 30.)
             .px(px(12.))
             .child(ui::icon("search", 13., t.dim))
@@ -65,6 +68,20 @@ impl BoardView {
             })
             .child(self.address_row(c))
             .when_some(self.server_err.clone(), |d, e| d.child(ui::wrap(e).text_size(px(12.5)).text_color(t.bad)))
+            .when_some(never, |d, u| {
+                let shown = u.strip_prefix("http://").unwrap_or(&u).to_string();
+                d.child(
+                    ui::link(&t, "server-forget", format!("Remove {shown}, it has never answered"))
+                        .text_size(px(12.5))
+                        .on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            let u = u.clone();
+                            this.app.update(cx, |s, cx| {
+                                s.remove_server(&u, cx);
+                                s.refresh(cx);
+                            });
+                        })),
+                )
+            })
             .child(
                 div().mt(px(4.)).flex().flex_wrap().items_center().gap(px(14.)).child(again).child(
                     ui::link(&t, "server-guide", "How to set up the computer that runs Switchboard")
@@ -325,7 +342,15 @@ impl BoardView {
             &format!("Make {} the server, step by step. Best on a computer that stays on.", os.this_one()),
             true,
         )
-        .on_click(c.cx.listener(|this, _: &ClickEvent, _, cx| this.open_setup(cx)));
+        .on_click(c.cx.listener(|this, _: &ClickEvent, _, cx| {
+            // A copy of the app without the server in it (Windows, a bare Linux binary) can't set one up: the
+            // guide says how, instead of three steps that end in "this copy doesn't include the server".
+            if this.find_shot || sb_core::hostsetup::Kit::find().is_some() {
+                this.open_setup(cx)
+            } else {
+                crate::state::open_link(cx, &guide())
+            }
+        }));
         let typed = tile(
             "find-type",
             "globe",
@@ -444,8 +469,19 @@ impl BoardView {
         if let Some(f) = self.find.found().iter().find(|f| f.url == url).cloned() {
             self.joining = Some(f);
         }
-        let _ = self.app.update(cx, |s, cx| s.use_server(url, cx));
-        self.find_view = false;
+        match self.app.update(cx, |s, cx| s.use_server(url, cx)) {
+            Ok(()) => {
+                self.server_err = None;
+                self.find_view = false;
+            }
+            // What the search heard is not an address the app can use: say so where the address is typed,
+            // instead of "Connecting" for ever.
+            Err(e) => {
+                self.joining = None;
+                self.server_err = Some(format!("{url}: {e}"));
+                self.type_open = true;
+            }
+        }
         cx.notify();
     }
 
@@ -475,14 +511,17 @@ impl BoardView {
     }
 
     /// Connect: saves what the field holds as the server's address and tries it.
-    pub fn connect_server(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn connect_server(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         let typed = self.server_field.read(cx).value().to_string();
         match self.app.update(cx, |s, cx| s.use_server(&typed, cx)) {
+            // The field keeps what was typed: when the address doesn't answer, one wrong digit is fixed in place,
+            // not typed again from the start.
             Ok(()) => {
                 self.server_err = None;
                 self.find_view = false;
                 self.type_open = false;
-                self.server_field.update(cx, |f, cx| f.set_value("", window, cx));
+                // The search's "Connecting to studio1" is over: this is a different address.
+                self.joining = None;
             }
             Err(e) => self.server_err = Some(e),
         }

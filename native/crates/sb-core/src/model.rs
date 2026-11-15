@@ -926,6 +926,8 @@ pub enum Tone {
 }
 
 impl Plan {
+    /// Red needs real use behind it: early in the week a small number can project past 100, and that is worth
+    /// amber at most. Past half the week's limit a projection over 100 is red, and so is 90% used whatever the pace.
     pub fn week_tone(&self) -> Tone {
         let used = self.week.unwrap_or(0.0);
         match self.week_projected {
@@ -939,7 +941,7 @@ impl Plan {
                 }
             }
             Some(p) => {
-                if p > 100.0 {
+                if used >= 90.0 || (p > 100.0 && used >= 50.0) {
                     Tone::Bad
                 } else if p > 85.0 {
                     Tone::Warn
@@ -982,6 +984,39 @@ impl Plan {
     }
     fn week_reset_passed(&self, now: f64) -> bool {
         self.week_reset.is_some_and(|r| r <= now)
+    }
+    /// The last weekly number is from a week that has reset, and no chat has replied since.
+    pub fn week_over(&self, now: f64) -> bool {
+        self.week.is_some() && self.week_reset_passed(now)
+    }
+    /// Where the week ends at this rate; nothing once the week has reset (the number is last week's).
+    pub fn week_pace(&self, now: f64) -> Option<f64> {
+        self.week_projected.filter(|_| !self.week_over(now))
+    }
+    /// The line under the week's number: when it resets, or that it has. `reset`: the reset time to show when the
+    /// plan has none of its own (the usage report's).
+    pub fn week_note(&self, now: f64, reset: Option<f64>) -> String {
+        if self.week_over(now) {
+            return "The week has reset since".into();
+        }
+        match self.week_reset.or(reset).filter(|r| *r > now) {
+            Some(r) => format!("Resets {}", fmt::when(r, now)),
+            None => "Reset not known yet".into(),
+        }
+    }
+    /// A reply showed the week and no 5-hour window at all: the plan does not report one, which is not the same as
+    /// no numbers yet. A 5-hour cap then has nothing to be checked against.
+    pub fn five_unreported(&self, now: f64) -> bool {
+        self.five_hour.is_none() && self.week.is_some() && !self.week_reset_passed(now)
+    }
+    /// The line under the 5-hour number.
+    pub fn five_note(&self, now: f64) -> String {
+        match self.five_hour_reset.filter(|_| self.five_hour.is_some()) {
+            Some(r) if r > now => format!("Resets {}", fmt::when(r, now)),
+            Some(_) => "The window has reset since".into(),
+            None if self.five_unreported(now) => "Not reported on this plan".into(),
+            None => "No numbers yet".into(),
+        }
     }
     /// The week as it may be shown: "81%"; "at least 81%" once the number is older than the five-hour window (use
     /// since then only adds); "--" when the week has reset since (the status line zeroes it there).
@@ -1536,6 +1571,57 @@ mod tests {
     use crate::board;
 
     const NOW: f64 = 1_791_782_309.0;
+
+    fn plan(week: Option<f64>, projected: Option<f64>, reset: f64) -> Plan {
+        Plan { week, week_projected: projected, week_reset: Some(reset), ..Default::default() }
+    }
+
+    #[test]
+    fn the_week_is_not_red_from_an_early_projection_alone() {
+        let soon = NOW + 6.0 * 86400.0;
+        // Day one, 14% used: on pace for well over 100, but one busy day is no alarm.
+        assert_eq!(plan(Some(14.0), Some(160.0), soon).week_tone(), Tone::Warn);
+        assert_eq!(plan(Some(55.0), Some(120.0), soon).week_tone(), Tone::Bad);
+        assert_eq!(plan(Some(92.0), Some(98.0), soon).week_tone(), Tone::Bad);
+        assert_eq!(plan(Some(60.0), Some(90.0), soon).week_tone(), Tone::Warn);
+        assert_eq!(plan(Some(30.0), Some(60.0), soon).week_tone(), Tone::Ok);
+        assert_eq!(plan(Some(55.0), None, soon).week_tone(), Tone::Warn);
+    }
+
+    #[test]
+    fn after_the_weekly_reset_the_tile_says_so_and_drops_the_pace() {
+        let p = plan(Some(59.0), Some(59.0), NOW - 3600.0);
+        assert!(p.week_over(NOW));
+        assert_eq!(p.week_label(NOW), "--");
+        assert_eq!(p.week_note(NOW, Some(NOW - 3600.0)), "The week has reset since");
+        assert_eq!(p.week_pace(NOW), None);
+        let live = plan(Some(59.0), Some(80.0), NOW + 86400.0 * 3.0);
+        assert!(!live.week_over(NOW));
+        assert!(live.week_note(NOW, None).starts_with("Resets "));
+        assert_eq!(live.week_pace(NOW), Some(80.0));
+        // No number at all: nothing has reset, there is just nothing yet. A reset time that has passed is not shown.
+        let none = Plan::default();
+        assert!(!none.week_over(NOW));
+        assert_eq!(none.week_note(NOW, None), "Reset not known yet");
+        assert_eq!(none.week_note(NOW, Some(NOW - 60.0)), "Reset not known yet");
+        assert!(none.week_note(NOW, Some(NOW + 3600.0)).starts_with("Resets "));
+    }
+
+    #[test]
+    fn the_five_hour_line_tells_not_reported_from_not_yet() {
+        let mut p = plan(Some(40.0), None, NOW + 86400.0);
+        assert_eq!(p.five_note(NOW), "Not reported on this plan");
+        assert!(p.five_unreported(NOW));
+        p.five_hour = Some(30.0);
+        assert!(!p.five_unreported(NOW));
+        p.five_hour_reset = Some(NOW + 3600.0);
+        assert!(p.five_note(NOW).starts_with("Resets "));
+        p.five_hour_reset = Some(NOW - 60.0);
+        assert_eq!(p.five_note(NOW), "The window has reset since");
+        assert_eq!(Plan::default().five_note(NOW), "No numbers yet");
+        // The week itself has reset and nobody replied: nothing can be said about the plan yet.
+        assert_eq!(plan(Some(40.0), None, NOW - 60.0).five_note(NOW), "No numbers yet");
+    }
 
     fn waiting(quiet: f64, needs: Option<&str>, reply: Option<&str>) -> Session {
         let a = ApiSession {

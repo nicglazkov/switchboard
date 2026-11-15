@@ -1,6 +1,6 @@
 """Settings > Server (server/serverctl.py, selfupdate.py): the server's version and parts, its logs, a restart, and an
 update that installs a release's kit only when it matches the SHA-256 the app read from the signed list."""
-import hashlib, io, json, sys, tarfile, time, unittest
+import hashlib, io, json, os, sys, tarfile, time, unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -91,6 +91,62 @@ class ManageTest(unittest.TestCase):
             with self.assertRaises(RuntimeError, msg='one at a time'):
                 serverctl.start_update(self.d, '0.8.11', SHA)
             self.assertEqual(det.call_count, 1)
+
+    def test_two_taps_at_the_same_moment_start_one_updater(self):
+        # Audit, server 12: the "already running" check and the start were two steps, so two requests could both pass.
+        import threading
+        started, go, out = [], threading.Event(), []
+
+        def slow(argv, name, log_to=None):
+            started.append(argv)
+            time.sleep(0.05)
+
+        def tap():
+            go.wait()
+            try:
+                serverctl.start_update(self.d, '0.8.11', SHA)
+                out.append('started')
+            except RuntimeError as e:
+                out.append(str(e))
+        with self.installed(), mock.patch.object(serverctl, 'detach', side_effect=slow), \
+                mock.patch.object(serverctl.releases_mod, 'repo', return_value='acme/board'):
+            ts = [threading.Thread(target=tap) for _ in range(6)]
+            for t in ts:
+                t.start()
+            go.set()
+            for t in ts:
+                t.join()
+        self.assertEqual(len(started), 1)
+        self.assertEqual(sorted(out), ['An update is already running.'] * 5 + ['started'])
+        self.assertTrue((self.d / 'update' / 'lock').is_file())
+
+    def test_a_lock_left_by_an_updater_that_died_does_not_block_the_next(self):
+        with self.installed(), mock.patch.object(serverctl, 'detach') as det, \
+                mock.patch.object(serverctl.releases_mod, 'repo', return_value='acme/board'):
+            serverctl.start_update(self.d, '0.8.11', SHA)
+            u = self.d / 'update'
+            # the state file says it failed, the lock is still there, and it is not brand new
+            (u / 'state.json').write_text(json.dumps({'step': 'downloading', 'ok': False, 'at': time.time()}))
+            with self.assertRaises(RuntimeError, msg='a lock made a moment ago is left alone'):
+                serverctl.start_update(self.d, '0.8.11', SHA)
+            old = time.time() - serverctl.LOCK_FRESH - 5
+            os.utime(u / 'lock', (old, old))
+            serverctl.start_update(self.d, '0.8.11', SHA)
+            self.assertEqual(det.call_count, 2)
+            # one that went quiet for 15 minutes counts as failed, and its lock goes the same way
+            (u / 'state.json').write_text(json.dumps({'step': 'downloading', 'ok': None, 'at': time.time() - serverctl.STALE_AFTER - 5}))
+            os.utime(u / 'lock', (old, old))
+            serverctl.start_update(self.d, '0.8.11', SHA)
+            self.assertEqual(det.call_count, 3)
+
+    def test_an_updater_that_could_not_start_leaves_nothing_running(self):
+        with self.installed(), mock.patch.object(serverctl, 'detach', side_effect=OSError('no room')), \
+                mock.patch.object(serverctl.releases_mod, 'repo', return_value='acme/board'):
+            with self.assertRaises(OSError):
+                serverctl.start_update(self.d, '0.8.11', SHA)
+        self.assertFalse((self.d / 'update' / 'lock').exists())
+        s = serverctl.update_state(self.d)
+        self.assertEqual((s['ok'], s['error']), (False, "The update couldn't start (no room)."))
 
     def test_github_turned_off_means_no_updates(self):
         with self.installed(), mock.patch.object(serverctl.releases_mod, 'repo', return_value=None):

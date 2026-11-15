@@ -270,6 +270,40 @@ class ThreadsTest(unittest.TestCase):
         r = app.get('/api/chats', {'q': ['lights'], 'exclude': [f'desk/{sid(4)}']})
         self.assertEqual({c['sid']: c['in_thread'] for c in r['chats']}, {sid(1): True, sid(3): False})
 
+    def test_search_words_in_any_script_and_signs(self):
+        # Audit, settings A9: words were cut at [a-z0-9], so a search in another script or for "C++" had no words
+        # left and matched every chat.
+        app = self.make()
+        self.m.sessions['desk'] = [chat(1, 'Кухня ремонт', 50, 40), chat(2, 'C++ build', 30, 20), chat(3, 'Blinds', 20, 10),
+                                   chat(9, 'Newest', 5, 1)]
+        self.poll()
+        ask = lambda q: [c['sid'] for c in app.get('/api/chats', {'q': [q], 'exclude': [f'desk/{sid(9)}']})['chats']]
+        self.assertEqual(ask('кухня'), [sid(1)])
+        self.assertEqual(ask('РЕМОНТ кух'), [sid(1)])
+        self.assertEqual(ask('++'), [sid(2)])
+        self.assertEqual(ask('c++ build'), [sid(2)])
+        self.assertEqual(ask('***'), [])
+        self.assertEqual(len(ask('  ')), 3, 'nothing typed: every older chat')
+        browse = lambda q: [r['sid'] for r in app.get('/api/browse', {'q': [q]})['rows']]
+        self.assertEqual(browse('ремонт'), [sid(1)])
+        self.assertEqual(browse('++'), [sid(2)])
+        self.assertEqual(browse('~~'), [])
+
+    def test_all_chats_by_thread_shows_the_chat_that_matches(self):
+        # Audit, settings A10: grouped by thread, a filter found the Desk chat and the row showed the thread's
+        # newest chat, the one on the Tower, under "Desk".
+        app = self.make()
+        self.m.sessions['desk'] = [chat(1, 'Kitchen remodel', 90, 80), chat(2, 'Kitchen remodel', 70, 60)]
+        self.m.sessions['tower'] = [chat(3, 'Kitchen remodel (from Desk)', 29, 1, cwd='C:\\Users\\you\\remodel')]
+        self.poll()
+        app.feat.job_done({'kind': 'continue', 'state': 'done', 'machine': 'tower', 'sid': sid(3),
+                           'plan': {'src': 'desk', 'sid': sid(2), 'dst': 'tower'}})
+        r = app.get('/api/browse', {'thread': ['1']})
+        self.assertEqual([(x['machine'], x['sid'], x['history_count']) for x in r['rows']], [('tower', sid(3), 2)])
+        r = app.get('/api/browse', {'thread': ['1'], 'machine': ['desk']})
+        self.assertEqual([(x['machine'], x['sid'], x['history_count']) for x in r['rows']], [('desk', sid(2), 1)])
+        self.assertEqual([h['sid'] for h in r['rows'][0]['history']], [sid(1)], 'only what came before it')
+
     def test_loops_are_cut(self):
         app = self.make()
         self.m.replaced['desk'] = [dict(chat(1, 'X', 50, 40), how='fresh', by={'machine': 'desk', 'sid': sid(2)}),

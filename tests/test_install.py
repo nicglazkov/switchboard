@@ -176,3 +176,103 @@ class BrandingTest(unittest.TestCase):
         self.assertIsNotNone(m, 'branding.toml has no launcher_id')
         sb = fresh_sb(tempfile.mkdtemp())
         self.assertEqual(sb.LAUNCHER_LABEL, m.group(1))
+
+
+class ClaudeFilesTest(unittest.TestCase):
+    """~/.claude.json and settings.json are Claude Code's: Switchboard's changes keep the file's permissions, a
+    symlinked file stays a symlink, and a change Claude Code made in between is never undone."""
+
+    def setUp(self):
+        import os
+        self.os = os
+        self.tmp = Path(tempfile.mkdtemp()).resolve()
+        self.cj = self.tmp / 'claude.json'
+        os.environ['SB_CLAUDE_JSON'] = str(self.cj)
+        self.addCleanup(os.environ.pop, 'SB_CLAUDE_JSON', None)
+        self.sb = fresh_sb(self.tmp)
+        self.home = self.tmp / 'home'
+        (self.home / '.claude').mkdir(parents=True)
+        self.settings = self.home / '.claude' / 'settings.json'
+        self.proj = self.tmp / 'proj'
+        self.proj.mkdir()
+
+    def mode(self, p):
+        return self.os.stat(p).st_mode & 0o777
+
+    @unittest.skipIf(__import__('os').name == 'nt', 'POSIX permissions')
+    def test_the_file_keeps_its_permissions(self):
+        self.cj.write_text(json.dumps({'oauthAccount': {'token': 'x'}}))
+        self.os.chmod(self.cj, 0o600)
+        self.assertTrue(self.sb.pretrust(self.proj))
+        self.assertEqual(self.mode(self.cj), 0o600)
+        self.settings.write_text('{}')
+        self.os.chmod(self.settings, 0o640)
+        self.sb.install(home=self.home)
+        self.assertEqual(self.mode(self.settings), 0o640)
+        self.assertEqual(self.mode(self.home / '.claude.json'), 0o600, 'a file Switchboard makes is the user\'s alone')
+
+    def test_a_symlinked_file_stays_a_symlink(self):
+        dot = self.tmp / 'dotfiles'
+        dot.mkdir()
+        (dot / 'settings.json').write_text(json.dumps({'model': 'opus'}))
+        self.os.symlink(dot / 'settings.json', self.settings)
+        (dot / 'claude.json').write_text('{}')
+        self.os.symlink(dot / 'claude.json', self.cj)
+        self.sb.install(home=self.home)
+        self.sb.pretrust(self.proj)
+        self.assertTrue(self.settings.is_symlink())
+        self.assertTrue(self.cj.is_symlink())
+        s = json.loads((dot / 'settings.json').read_text())
+        self.assertEqual(s['model'], 'opus')
+        self.assertIn('UserPromptSubmit', s['hooks'])
+        self.assertTrue(json.loads((dot / 'claude.json').read_text())['projects'][self.sb.trust_key(self.proj)]['hasTrustDialogAccepted'])
+        self.sb.uninstall(home=self.home)
+        self.assertTrue(self.settings.is_symlink())
+        self.assertEqual(json.loads((dot / 'settings.json').read_text()), {'model': 'opus', 'hooks': {}})
+
+    def test_what_claude_code_wrote_meanwhile_is_kept(self):
+        self.cj.write_text(json.dumps({'numStartups': 1}))
+        real, wrote = self.sb._backup, []
+
+        def backup(p):  # between Switchboard's read and its write, Claude Code saves the file
+            if not wrote:
+                wrote.append(1)
+                self.cj.write_text(json.dumps({'numStartups': 2, 'projects': {'/elsewhere': {'hasTrustDialogAccepted': True}}}))
+            real(p)
+        self.sb._backup = backup
+        self.assertTrue(self.sb.pretrust(self.proj))
+        d = json.loads(self.cj.read_text())
+        self.assertEqual(d['numStartups'], 2)
+        self.assertEqual(set(d['projects']), {'/elsewhere', self.sb.trust_key(self.proj)})
+
+    def test_a_file_that_never_stops_changing_is_left_alone_with_a_clear_word(self):
+        self.cj.write_text('{}')
+        n = [0]
+
+        def backup(p):
+            n[0] += 1
+            self.cj.write_text(json.dumps({'n': n[0]}))
+        self.sb._backup = backup
+        with self.assertRaises(self.sb.CfgChanged) as e:
+            self.sb.grant_trust(self.proj)
+        self.assertIn('Try again', str(e.exception))
+        self.assertIsInstance(e.exception, OSError)
+        self.assertEqual(json.loads(self.cj.read_text()), {'n': n[0]})
+        self.assertEqual([f.name for f in self.tmp.glob('claude.json.*tmp')], [])
+
+    def test_only_the_newest_backups_are_kept_and_they_are_private(self):
+        self.cj.write_text('{}')
+        self.os.chmod(self.cj, 0o644)
+        old = [self.tmp / f'claude.json.bak-sb-202601{d:02d}-101010' for d in range(1, 9)]
+        for b in old:
+            b.write_text('{"old": true}')
+        once = self.tmp / 'claude.json.bak-sb-computer-use'
+        once.write_text('{}')
+        self.sb.pretrust(self.proj)
+        left = sorted(b.name for b in self.tmp.glob('claude.json.bak-sb-2*'))
+        self.assertEqual(len(left), 3)
+        self.assertEqual(left[:2], [old[-2].name, old[-1].name])
+        self.assertTrue(once.exists(), 'the one copy from before computer use is not a dated backup')
+        if self.os.name != 'nt':
+            for b in self.tmp.glob('claude.json.bak-sb-2*'):
+                self.assertEqual(self.mode(b), 0o600)

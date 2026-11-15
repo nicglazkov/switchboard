@@ -167,7 +167,35 @@ show_details() {
 say() { printf '%s\n' "$*"; }
 step() { printf '\n== %s\n' "$*"; }
 CUR="" DIE_MSG="" STEP_N=0 STEP_TOTAL=0 T0=0 LOG_MARK=0
+
+# An update keeps the server and hub it replaces (app.old, switchboard-hub.old) until the new server has answered.
+# If anything after the swap fails, they are put back, and started again if this run had stopped them: a failed
+# update leaves the server that was working, not the new files with nothing running.
+SWAPPED=0 STOPPED=0 PUT_BACK=0 SAID_BACK=0
+BACK_NOTE="The server that was here before was put back."
+put_back() {
+  [ "$SWAPPED" = 1 ] || return 0
+  SWAPPED=0
+  {
+    [ "$STOPPED" = 1 ] && "$BIN/switchboard" stop
+    if [ -d "$SHARE/app.old" ]; then
+      rm -rf "$SHARE/app.bad"
+      [ -d "$APP" ] && mv "$APP" "$SHARE/app.bad"
+      mv "$SHARE/app.old" "$APP" && rm -rf "$SHARE/app.bad"
+    fi
+    [ -f "$BIN/switchboard-hub.old" ] && mv -f "$BIN/switchboard-hub.old" "$BIN/switchboard-hub"
+    [ "$STOPPED" = 1 ] && [ "$NO_START" = 0 ] && "$BIN/switchboard" start
+  } >/dev/null 2>&1 || true
+  PUT_BACK=1
+}
+keep_new() {
+  SWAPPED=0
+  rm -rf "$SHARE/app.old" "$BIN/switchboard-hub.old"
+}
+
 die() {
+  put_back
+  if [ "$PUT_BACK" = 1 ] && [ "$SAID_BACK" = 0 ]; then SAID_BACK=1; set -- "$* $BACK_NOTE"; fi
   if [ "$FANCY" = 1 ]; then
     DIE_MSG="$*"
     [ -n "$CUR" ] || printf '\n  %s%s%s  %s\n\n' "$RED" "$G_BAD" "$R" "$*" >&2
@@ -195,11 +223,18 @@ run_step() {  # $1 = plain title, $2 = title on a terminal, $3 = what the spinne
 
 on_exit() {
   local rc=$?
+  if [ "$rc" = 0 ]; then keep_new; else put_back; fi
+  if [ "$FANCY" = 0 ]; then
+    # (a step that stopped by itself, not through die, which says this in its own line)
+    if [ "$PUT_BACK" = 1 ] && [ "$SAID_BACK" = 0 ]; then printf 'install-server.sh: stopped before it finished. %s\n' "$BACK_NOTE" >&2; fi
+    exit "$rc"
+  fi
   spin_stop
   if [ -n "$CUR" ]; then
     local el; el=$(fmt_ms $(($(now_ms) - T0)))
     step_line "$RED" "$G_BAD" "$(fit "$CUR")" "$el"
     [ -n "$DIE_MSG" ] && printf '           %s\n' "$DIE_MSG" >&3
+    if [ "$PUT_BACK" = 1 ] && [ "$SAID_BACK" = 0 ]; then printf '           %s\n' "$BACK_NOTE" >&3; fi
     if [ "$rc" = 130 ]; then
       printf '           Stopped.\n' >&3
     elif [ -s "$LOGF" ] && [ "$(wc -l <"$LOGF" | tr -d ' ')" -gt "$LOG_MARK" ]; then
@@ -211,10 +246,8 @@ on_exit() {
   fi
   exit "$rc"
 }
-if [ "$FANCY" = 1 ]; then
-  trap on_exit EXIT
-  trap 'exit 130' INT TERM
-fi
+trap on_exit EXIT
+trap 'exit 130' INT TERM
 
 VERSION=""
 if [ -f "$REPO/VERSION" ]; then VERSION=$(head -n 1 "$REPO/VERSION")
@@ -262,7 +295,7 @@ uninstall() {
     done
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
-  rm -rf "$APP" "$SHARE/downloads" "$SHARE/run" "$BIN/switchboard-hub" "$BIN/switchboard"
+  rm -rf "$APP" "$SHARE/app.old" "$SHARE/downloads" "$SHARE/run" "$BIN/switchboard-hub" "$BIN/switchboard-hub.old" "$BIN/switchboard"
 }
 if [ "$UNINSTALL" = 1 ]; then
   if [ "$FANCY" = 0 ]; then
@@ -471,10 +504,12 @@ s_server() {
   cp "$REPO/$SCH" "$NEW/$SCH"
   # What Settings > Server shows as this server's version (serverctl.py).
   if [ -f "$REPO/VERSION" ]; then cp "$REPO/VERSION" "$NEW/VERSION"; elif [ -n "$VERSION" ]; then printf '%s\n' "$VERSION" > "$NEW/VERSION"; fi
-  rm -rf "$SHARE/app.old"
-  [ -d "$APP" ] && mv "$APP" "$SHARE/app.old"
+  # A run that was killed between the two moves below left no server, only app.old: that one goes back first.
+  if [ ! -d "$APP" ] && [ -d "$SHARE/app.old" ]; then mv "$SHARE/app.old" "$APP"; fi
+  rm -rf "$SHARE/app.old" "$BIN/switchboard-hub.old"
+  # The old server stays as app.old until the new one has answered (see put_back).
+  if [ -d "$APP" ]; then mv "$APP" "$SHARE/app.old"; SWAPPED=1; fi
   mv "$NEW" "$APP"
-  rm -rf "$SHARE/app.old"
   install -m 755 "$HERE/switchboard" "$BIN/switchboard"
   printf 'export SWITCHBOARD_TZ=%s\n' "$TZNAME" > "$SHARE/env"
   say "Server in $APP"
@@ -496,6 +531,7 @@ s_hub() {
     [ -f "$HUB_BIN" ] || die "there is no hub at $HUB_BIN."
     "$HUB_BIN" --version >/dev/null 2>&1 || die "$HUB_BIN does not run on this machine (is it built for another system?)."
     install -m 755 "$HUB_BIN" "$BIN/switchboard-hub.new"
+    if [ "$SWAPPED" = 1 ] && [ -f "$BIN/switchboard-hub" ]; then cp -p "$BIN/switchboard-hub" "$BIN/switchboard-hub.old"; fi
     mv -f "$BIN/switchboard-hub.new" "$BIN/switchboard-hub"
     say "Hub: $("$BIN/switchboard-hub" --version)"
     detail "$("$BIN/switchboard-hub" --version), terminals and linking with a code"
@@ -550,7 +586,17 @@ desc_of() {
     downloads) echo "Switchboard downloads for Add a machine" ;;
   esac
 }
+# A path as text inside a plist.
+xml() { printf '%s\n' "$1" | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g'; }
+# A command for a unit's ExecStart=, each word in quotes: systemd splits on spaces, and reads % and $ specially,
+# and \ and " inside the quotes. (A home folder with a space in its name made a unit that could not start.)
+unit_cmd() {  # $1 = the words, with | between them
+  printf '%s\n' "$1" | tr '|' '\n' | sed -e 's/\\/\\\\/g' -e 's/"/\\"/g' -e 's/%/%%/g' -e 's/\$/$$/g' -e 's/.*/"&"/' | tr '\n' ' ' | sed 's/ $//'
+}
+unit_path() { printf '%s\n' "$1" | sed 's/%/%%/g'; }
+
 s_services() {
+  STOPPED=1
   "$BIN/switchboard" stop >/dev/null 2>&1 || true
   PARTS="server downloads"; [ "$NO_HUB" = 0 ] && PARTS="server hub downloads"
   if [ "$MODE" = systemd ]; then
@@ -560,7 +606,7 @@ s_services() {
       if ! echo "$PARTS" | grep -qw "$p"; then systemctl --user disable --now "$n" >/dev/null 2>&1 || true; rm -f "$U/$n.service"; continue; fi
       {
         printf '[Unit]\nDescription=%s\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\n' "$(desc_of "$p")"
-        printf 'WorkingDirectory=%s\nExecStart=%s\nEnvironment=SWITCHBOARD_TZ=%s\n' "$APP" "$(exec_of "$p" | sed 's/|/ /g')" "$TZNAME"
+        printf 'WorkingDirectory=%s\nExecStart=%s\nEnvironment=SWITCHBOARD_TZ=%s\n' "$(unit_path "$APP")" "$(unit_cmd "$(exec_of "$p")")" "$TZNAME"
         [ "$p" = hub ] && printf 'Environment=SWITCHBOARD_HUB_LISTEN=0.0.0.0:8132\n'
         printf 'Restart=always\nRestartSec=3\nNoNewPrivileges=yes\n\n[Install]\nWantedBy=default.target\n'
       } > "$U/$n.service"
@@ -573,7 +619,7 @@ s_services() {
     for p in server hub downloads; do
       f="$LA/com.switchboard.$p.plist"
       if ! echo "$PARTS" | grep -qw "$p"; then launchctl bootout "gui/$(id -u)/com.switchboard.$p" 2>/dev/null || true; rm -f "$f"; continue; fi
-      args=$(exec_of "$p" | tr '|' '\n' | sed 's#.*#    <string>&</string>#')
+      args=$(exec_of "$p" | tr '|' '\n' | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g' -e 's#.*#    <string>&</string>#')
       cat > "$f" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -582,15 +628,15 @@ s_services() {
   <key>ProgramArguments</key><array>
 $args
   </array>
-  <key>WorkingDirectory</key><string>$APP</string>
+  <key>WorkingDirectory</key><string>$(xml "$APP")</string>
   <key>EnvironmentVariables</key><dict>
-    <key>SWITCHBOARD_TZ</key><string>$TZNAME</string>
-    <key>PATH</key><string>$BIN:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <key>SWITCHBOARD_TZ</key><string>$(xml "$TZNAME")</string>
+    <key>PATH</key><string>$(xml "$BIN"):/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>$LOGS/$p.log</string>
-  <key>StandardErrorPath</key><string>$LOGS/$p.log</string>
+  <key>StandardOutPath</key><string>$(xml "$LOGS/$p.log")</string>
+  <key>StandardErrorPath</key><string>$(xml "$LOGS/$p.log")</string>
 </dict></plist>
 EOF
     done
@@ -601,18 +647,28 @@ EOF
 }
 
 ok=""
+# (the two settings are for this script's own tests)
+ANSWER_URL="${SWITCHBOARD_INSTALL_CHECK_URL:-http://127.0.0.1:8130/api/summary}"
+ANSWER_WAIT="${SWITCHBOARD_INSTALL_WAIT:-60}"
+case "$ANSWER_WAIT" in ''|*[!0-9]*) ANSWER_WAIT=60 ;; esac
 s_start() {
   "$BIN/switchboard" start >/dev/null
 
-  # The server answers within a few seconds of starting.
-  for _ in $(seq 1 30); do
-    if "$PY" -c 'import urllib.request; urllib.request.urlopen("http://127.0.0.1:8130/api/summary", timeout=2).close()' 2>/dev/null; then ok=1; break; fi
+  # The server answers within a few seconds of starting. An update waits a good while before it gives the new one
+  # up, since giving up puts the old one back.
+  for _ in $(seq 1 "$ANSWER_WAIT"); do
+    if "$PY" -c 'import sys, urllib.request; urllib.request.urlopen(sys.argv[1], timeout=2).close()' "$ANSWER_URL" 2>/dev/null; then ok=1; break; fi
     sleep 1
   done
   "$BIN/switchboard" status
   # On a terminal a failure shows the end of this step's output, so put the server's own last lines there.
   [ -n "$ok" ] || [ "$FANCY" = 0 ] || "$BIN/switchboard" logs 8 2>&1 | grep -v '^== ' || true
+  if [ -z "$ok" ] && [ "$SWAPPED" = 1 ]; then
+    SAID_BACK=1
+    die "the new server did not start, so the one that was here before was put back and started again. See: switchboard logs"
+  fi
   [ -n "$ok" ] || die "the server did not start. See: switchboard logs"
+  keep_new
   [ "$MODE" = systemd ] && ! loginctl show-user "$(id -un)" -p Linger 2>/dev/null | grep -q yes && \
     say "Tip: to keep Switchboard running while you're logged out, run: sudo loginctl enable-linger $(id -un)"
   case ":$PATH:" in *":$BIN:"*) ;; *) say "Tip: add $BIN to your PATH to use the switchboard command." ;; esac

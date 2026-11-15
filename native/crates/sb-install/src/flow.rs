@@ -126,14 +126,37 @@ fn dirs_for(p: &dyn Platform, dest: Option<&Path>) -> Vec<Dir> {
     }
 }
 
-/// Picks the folder and works out what this install means. Changes nothing.
+/// Puts back an app that an install which was cut short (a crash, the power) left moved aside with nothing in its
+/// place. Without this the next install saw no app, called itself a fresh install, and left the old copy hidden
+/// in the folder for good.
+fn put_back(p: &dyn Platform, dirs: &[Dir]) {
+    for d in dirs {
+        let dest = d.path.join(p.bundle_name());
+        let Some(aside) = swap::plan(&dest, &dest, true).backup else { continue };
+        if dest.symlink_metadata().is_err() && aside.symlink_metadata().is_ok() {
+            let _ = p.rename(&aside, &dest); // (if it cannot be, the install goes on as before)
+        }
+    }
+}
+
+/// Picks the folder and works out what this install means. Changes nothing, but for putting back an app that an
+/// earlier install left moved aside.
 pub fn prepare(p: &dyn Platform, opts: &Opts) -> Result<Setup, String> {
     let payload = p.find_payload(opts.app.as_deref())?;
     let version = p
         .bundle_version(&payload)
         .and_then(|v| Version::parse(&v))
         .ok_or_else(|| format!("{} has no version this installer can read.", payload.display()))?;
+    put_back(p, &dirs_for(p, opts.dest.as_deref()));
     let (dir, why_dir) = match find_installed(p, opts.dest.as_deref()) {
+        // Said now, before the running app is asked to quit for an update that then cannot be copied in.
+        Some((dir, app)) if !writable(&dir.path) => {
+            return Err(format!(
+                "{NAME} is installed at {}, and this account cannot change that folder, so it cannot update it. \
+                 Run this installer from an account that can, or remove that copy first. Nothing was changed.",
+                app.display()
+            ));
+        }
         Some((dir, _)) => (dir, None),
         None => pick_dir(&dirs_for(p, opts.dest.as_deref()))?,
     };
@@ -569,6 +592,45 @@ mod tests {
         let s = prepare(&t, &opts(&t, "1.0.0")).unwrap();
         assert_eq!(s.dir.label, "Applications in your home folder");
         assert!(s.why_dir.as_deref().unwrap().contains("needs an admin password"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn an_installed_copy_this_account_cannot_change_is_said_before_anything_happens() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = setup("readonly", false);
+        app(&t.root.join("Applications/Switchboard.app"), "0.8.3");
+        let lock =
+            |m| std::fs::set_permissions(t.root.join("Applications"), std::fs::Permissions::from_mode(m)).unwrap();
+        lock(0o555);
+        if writable(&t.root.join("Applications")) {
+            return; // running as root: every folder is writable
+        }
+        let said = prepare(&t, &opts(&t, "0.9.0")).map(|s| s.dir.label);
+        lock(0o755);
+        let no = said.unwrap_err();
+        assert!(no.contains("this account cannot change that folder"), "{no}");
+        assert!(no.contains("Applications/Switchboard.app") && no.ends_with("Nothing was changed."), "{no}");
+        // (and no second copy went into the home folder)
+        assert!(!t.root.join("home/Applications/Switchboard.app").exists());
+    }
+
+    #[test]
+    fn an_app_left_moved_aside_by_a_cut_short_install_is_put_back() {
+        let t = setup("aside", false);
+        // as a power cut in the middle of an update leaves the folder: the old app aside, nothing in its place
+        app(&t.root.join("Applications/.Switchboard.app.old"), "0.8.3");
+        let s = prepare(&t, &opts(&t, "0.9.0")).unwrap();
+        assert_eq!(s.kind, Kind::Update { from: Version::parse("0.8.3").unwrap() }, "{}", s.title());
+        assert_eq!(crate::platform::info_plist_version(&s.dest).as_deref(), Some("0.8.3"));
+        install(&t, &s, Choices::default(), &mut || false, &mut |_| {}).unwrap();
+        assert_eq!(crate::platform::info_plist_version(&s.dest).as_deref(), Some("0.9.0"));
+        assert!(!t.root.join("Applications/.Switchboard.app.old").exists(), "nothing left behind");
+        // an app that is in place is never replaced by a leftover
+        app(&t.root.join("Applications/.Switchboard.app.old"), "0.1.0");
+        let s = prepare(&t, &opts(&t, "0.9.1")).unwrap();
+        assert_eq!(crate::platform::info_plist_version(&s.dest).as_deref(), Some("0.9.0"));
+        drop(s);
     }
 
     #[test]

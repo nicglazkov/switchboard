@@ -143,8 +143,40 @@ fn under_of(flags: Flags) -> Option<Under> {
 /// A run of text being collected for one shaped line.
 struct Seg {
     col: usize,
+    /// The cells collected so far (one per character), kept beside the text: counting its characters for every
+    /// cell added made a long row cost the square of its length.
+    cells: usize,
     text: String,
     runs: Vec<TextRun>,
+}
+
+impl Seg {
+    fn new(col: usize) -> Seg {
+        Seg { col, cells: 0, text: String::new(), runs: Vec::new() }
+    }
+
+    /// Text at `col` goes on from where this segment ends.
+    fn joins(&self, col: usize) -> bool {
+        self.col + self.cells == col
+    }
+
+    /// Adds one cell's character. `font` is asked for only when the look starts a new run (a font is not free to
+    /// copy, and most cells go on in the run before).
+    fn push(&mut self, s: &str, fg: Hsla, weight: FontWeight, style: FontStyle, font: impl FnOnce() -> Font) {
+        self.text.push_str(s);
+        self.cells += 1;
+        match self.runs.last_mut() {
+            Some(r) if r.color == fg && r.font.weight == weight && r.font.style == style => r.len += s.len(),
+            _ => self.runs.push(TextRun {
+                len: s.len(),
+                font: font(),
+                color: fg,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            }),
+        }
+    }
 }
 
 struct Rows<'a> {
@@ -216,27 +248,15 @@ impl<'a> Rows<'a> {
     }
 
     fn push_text(&mut self, window: &Window, line: usize, col: usize, s: &str, look: &Look) {
-        let joins = self.seg.as_ref().is_some_and(|g| g.col + g.text.chars().count() == col);
-        if !joins {
+        if !self.seg.as_ref().is_some_and(|g| g.joins(col)) {
             self.flush_seg(window, line);
-            self.seg = Some(Seg { col, text: String::new(), runs: Vec::new() });
+            self.seg = Some(Seg::new(col));
         }
-        let font = self.styled(look);
+        let weight = if look.bold { FontWeight::BOLD } else { self.font.weight };
+        let style = if look.italic { FontStyle::Italic } else { self.font.style };
+        let base = &self.font;
         let seg = self.seg.as_mut().expect("segment");
-        seg.text.push_str(s);
-        match seg.runs.last_mut() {
-            Some(r) if r.color == look.fg && r.font.weight == font.weight && r.font.style == font.style => {
-                r.len += s.len()
-            }
-            _ => seg.runs.push(TextRun {
-                len: s.len(),
-                font,
-                color: look.fg,
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            }),
-        }
+        seg.push(s, look.fg, weight, style, || Font { weight, style, ..base.clone() });
     }
 
     /// The face for a cell: bold and italic are the font's own.
@@ -282,6 +302,8 @@ pub struct CursorLook {
     pub visible: bool,
     /// Off while a Windows terminal's cursor has not stayed shown long enough to draw (settle.rs).
     pub settled: bool,
+    /// Drawn although the program hides it this moment: on a Windows terminal, while typing, through a repaint.
+    pub held: bool,
 }
 
 pub fn build(
@@ -299,6 +321,9 @@ pub fn build(
     let sel = content.selection;
     let mode = content.mode;
     let mut cursor = content.cursor;
+    if look.held && cursor.shape == CursorShape::Hidden {
+        cursor.shape = t.term.cursor_style().shape;
+    }
     // A program that sets its own shape (vim's bar in insert mode) wins; the default block takes the user's style.
     if cursor.shape == CursorShape::Block {
         cursor.shape = look.shape;
@@ -409,7 +434,7 @@ pub fn build(
     // The cursor: a block when focused (the character redrawn in the background color), an outline when not.
     let show = t.phase == Phase::Open
         && cursor.shape != CursorShape::Hidden
-        && mode.contains(TermMode::SHOW_CURSOR)
+        && (mode.contains(TermMode::SHOW_CURSOR) || look.held)
         && look.settled
         && (look.visible || !t.focused);
     if show && let Some(vp) = term::point_to_viewport(offset, cursor.point) {
@@ -784,7 +809,30 @@ fn special(u: u32, x: f32, y: f32, w: f32, h: f32, cx: f32, cy: f32, lt: f32, fg
 
 #[cfg(test)]
 mod tests {
-    use super::ARMS;
+    use super::{ARMS, Seg};
+    use gpui::{FontStyle, FontWeight, font, hsla};
+
+    #[test]
+    fn a_long_run_is_one_run_and_copies_its_font_once() {
+        let (white, red) = (hsla(0., 0., 1., 1.), hsla(0., 1., 0.5, 1.));
+        let mut fonts = 0;
+        let mut seg = Seg::new(3);
+        for i in 0..5000 {
+            assert!(seg.joins(3 + i), "cell {i} goes on from the last");
+            seg.push("x", white, FontWeight::NORMAL, FontStyle::Normal, || {
+                fonts += 1;
+                font("Menlo")
+            });
+        }
+        assert_eq!((seg.cells, seg.text.len(), seg.runs.len(), seg.runs[0].len), (5000, 5000, 1, 5000));
+        assert_eq!(fonts, 1, "the cells after the first go on in its run");
+        assert!(!seg.joins(5002) && !seg.joins(5004), "a gap (a space, a box character) starts a new segment");
+        // a new color or weight starts a run, in the same segment
+        seg.push("y", red, FontWeight::NORMAL, FontStyle::Normal, || font("Menlo"));
+        seg.push("z", red, FontWeight::BOLD, FontStyle::Normal, || font("Menlo").bold());
+        assert_eq!(seg.runs.iter().map(|r| r.len).collect::<Vec<_>>(), [5000, 1, 1]);
+        assert!(seg.joins(5005));
+    }
 
     #[test]
     fn arms_table_is_whole() {
