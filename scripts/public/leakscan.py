@@ -28,6 +28,8 @@ DOC_IPS = re.compile(r'^(192\.0\.2|198\.51\.100|203\.0\.113)\.')
 PLACEHOLDER_USERS = {'you', 'yourname', 'shared', 'public', 'runner', 'example'}
 OK_EMAIL_DOMAINS = ('example.com', 'example.org', 'example.net', 'users.noreply.github.com',
                     'anthropic.com', 'example', '.local', '.lan', '.internal', '.ts.net')
+# GitHub's own address: it commits pull request merge refs and web-UI merges, so it shows up in history.
+OK_EMAILS = {'noreply@github.com'}
 OK_TAILNETS = {'example', 'tail0000', 'tail1234', 'your-tailnet'}
 FILE_SUFFIXES = ('.png', '.jpg', '.jpeg', '.svg', '.gif', '.webp', '.ico', '.icns', '.pdf')
 
@@ -69,7 +71,8 @@ def allowed(rule, m):
         return m.group(2).lower() in PLACEHOLDER_USERS or m.group(2).startswith(('$', '%', '<'))
     if rule == 'email address':
         d = s.split('@', 1)[1].lower()
-        return d.endswith(OK_EMAIL_DOMAINS) or d.endswith(FILE_SUFFIXES) or s.lower().startswith('git@')
+        return (s.lower() in OK_EMAILS or d.endswith(OK_EMAIL_DOMAINS) or d.endswith(FILE_SUFFIXES)
+                or s.lower().startswith('git@'))
     if rule == 'tailnet name':
         return m.group(1) in OK_TAILNETS
     return False
