@@ -299,6 +299,7 @@ class Fleet:
         # What each chat used this week ("Most used this week"): the week's start as the last poll knew it, each
         # machine's last answer (kept for the week, so a machine that is offline still counts), and what was asked.
         self._since, self.spend, self._spend_asked, self.spend_file = None, {}, {}, None
+        self._spend_saving = threading.Lock()  # one writer of the file at a time, each writing what is true then
         self._save_lock = threading.Lock()  # saves go out one at a time, each with the list as it is then
         self._stopped = {}  # (machine, sid): when Stop succeeded; shown stopped at once, not at the next poll
 
@@ -525,13 +526,18 @@ class Fleet:
             old = self.spend.get(name)
             self.spend[name] = new
             same = old and {k: v for k, v in old.items() if k != 'at'} == {k: v for k, v in new.items() if k != 'at'}
-            keep = None if same or self.spend_file is None else json.dumps(self.spend)
+            keep = not same and self.spend_file is not None
         if keep:
-            try:
-                durable.put(self.spend_file, keep,
-                            tmp=self.spend_file.with_name(f'{self.spend_file.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
-            except OSError:
-                pass
+            # Machines answer side by side. Each writer takes its copy only once it is its turn, or an older copy
+            # written last would drop the machine that answered in between.
+            with self._spend_saving:
+                with self.lock:
+                    text = json.dumps(self.spend)
+                try:
+                    durable.put(self.spend_file, text,
+                                tmp=self.spend_file.with_name(f'{self.spend_file.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
+                except OSError:
+                    pass
 
     def spend_view(self):
         """What the machines said their chats used this week: {since, reports: {machine: answer}, able, machines,

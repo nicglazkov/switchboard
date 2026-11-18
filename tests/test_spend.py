@@ -384,6 +384,31 @@ class TopTest(ServerBase):
         f2.poll()
         self.assertEqual(sorted((r['sid'], r['weighted']) for r in app2.get('/api/usage')['top']['rows']), [(SID_A, 600), (SID_C, 200)])
 
+    def test_two_machines_answering_at_once_are_both_kept(self):
+        # The first writer is held up (a slow disk) while the second answers: the file still ends with both.
+        import threading, time
+        from unittest import mock
+        real, first, n = fleet.durable.put, threading.Event(), [0]
+
+        def slow(path, data, **kw):
+            n[0] += 1
+            if n[0] == 1:
+                first.set()
+                time.sleep(0.3)
+            return real(path, data, **kw)
+        self.m.spend = {'studio': answer([(SID_A, 600)]), 'laptop': answer([(SID_C, 200)])}
+        self.poll(2)  # the week is known and both were asked
+        f = self.app.fleet
+        with mock.patch.object(fleet.durable, 'put', slow):
+            a = threading.Thread(target=f._spend_got, args=('studio', answer([(SID_A, 601)]), self.clock[0]))
+            a.start()
+            self.assertTrue(first.wait(5))
+            f._spend_got('laptop', answer([(SID_C, 201)]), self.clock[0])
+            a.join()
+        kept = json.loads(f.spend_file.read_text())
+        self.assertEqual({k: v['total'] for k, v in kept.items()}, {k: v['total'] for k, v in f.spend.items()})
+        self.assertEqual(sorted(kept), ['laptop', 'studio'])
+
     def test_the_weekly_reset_drops_what_an_absent_machine_said_about_last_week(self):
         self.m.spend = {'studio': answer([(SID_A, 600, 'Kitchen')]), 'laptop': answer([(SID_C, 200, 'Trip')])}
         self.poll(2)
