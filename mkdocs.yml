@@ -31,7 +31,7 @@ theme:
   icon:
     repo: fontawesome/brands/github
   font:
-    text: Instrument Sans
+    text: Inter Tight
     code: JetBrains Mono
   palette:
     - media: "(prefers-color-scheme)"

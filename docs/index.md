@@ -119,7 +119,7 @@ by itself. [Get the app](apps.md)</li>
 
 <div class="grid cards" markdown>
 
--   :material-home-lock-outline:{ .lg .middle } **Runs on your own computers**
+-   :material-shield-home-outline:{ .lg .middle } **Runs on your own computers**
 
     ---
 
