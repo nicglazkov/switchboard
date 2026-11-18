@@ -9,6 +9,8 @@ get()/post() for the /api/library routes."""
 import base64, hashlib, io, json, os, re, shutil, tarfile, threading, time, traceback, uuid, zlib
 from pathlib import Path
 
+import durable
+
 TOOL_RE = re.compile(r'[a-z0-9][a-z0-9-]{0,39}')
 SECRET_NAME_RE = re.compile(r'[A-Za-z_][A-Za-z0-9_]{0,63}')
 SID_RE = re.compile(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}')
@@ -59,9 +61,7 @@ def jload(p, default):
 
 def jsave(p, obj):
     p = Path(p)
-    tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-    tmp.write_text(json.dumps(obj, indent=1))
-    os.replace(tmp, p)
+    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
 
 
 def ck(machine, sid):
@@ -296,9 +296,7 @@ class Library:
             v = max([x.get('v') or 0 for x in t['versions']] + [0]) + 1
             p = self._bundle(tool, v)
             p.parent.mkdir(parents=True, exist_ok=True)
-            tmp = p.with_name(f'.{v}.{uuid.uuid4().hex}.tmp')
-            tmp.write_bytes(blob)
-            os.replace(tmp, p)
+            durable.put(p, blob, tmp=p.with_name(f'.{v}.{uuid.uuid4().hex}.tmp'))
             t.update(description=(description or info['description'] or t.get('description') or '')[:500], kinds=info['kinds'],
                      mode=info['mode'], secrets=info['secrets'], skill_secrets=info['skill_secrets'], latest=v)
             t.setdefault('auto', True)

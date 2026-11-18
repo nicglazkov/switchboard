@@ -296,6 +296,10 @@ pub struct Session {
     pub keep: bool,
     /// Starred: its tab sits at the left and is restored on launch even when the chat has stopped.
     pub star: bool,
+    /// Not running, and last active before its machine last started: the restart (a power cut, an update) ended
+    /// it, nobody stopped it. A tab it had comes back on launch saying so, with Resume.
+    #[serde(default)]
+    pub cut: bool,
     /// Asked for Claude in Chrome, but Claude Code started the chat without it.
     #[serde(default)]
     pub chrome_missing: bool,
@@ -1326,6 +1330,12 @@ pub fn session(s: &ApiSession, m: &ApiMachine, label: &str, root_lbl: &str, fetc
     session_at(s, m, label, root_lbl, fetched_at, 0.0)
 }
 
+/// Whether a chat was ended by its machine restarting: it is not running, and the last thing it did came before
+/// the machine started. `boot` is None when the machine does not say (an older agent), and then nothing is.
+pub fn cut_by_restart(running: bool, active: f64, boot: Option<f64>) -> bool {
+    !running && active > 0.0 && boot.is_some_and(|b| active < b)
+}
+
 pub fn session_at(
     s: &ApiSession,
     m: &ApiMachine,
@@ -1447,6 +1457,7 @@ pub fn session_at(
         flags: Flags::from_api(s.flags.as_ref()),
         keep: s.keep.unwrap_or(false),
         star: s.star.unwrap_or(false),
+        cut: cut_by_restart(alive(s.kind.as_deref(), status), active, local(m.boot)),
         chrome_missing: s.chrome_missing.unwrap_or(false),
         group: s.group.clone().filter(|g| !g.is_empty()),
         reaped: Reaped::from_api(s.reaped.as_ref()),
@@ -2148,6 +2159,28 @@ mod tests {
         assert!(session(&a, &m, "Studio", "Claude", NOW).star);
         let a: ApiSession = serde_json::from_str(r#"{"sid": "x", "status": "idle"}"#).unwrap();
         assert!(!session(&a, &m, "Studio", "Claude", NOW).star);
+    }
+
+    #[test]
+    fn a_chat_its_machines_restart_ended_is_told_apart() {
+        let boot = NOW - 600.0;
+        let m = ApiMachine { name: "studio".into(), boot: Some(boot), ..Default::default() };
+        let at = |status: &str, active: f64| {
+            let a: ApiSession = serde_json::from_str(&format!(
+                r#"{{"sid": "x", "kind": "background", "status": "{status}", "active": {active}, "mtime": {active}}}"#
+            ))
+            .unwrap();
+            session(&a, &m, "Studio", "Claude", NOW).cut
+        };
+        assert!(at("stopped", boot - 3000.0), "last active before the restart, and not running");
+        assert!(!at("stopped", boot + 60.0), "stopped after the restart: somebody stopped it");
+        assert!(!at("idle", boot - 3000.0), "running again");
+        // a machine that does not say when it started (an older agent or server): nothing is taken for cut off
+        let m = ApiMachine { name: "studio".into(), ..Default::default() };
+        let a: ApiSession =
+            serde_json::from_str(r#"{"sid": "x", "kind": "background", "status": "stopped", "active": 5}"#).unwrap();
+        assert!(!session(&a, &m, "Studio", "Claude", NOW).cut);
+        assert!(!cut_by_restart(false, 0.0, Some(boot)), "no time known for the chat");
     }
 
     #[test]

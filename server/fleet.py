@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import durable
 import options as options_mod  # what a machine says about its compact window, checked
 
 GUARD_CTX = 150_000
@@ -176,9 +177,8 @@ class FleetConfig:
     def save(self, machines):
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = self.path.with_name(f'.{self.path.name}.{os.getpid()}.tmp')
-            tmp.write_text(json.dumps({'machines': [clean_machine(m) for m in machines if clean_machine(m)]}, indent=1))
-            os.replace(tmp, self.path)
+            durable.put(self.path, json.dumps({'machines': [clean_machine(m) for m in machines if clean_machine(m)]}, indent=1),
+                        tmp=self.path.with_name(f'.{self.path.name}.{os.getpid()}.tmp'))
 
 
 CHILD_WORK = 15 * 60      # a background chat whose turn is over still works while its subagents or commands wrote this recently
@@ -328,7 +328,7 @@ class Fleet:
     @staticmethod
     def _blank():
         return {'online': None, 'error': None, 'sessions': [], 'replaced': [], 'limits': None, 'account': None, 'updated': None, 'as_of': None, 'skew': 0.0, 'root': None,
-                'launcher': None, 'mem': None, 'features': [], 'versions': None, 'models': None, 'setup': [], 'root_set': None, 'root_suggest': None, 'agents_ok': True}
+                'launcher': None, 'mem': None, 'features': [], 'versions': None, 'models': None, 'setup': [], 'root_set': None, 'root_suggest': None, 'agents_ok': True, 'boot': None}
 
     def config(self):
         """The machine list as saved: in order, without what the machines report."""
@@ -528,9 +528,8 @@ class Fleet:
             keep = None if same or self.spend_file is None else json.dumps(self.spend)
         if keep:
             try:
-                tmp = self.spend_file.with_name(f'{self.spend_file.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-                tmp.write_text(keep)
-                os.replace(tmp, self.spend_file)
+                durable.put(self.spend_file, keep,
+                            tmp=self.spend_file.with_name(f'{self.spend_file.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
             except OSError:
                 pass
 
@@ -580,7 +579,8 @@ class Fleet:
                    'root_suggest': r.get('root_suggest') if isinstance(r.get('root_suggest'), str) else None,
                    # False: Claude Code there could not be asked what runs, so no row's kind or status says
                    # anything (a chat with neither is not a stopped one). An agent that never says is believed.
-                   'agents_ok': r.get('agents_ok') is not False}
+                   'agents_ok': r.get('agents_ok') is not False,
+                   'boot': self._boot(name, got, r.get('up'))}
         except Exception as e:
             upd, r = {'online': False, 'error': _short(e), 'asked': asked}, None
         if r is not None:
@@ -588,6 +588,19 @@ class Fleet:
             if 'spend' in req:
                 self._spend_got(name, r.get('spend'), upd['as_of'])
         self.store(name, upd)
+
+    def _boot(self, name, got, up):
+        """When the machine last started, by this server's clock, from the uptime it reports (None from an agent
+        that does not say). Worked out afresh at every answer it would wander by the answer's travel time, and
+        every wander would count as news for the apps: the time already held stands while the new one is within
+        two minutes of it."""
+        up = _num(up)
+        if up is None or up > 20 * 365 * 86400:
+            return None
+        boot = round(got - up)
+        with self.lock:
+            had = (self.state.get(name) or {}).get('boot')
+        return had if isinstance(had, (int, float)) and abs(had - boot) < 120 else boot
 
     def store(self, name, upd):
         """Keep what a machine said; tell the server when it differs from last time (not just its timestamps)."""
@@ -1207,9 +1220,7 @@ class WeekHistory:
                 return False
             self.samples = (self.samples + [[float(now), float(pct)]])[-self.KEEP:]
             try:
-                tmp = self.path.with_name(f'{self.path.name}.{os.getpid()}.tmp')
-                tmp.write_text(json.dumps({'reset': self.reset, 'samples': self.samples}))
-                os.replace(tmp, self.path)
+                durable.put(self.path, json.dumps({'reset': self.reset, 'samples': self.samples}))
             except OSError:
                 pass  # kept in memory; the next sample writes the file again
             return True
@@ -1229,9 +1240,7 @@ class WeekHistory:
         self.weeks = ([week] + [w for w in self.weeks if abs(w['reset'] - old) > RESET_SLACK])[:self.WEEKS]
         self.weeks.sort(key=lambda w: -w['reset'])
         try:
-            tmp = self.archive.with_name(f'{self.archive.name}.{os.getpid()}.tmp')
-            tmp.write_text(json.dumps({'weeks': self.weeks}))
-            os.replace(tmp, self.archive)
+            durable.put(self.archive, json.dumps({'weeks': self.weeks}))
         except OSError:
             pass  # kept in memory until the next archive
 

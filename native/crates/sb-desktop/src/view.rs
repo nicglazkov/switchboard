@@ -1625,7 +1625,7 @@ impl BoardView {
             if !seen.insert(key.clone()) {
                 continue;
             }
-            let known = self.app.read(cx).snap.session(key).map(|s| (s.alive, s.star));
+            let known = self.app.read(cx).snap.session(key).map(|s| (s.alive, s.star || s.cut));
             match reopen(known, live) {
                 Reopen::Wait => {
                     self.restore_left.push(key.clone());
@@ -1669,12 +1669,24 @@ impl BoardView {
         // board loses its tab, unless its terminal is attached after all.
         for key in std::mem::take(&mut self.restore_check) {
             let key = self.app.read(cx).snap.latest_key(&key);
-            let known = self.app.read(cx).snap.session(&key).map(|s| (s.alive, s.star));
+            let known = self.app.read(cx).snap.session(&key).map(|s| (s.alive, s.star || s.cut));
             let Some(i) = self.tabs.iter().position(|t| t.read(cx).key.as_deref() == Some(key.as_str())) else {
                 continue;
             };
             let attached = self.tabs[i].read(cx).live();
             if keeps_tab(known, attached) {
+                if !attached && matches!(known, Some((false, _))) {
+                    // It stays (starred, or cut off when its machine restarted), but it is not running: the tab
+                    // that was trying to attach becomes the one that says so, with Resume, in the same place.
+                    let old = std::mem::replace(
+                        &mut self.tabs[i],
+                        cx.new(|cx| TermTab::new(Start::Stopped(key.clone()), cx)),
+                    );
+                    old.update(cx, |t, _| t.detach());
+                    self.unwatch_tab(&old);
+                    let new = self.tabs[i].clone();
+                    self.watch_tab(&new, cx);
+                }
                 continue;
             }
             log::info!("tabs: the chat of a reopened tab has stopped since; its tab goes");
@@ -1692,7 +1704,8 @@ impl BoardView {
             if self.tabs.iter().any(|t| t.read(cx).key.as_deref() == Some(key.as_str())) {
                 continue;
             }
-            let (alive, star) = self.app.read(cx).snap.session(&key).map(|s| (s.alive, s.star)).unwrap_or_default();
+            let (alive, star) =
+                self.app.read(cx).snap.session(&key).map(|s| (s.alive, s.star || s.cut)).unwrap_or_default();
             let start = if alive {
                 Start::Chat(key)
             } else if star {
@@ -3912,7 +3925,8 @@ const FRAME_LATE: std::time::Duration = std::time::Duration::from_secs(5);
 enum Reopen {
     /// Its chat runs: the terminal opens.
     Open,
-    /// Its chat stopped and is starred: the tab comes back saying so, with Resume.
+    /// Its chat stopped and is starred, or was cut off when its machine restarted: the tab comes back saying so,
+    /// with Resume.
     Stopped,
     /// Its chat stopped or left the board: no tab (reopening would mean resuming it, which costs tokens).
     Skip,
@@ -3920,8 +3934,8 @@ enum Reopen {
     Wait,
 }
 
-/// `known`: the chat as the board has it (running, starred), or None when it is not there. `live`: the board is the
-/// server's own, not the snapshot saved by the last launch.
+/// `known`: the chat as the board has it (running; starred or cut off by a restart), or None when it is not there.
+/// `live`: the board is the server's own, not the snapshot saved by the last launch.
 fn reopen(known: Option<(bool, bool)>, live: bool) -> Reopen {
     match known {
         Some((true, _)) => Reopen::Open,

@@ -69,6 +69,11 @@ and `switchboard logs` shows the last lines of each. On a Windows server, use
 
 ## Using it
 
+??? failure "A tab says “Stopped when Studio restarted”"
+    The computer it names (Studio here) lost power or restarted while the chat was running, which ended it. Nothing is lost:
+    **Resume** starts it again where it was. Chats you stopped yourself don't get this tab. A Windows computer
+    only rejoins after someone signs in, since its Switchboard starts at sign-in.
+
 ??? failure "A message I typed didn't go through"
     It's probably held: the chat is big and cold, so the message would read all of it again. The terminal shows
     what it would cost. Send it again or type `go` within 15 minutes, or type `/clear` to start fresh.

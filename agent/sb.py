@@ -451,10 +451,56 @@ def _replace(tmp, p):
         raise
 
 
-def _jput_text(p, text):
+def _to_disk(f):
+    """The file's contents, forced to disk before it is renamed over the old one. Without this a power cut can keep
+    the rename and lose the contents, and the file comes back as zeros (it happened: November 2026, on Windows)."""
+    try:
+        f.flush()
+        os.fsync(f.fileno())
+    except OSError:
+        pass  # a disk that cannot be asked (some network folders): the write itself still stands
+
+
+def _write_then_replace(p, raw):
     tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-    tmp.write_text(text, encoding='utf-8')
+    try:
+        with open(tmp, 'wb') as f:
+            f.write(raw)
+            _to_disk(f)
+    except BaseException:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
     _replace(tmp, p)
+
+
+def _jput_text(p, text):
+    _write_then_replace(p, text.encode('utf-8'))
+
+
+TMP_ORPHAN_AGE = 3600  # a write takes milliseconds: an hour-old temp file has no writer
+
+
+def sweep_tmp(now=None):
+    """Temp files of writers that died before the rename (a kill, a power cut) are never used again: remove them."""
+    now, gone = now or time.time(), 0
+    pq = paths_q()
+    for d in (paths()['state'], paths()['handoffs'], pq['queue'], pq['seeds'], SB_HOME):
+        try:
+            names = [n for n in os.listdir(d) if n.endswith('.tmp')]
+        except OSError:
+            continue
+        for n in names:
+            try:
+                f = Path(d) / n
+                if f.is_file() and now - f.stat().st_mtime > TMP_ORPHAN_AGE:
+                    f.unlink()
+                    gone += 1
+            except OSError:
+                pass
+    return gone
 
 
 # ---- claim files. One small file says who is doing a job only one process may do (the launch queue, a chat's
@@ -652,6 +698,15 @@ def _generate_handoff(transcript_path, session_id, runner=None):
     out = handoff_path(session_id)
     _jput_text(out, head + summary + last + verbatim + footer)
     return out
+
+
+def handoff_in_child(transcript_path, session_id):
+    """Write the note in a process of its own and wait for it. Reading a long chat takes memory that a process
+    never gives back, and the launcher stays for good: this way it stays small however many chats it carries over."""
+    argv = [sys.executable, str(Path(__file__).resolve()), 'handoff', transcript_path, session_id]
+    r = run_tree(argv, None, HANDOFF_CHILD_S, env=claude_env(), cwd=str(Path.home()))
+    if r.returncode != 0:
+        raise RuntimeError(f'the summary run ended with {r.returncode}: {(r.stderr or "")[-300:]!r}')
 
 
 def spawn_handoff(transcript_path, session_id):
@@ -1545,9 +1600,7 @@ def _jget(p):
 
 
 def _jput(p, obj):
-    tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-    tmp.write_text(json.dumps(obj))
-    _replace(tmp, p)
+    _write_then_replace(p, json.dumps(obj).encode('utf-8'))
 
 
 def held_get(sid):
@@ -2344,6 +2397,7 @@ def cfg_write(p, data):
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             f.write(json.dumps(data, indent=2))
+            _to_disk(f)  # Claude Code's own settings: never left as zeros by a power cut
         if not IS_WIN:
             os.chmod(tmp, mode)
         seen = _cfg_seen.pop((str(p), threading.get_ident()), _cfg_seen)  # this thread's own reading, taken once
@@ -2657,6 +2711,7 @@ def has_schedule(path):
 
 
 IDLE_STOP_MIN = 2 * 3600  # the shortest wait the server ever uses, and the one assumed when it names none
+HELD_FOR = 6 * 3600  # a held message nobody answered counts for this long, as on the server (guard.py)
 ATTACH_HOSTS = ('node', 'bun')  # what else a `claude attach` can show up as in the process list (Windows)
 
 
@@ -2705,6 +2760,12 @@ def idle_stop_refusal(sid, a, now, agents, idle_s=None):
         return 'It was started or resumed a short while ago.'
     if now - used < wait:  # by this machine's own clock, whatever the server's says
         return 'It was used a short while ago.'
+    # A message the guard holds was typed into this chat, but blocked before it reached the transcript: nothing
+    # above knows of it, and the server only does if the hook's ping arrived and it has not restarted since.
+    # One nobody answered is not cleared, so it stops counting after HELD_FOR (or the wait, when that is longer).
+    held = held_get(sid)
+    if held is not None and not (isinstance(held, dict) and num(held.get('ts')) and now - held['ts'] >= max(wait, HELD_FOR)):
+        return 'A message is held for it.'
     b = busy_report(sid, now, agents, procs, transcript=tp)
     if b['live']:
         return b['summary'] or 'Something is still running in it.'
@@ -5252,7 +5313,7 @@ def rpc(req, now, agents=None):
                     'launcher': {'alive': None} if IS_WIN else launcher_status(now), 'mem': mem_or_none(ags, procs) if known else None,
                     'features': list(AGENT_FEATURES), 'versions': {'agent': agent_version(), 'claude': claude_version()},
                     'models': models_or_none(), 'root_suggest': None if root_is_set() else root_suggest(),
-                    'compact': compact_or_none(), 'spend': spend}
+                    'compact': compact_or_none(), 'spend': spend, 'up': uptime_s()}
         if verb == 'folders':
             list_sessions(now, _NoAgents())  # for the index only: nobody was asked, so nothing counts as stopped
             if 'parent' in req:  # the tree: one level at a time
@@ -5503,6 +5564,11 @@ def model_ok(model):
 
 
 JOB_QUEUED_TTL, JOB_RUNNING_TTL, QUEUE_LOCK_TTL = 600, 900, 900
+# Jobs asked for together run together. What takes long is the summary a Start fresh writes (most of a minute,
+# all of it waiting for Claude), so a few are written at once; the launch itself takes seconds and stays one at a
+# time, because launches share this machine's Claude Code service and the per-folder notes a new chat picks up.
+SUMMARY_PARALLEL, JOBS_PARALLEL = 3, 12
+HANDOFF_CHILD_S = 780  # the summary's own process: longer than Claude's own limit there, shorter than a job's
 SEED_RE = re.compile(r'^\[switchboard:([0-9a-f]{12})\]')
 ANSI_RE = re.compile(r'\x1b\[[0-9;?]*[A-Za-z]')
 LAUNCHER_LABEL = 'com.glazkov.switchboard.launcher'  # leakscan: allow (sb.py ships alone: keep equal to launcher_id in branding.toml)
@@ -6445,7 +6511,47 @@ def wait_live(bg_id, wait=25, sleep=time.sleep):
         sleep(1)
 
 
-def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None):
+class _Turn:
+    """A job's turn at launching: taken once its summary is there, given back when the chat is up (before the
+    wait for its link) or the job ends, whichever comes first. With no gate it is nothing at all."""
+
+    def __init__(self, gate):
+        self.gate, self.held = gate, False
+
+    def take(self):
+        if self.gate is not None and not self.held:
+            self.gate.acquire()
+            self.held = True
+
+    def give(self):
+        if self.held:
+            self.held = False
+            self.gate.release()
+
+
+class _NoLimit:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None, gate=None, slots=None):
+    """One queued job, start to finish. gate: a lock the launch step holds, so chats come up one at a time.
+    slots: a limit on the summaries being written at once. Both are the queue's, shared by the jobs it runs."""
+    turn = _Turn(gate)
+
+    def url(bg):
+        turn.give()  # the chat is up: the next one may launch while this one's link is looked up
+        return find_url(bg)
+    try:
+        return _do_job(job, runner, url, make_handoff, now, live, progress, turn, slots or _NoLimit())
+    finally:
+        turn.give()
+
+
+def _do_job(job, runner, find_url, make_handoff, now, live, progress, turn, slots):
     live = live or wait_live
     verb = job['verb']
     carried = []  # flags nobody asked for just now: the old chat's own, brought along (dropped if they stop the launch)
@@ -6462,7 +6568,8 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
     if verb == 'compact':  # one note for the whole thread, then a new chat from it in the newest chat's folder
         if progress:
             progress({'step': 'summary', 'note': 'Writing one summary of the whole thread, a minute or two'})
-        note = make_thread_note(combine_thread(job['pieces']), job['sid'])
+        with slots:
+            note = make_thread_note(combine_thread(job['pieces']), job['sid'])
         text = f'(Handoff file: {note})\n\n' + note.read_text(encoding='utf-8')
         job = dict(job, verb='start', handoff_text=text, pieces=None, compacted=job['sid'])
         c = carry_over(job['transcript'], job.get('model_was'), job['sid'])  # the newest chat's own setup comes along
@@ -6472,9 +6579,11 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
     if verb in ('fresh', 'handoff') and not handoff_is_fresh(job['sid'], job['transcript']):
         if progress:  # written only now that Start fresh was picked; the apps say so while it runs
             progress({'step': 'summary', 'note': 'Writing the summary, about a minute'})
-        if handoff_lock(job['sid'], now):
-            make_handoff(job['transcript'], job['sid'])
-        else:  # a hook-started run is already writing it
+        with slots:  # the claim is made only once there is room to write, so it never sits unowned in a line
+            mine = not handoff_is_fresh(job['sid'], job['transcript']) and handoff_lock(job['sid'], now)
+            if mine:
+                make_handoff(job['transcript'], job['sid'])
+        if not mine:  # another run is already writing it (a hook's, or a second job for the same chat)
             deadline, claim = time.time() + 240, paths()['handoffs'] / f'{job["sid"]}.generating'
             while not handoff_is_fresh(job['sid'], job['transcript']) and time.time() < deadline:
                 if handoff_is_current(job['sid'], job['transcript']) and not claim.exists():
@@ -6490,6 +6599,7 @@ def _run_job(job, runner, find_url, make_handoff, now, live=None, progress=None)
             if a and a.get('kind') == 'background' and a.get('id'):
                 run_claude_cmd(['stop', a['id']])
         return {'state': 'done', 'handoff': True}
+    turn.take()
     launch = dict(job)
     cwd = job['cwd'] if verb == 'resume' else launch_dir(job['cwd'])  # a resume has to run where the chat lives
     if verb == 'start' and not job.get('name'):
@@ -6647,18 +6757,45 @@ def bg_session_id(bg_id):
 
 
 def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=None):
+    """Run what is queued, and what joins the queue meanwhile, until nothing is left. Each job has a thread of its
+    own, so one chat's summary never holds up another chat (_run_job says what is shared between them)."""
     runner, find_url, live = runner or _run_launch, find_url or globals()['find_url'], live or wait_live
-    make_handoff = make_handoff or generate_handoff
+    make_handoff = make_handoff or handoff_in_child
     q = paths_q()['queue']
     lock = q / '.lock'
-    now = now or time.time()
-    if not lock_take(lock, now, QUEUE_LOCK_TTL):
+    clock = (lambda: now) if now else time.time  # a job's own times are read when it is taken, not when the drain began
+    if not lock_take(lock, clock(), QUEUE_LOCK_TTL):
         return 0
-    t0 = time.time()
+    gate, slots, running = threading.Lock(), threading.BoundedSemaphore(max(1, SUMMARY_PARALLEL)), []
+    owned = time.monotonic()
+
+    def work(job, rp, t):
+        try:
+            res = _run_job(job, runner, find_url, make_handoff, t, live,
+                           progress=lambda d: _jput(rp, dict(d, state='running', started=t)), gate=gate, slots=slots)
+        except Exception as e:
+            log(f'job {job.get("id")} failed: {traceback.format_exc()}')
+            res = {'state': 'error', 'error': f"Couldn't launch it: {e}"}
+        try:
+            _jput(rp, dict(res, finished=time.time()))
+        except Exception:
+            log(f'job {job.get("id")}: its result could not be written: {traceback.format_exc(limit=2)}')
+
+    def waiting():
+        jobs = []
+        for p in q.glob('*.json'):
+            if not p.name.endswith('.result.json'):
+                try:
+                    jobs.append((p.stat().st_mtime, p.name, p))
+                except OSError:
+                    pass
+        return [p for _, _, p in sorted(jobs)]  # the order they were asked in
+
     try:
         while True:
-            jobs = sorted(p for p in q.glob('*.json') if not p.name.endswith('.result.json'))
-            if not jobs:
+            running = [th for th in running if th.is_alive()]
+            jobs = waiting()[:max(0, JOBS_PARALLEL - len(running))]
+            if not jobs and not running:
                 return 0
             for jp in jobs:
                 claimed = jp.with_name(jp.stem + '.claimed')
@@ -6673,20 +6810,21 @@ def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=N
                     pass
                 if not job:
                     continue
+                t = clock()
                 rp = q / f'{job["id"]}.result.json'
-                if now - job.get('created', now) > JOB_QUEUED_TTL:  # nobody watched it fail; still never run it late
+                if t - job.get('created', t) > JOB_QUEUED_TTL:  # nobody watched it fail; still never run it late
                     _jput(rp, {'state': 'error', 'error': 'This waited too long to start, so it was dropped. Try again.',
                                'finished': time.time()})
                     continue
-                _jput(rp, {'state': 'running', 'started': now})
-                lock_own(lock, now + (time.time() - t0))  # still at work: a long queue is not taken for a dead drain
-                try:
-                    res = _run_job(job, runner, find_url, make_handoff, now, live,
-                                   progress=lambda d, rp=rp: _jput(rp, dict(d, state='running', started=now)))
-                except Exception as e:
-                    log(f'job {job.get("id")} failed: {traceback.format_exc()}')
-                    res = {'state': 'error', 'error': f"Couldn't launch it: {e}"}
-                _jput(rp, dict(res, finished=time.time()))
+                _jput(rp, {'state': 'running', 'started': t})
+                th = threading.Thread(target=work, args=(job, rp, t), name=f'job-{job["id"]}', daemon=True)
+                th.start()
+                running.append(th)
+            if running:
+                if time.monotonic() - owned >= 5:  # still at work: a long queue is not taken for a dead drain
+                    lock_own(lock, clock())
+                    owned = time.monotonic()
+                running[0].join(0.25)
     finally:
         lock_drop(lock)
 
@@ -6841,6 +6979,10 @@ def launcher_daemon(me=None, sleep=time.sleep):
                 _jput_text(beat, json.dumps({'pid': mine, 'ts': time.time()}))
 
     _jput_text(beat, json.dumps({'pid': mine, 'ts': time.time()}))
+    try:
+        sweep_tmp()
+    except Exception:
+        pass
     beater = threading.Thread(target=pulse, daemon=True)
     beater.start()
     threading.Thread(target=ask_worker, args=(stop,), daemon=True).start()  # v2: questions for Claude (auto machine)
@@ -7195,6 +7337,31 @@ def run_tree(argv, stdin_text, timeout, **kw):
             pass
         raise
     return subprocess.CompletedProcess(argv, p.returncode, out, err)
+
+def uptime_s():
+    """Seconds since this machine started, or None when it cannot be told. The apps learn from it that a chat was
+    cut off by a restart (a power cut, an update) and not stopped by anyone, and keep its tab with Resume on it."""
+    try:
+        if IS_WIN:
+            import ctypes
+            f = ctypes.windll.kernel32.GetTickCount64
+            f.restype = ctypes.c_ulonglong
+            return f() / 1000.0
+        if sys.platform == 'darwin':
+            import ctypes, ctypes.util
+
+            class _Tv(ctypes.Structure):
+                _fields_ = [('sec', ctypes.c_long), ('usec', ctypes.c_int)]
+            libc = ctypes.CDLL(ctypes.util.find_library('c') or '/usr/lib/libc.dylib', use_errno=True)
+            tv, size = _Tv(), ctypes.c_size_t(ctypes.sizeof(_Tv))
+            if libc.sysctlbyname(b'kern.boottime', ctypes.byref(tv), ctypes.byref(size), None, ctypes.c_size_t(0)) != 0:
+                return None
+            up = time.time() - tv.sec
+            return up if tv.sec > 0 and up >= 0 else None
+        return float(Path('/proc/uptime').read_text().split()[0])
+    except Exception:
+        return None
+
 
 def mem_or_none(agents, procs=None):
     try:
@@ -9794,6 +9961,7 @@ class FileSecrets:
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w') as f:
             json.dump(d, f)
+            _to_disk(f)
         if not IS_WIN:
             os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
@@ -10459,7 +10627,14 @@ def main(argv):
             run_need_ask(argv[2], argv[3], argv[4] if len(argv) > 4 else '')
             return 0
         if cmd == 'launch-queue':  # Windows scheduled task; on a Mac a retired LaunchAgent may still fire it
-            return launch_queue() if IS_WIN else 0
+            if not IS_WIN:
+                return 0
+            rc = launch_queue()
+            try:  # no resident launcher on Windows: this is where what dead writers left behind is cleared
+                sweep_tmp()
+            except Exception:
+                pass
+            return rc
         if cmd == 'launcher':
             return launcher_daemon()
         if cmd == 'places':  # run on the machine: what the apps may browse, and drives outside home

@@ -256,6 +256,25 @@ class StopIfIdleTest(unittest.TestCase):
         self.age(self.t, 3 * 3600)
         self.assertTrue(self.stop(idle_s=None)['ok'])
 
+    def test_a_message_held_for_it_keeps_it(self):
+        # the guard blocked the prompt, so the transcript says nothing of it: only the held file does
+        self.sb.held_set(SID, 'fix the lights', self.now - 600)
+        r = self.stop()
+        self.assertEqual((r['ok'], r['error']), (False, 'A message is held for it.'))
+        self.sb.held_set(SID, 'fix the lights', self.now - self.sb.HELD_FOR + 60)  # as long as the apps show it held
+        self.assertFalse(self.stop()['ok'], 'a short wait does not shorten it')
+        (self.sb.paths()['state'] / f'{SID}.held.json').write_text('{"prompt": "fix the lights"}')
+        self.assertFalse(self.stop()['ok'], 'held since nobody knows when')
+        self.assertEqual(self.stopped, [])
+        self.sb.held_set(SID, 'fix the lights', self.now - self.sb.HELD_FOR - 60)  # nobody answered: it lapsed
+        self.assertTrue(self.stop()['ok'])
+        self.stopped.clear()
+        self.sb.held_set(SID, 'fix the lights', self.now - self.sb.HELD_FOR - 60)
+        self.assertFalse(self.stop(idle_s=7 * 3600)['ok'], 'inside a longer wait, holding it was use')
+        self.sb.held_clear(SID)
+        self.age(self.t, 8 * 3600)
+        self.assertTrue(self.stop(idle_s=7 * 3600)['ok'])
+
     def test_a_process_it_cannot_find_keeps_it(self):
         for procs in ({}, {7: {'ppid': 1, 'name': 'launchd', 'age': 99999}}):
             self.procs = procs

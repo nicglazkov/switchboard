@@ -8,6 +8,8 @@ first. The hub reads machines (name -> ssh target) and extra web origins from ma
 import base64, hashlib, hmac, json, os, re, secrets, time
 from pathlib import Path
 
+import durable
+
 HUB_PORT = int(os.environ.get('SWITCHBOARD_HUB_PORT') or 8132)
 TTL = 60
 KEY_LEN = 32
@@ -88,12 +90,7 @@ def write_machines(path, machines, origins):
     data = {'machines': [{k: m.get(k) for k in ('name', 'label', 'target', 'os')} for m in machines],
             'origins': list(dict.fromkeys(origins)), 'written': int(time.time())}
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
-    with os.fdopen(os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600), 'w') as f:  # the hub trusts its origins
-        f.write(json.dumps(data, indent=1))
-    if os.name != 'nt':
-        os.chmod(tmp, 0o600)  # also when an older run left the temp file behind
-    os.replace(tmp, path)
+    durable.put(path, json.dumps(data, indent=1), mode=0o600)  # the hub trusts its origins
 
 
 def ws_host(host_header):

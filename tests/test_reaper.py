@@ -74,11 +74,11 @@ class CleanupTest(unittest.TestCase):
     def test_the_rules(self):
         app = self.make()
         self.m.sessions['desk'] = [
-            bg(1, 'idle', 80, mb=365), bg(2, 'waiting', 75), bg(3, 'idle', 70),          # idle: three days at least
+            bg(1, 'idle', 80, mb=365), bg(2, 'waiting', 75), bg(3, 'idle', 70),          # idle: three days at least (2 asked you)
             bg(4, 'busy', 13), bg(5, 'busy', 11),                                         # stalled: 12 h busy, nothing written
             bg(6, 'idle', 999, kind='interactive'), bg(7, 'stopped', 99),                 # a terminal chat / already stopped
             bg(8, 'idle', 99, bg_id=False), bg(9, None, 99),                              # no bg id / status unknown
-            bg(12, 'busy', 0, archived=NOW - 2 * H, last_ts=NOW - 2.5 * H, mb=432),      # archived in the Claude app
+            bg(12, 'busy', 0, archived=NOW - 2 * H, last_ts=NOW - 2.5 * H, mb=432, turn_open=False),  # archived in the Claude app
             bg(13, 'idle', 200, child_ts=NOW - 60),                                       # its subagent is working
             bg(14, 'idle', 0, last_ts=NOW - 100 * H),                                     # bookkeeping lines are not use
             bg(15, 'busy', 0, archived=NOW - 2 * H, last_ts=NOW - 10),                   # used again after it was archived
@@ -86,8 +86,7 @@ class CleanupTest(unittest.TestCase):
         self.m.replaced['desk'] = [bg(10, 'idle', 1.5), bg(11, 'idle', 0.5)]  # replaced: idle an hour
         app.fleet.poll()
         got = {d['sid']: d['reason'] for d in app.feat.reaper.decisions()}
-        self.assertEqual(got, {sid(1): 'idle', sid(2): 'idle', sid(4): 'stalled', sid(10): 'replaced', sid(12): 'archived',
-                               sid(14): 'idle'})
+        self.assertEqual(got, {sid(1): 'idle', sid(4): 'stalled', sid(10): 'replaced', sid(12): 'archived', sid(14): 'idle'})
         ds = app.feat.reaper.decisions()
         self.assertEqual([d['sid'] for d in ds[:2]], [sid(12), sid(1)], 'the most memory first')
         d = next(d for d in ds if d['sid'] == sid(1))
@@ -220,6 +219,32 @@ class CleanupTest(unittest.TestCase):
         app.fleet.state['tower']['online'] = False
         self.assertEqual(app.feat.reaper.decisions(), [])
         self.assertTrue(next(s for s in app.sessions()['machines'][0]['sessions'] if s['sid'] == sid(2))['keep'])
+
+    def test_what_would_not_stop_by_itself_for_its_users_sake_is_never_suggested(self):
+        # Audit of 0.8.21: the card had its own, older rules, and offered starred chats and ones waiting on an answer.
+        app = self.make()
+        self.m.sessions['desk'] = [
+            bg(1, 'idle', 99), bg(2, 'idle', 99),                                      # starred / a message held for it
+            bg(3, 'idle', 99, needs='say which one'), bg(4, 'idle', 99, state='blocked'),  # it asked for something
+            bg(5, 'waiting', 99),                                                      # a permission prompt
+            bg(6, 'busy', 0, archived=NOW - 2 * H, last_ts=NOW - 2.5 * H),            # archived, but in a turn right now
+            bg(7, 'idle', 99), bg(8, 'busy', 30),                                      # the card's own: idle, stalled
+        ]
+        self.m.replaced['desk'] = [bg(9, 'idle', 5), bg(10, 'idle', 5, turn_open=True), bg(11, 'idle', 5)]  # 10 works, 11 held
+        app.fleet.poll()
+        app.post('/api/action', {'machine': 'desk', 'verb': 'star', 'sid': sid(1)})
+        app.guard.held = lambda machine, s: s in (sid(2), sid(11))
+        want = {sid(7): 'idle', sid(8): 'stalled', sid(9): 'replaced'}
+        self.assertEqual({d['sid']: d['reason'] for d in app.feat.reaper.decisions()}, want)
+        self.assertEqual({d['sid'] for d in app.get('/api/cleanup')['items']}, set(want))
+        snap = app.sessions()
+        self.assertEqual({d['sid'] for d in snap['cleanup']['items']}, set(want))
+        self.assertEqual({s['sid'] for s in snap['machines'][0]['sessions'] if s.get('cleanup')}, {sid(7), sid(8)})
+        r = app.post('/api/cleanup', {'action': 'stop', 'items': [{'machine': 'desk', 'sid': sid(n)} for n in (1, 2, 3, 5, 7)]})
+        self.assertEqual((r['stopped'], sorted(r['skipped'])), ([f'desk/{sid(7)}'], [f'desk/{sid(n)}' for n in (1, 2, 3, 5)]))
+        self.assertEqual([c['sid'] for c in self.calls('stop')], [sid(7)], 'a click on an old card stops none of them either')
+        app.post('/api/action', {'machine': 'desk', 'verb': 'star', 'sid': sid(1), 'on': False})
+        self.assertIn(sid(1), {d['sid'] for d in app.feat.reaper.decisions()}, 'the star came off: its age speaks again')
 
     def test_a_chat_open_in_an_apps_tab_is_never_suggested_connected_or_not(self):
         app = self.make()
@@ -386,6 +411,14 @@ class AutoStopTest(unittest.TestCase):
         for _ in range(4):
             self.assertEqual(self.look(app), [])
         self.assertEqual(self.calls('reap_orphans'), [])
+
+    def test_a_replaced_chat_with_a_message_held_for_it_is_left(self):
+        # a replaced chat is listed raw, without the guard's word on it: a message typed into the old chat was not seen
+        app = self.auto()
+        self.m.replaced['desk'] = [cold(1, 9), cold(2, 9)]
+        app.guard.held = lambda machine, s: s == sid(1)
+        self.assertEqual(self.look(app), [sid(2)])
+        self.assertEqual(self.look(app), [sid(2)])
 
     def test_off_or_an_older_helper_or_a_silent_hub_stops_nothing(self):
         for kw in ({'prefs': {'auto_stop_h': 0}}, {'features': ('busy',)}, {'cfg': {'enabled': False}}):

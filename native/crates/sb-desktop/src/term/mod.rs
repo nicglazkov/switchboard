@@ -290,8 +290,8 @@ pub enum Start {
     Chat(String),
     /// A stopped chat: resume it, then open.
     Resume(String),
-    /// A starred chat that has stopped, brought back on launch: a placeholder with Resume (resuming costs tokens,
-    /// so it never happens by itself).
+    /// A chat that has stopped and whose tab is brought back on launch all the same (starred, or cut off when its
+    /// machine restarted): a placeholder with Resume (resuming costs tokens, so it never happens by itself).
     Stopped(String),
     /// A job already started (New session with "Open its terminal").
     Job { id: String, machine: String, label: String, title: String },
@@ -304,6 +304,8 @@ pub const LOCAL_LABEL: &str = if MAC { "This Mac" } else { "This PC" };
 
 /// The message of a starred tab that came back on launch while its chat had stopped.
 pub const STOPPED_STAR: &str = "stopped-starred";
+/// The same placeholder for a chat its machine's restart ended (a power cut, an update): nobody stopped it.
+pub const STOPPED_CUT: &str = "stopped-restart";
 
 /// A terminal with key `tab_key` and background id `tab_bg` holds the chat at `key` (background id `bg`).
 pub fn same_chat(tab_key: Option<&str>, tab_bg: Option<&str>, key: &str, bg: Option<&str>) -> bool {
@@ -556,7 +558,10 @@ impl TermTab {
             }
             Start::Stopped(key) => {
                 tab.fill(&key, cx);
-                tab.phase = Phase::Need { need: Need::Resume, message: STOPPED_STAR.into() };
+                // starred says so first: that is why its tab always comes back, restart or not
+                let cut = app.read(cx).snap.session(&key).is_some_and(|s| s.cut && !s.star);
+                let message = if cut { STOPPED_CUT } else { STOPPED_STAR };
+                tab.phase = Phase::Need { need: Need::Resume, message: message.into() };
             }
             Start::Job { id, machine, label, title } => {
                 tab.machine = machine;
@@ -2145,6 +2150,12 @@ impl TermTab {
             Phase::Need { need: Need::Resume, message } if message == STOPPED_STAR => (
                 "Stopped. Resume to continue".into(),
                 "Starred, so its tab came back. Resume starts it on its machine and re-reads its context.".into(),
+                Some("Resume"),
+            ),
+            Phase::Need { need: Need::Resume, message } if message == STOPPED_CUT => (
+                format!("Stopped when {label} restarted"),
+                "It was open before the restart, so its tab came back. Resume starts it on its machine and re-reads its context."
+                    .into(),
                 Some("Resume"),
             ),
             Phase::Need { need: Need::Resume, .. } => (

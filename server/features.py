@@ -8,6 +8,7 @@ import json, os, re, threading, time, traceback, urllib.request
 from pathlib import Path
 
 import budget as budget_mod
+import durable
 import flags as flags_mod
 import fleet as fleet_mod
 import library as library_mod
@@ -32,9 +33,7 @@ def jload(p, default):
 
 def jsave(p, obj):
     p = Path(p)
-    tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-    tmp.write_text(json.dumps(obj, indent=1))
-    os.replace(tmp, p)
+    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
 
 
 def hub_open_known(url=None, timeout=1.5):
@@ -267,6 +266,8 @@ class Reaper:
                     reason, since = 'idle', used
                 else:
                     continue
+                if self.spoken_for(self.seen(m, s, now)):
+                    continue  # old enough, but its user wants it or it is not done: never offered, never stopped
                 out.append({'machine': m['name'], 'label': label, 'sid': sid, 'bg_id': s['bg_id'], 'title': s.get('title'),
                             'reason': reason, 'why': why_text(reason, s, now), 'since': since, 'idle_h': int(q // 3600),
                             'mb': s.get('mb') if isinstance(s.get('mb'), int) else None})
@@ -280,12 +281,45 @@ class Reaper:
         out.sort(key=lambda d: -(d['mb'] or 0))
         return out
 
-    def decisions(self, cfg=None):
+    @staticmethod
+    def spoken_for(s):
+        """Why a chat is left alone however long it has sat: its user wants it, or something in it is not done.
+        The one list for the card and for "Stop idle chats" (auto_refusal adds what only a stop nobody asked for
+        needs), so the card never offers a chat that would not stop by itself for one of these reasons.
+        s: the chat as the apps see it (seen). None: nothing here speaks for it."""
+        if s.get('star') or s.get('keep'):
+            return 'it is starred or kept running'
+        if s.get('held') or s.get('activity') == 'held':
+            return 'a message is held for it'
+        if (s.get('needs') or s.get('ask') or s.get('status') == 'waiting' or s.get('state') == 'blocked'
+                or s.get('activity') in ('needs', 'parked')):
+            return 'it asked for something'
+        if s.get('activity') == 'working':  # not 'stalled': it says so, but nothing has happened for hours
+            return 'it is working'
+        return None
+
+    def seen(self, m, s, now):
+        """The chat's row with what the apps show of it. A replaced chat is listed raw, and the machines' own list
+        knows of no held message: its live state and the guard's word are added here."""
+        held = bool(s.get('held') or self.app.guard.held(m['name'], s.get('sid')))
+        if 'activity' not in s:
+            s = dict(s, **fleet_mod.derive(s, now, m.get('skew') or 0.0, held, updated=m.get('updated')))
+        return dict(s, held=True) if held else s
+
+    def decisions(self, cfg=None, snap=None):
+        """What the card offers. snap: the session list being put together for the apps (decorate); without one it
+        is asked for, since the rules need the chats as the apps see them: stars, hook pings newer than the list."""
         cfg = cfg or self.config()
         if not cfg['enabled']:
             return []
         keep = set(self.keep()) | self.tab_keys()  # a chat open in a tab is in use, even while the app is closed
-        return self.decide(self.app.fleet.snapshot()['machines'], self.app.clock(), cfg, keep, self.open_now())
+        now, opened = self.app.clock(), self.open_now()
+        if snap is None:
+            out = self.decide(self.app.fleet.snapshot()['machines'], now, cfg, keep, opened)
+            if not any(d.get('sid') for d in out):
+                return out  # no chat to offer, the usual answer: nothing a star could take away
+            snap = self.app.sessions()
+        return self.decide(snap['machines'], now, cfg, keep, opened)
 
     # ---- "Stop idle chats": what stops without a click
     def auto_wait(self):
@@ -308,14 +342,13 @@ class Reaper:
             s = dict(s, **fleet_mod.derive(s, now, m.get('skew') or 0.0, updated=m.get('updated')))
         if s.get('kind') != 'background' or s.get('status') != 'idle':
             return 'it is not idle'
-        if s.get('activity') != 'quiet' or s.get('held') or s.get('turn_open') is True or s.get('state') in ('blocked', 'running', 'working'):
+        why = Reaper.spoken_for(s)  # what also keeps it off the card
+        if why:
+            return why
+        if s.get('activity') != 'quiet' or s.get('turn_open') is True or s.get('state') in ('blocked', 'running', 'working'):
             return 'it is working or waiting on you'
-        if s.get('needs') or s.get('ask'):
-            return 'it asked for something'
         if s.get('cache') != 'cold':
             return 'its cache is not known to be cold'
-        if s.get('star') or s.get('keep'):
-            return 'it is starred or kept running'
         return None
 
     def auto_waited_on(self, machine, sid):
@@ -378,7 +411,8 @@ class Reaper:
         out = []
         for d in pick(snap['machines']):
             m, r = rows.get((d['machine'], d['sid']), (None, None))
-            if r is not None and self.auto_refusal(m, r, now) is None and not self.auto_waited_on(d['machine'], d['sid']):
+            if (r is not None and self.auto_refusal(m, self.seen(m, r, now), now) is None
+                    and not self.auto_waited_on(d['machine'], d['sid'])):
                 out.append(d)
         return out
 
@@ -563,10 +597,10 @@ class Reaper:
         return out
 
     # ---- what clients see
-    def report(self):
+    def report(self, snap=None):
         """The card: what could go, how much memory it holds, and what was stopped from it today (with Resume)."""
         cfg, now = self.config(), self.app.clock()
-        items = self.decisions(cfg)
+        items = self.decisions(cfg, snap)
         live = {(m['name'], s.get('sid')): s for m in self.app.fleet.snapshot()['machines']
                 for s in (m.get('sessions') or []) + (m.get('replaced') or [])}
         stopped, shown = [], set()
@@ -586,7 +620,7 @@ class Reaper:
 
     def decorate(self, snap):
         keep, reaped = self.keep(), self.reaped()
-        rep = self.report()
+        rep = self.report(snap)  # from this very list: asking for the list again here would never end
         by = {(d['machine'], d.get('sid')): d for d in rep['items'] if d.get('sid')}
         for m in snap['machines']:
             for s in (m.get('sessions') or []) + (m.get('replaced') or []):
@@ -2297,8 +2331,9 @@ class Features:
     def decorate(self, snap):
         for m in snap['machines']:  # the fleet's stored rows stay as the machines sent them
             m['replaced'] = [dict(r) for r in m.get('replaced') or []]
-        # stars, groups and who sent a chat after threads: they follow a thread
-        for part in (self.threads, self.reaper, self.auto, self.library, self.stars, self.groups, self.budget, self.dispatch):
+        # stars, groups and who sent a chat after threads: they follow a thread. Stars before the cleanup card: it
+        # never offers a starred chat
+        for part in (self.threads, self.stars, self.reaper, self.auto, self.library, self.groups, self.budget, self.dispatch):
             try:
                 part.decorate(snap)
             except Exception:

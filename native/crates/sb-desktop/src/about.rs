@@ -19,6 +19,16 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.22",
+        &[
+            "Several chats at once: Start fresh, Resume or Compact on several chats in a row no longer queues them behind each other. A computer used to write one summary at a time, about 45 seconds each, so the sixth chat waited five minutes and a plain new chat waited behind all of them. Summaries are now written three at a time, a new chat or a resume starts right away, and a large batch is no longer dropped for waiting too long.",
+            "After a power cut or restart: a chat that was open in a tab and was ended by its computer restarting keeps its tab. The tab says it stopped when that computer restarted and offers Resume, instead of closing without a word. Tabs of chats you stopped yourself still go.",
+            "Settings and state survive a power cut: every file Switchboard keeps (on the server and on each computer) is now forced to disk before it replaces the old one. A file could come back from a power cut filled with zeros. Half-written temp files left by a cut are cleared.",
+            "Clean up: the card no longer suggests a starred chat, one waiting on your answer, one that is working, or one with a held message. It follows the same rules as Stop idle chats. A chat with a held message is not stopped by itself either.",
+            "Server log: a phone or app that drops its connection no longer prints an error into the server's log.",
+        ],
+    ),
+    (
         "0.8.21",
         &[
             "Mac: the window keeps drawing when macOS reports it covered while you are using it. That state left the window movable but showing nothing new, while typing still reached the chat. The app now draws such a window itself, draws by hand any change that has waited seconds for a frame, and writes down at quit whether the window was drawing, what macOS thought of it and the last clicks, so a freeze that still happens explains itself in the log.",

@@ -159,12 +159,12 @@ class MeasuredTtlTest(RpcBase):
 
 class Fake:
     def __init__(self):
-        self.rows, self.clock = [], NOW
+        self.rows, self.clock, self.up = [], NOW, None
 
     def __call__(self, target, req, timeout):
         if req['verb'] == 'list' and target == 'me@x':
             return {'ok': True, 'sessions': [dict(r) for r in self.rows], 'replaced': [], 'limits': None, 'now': self.clock - 30,
-                    'clock': self.clock - 30}
+                    'clock': self.clock - 30, 'up': self.up}
         if req['verb'] == 'list':
             return {'ok': True, 'sessions': [], 'replaced': [], 'limits': None}
         return {'ok': True}
@@ -196,6 +196,24 @@ class ServerLiveTest(unittest.TestCase):
             self.assertIn(old, row, 'old fields stay for one release')
         self.now[0] = NOW + 101
         self.assertEqual(self.row()[2]['cache'], 'cold', 'warm flips to cold when cold_at passes, between polls too')
+
+    def test_the_machines_last_start_is_told_and_holds_still(self):
+        self.f.rows = [s()]
+        self.app.fleet.poll()
+        self.assertIsNone(self.row()[1]['boot'], 'an agent that does not say')
+        self.f.up = 3600.4
+        self.app.fleet.poll()
+        self.assertEqual(self.row()[1]['boot'], NOW - 3600)
+        self.now[0], self.f.up = NOW + 60, 3657.0  # the answer took a few seconds longer this time: the same start
+        self.app.fleet.poll()
+        self.assertEqual(self.row()[1]['boot'], NOW - 3600)
+        self.now[0], self.f.up = NOW + 900, 200.0  # it has restarted since
+        self.app.fleet.poll()
+        self.assertEqual(self.row()[1]['boot'], NOW + 700)
+        for odd in ('soon', -5, True, 10 ** 12):
+            self.f.up = odd
+            self.app.fleet.poll()
+            self.assertIsNone(self.row()[1]['boot'], odd)
 
     def test_hook_overlay_then_poll(self):
         self.f.rows = [s(cache_expires_at=None)]

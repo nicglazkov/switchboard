@@ -202,6 +202,10 @@ pub struct ApiMachine {
     /// only `updated`.
     #[serde(default)]
     pub as_of: Option<f64>,
+    /// When the machine last started (server clock); absent from an older server or agent. A chat that was last
+    /// active before it and is not running was cut off by the restart.
+    #[serde(default)]
+    pub boot: Option<f64>,
     #[serde(default)]
     pub root: Option<String>,
     #[serde(default, deserialize_with = "lenient_vec")]

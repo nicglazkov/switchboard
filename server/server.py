@@ -7,6 +7,7 @@ import urllib.error
 from urllib.request import urlopen
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import durable  # noqa: E402
 import fleet as fleet_mod  # noqa: E402
 import term as term_mod  # noqa: E402
 import nodes as nodes_mod  # noqa: E402
@@ -193,7 +194,7 @@ class ServerConfig:
             d = self._seed(Path(state_dir) / 'machines.json', port, local)
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
-                self.path.write_text(json.dumps(d, indent=1))
+                durable.put(self.path, json.dumps(d, indent=1))  # never written in place: a cut would leave half of it
             except OSError:
                 pass
         self.bind = d['bind'] or ['0.0.0.0']
@@ -268,6 +269,8 @@ class App:
         self.cfg_dir = Path(cfg_dir) if cfg_dir else self.state_dir / 'config'
         had_state = self._had_state()  # before anything below writes a file
         self.state_dir.mkdir(parents=True, exist_ok=True)
+        for d in (self.state_dir, self.cfg_dir):  # temp files of a run that died before its rename
+            durable.sweep(d)
         self.server_cfg = server_cfg  # None in tests: only localhost is its own
         # the addresses the apps are told to remember (only for a real server: tests have no network of their own)
         self.addresses = addresses_mod.Addresses(PORT, allowed=server_cfg.host_ok, bind=server_cfg.bind) if server_cfg else None
@@ -945,9 +948,8 @@ class App:
             return {}
 
     def _save_json(self, name, d):
-        tmp = self.state_dir / f'{name}.{os.getpid()}.{threading.get_ident()}.tmp'
-        tmp.write_text(json.dumps(d, indent=1))
-        os.replace(tmp, self.state_dir / name)
+        durable.put(self.state_dir / name, json.dumps(d, indent=1),
+                    tmp=self.state_dir / f'{name}.{os.getpid()}.{threading.get_ident()}.tmp')
 
     def _widget_check(self, quiet=False):
         if not self.widget_pusher:
@@ -1286,10 +1288,9 @@ class App:
         now = self.clock()
         for jid in [k for k, j in self.jobs.items() if j.get('finished') and now - j['finished'] > JOB_KEEP]:
             del self.jobs[jid]
-        tmp = self.state_dir / f'jobs.{os.getpid()}.tmp'
         try:
-            tmp.write_text(json.dumps(self.jobs, indent=1))
-            os.replace(tmp, self.state_dir / 'jobs.json')
+            durable.put(self.state_dir / 'jobs.json', json.dumps(self.jobs, indent=1),
+                        tmp=self.state_dir / f'jobs.{os.getpid()}.tmp')
         except OSError:
             log('could not save jobs: ' + traceback.format_exc())
 
@@ -2243,10 +2244,22 @@ def make_handler(app):
     return H
 
 
+GONE = (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)
+
+
+class Server(ThreadingHTTPServer):
+    daemon_threads = True
+
+    def handle_error(self, request, client_address):
+        """A client that went away mid-request (a phone leaving wifi, an app quitting, a power cut) is not an error
+        of ours: no traceback for it. Anything else is still printed in full."""
+        if isinstance(sys.exc_info()[1], GONE):
+            return
+        super().handle_error(request, client_address)
+
+
 def make_server(host, port, app):
-    s = ThreadingHTTPServer((host, port), make_handler(app))
-    s.daemon_threads = True
-    return s
+    return Server((host, port), make_handler(app))
 
 
 def apns_key_path(cfg, conf):

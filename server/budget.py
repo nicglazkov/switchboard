@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+import durable
 import fleet as fleet_mod
 import notes
 
@@ -34,9 +35,7 @@ def _jload(p, default):
 def _jsave(p, obj):
     p = Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
-    tmp.write_text(json.dumps(obj, indent=1))
-    os.replace(tmp, p)
+    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
 
 
 class BudgetError(ValueError):

@@ -121,6 +121,7 @@ much memory they hold. **Review** lists them; **Stop** each one, **Stop all**, *
 
 What it asks about: background chats idle for 3 days, ones that say they're working but have done nothing for
 12 hours, chats replaced by a newer one or archived in the Claude app, and leftover Claude processes with no chat.
-Never a chat you marked **Keep running**, and never one open in a terminal tab, even while the app is closed.
+Never a chat you marked **Keep running** or starred, one waiting on your answer or holding a message for you, one
+that is working, or one open in a terminal tab, even while the app is closed.
 
 A stopped chat stays under **Stopped today** for a day, and **Resume** brings it back where it was.
