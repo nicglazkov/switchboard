@@ -297,6 +297,8 @@ pub struct BoardView {
     pub main: Main,
     /// "Not in use" strip: its list is open.
     pub spare_open: bool,
+    /// Machines whose "Sent by Claude" line is open. Shut on every start: the line is there to stay out of the way.
+    pub sent_open: HashSet<String>,
     /// The two-step stop armed now, and a stopped chat on its way to "Stopped today".
     pub stop_armed: Option<crate::stop::Armed>,
     pub flight: Option<crate::stop::Flight>,
@@ -430,6 +432,7 @@ pub struct BoardView {
     pub flags_scroll: ScrollHandle,
     pub tray_scroll: ScrollHandle,
     pub clean_scroll: ScrollHandle,
+    pub usage_scroll: ScrollHandle,
     pub arc_scroll: gpui::UniformListScrollHandle,
     /// The open dropdown on the board (the flags drawer's effort or permissions), if any.
     pub drop: ui::Drop,
@@ -699,6 +702,7 @@ impl BoardView {
                 // What every terminal was doing as the app goes: a quit because it "froze" leaves its reason here.
                 let late = this.frame_wanted.map_or(0.0, |t| t.elapsed().as_secs_f32());
                 log::info!("quit: tab {} of {} showing, frame waiting {late:.1}s", this.tab, this.tabs.len());
+                log::info!("quit: {}", crate::wake::quit_report());
                 for t in this.tabs.iter().chain(this.float.iter()) {
                     log::info!("quit: {}", t.read(cx).state_line(cx));
                 }
@@ -717,6 +721,7 @@ impl BoardView {
             app,
             main: Main::Board,
             spare_open: false,
+            sent_open: HashSet::new(),
             stop_armed: None,
             flight: None,
             freed_seen: std::cell::Cell::new(0.),
@@ -797,6 +802,7 @@ impl BoardView {
             flags_scroll: ScrollHandle::new(),
             tray_scroll: ScrollHandle::new(),
             clean_scroll: ScrollHandle::new(),
+            usage_scroll: ScrollHandle::new(),
             arc_scroll: gpui::UniformListScrollHandle::new(),
             drop: ui::Drop::default(),
             cap: 4,
@@ -1503,6 +1509,7 @@ impl BoardView {
         self.plan_open = true;
         self.add_open = false;
         self.usage_hover = None;
+        self.usage_scroll.set_offset(gpui::point(px(0.), px(0.)));
         self.app.update(cx, |s, cx| s.load_usage(cx));
         cx.notify();
     }
@@ -1523,6 +1530,9 @@ impl BoardView {
     }
 
     pub fn set_tab(&mut self, n: usize, cx: &mut Context<Self>) {
+        if crate::wake::input_log() {
+            log::info!("input: set_tab {n}");
+        }
         self.tab = n.min(self.tabs.len());
         // A tab in a folded group: its group opens, so the tab row shows where you are.
         self.unfold_shown(cx);
@@ -1576,6 +1586,8 @@ impl BoardView {
         if self.frame_active && !self.frame_late && late >= FRAME_LATE {
             self.frame_late = true;
             log::warn!("window: no frame drawn for {:.0}s while it is the active window", late.as_secs_f32());
+            // the frame watchdog draws it by hand and says what macOS thinks of the window
+            crate::wake::view_late();
         }
     }
 
@@ -2047,6 +2059,14 @@ impl BoardView {
                     self.pop_out(cx);
                 }
                 "spare" => self.spare_open = true,
+                // sent: every machine's "Sent by Claude" line open; sent=<machine>: that one's.
+                "sent" => {
+                    if arg.is_empty() {
+                        self.sent_open = self.app.read(cx).snap.machines.iter().map(|m| m.name.clone()).collect();
+                    } else {
+                        self.sent_open.insert(arg.to_string());
+                    }
+                }
                 "add" => self.add_open = true,
                 // addterm: the chevron's menu, the shells first. local=<n>: n tabs with a shell on this computer.
                 "addterm" => {
@@ -2114,6 +2134,7 @@ impl BoardView {
                 "settings" => {
                     let sec = match arg {
                         "new" => crate::settings::Section::NewSessions,
+                        "context" => crate::settings::Section::Context,
                         "terminal" => crate::settings::Section::Terminal,
                         "machines" => crate::settings::Section::Machines,
                         "notifications" => crate::settings::Section::Notifications,
@@ -2194,7 +2215,7 @@ pub struct Ctx<'a> {
 /// by ';' or newlines, each one of
 ///   wait <ms> | key <keystroke, e.g. cmd-k, escape, j> | type <text> | move <x> <y> | click <x> <y> [n]
 ///   | rclick <x> <y> | scroll <x> <y> <dy> | drag <x0> <y0> <x1> <y1> [mods] | drop <x> <y> <path>... | resize <w> <h>
-///   | shot <file.png> | quit
+///   | shot <file.png> | winshot <window> <file.png> | in <window> <key|move|down|drag|up|click> ... | quit
 /// Coordinates are window points (a 2x frame divided by 2). Input goes through Window::dispatch_event, the same path
 /// real mouse and keyboard events take, and frames are the GPU renderer's own output (on Linux, the X screen).
 #[cfg(feature = "shots")]
@@ -2273,14 +2294,20 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                         }
                     });
                 }
-                // winshot <settings|about> <path>: a frame of that window instead of the board's.
+                // winshot <settings|about|files|pair|history> <path>: a frame of that window instead of the board's.
                 "winshot" => {
                     let (which, path) = rest.split_once(' ').unwrap_or((rest.as_str(), ""));
                     let path = std::path::PathBuf::from(path);
                     let which = which.to_string();
                     let _ = cx.update(|_, cx| {
                         let app = crate::state::app(cx);
-                        let h = if which == "about" { app.read(cx).about_win } else { app.read(cx).settings_win };
+                        let h = match which.as_str() {
+                            "about" => app.read(cx).about_win,
+                            "files" => app.read(cx).files_win,
+                            "pair" => app.read(cx).pair_win,
+                            "history" => app.read(cx).browser_win,
+                            _ => app.read(cx).settings_win,
+                        };
                         let Some(h) = h else {
                             eprintln!("sb-shot no {which} window");
                             return;
@@ -2305,6 +2332,78 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
                             Ok(Err(e)) => eprintln!("sb-shot could not render: {e:#}"),
                             Err(e) => eprintln!("sb-shot no {which} window: {e:#}"),
                         }
+                    });
+                }
+                // in <settings|about|files|pair|history> <key k | move x y | down x y | drag x y | up x y | click x y>:
+                // the same input, sent to that window instead of the board's. down, drag (a move with the button
+                // held) and up are separate steps, so a frame can be taken in the middle of a drag.
+                "in" => {
+                    let mut w = rest.splitn(3, ' ');
+                    let mut word = || w.next().unwrap_or("").to_string();
+                    let (which, what, arg) = (word(), word(), word());
+                    let n: Vec<f32> = arg.split_whitespace().filter_map(|n| n.parse().ok()).collect();
+                    let p = gpui::point(px(n.first().copied().unwrap_or(0.)), px(n.get(1).copied().unwrap_or(0.)));
+                    let _ = cx.update(|_, cx| {
+                        let app = crate::state::app(cx);
+                        let h = match which.as_str() {
+                            "about" => app.read(cx).about_win,
+                            "files" => app.read(cx).files_win,
+                            "pair" => app.read(cx).pair_win,
+                            "history" => app.read(cx).browser_win,
+                            _ => app.read(cx).settings_win,
+                        };
+                        let Some(h) = h else {
+                            eprintln!("sb-drive no {which} window");
+                            return;
+                        };
+                        let left = gpui::MouseButton::Left;
+                        let mv = |held: bool| {
+                            gpui::PlatformInput::MouseMove(gpui::MouseMoveEvent {
+                                position: p,
+                                pressed_button: held.then_some(left),
+                                modifiers: Default::default(),
+                            })
+                        };
+                        let down = gpui::PlatformInput::MouseDown(gpui::MouseDownEvent {
+                            button: left,
+                            position: p,
+                            modifiers: Default::default(),
+                            click_count: 1,
+                            first_mouse: false,
+                        });
+                        let up = gpui::PlatformInput::MouseUp(gpui::MouseUpEvent {
+                            button: left,
+                            position: p,
+                            modifiers: Default::default(),
+                            click_count: 1,
+                        });
+                        let _ = h.update(cx, |_, window, cx| match what.as_str() {
+                            "key" => match gpui::Keystroke::parse(&arg) {
+                                Ok(k) => {
+                                    window.dispatch_keystroke(k, cx);
+                                }
+                                Err(e) => eprintln!("sb-drive bad key {arg}: {e}"),
+                            },
+                            "move" => {
+                                window.dispatch_event(mv(false), cx);
+                            }
+                            "down" => {
+                                window.dispatch_event(mv(false), cx);
+                                window.dispatch_event(down, cx);
+                            }
+                            "drag" => {
+                                window.dispatch_event(mv(true), cx);
+                            }
+                            "up" => {
+                                window.dispatch_event(up, cx);
+                            }
+                            "click" => {
+                                window.dispatch_event(mv(false), cx);
+                                window.dispatch_event(down, cx);
+                                window.dispatch_event(up, cx);
+                            }
+                            _ => eprintln!("sb-drive unknown step in {which}: {what}"),
+                        });
                     });
                 }
                 "key" => {
@@ -2696,6 +2795,22 @@ impl Render for BoardView {
                 let dark = cx.try_global::<Theme>().is_some_and(|t| t.dark);
                 this.set_mode(if dark { Mode::Light } else { Mode::Dark }, window, cx)
             }))
+            .capture_any_mouse_down(|ev, _, cx| {
+                crate::wake::pointer(format!(
+                    "down {:?} at {:.0},{:.0}{}",
+                    ev.button,
+                    f32::from(ev.position.x),
+                    f32::from(ev.position.y),
+                    if cx.has_active_drag() { " (a drag is on)" } else { "" }
+                ));
+            })
+            .capture_any_mouse_up(|ev, _, cx| {
+                crate::wake::pointer(format!(
+                    "up {:?}{}",
+                    ev.button,
+                    if cx.has_active_drag() { " (a drag is on)" } else { "" }
+                ));
+            })
             .on_drop::<crate::chrome::TabDrag>(cx.listener(|this, d: &crate::chrome::TabDrag, window, cx| {
                 // A tab dragged down out of the tab row opens in a window of its own.
                 if f32::from(window.mouse_position().y) > ui::header() + 6.
@@ -2810,7 +2925,7 @@ impl Render for BoardView {
                 16.
             };
             let right = right + crate::chrome::app_menu_room();
-            root = root.child(self.plan_popover(&c, right));
+            root = root.child(self.plan_popover(&c, right, h));
         }
         if self.menu.is_some() {
             root = root.child(self.ctx_menu(&c, w, h));
@@ -3596,7 +3711,7 @@ impl BoardView {
                                 )
                             }),
                     )
-                    .child(ui::icon_btn(&t, SharedString::from(format!("setup-x-{m}-{}", i.id)), "x", 22.).on_click(
+                    .child(ui::icon_btn(&t, SharedString::from(format!("setup-x-{m}-{}", i.id)), "x", 24.).on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             let (m, id) = (mx.clone(), idx.clone());
                             this.app.update(cx, |s, cx| s.park_setup(&m, &id, cx));
@@ -3673,7 +3788,7 @@ impl BoardView {
                                 })),
                         )
                     })
-                    .child(ui::icon_btn(&t, SharedString::from(format!("toast-x-{}", to.id)), "x", 22.).on_click(
+                    .child(ui::icon_btn(&t, SharedString::from(format!("toast-x-{}", to.id)), "x", 24.).on_click(
                         cx.listener(move |this, _: &ClickEvent, _, cx| {
                             cx.stop_propagation();
                             this.app.update(cx, |s, cx| s.drop_toast(id, cx));

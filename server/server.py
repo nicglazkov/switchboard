@@ -281,8 +281,11 @@ class App:
         self._migrate_options(had_state)
         fleet.summary_model = self.prefs()['summary_model']  # the agents hear it on every poll
         fleet.options = self.options()  # ... and the opt-in settings (options.py)
+        fleet.compact_at = self.prefs()['compact_at']  # ... and where long chats compact, beside its switch
         if getattr(fleet, 'history', False) is None:  # every poll writes down the weekly percent for the widgets
             fleet.history = fleet_mod.WeekHistory(self.state_dir / 'week_history.json')
+        if hasattr(fleet, 'keep_spend'):  # what each machine's chats used this week outlives a restart
+            fleet.keep_spend(self.state_dir / 'spend.json')
         self.pusher = pusher or (lambda *a: None)
         self.guard = GuardTimer(guard_delay, self._push_guard, clock=clock)
         self.clock, self.sleep, self.poll_every, self.retry_waits = clock, sleep, poll_every, retry_waits
@@ -426,6 +429,29 @@ class App:
     def _refresh_soon(self, name, delay=1.5):
         threading.Timer(delay, lambda: self.fleet.poll_one(name)).start()
 
+    def usage(self):
+        """GET /api/usage: the fleet's plan numbers and, under `top`, the chats that used the most this week."""
+        u = self.fleet.usage()
+        if not hasattr(self.fleet, 'spend_view'):
+            return u
+        try:
+            u['top'] = self.top_chats()
+        except Exception:
+            log('top chats failed: ' + traceback.format_exc())
+        return u
+
+    def top_chats(self):
+        """The week's biggest chats as the apps can show them (fleet.top_chats): by thread, with the name and the
+        machine of the chat the apps list for it."""
+        view = self.fleet.spend_view()
+        if not view['reports']:
+            return fleet_mod.top_chats(view)
+        snap = self.sessions()
+        listed = {f'{m["name"]}/{s.get("sid")}': s for m in snap['machines'] for s in m['sessions']}
+        chats, _, roots, _ = self.feat.threads.graph()
+        return fleet_mod.top_chats(view, listed, chats, roots, {m['name']: m.get('label') for m in snap['machines']},
+                                   sent=lambda k: bool(self.feat.dispatch.origin(k)))
+
     def sessions(self):
         snap = self.fleet.snapshot()
         names, chrome = self.names(), self.chrome_machines()
@@ -452,12 +478,15 @@ class App:
         snap['v'] = self.version
         prefs = self.prefs()
         snap['prefs'] = dict({'chrome_machine': prefs.get('chrome_machine'), 'appearance': prefs['appearance'],
-                              'summary_model': prefs['summary_model']}, **options_mod.clean(prefs))
+                              'summary_model': prefs['summary_model'], 'auto_stop_h': prefs['auto_stop_h'],
+                              'compact_at': prefs['compact_at']},
+                             **options_mod.clean(prefs))
         return self.feat.decorate(snap)
 
     def note(self, machines, summary):
         """The status line under the plan gauges (notes.py)."""
         try:
+            self.feat.dispatch.mark(machines)  # a task a chat sent waits for the person only at a prompt
             return notes_mod.pick(machines, summary, self.clock(), self.guard.held)
         except Exception:
             log('note failed: ' + traceback.format_exc(limit=2))
@@ -984,6 +1013,7 @@ class App:
                         'roam': m.get('roam') is not False,
                         'needs_root': not m.get('root') and s.get('root_set') is False, 'root_suggest': s.get('root_suggest'),
                         'versions': s.get('versions'), 'features': s.get('features') or [], 'updated': s.get('updated'),
+                        'compact': s.get('compact'),  # its own compact window, as its Claude Code settings hold it
                         'auto': self.feat.auto.settings().get(m['name'], {}).get('on', False), 'can': self.feat.auto.view(m['name'])['can']})
         return {'ok': True, 'machines': out, 'max': fleet_mod.MACHINES_MAX}
 
@@ -1131,7 +1161,9 @@ class App:
                      'appearance': appearance(d.get('appearance')),
                      'summary_model': d.get('summary_model') if d.get('summary_model') in SUMMARY_MODELS else 'opus',
                      'migrations': [m for m in d.get('migrations') or [] if isinstance(m, str)],
-                     'notify': options_mod.notify_clean(d.get('notify'))}, **options_mod.clean(d))
+                     'auto_stop_h': features_mod.auto_hours(d.get('auto_stop_h')),
+                     'notify': options_mod.notify_clean(d.get('notify')),
+                     'compact_at': options_mod.compact_at(d.get('compact_at'))}, **options_mod.clean(d))
 
     def options(self):
         """The opt-in settings (options.py): {key: bool}."""
@@ -1210,11 +1242,21 @@ class App:
             if body['summary_model'] not in SUMMARY_MODELS:
                 raise HttpError(400, 'the summary model is opus or sonnet')
             d['summary_model'] = body['summary_model']
+        if 'auto_stop_h' in body:  # Stop idle chats: after this many hours left alone, or 0 for never
+            v = body['auto_stop_h']
+            if isinstance(v, bool) or not isinstance(v, (int, float)) or not (v == 0 or features_mod.AUTO_MIN_H <= v <= features_mod.AUTO_MAX_H):
+                raise HttpError(400, f'auto_stop_h is 0 (never) or {features_mod.AUTO_MIN_H} to {features_mod.AUTO_MAX_H} hours')
+            d['auto_stop_h'] = v
         if 'notify' in body:  # {kind: bool} for the kinds given; the others stay as they were
             n = body['notify']
             if not isinstance(n, dict) or any(k not in options_mod.NOTIFY_KEYS or not isinstance(v, bool) for k, v in n.items()):
                 raise HttpError(400, 'notify is {kind: true or false} for ' + ', '.join(options_mod.NOTIFY_KEYS))
             d['notify'] = dict(d['notify'], **n)
+        if 'compact_at' in body:  # Compact long chats at: tokens, in the range Claude Code takes
+            try:
+                d['compact_at'] = options_mod.compact_check(body['compact_at'])
+            except ValueError as e:
+                raise HttpError(400, str(e))
         for k in options_mod.KEYS:  # the opt-in settings: each one true or false
             if k in body:
                 if not isinstance(body[k], bool):
@@ -1223,6 +1265,7 @@ class App:
         self._save_json('prefs.json', d)
         self.fleet.summary_model = d['summary_model']
         self.fleet.options = options_mod.clean(d)
+        self.fleet.compact_at = d['compact_at']
         self.bump()
         return dict(d, ok=True)
 
@@ -1609,6 +1652,8 @@ class App:
         self._refresh_soon(j['machine'], 0.5)
         if watched or j.get('cancel'):  # the app is showing this job and says so itself, or the user called it off
             return
+        if (j.get('plan') or {}).get('sent'):  # a task a chat sent (run_on): the chat hears how it went, not the phone
+            return
         where, what = self._label(j['machine']), j.get('name') or j.get('title') or 'The chat'
         if state == 'done':
             title = DONE_TITLES[j['kind']].format(where=where)
@@ -1685,11 +1730,12 @@ class App:
         if path == '/api/prefs':
             return dict(self.prefs(), ok=True, flags=sorted(flags_mod.START_FLAGS), chips=flags_mod.CHIP_FLAGS,
                         takes={k: v is not None for k, v in flags_mod.START_FLAGS.items()}, aliases=flags_mod.ALIASES,
-                        live=flags_mod.LIVE, labels=flags_mod.LABELS, **options_mod.view(self.options(), self.push_ready, self._prefs_raw().get('notify')))
+                        live=flags_mod.LIVE, labels=flags_mod.LABELS,
+                        **options_mod.view(self.options(), self.push_ready, self._prefs_raw().get('notify'), self.prefs()['compact_at']))
         if path == '/api/summary':
             return self.summary()
         if path == '/api/usage':
-            return self.fleet.usage()
+            return self.usage()
         if path == '/api/app':
             return self.app_latest(host)
         if path == '/api/models':  # the New sheet's and flags drawer's model picker (models.py)
@@ -1803,6 +1849,9 @@ class App:
         if path == '/api/refresh':
             self.fleet.poll()
             return self.sessions()
+        if path == '/api/usage/refresh':  # Refresh on the usage page: Claude Code's own report, asked for now
+            asked = self.fleet.refresh_account()
+            return dict(self.usage(), asked=asked)
         if path == '/api/action':
             name, verb = self._machine(body), body.get('verb')
             if isinstance(verb, str) and verb in self.feat.ACTIONS:

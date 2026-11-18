@@ -244,13 +244,14 @@ pub fn span(s: u64) -> String {
     }
 }
 
-/// The context label beside the strip's meter: "98k of 300k context", or "98k / 300k" when room is short.
-pub fn ctx_label(ctx: u64, short: bool) -> String {
-    let max = crate::model::COMPACT;
+/// The context label beside the strip's meter: "98k of 300k context", or "98k / 300k" when room is short. `max`
+/// is where that chat compacts (Session::limit).
+pub fn ctx_label(ctx: u64, max: u64, short: bool) -> String {
+    let k = crate::compact::k;
     match (short, ctx > max) {
-        (true, _) => format!("{} / {}", fmt::k(ctx), fmt::k(max)),
-        (false, false) => format!("{} of {} context", fmt::k(ctx), fmt::k(max)),
-        (false, true) => format!("{} context, past {}", fmt::k(ctx), fmt::k(max)),
+        (true, _) => format!("{} / {}", fmt::k(ctx), k(max)),
+        (false, false) => format!("{} of {} context", fmt::k(ctx), k(max)),
+        (false, true) => format!("{} context, past {}", fmt::k(ctx), k(max)),
     }
 }
 
@@ -399,8 +400,10 @@ mod tests {
         assert_eq!(clock(3725), "1:02:05");
         assert_eq!(span(45), "45s");
         assert_eq!(span(3900), "1h 05m");
-        assert_eq!(ctx_label(98_000, false), "98k of 300k context");
-        assert_eq!(ctx_label(98_000, true), "98k / 300k");
-        assert_eq!(ctx_label(550_000, false), "550k context, past 300k");
+        assert_eq!(ctx_label(98_000, 300_000, false), "98k of 300k context");
+        assert_eq!(ctx_label(98_000, 300_000, true), "98k / 300k");
+        assert_eq!(ctx_label(550_000, 300_000, false), "550k context, past 300k");
+        assert_eq!(ctx_label(550_000, 1_000_000, false), "550k of 1M context", "against the chat's own limit");
+        assert_eq!(ctx_label(150_000, 200_000, true), "150k / 200k");
     }
 }

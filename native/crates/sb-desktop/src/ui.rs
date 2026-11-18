@@ -252,6 +252,26 @@ pub fn name_tag(t: &Theme, text: &str, kind: Option<sb_core::names::TagKind>) ->
     }
 }
 
+/// The mark of a chat that a chat started (run_on), the same wherever one shows: an arrow and "Sent by Claude".
+/// Quiet on purpose: it says whose the chat is, not that anything is wrong.
+pub fn sent_mark(t: &Theme) -> Div {
+    div()
+        .flex_none()
+        .pl(px(4.))
+        .pr(px(6.))
+        .h(px(18.))
+        .flex()
+        .items_center()
+        .gap(px(3.))
+        .rounded(px(R_CHIP))
+        .bg(t.chip_bg)
+        .text_size(px(11.))
+        .font_weight(FontWeight::SEMIBOLD)
+        .text_color(t.ink2)
+        .child(icon("for", 10., t.dim))
+        .child(sb_core::model::SENT_BY)
+}
+
 /// An outlined chip in the inspector's chip row for something Switchboard does, not Claude ("Kept running").
 pub fn note_tag(t: &Theme, ic: &str, text: &str) -> Div {
     div()

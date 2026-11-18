@@ -337,6 +337,8 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         let mut map = hub.sessions.lock().await;
         if let Some(s) = map.get(&key).filter(|s| s.alive()).cloned() {
             // (an ssh started for this viewer while another viewer opened the same chat is dropped: it hangs up)
+            // Dropped here, not when this viewer leaves: until then it was a second `claude attach` on the chat.
+            drop(started.take());
             let seat = s.join(hello);
             break (s, seat);
         }

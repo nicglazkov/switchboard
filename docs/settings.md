@@ -8,6 +8,10 @@ description: What each section of Switchboard's Settings holds, from your comput
 app on. The few settings kept on one computer say **This computer only**: the default shell, the terminal's text
 size, **Stop a chat when its tab closes**, that computer's own notifications and the server's addresses.
 
+The sidebar groups the sections: **General** (Appearance, Notifications), **Chats** (Chats, Context window, Terminal, Budget),
+**Claude** (Library, Chrome, AI and your Claude setup) and **Machines** (Machines, Server). **Updates** and
+**About** stay at the bottom.
+
 ## Appearance
 
 Light, dark, or the system's. Synced, so your other computers match.
@@ -18,12 +22,50 @@ The color scheme, the default shell for new terminals, the text size, the cursor
 chat when its tab closes**. The text size is kept on each computer, since screens differ.
 [Terminals](terminals.md#look)
 
-## New sessions
+## Chats
 
 - **Summaries:** who writes them for Start fresh and Continue: **Opus** (the most careful) or **Sonnet** (quicker,
   and less of your plan).
 - **Saved setups:** the combinations you saved in New chat, which it offers along with Defaults and Last used.
   **Remove** asks you to click again.
+- **Stop idle chats** is for every computer: how long a finished chat is left alone before it's stopped to free
+  its memory (**6 hours** unless you change it, or **Never**). Chats replaced by a newer one or archived in the
+  Claude app wait the same time, and resuming a chat starts its wait again. [What stops, and what never does](board.md#tidy-up)
+
+## Context window
+
+One slider: **Compact long chats at**. It sets how much of a long chat Claude Code keeps word for word before it
+compacts it, which means replacing the older part with a summary. The same value goes to every computer and
+covers every model.
+
+| Stop | What it means |
+|---|---|
+| **150k** (Lean) | Chats stay small, so coming back to a cold one costs the least. Compacts soonest |
+| **200k** (Standard) | The size of a model's window before the 1M ones |
+| **300k** (Balanced), recommended | Room for a long working session, and a cold resume that still costs a fraction of a full window |
+| **500k** (Long memory) | Half the window stays word for word. A cold resume re-reads all of it |
+| **Default** (Claude Code's default) | Switchboard sets nothing. Today's models compact at about 967k |
+
+The words under the slider change with the stop and say what coming back to a cold chat that size costs. A model
+with a smaller window than the value compacts at its own window, so one value is safe for all of them. To give
+each model its own window, pick **Default** and use `/autocompact` in Claude Code.
+
+Two things follow the value and are not settings of their own: the context meters fill at the point where that
+chat compacts, and [Start fresh](chats.md#resume-or-start-fresh) is suggested from nine tenths of it (270k at
+300k).
+
+**On each computer** lists what every computer has. Switchboard writes its value
+(`CLAUDE_CODE_AUTO_COMPACT_WINDOW` in that computer's Claude Code settings) only where no compact window was
+chosen by hand, and only ever changes or removes what it wrote:
+
+- **Set on this computer: 500k, left alone** means you set a window there yourself, in the settings file or with
+  `/autocompact`. The slider never touches it.
+- **Older helper** means that computer's Switchboard is from before the slider and only knows 300k. Update it
+  there.
+- A computer that is offline follows when it's back.
+
+A chat picks the value up the next time it starts. On a server from before the slider, the page offers the old
+switch instead (300k or Claude Code's default).
 
 ## Machines
 
@@ -101,9 +143,10 @@ had them all turned on once, so look them over.
 | **Let Claude pick for Auto** | Claude picks the computer for Auto from the task and each computer's tools, free memory and repo names |
 | **Subagent model rule** | A short rule in `~/.claude/CLAUDE.md` on each computer: Haiku for lookups, Sonnet for search and reading |
 | **Explore agent on Sonnet** | `~/.claude/agents/Explore.md` on each computer |
-| **Compact at 300k tokens** | `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` in each computer's Claude Code settings |
 
-The first three use your own Claude plan. Turning a setup change off removes only what Switchboard added.
+The first three use your own Claude plan. Turning a setup change off removes only what Switchboard added. Where
+long chats are compacted is also a change to each computer's Claude Code settings; it has its own page,
+[Context window](#context-window).
 [Privacy and security](privacy.md#what-leaves-your-network-and-when)
 
 ## About

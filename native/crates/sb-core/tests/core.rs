@@ -902,3 +902,61 @@ fn back_to_back_refreshes_save_the_snapshot_once() {
     assert_eq!(std::fs::read(&path).unwrap(), b"marker", "a refresh right after the last save does not write");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A chat whose computer says where it compacts.
+fn one_with_limit(ctx: f64, limit: serde_json::Value) -> model::Session {
+    let raw: ApiSessions =
+        serde_json::from_value(serde_json::json!({"machines": [{"name": "studio", "label": "Studio",
+        "online": true, "updated": NOW, "sessions": [{"sid": "aaaaaaaa-1111-4111-8111-111111111111",
+        "title": "Bay Area planning", "mtime": NOW - 27.0 * 3600.0, "active": NOW - 27.0 * 3600.0, "ctx": ctx,
+        "cache_left": 0.0, "limit": limit}]}], "summary": {}}))
+        .unwrap();
+    model::normalize(&raw, NOW).machines[0].sessions[0].clone()
+}
+
+#[test]
+fn a_chat_is_measured_against_where_it_really_compacts() {
+    let s = one_with_limit(250_000.0, serde_json::json!(500_000));
+    assert_eq!((s.limit(), s.over(), s.ctx_frac()), (500_000, false, 0.5));
+    assert_eq!(s.ctx_of_limit(), "250k of 500k");
+    let s = one_with_limit(210_000.0, serde_json::json!(200_000));
+    assert!(s.over(), "a model with a 200k window is over at 200k whatever the setting says");
+    assert_eq!(one_with_limit(400_000.0, serde_json::json!(1_000_000)).ctx_of_limit(), "400k of 1M");
+}
+
+#[test]
+fn a_chat_with_no_limit_or_an_odd_one_is_measured_against_300k_as_before() {
+    for odd in [
+        serde_json::Value::Null,
+        serde_json::json!(0),
+        serde_json::json!(-5),
+        serde_json::json!(99_999),
+        serde_json::json!(5_000_000),
+        serde_json::json!("300000"),
+        serde_json::json!([1]),
+        serde_json::json!(1e30),
+    ] {
+        let s = one_with_limit(150_000.0, odd.clone());
+        assert_eq!((s.limit(), s.ctx_frac()), (300_000, 0.5), "{odd}");
+    }
+    assert_eq!(one(150_000.0, 0.0, None).limit(), 300_000, "an older helper sends no limit at all");
+    assert_eq!(one(150_000.0, 0.0, None).ctx_of_limit(), "150k of 300k");
+}
+
+#[test]
+fn start_fresh_is_suggested_near_the_chats_own_limit() {
+    use sb_core::actions::{Pick, suggest};
+    // 280k: close to compacting at 300k, far from it at 500k
+    let near = suggest(&one_with_limit(280_000.0, serde_json::json!(300_000)), NOW);
+    assert_eq!(near.pick, Some(Pick::Fresh));
+    assert!(near.why.contains("close to the 300k point"), "{}", near.why);
+    let far = suggest(&one_with_limit(280_000.0, serde_json::json!(500_000)), NOW);
+    assert!(!far.why.contains("squeezes"), "{}", far.why);
+    let at = suggest(&one_with_limit(450_000.0, serde_json::json!(500_000)), NOW);
+    assert!(at.why.contains("At 450k it's close to the 500k point"), "{}", at.why);
+    let small = suggest(&one_with_limit(180_000.0, serde_json::json!(200_000)), NOW);
+    assert!(small.why.contains("close to the 200k point"), "{}", small.why);
+    // no limit known: 270k, as before
+    assert!(suggest(&one(270_000.0, 0.0, None), NOW).why.contains("close to the 300k point"));
+    assert!(!suggest(&one(269_000.0, 0.0, None), NOW).why.contains("squeezes"));
+}

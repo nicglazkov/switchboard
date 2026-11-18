@@ -155,6 +155,175 @@ class BusyReportTest(unittest.TestCase):
         self.assertEqual(r['subagents'], ['Look through the logs for errors'])
 
 
+class StopIfIdleTest(unittest.TestCase):
+    """The stop nobody asked for ("Stop idle chats"): the chat's own machine goes through with it only when nothing
+    at all would be cut off at that moment."""
+
+    chat, age, sub, tearDown = BusyReportTest.chat, BusyReportTest.age, BusyReportTest.sub, BusyReportTest.tearDown
+
+    def setUp(self):
+        BusyReportTest.setUp(self)
+        d = Path(self.tmp) / 'claude' / 'projects' / '-w'
+        d.mkdir(parents=True, exist_ok=True)
+        self.t = str(d / f'{SID}.jsonl')
+        self.rows = [user('2026-10-10T01:00:00Z', 'Run the agents.'),
+                     dict(assistant('2026-10-10T01:00:05Z', 'Done.'), message={'role': 'assistant', 'content': [], 'stop_reason': 'end_turn'})]
+        self.write(self.rows)
+        self.stopped, self.procs = [], {500: {'ppid': 1, 'name': 'claude', 'age': 9 * 3600}}
+        self.args = {500: ['claude', '--bg-worker']}  # what each process was started as
+        self.sb.stop_bg = lambda bg: self.stopped.append(bg)
+        self.sb.claude_procs = lambda: self.procs
+        self.sb._cmdlines = lambda pids, loose=None: {p: a for p, a in self.args.items() if p in set(pids)}
+
+    def write(self, rows):
+        with open(self.t, 'w') as f:
+            for r in rows:
+                f.write(json.dumps(r, separators=(',', ':')) + '\n')
+        self.age(self.t, 3600)
+
+    def stop(self, status='idle', idle_s=1800, **kw):
+        agents = [dict({'sessionId': SID, 'kind': 'background', 'status': status, 'pid': 500, 'id': 'aaaaaaaa'}, **kw)]
+        req = {'verb': 'stop', 'sid': SID, 'if_idle': True}
+        return self.sb.rpc(dict(req, idle_s=idle_s) if idle_s is not None else req, self.now, agents=agents)
+
+    def tool(self, name, ts='2026-10-10T01:00:03Z'):
+        return dict(assistant(ts), message={'role': 'assistant', 'stop_reason': 'tool_use',
+                                            'content': [{'type': 'tool_use', 'id': 'tu1', 'name': name, 'input': {'cron': '0 9 * * *'}}]})
+
+    def test_a_quiet_chat_stops(self):
+        self.assertEqual(self.stop(), {'ok': True})
+        self.assertEqual(self.stopped, ['aaaaaaaa'])
+        self.assertIn('stop_if_idle', self.sb.AGENT_FEATURES)
+
+    def test_anything_running_keeps_it(self):
+        cases = [('busy', lambda: None, 'not idle'), ('waiting', lambda: None, 'not idle'),
+                 ('idle', lambda: self.sub('a1', 10), 'subagent'),
+                 ('idle', lambda: self.procs.update({501: {'ppid': 500, 'name': '/bin/zsh'}}), 'background command')]
+        self.assertTrue(self.stop()['ok'])
+        self.stopped.clear()
+        for status, setup, word in cases:
+            setup()
+            r = self.stop(status)
+            self.assertFalse(r['ok'], word)
+            self.assertIn(word, r['error'])
+        self.assertEqual(self.stopped, [])
+
+    def test_a_scheduled_task_keeps_it_until_it_is_taken_back(self):
+        self.write([self.rows[0], self.tool('CronCreate'), self.rows[1]])
+        r = self.stop()
+        self.assertEqual((r['ok'], r['error']), (False, 'It has a scheduled task.'))
+        self.write([self.rows[0], self.tool('CronCreate'), self.tool('CronDelete'), self.rows[1]])
+        self.assertTrue(self.stop()['ok'])
+        # the words in a message are not a call
+        self.write([user('2026-10-10T01:00:00Z', 'What does {"name":"CronCreate"} do?'), self.rows[1]])
+        self.assertTrue(self.stop()['ok'])
+        self.assertTrue(self.sb.has_schedule(self.t + '.gone'), 'a transcript that cannot be read is no proof')
+
+    def test_what_it_cannot_see_keeps_it(self):
+        def boom():
+            raise OSError('ps failed')
+        self.sb.claude_procs = boom
+        self.assertFalse(self.stop()['ok'])
+        self.sb.claude_procs = lambda: {}
+        r = self.sb.rpc({'verb': 'stop', 'sid': SID, 'if_idle': True}, self.now, agents=[])
+        self.assertEqual((r['ok'], r['error']), (False, 'It is not a running background chat.'))
+        r = self.stop(kind='interactive')
+        self.assertFalse(r['ok'])
+        self.assertEqual(self.stopped, [])
+
+    def test_a_chat_just_brought_up_is_left(self):
+        # resuming a chat writes nothing to its transcript: only its process says it was just used
+        self.procs[500]['age'] = 120
+        r = self.stop()
+        self.assertEqual((r['ok'], r['error']), (False, 'It was started or resumed a short while ago.'))
+        self.procs[500]['age'] = 1801
+        self.assertTrue(self.stop()['ok'])
+        self.stopped.clear()
+        for odd in (None, 'x', True):  # an age nobody could read is no proof
+            self.procs[500]['age'] = odd
+            self.assertFalse(self.stop()['ok'], odd)
+        self.assertEqual(self.stopped, [])
+
+    def test_the_wait_is_checked_on_this_machines_own_clock(self):
+        # the server's clock (or this one) may be off: what counts is how long ago the transcript was written here
+        self.assertTrue(self.stop(idle_s=3500)['ok'])
+        self.stopped.clear()
+        r = self.stop(idle_s=3700)
+        self.assertEqual((r['ok'], r['error']), (False, 'It was used a short while ago.'))
+        for odd in (None, 'soon', True, 0, -5):  # a wait that was not sent, or is no wait: two hours, the shortest there is
+            self.assertFalse(self.stop(idle_s=odd)['ok'], odd)
+        self.assertEqual(self.stopped, [])
+        self.age(self.t, 3 * 3600)
+        self.assertTrue(self.stop(idle_s=None)['ok'])
+
+    def test_a_process_it_cannot_find_keeps_it(self):
+        for procs in ({}, {7: {'ppid': 1, 'name': 'launchd', 'age': 99999}}):
+            self.procs = procs
+            r = self.stop()
+            self.assertEqual((r['ok'], r['error']), (False, 'This machine could not see what is running in it.'), procs)
+        self.procs = {500: {'ppid': 1, 'name': 'claude', 'age': 9 * 3600}}
+        self.assertFalse(self.stop(pid=None)['ok'])
+        self.assertEqual(self.stopped, [])
+
+    def test_a_windows_shell_under_it_is_a_background_command(self):
+        for name in ('bash.exe', 'C:\\Windows\\System32\\cmd.exe', 'PowerShell.exe', 'pwsh.exe', 'pwsh', '-zsh'):
+            self.procs[501] = {'ppid': 500, 'name': name}
+            r = self.stop()
+            self.assertFalse(r['ok'], name)
+            self.assertIn('background command', r['error'], name)
+        self.procs[501] = {'ppid': 500, 'name': 'conhost.exe'}
+        self.assertTrue(self.stop()['ok'])
+
+    def test_someone_attached_to_it_keeps_it(self):
+        self.procs[600] = {'ppid': 1, 'name': 'claude', 'age': 60}
+        for args in (['/usr/local/bin/claude', 'attach', 'aaaaaaaa'], ['claude.exe', 'attach', 'aaaaaaaa'],
+                     ['node', '/opt/claude-code/cli.js', 'attach', 'aaaaaaaa'], ['claude', 'attach', SID],
+                     ['claude', '--debug', 'attach', 'aaaaaaaa']):
+            self.args[600] = args
+            r = self.stop()
+            self.assertEqual((r['ok'], r['error']), (False, 'It is open in a terminal.'), args)
+        r = self.stop(id='aaaaaaaabbbbcccc')  # a longer id, attached to by its short form
+        self.assertEqual((r['ok'], r.get('error')), (False, 'It is open in a terminal.'))
+        self.assertEqual(self.stopped, [])
+        for args in (['claude', 'attach', 'bbbbbbbb'], ['claude', 'attach'], ['claude', 'logs', 'aaaaaaaa'],
+                     ['claude', '-p', 'attach aaaaaaaa'], ['vim', 'attach', 'aaaaaaaa'], ['claude', 'attach', 'aaaaaaa']):
+            self.args[600] = args
+            self.assertTrue(self.stop()['ok'], args)
+
+    def test_command_lines_it_cannot_read_keep_it(self):
+        def boom(pids, loose=None):
+            raise OSError('ps failed')
+        for how in (boom, lambda pids, loose=None: {}):
+            self.sb._cmdlines = how
+            r = self.stop()
+            self.assertEqual((r['ok'], r['error']), (False, 'This machine could not see what is running in it.'))
+        self.procs[600] = {'ppid': 1, 'name': 'claude', 'age': 60}  # a claude process that will not say what it is
+        self.sb._cmdlines = lambda pids, loose=None: {500: ['claude', '--bg-worker']}
+        self.assertFalse(self.stop()['ok'])
+        self.assertEqual(self.stopped, [])
+
+    def test_a_chat_that_started_working_during_the_checks_is_left(self):
+        asked = []
+
+        def agents(raw):  # the list is read again just before the stop, and by then the chat has a message
+            asked.append(1)
+            return [dict(a, status='idle' if len(asked) == 1 else 'busy') for a in raw]
+        self.sb.norm_agents = agents
+        r = self.stop()
+        self.assertEqual((r['ok'], r['error'], self.stopped), (False, 'It is not idle.', []))
+        self.assertEqual(len(asked), 2)
+        asked.clear()
+        self.sb.norm_agents = lambda raw: (asked.append(1), [] if len(asked) > 1 else raw)[1]
+        self.assertFalse(self.stop()['ok'], 'gone from the list')
+        self.assertEqual(self.stopped, [])
+
+    def test_a_plain_stop_is_as_before(self):
+        self.sub('a1', 10)
+        agents = [{'sessionId': SID, 'kind': 'background', 'status': 'busy', 'pid': 500, 'id': 'aaaaaaaa'}]
+        self.assertEqual(self.sb.rpc({'verb': 'stop', 'sid': SID}, self.now, agents=agents), {'ok': True})
+        self.assertEqual(self.stopped, ['aaaaaaaa'])
+
+
 class BusyServerTest(unittest.TestCase):
     """The server asks before it cuts anything off, queues "when they finish", and goes at once on "now"."""
 

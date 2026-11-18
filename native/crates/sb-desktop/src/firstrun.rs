@@ -95,7 +95,8 @@ impl BoardView {
                 &t,
                 "remote",
                 "Can't reach Switchboard",
-                error.to_string(),
+                // The usual reason starts with the same words as the title: say them once.
+                error.strip_prefix("Can't reach Switchboard. ").unwrap_or(error).to_string(),
                 Some(action.into_any_element()),
             )),
         )

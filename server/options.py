@@ -22,13 +22,50 @@ OPTIONS = (
      'Writes ~/.claude/agents/Explore.md on each machine, so the Explore agent runs on Sonnet and only reads. '
      "If you wrote your own Explore.md, it's left alone.",
      'When off, Switchboard deletes the file only if it wrote it.'),
-    ('setup_compact_window', 'setup', 'Compact at 300k tokens',
-     'Sets CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000 in ~/.claude/settings.json on each machine, so long chats '
-     'compact at about 300k tokens.',
-     "When off, Switchboard removes the setting only if it's still the value Switchboard set."),
+    # {k} and {n} are the value picked in Settings (compact_at), as "300k" and "300000": view() fills them in
+    ('setup_compact_window', 'setup', 'Compact long chats at {k} tokens',
+     'Sets CLAUDE_CODE_AUTO_COMPACT_WINDOW={n} in ~/.claude/settings.json on each machine, so long chats '
+     'compact at about {k} tokens. A machine where you set a compact window yourself is left alone.',
+     "When off, Switchboard removes the setting only if it's still the value Switchboard set, and Claude Code "
+     'compacts where it does by default.'),
 )
 KEYS = tuple(o[0] for o in OPTIONS)
 MIGRATION = 'opt-in-2026-10'  # recorded in prefs.json "migrations" once it has run, so it never runs again
+
+# Compact long chats at (setup_compact_window is its switch): the tokens a chat may reach before Claude Code
+# compacts it. Claude Code takes 100k to 1M and holds a bigger value to the model's own window. A server that had
+# the switch before the value existed means 300k, which is also the value recommended.
+COMPACT_MIN, COMPACT_MAX, COMPACT_DEFAULT = 100_000, 1_000_000, 300_000
+COMPACT_STOPS = (150_000, 200_000, 300_000, 500_000)  # the slider's stops; the last stop after these is "off"
+
+
+def compact_at(v):
+    """The stored compact window: a whole number of tokens in range, else 300k (nothing stored yet, or not a value)."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and COMPACT_MIN <= v <= COMPACT_MAX else COMPACT_DEFAULT
+
+
+def compact_check(v):
+    """A compact window as POSTed: the same rule, but anything else is refused (ValueError) instead of replaced."""
+    if compact_at(v) is not v:
+        raise ValueError(f'compact_at is a whole number of tokens from {COMPACT_MIN} to {COMPACT_MAX}')
+    return v
+
+
+def compact_seen(d):
+    """What a machine said its own Claude Code settings hold (agent compact_state), checked; None when it said
+    nothing (an older helper) or nothing usable."""
+    if not isinstance(d, dict) or not isinstance(d.get('set'), bool):
+        return None
+    v, raw = d.get('value'), d.get('raw')
+    return {'set': d['set'], 'own': d.get('own') is True and d['set'],
+            'value': v if isinstance(v, int) and not isinstance(v, bool) and COMPACT_MIN <= v <= COMPACT_MAX else None,
+            'raw': raw[:24] if isinstance(raw, str) else None,
+            'other': d.get('other') if d.get('other') in ('setting', 'models') else None}
+
+
+def _k(n):
+    return f'{n // 1000}k' if n % 1000 == 0 and n < 1_000_000 else '1M' if n == 1_000_000 else f'{n:,}'
+
 
 # Notifications, one setting for each kind: (key, label, what it sends). All on unless turned off.
 NOTIFY = (
@@ -70,10 +107,15 @@ def migrate(stored, existing):
     return opts, done + [MIGRATION], True
 
 
-def view(opts, push_ready, notify=None):
-    """GET /api/prefs: each option with its words, and whether notifications are set up."""
-    return {'options': [{'key': k, 'kind': kind, 'label': label, 'on': bool(opts.get(k)), 'explain': on, 'off': off}
+def view(opts, push_ready, notify=None, compact=None):
+    """GET /api/prefs: each option with its words, the compact window with its range and stops, and whether
+    notifications are set up."""
+    at = compact_at(compact)
+    fill = lambda words: words.replace('{k}', _k(at)).replace('{n}', str(at))  # noqa: E731
+    return {'options': [{'key': k, 'kind': kind, 'label': fill(label), 'on': bool(opts.get(k)), 'explain': fill(on), 'off': off}
                         for k, kind, label, on, off in OPTIONS],
+            'compact': {'at': at, 'on': bool(opts.get('setup_compact_window')), 'min': COMPACT_MIN, 'max': COMPACT_MAX,
+                        'recommended': COMPACT_DEFAULT, 'stops': list(COMPACT_STOPS)},
             'notify_kinds': [{'key': k, 'label': label, 'explain': what, 'on': notify_clean(notify)[k]} for k, label, what in NOTIFY],
             'push': {'ready': bool(push_ready), 'explain': PUSH_ON if push_ready else PUSH_OFF,
                      'setup': None if push_ready else '~/.config/switchboard/apns.json'}}

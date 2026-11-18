@@ -74,7 +74,7 @@ The server sends four kinds of iPhone push, and each one can be turned off in Se
 |---|---|---|
 | `held` | The guard held a message typed into a big chat that went cold | One per held message; a newer one replaces it |
 | `jobs` | Something started from an app finished or failed while no app showed it | Grouped as tasks |
-| `cleanup` | Chats that do nothing are taking memory | At most once a day |
+| `cleanup` | Chats that do nothing are taking memory, and are not ones that stop by themselves | At most once a day |
 | `budget` | The daily budget stopped new chats | Once a day |
 
 Only a prompt typed by a person is held. Task notifications, agent messages (with or without the plain line

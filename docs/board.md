@@ -24,6 +24,31 @@ Each computer gets a row. Each chat sits in a column by what it needs from you, 
 The server decides each chat's state once, and the board, the terminal tabs, the details and the iPhone all show
 that same answer. [What warm and cold mean](chats.md#warm-and-cold)
 
+## Sent by Claude
+
+A chat can send a task to another computer, where a new background chat does it and reports back. Those are not
+your chats, so on the desktop they stay out of the columns and out of every count. Each computer's row ends with
+one line instead, **Sent by Claude 7**, with how many are working and how many have finished.
+
+Click the line to open it. Each task has a row: where it stands (Working, Done and whether its report was read,
+Stopped without a report), which chat sent it (click to go to that chat), and **Stop** or **Clear**. The chat
+that sent tasks says so in its details: "2 tasks out: 1 working, 1 done".
+
+- **It only asks for you when it must.** A sent task reports to the chat that sent it, so a question in its report
+  is not yours to answer. It moves to **Needs you**, marked **Sent by Claude**, only while it is stopped at a
+  prompt that only you can answer, such as a permission. The notification then says "A task Claude sent is
+  waiting".
+- **It cleans up after itself.** Two minutes after a task finishes, Switchboard stops its process, unless you
+  opened it in a tab, marked it **Keep running**, or it is busy again. The report is kept, and **Resume** brings
+  the chat back.
+- **It leaves the board soon after.** A finished task moves to History 10 minutes after its report is read, or
+  after a day when nobody read it. In History it carries the same mark, and the **All chats** filter can show
+  only your chats or only the ones Claude sent.
+- **Move to my chats** in a task's details makes it one of yours from then on: it sits in the columns, counts
+  like any chat, and is no longer stopped for you.
+
+The mark survives a rename, Start fresh, a resume and a handoff.
+
 ## A card
 
 - **The name**, its tag (UltraCode, Max effort), its tab group's dot, and a star.
@@ -73,15 +98,28 @@ computer. An offline computer says so, and its chats come back when it does.
 
 ## Tidy up
 
-Chats that sit open and do nothing still hold memory. When some have been idle for days, a strip under the top
-line says **N chats are open but not in use**, with how much memory they hold. **Review** lists them; **Stop**
-each one, **Stop all**, **Keep** the ones you want, or **Not now**.
+Chats that sit open and do nothing still hold memory, about half a gigabyte each. Switchboard stops the ones
+that cost nothing to stop, and asks about the rest.
 
-!!! info "Nothing stops by itself"
-    Switchboard only suggests. A chat stops when you click Stop (twice: the first click turns into **Confirm
-    stop**). The one exception is the budget's [hard limit](usage.md), if you turn it on.
+**Stopped by itself.** A chat that finished its reply and has been left alone for 6 hours is stopped to free its
+memory. One replaced by a newer chat or archived in the Claude app waits just as long. Its card says **Stopped to
+free memory**, and **Resume** (or opening it) brings it back where it was. By then its cache has run out, so
+resuming costs what replying to it would have cost anyway. A stopped chat can't be reached from the Claude phone
+app or claude.ai until you resume it in Switchboard. A chat is never stopped
+this way while it's working, waiting on you, running a subagent, a background command or a scheduled task, or
+while another chat waits on it; nor when it's starred, marked **Keep running**, or open in a terminal (a tab, even
+while the app is closed, or `claude attach` on its computer). Its own computer checks once more at the moment of
+the stop, and leaves it alone if anything is running, if it can't tell, or if the chat was resumed or restarted
+within the wait. Change the wait, or turn this off, in **Settings > Chats > Stop idle chats**.
 
-What it suggests: background chats idle for 3 days, ones that say they're working but have done nothing for
+A finished task that [Claude sent](#sent-by-claude) is stopped sooner, two minutes after its report: it was never
+yours to keep open.
+
+**Asked about.** For the others, a strip under the top line says **N chats are open but not in use**, with how
+much memory they hold. **Review** lists them; **Stop** each one, **Stop all**, **Keep** the ones you want, or
+**Not now**. These stop only when you click Stop (twice: the first click turns into **Confirm stop**).
+
+What it asks about: background chats idle for 3 days, ones that say they're working but have done nothing for
 12 hours, chats replaced by a newer one or archived in the Claude app, and leftover Claude processes with no chat.
 Never a chat you marked **Keep running**, and never one open in a terminal tab, even while the app is closed.
 

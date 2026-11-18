@@ -67,9 +67,15 @@ def quiet_s(s, now):
 
 
 # ---------------------------------------------------------------- Cleanup (spec section 2; was the reaper)
-# Nothing here stops anything by itself. It finds background chats nobody is using (archived in the Claude app, idle
-# for days, stuck, replaced by a newer chat) and leftover claude processes, says why and how much memory they hold,
-# and the apps show them in a card: Stop all, Stop, Keep. Only a person's click stops one.
+# It finds background chats nobody is using (archived in the Claude app, idle for days, stuck, replaced by a newer
+# chat) and leftover claude processes, says why and how much memory they hold, and the apps show them in a card: Stop
+# all, Stop, Keep. A person's click stops those.
+#
+# One kind stops by itself (Reaper.auto, the "Stop idle chats" setting): a background chat that finished its turn,
+# has been left alone for hours, and whose prompt cache is cold, so resuming it later costs what replying to it would
+# have. Nothing may be lost by it: the chat's own machine is asked first what a stop would cut off, and anything it
+# names (a reply, a subagent, a background command, an undelivered result, a scheduled task) leaves the chat alone,
+# as does a question it is waiting on, a star, Keep running, an open tab or terminal, or any doubt.
 REAPER_DEFAULTS = {'enabled': True, 'idle_h': 72, 'stalled_h': 12, 'replaced_h': 1, 'archived_h': 1}
 IDLE_MIN_H = 72          # an idle background chat younger than three days is never suggested
 ORPHAN_H = 6
@@ -78,6 +84,15 @@ OPEN_TRUST = 300         # while the hub does not answer, the terminals it last 
 REAPED_KEEP = 200
 STOPPED_SHOW = 86400     # a chat stopped from the card stays there for a day, with Resume
 PUSH_EVERY = 86400       # the "not in use" notification comes at most once a day
+AUTO_H = 6               # "Stop idle chats": hours a finished, cold chat is left alone before it is stopped (0 is off)
+AUTO_MIN_H = 2           # never sooner: Claude Code's own wake-ups are at most an hour apart, and the cache lasts one
+AUTO_MAX_H = 30 * 24
+AUTO_EVERY = 60          # seconds between two looks
+AUTO_BATCH = 2           # chats looked at closely (their machine asked) in one look
+AUTO_RETRY = 30 * 60     # one that could not be stopped, or still had something running, is left for this long
+AUTO_REASONS = ('idle', 'archived', 'replaced')  # never 'stalled' (it says it is working) and never a bare process
+AUTO_USE_KINDS = ('resume', 'relaunch', 'start')  # a job that brought the chat up: it writes nothing to the transcript
+OPEN_FRESH = 45          # the hub must have said which terminals are open this recently for anything to stop by itself
 CLEANUP_URL = '/?cleanup=1'
 
 
@@ -107,6 +122,15 @@ def span(sec):
     return 'a moment'
 
 
+def auto_hours(v):
+    """The "Stop idle chats" wait as stored: 0 (off) or AUTO_MIN_H to AUTO_MAX_H hours; anything else is the default."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return AUTO_H
+    if v == 0:
+        return 0
+    return v if AUTO_MIN_H <= v <= AUTO_MAX_H else AUTO_H
+
+
 def last_use(s):
     """When the chat was last used: its own last message (or, from an older agent, the transcript's write time and
     last reply), or the newest write by its subagents and background commands, whichever is later."""
@@ -133,6 +157,8 @@ class Reaper:
         self.tabs_path = app.state_dir / 'tabs.json'
         self.lock, self.busy = threading.Lock(), threading.Lock()
         self._open, self._open_at = (0, set()), 0  # (asked when, what it said), and when the hub last answered
+        self._auto_at, self._auto_later = 0, {}    # the last look at what may stop by itself; {key: not before}
+        self._auto_used = {}                       # {key: when a resume, relaunch or start of it last finished}
 
     def open_now(self):
         """Terminals open on the hub, asked at most every 10 s (every session list reads it)."""
@@ -261,7 +287,159 @@ class Reaper:
         keep = set(self.keep()) | self.tab_keys()  # a chat open in a tab is in use, even while the app is closed
         return self.decide(self.app.fleet.snapshot()['machines'], self.app.clock(), cfg, keep, self.open_now())
 
-    # ---- the log of what a person stopped
+    # ---- "Stop idle chats": what stops without a click
+    def auto_wait(self):
+        """Hours a finished, cold chat is left alone before it stops by itself; 0 when the setting is off."""
+        try:
+            return auto_hours(self.app.prefs().get('auto_stop_h'))
+        except Exception:
+            return 0
+
+    @staticmethod
+    def auto_refusal(m, s, now):
+        """Why this chat must not stop by itself, from what the apps show of it. None: nothing here speaks against
+        it (its machine still has the last word, see auto). Anything unknown or missing is a reason."""
+        feats = m.get('features') or []
+        if not m.get('online') or m.get('agents_ok') is False:
+            return 'its machine has not said what is running'
+        if 'stop_if_idle' not in feats:
+            return 'its machine cannot check a stop itself yet'
+        if 'activity' not in s:  # a replaced chat is listed raw
+            s = dict(s, **fleet_mod.derive(s, now, m.get('skew') or 0.0, updated=m.get('updated')))
+        if s.get('kind') != 'background' or s.get('status') != 'idle':
+            return 'it is not idle'
+        if s.get('activity') != 'quiet' or s.get('held') or s.get('turn_open') is True or s.get('state') in ('blocked', 'running', 'working'):
+            return 'it is working or waiting on you'
+        if s.get('needs') or s.get('ask'):
+            return 'it asked for something'
+        if s.get('cache') != 'cold':
+            return 'its cache is not known to be cold'
+        if s.get('star') or s.get('keep'):
+            return 'it is starred or kept running'
+        return None
+
+    def auto_waited_on(self, machine, sid):
+        """Something still follows this chat: a task another chat sent (run_on) that has not reported, or a job
+        (a stop when idle, a resume, a move) on its way."""
+        feat = getattr(self.app, 'feat', None)
+        for r in list(getattr(getattr(feat, 'dispatch', None), 'd', {}).values()):
+            src = r.get('from') if isinstance(r.get('from'), dict) else {}
+            mine = (r.get('machine') == machine and r.get('sid') == sid) or (src.get('machine') == machine and src.get('sid') == sid)
+            if mine and r.get('state') not in ('done', 'failed'):  # the chat doing the task, and the one that sent it
+                return True
+        with self.app.jobs_lock:
+            jobs = list(self.app.jobs.values())
+        for j in jobs:
+            req = (j.get('plan') or {}).get('req') or {}
+            if j.get('machine') == machine and sid in (req.get('sid'), j.get('sid')) and j.get('state') not in ('done', 'error'):
+                return True
+        return False
+
+    def auto_cfg(self, cfg):
+        """The rules with the setting's wait: an idle chat waits that long, and a replaced or archived one never less."""
+        wait = max(self.auto_wait(), AUTO_MIN_H)
+        return dict(cfg, idle_h=wait, archived_h=max(cfg['archived_h'], wait), replaced_h=max(cfg['replaced_h'], wait))
+
+    def auto_used(self, now):
+        """{key: when a resume, relaunch or start of that chat last finished}. Bringing a chat up writes nothing to
+        its transcript, so its last message is as old as before; without this it would stop again within a minute.
+        Kept here because the server forgets a finished job after an hour, and the wait is longer."""
+        with self.app.jobs_lock:
+            jobs = list(self.app.jobs.values())
+        used = self._auto_used
+        for j in jobs:
+            t = j.get('finished')
+            if j.get('kind') not in AUTO_USE_KINDS or j.get('state') != 'done' or isinstance(t, bool) or not isinstance(t, (int, float)):
+                continue
+            for sid in {((j.get('plan') or {}).get('req') or {}).get('sid'), j.get('sid')}:
+                if isinstance(sid, str) and isinstance(j.get('machine'), str):
+                    k = f'{j["machine"]}/{sid}'
+                    used[k] = max(used.get(k, 0), t)
+        for k in [k for k, t in used.items() if now - t > AUTO_MAX_H * 3600]:
+            del used[k]
+        return used
+
+    def auto_due(self, cfg, now, opened):
+        """The chats that may stop by themselves now, by everything the server knows: the rules (with the setting's
+        wait), a resume or relaunch inside that wait counted as use, then auto_refusal on each as the apps see it."""
+        skip, used = self._auto_later, self.auto_used(now)
+        acfg = self.auto_cfg(cfg)
+        keep = set(self.keep()) | self.tab_keys()
+        pick = lambda ms: [d for d in self.decide(ms, now, acfg, keep, opened)
+                           if d.get('sid') and d['reason'] in AUTO_REASONS and skip.get(self.key(d), 0) <= now
+                           and (self.key(d) not in used or now - used[self.key(d)] >= acfg[d['reason'] + '_h'] * 3600)]
+        if not pick(self.app.fleet.snapshot()['machines']):
+            return []  # the usual answer, and a cheap one
+        snap = self.app.sessions()  # as the apps see them: held messages, hook pings newer than the list, stars
+        rows = {}
+        for m in snap['machines']:
+            for r in (m.get('replaced') or []) + (m.get('sessions') or []):
+                rows[(m['name'], r.get('sid'))] = (m, r)
+        out = []
+        for d in pick(snap['machines']):
+            m, r = rows.get((d['machine'], d['sid']), (None, None))
+            if r is not None and self.auto_refusal(m, r, now) is None and not self.auto_waited_on(d['machine'], d['sid']):
+                out.append(d)
+        return out
+
+    def auto(self, cfg):
+        """Stop idle chats, when the setting is on: a few at a time, each one checked three times. The server's own
+        view first (auto_due), again after its machine was asked for a fresh list, and last by the machine itself,
+        which stops the chat only if nothing would be cut off at that moment (the agent's stop with if_idle).
+        Returns the keys it stopped."""
+        now = self.app.clock()
+        if not self.auto_wait() or abs(now - self._auto_at) < AUTO_EVERY:
+            return []
+        self._auto_at = now
+        self._auto_later = {k: t for k, t in self._auto_later.items() if t > now}
+        fresh = lambda: time.time() - self._open_at <= OPEN_FRESH  # a hub that does not answer may have terminals open
+        opened = self.open_now()
+        todo = self.auto_due(cfg, now, opened)[:AUTO_BATCH] if fresh() else []
+        if not todo:
+            return []
+        for name in {d['machine'] for d in todo}:
+            self.app.fleet.poll_one(name)
+        self._open = (0, self._open[1])  # asked again: a terminal opened a moment ago counts
+        opened = self.open_now()
+        still = {self.key(d): d for d in self.auto_due(cfg, now, opened)} if fresh() else {}
+        stopped = []
+        for k in [self.key(d) for d in todo]:
+            d = still.get(k)
+            if not d:
+                continue  # used, opened, starred or asked about since the first look
+            try:  # idle_s: the wait, so the machine can hold its own clock and the chat's process against it
+                self.app._call(d['machine'], {'verb': 'stop', 'sid': d['sid'], 'if_idle': True,
+                                              'idle_s': int(self.auto_cfg(cfg)[d['reason'] + '_h'] * 3600)}, timeout=60)
+            except Exception as e:  # its machine found something running, or could not stop it: it waits
+                self._auto_later[k] = now + AUTO_RETRY
+                if not self.auto_gone(d):
+                    log(f'cleanup: left {k} running: {str(e)[:200]}')
+                    continue
+                # no answer, or one that said no, yet the chat is stopped: its card still has to say why
+                log(f'cleanup: {k} stopped although the stop did not say so: {str(e)[:200]}')
+            self.app.fleet.mark_stopped(d['machine'], d['sid'])
+            self._log({'at': now, 'machine': d['machine'], 'sid': d['sid'], 'title': d.get('title'), 'reason': d['reason'],
+                       'mb': d['mb'], 'idle_h': d['idle_h'], 'by': 'auto'})
+            stopped.append(k)
+        if stopped:
+            self.app.bump()
+            for name in {k.split('/', 1)[0] for k in stopped}:
+                self.app._refresh_soon(name, 1)
+        return stopped
+
+    def auto_gone(self, d):
+        """After a stop that failed or was not answered: its machine, asked again, lists the chat as stopped."""
+        try:
+            self.app.fleet.poll_one(d['machine'])
+            for m in self.app.fleet.snapshot()['machines']:
+                if m.get('name') == d['machine'] and m.get('online'):
+                    return any(r.get('sid') == d['sid'] and r.get('status') == 'stopped'
+                               for r in (m.get('sessions') or []) + (m.get('replaced') or []))
+        except Exception:
+            pass
+        return False
+
+    # ---- the log of what was stopped
     def entries(self):
         return jload(self.log_path, [])
 
@@ -290,6 +468,10 @@ class Reaper:
             cfg = self.config()
             if not cfg['enabled']:
                 return
+            try:
+                self.auto(cfg)
+            except Exception:
+                log('stopping idle chats failed: ' + traceback.format_exc())
             now, items = self.app.clock(), self.decisions(cfg)
             seen = jload(self.seen_path, {})
             keys = {self.key(d) for d in items}
@@ -300,7 +482,7 @@ class Reaper:
                 seen['pushed'] = now
             jsave(self.seen_path, seen)  # written down first: a push that fails is not sent again at every poll
             if tell:
-                self.app._push(*self.notice(items), 'cleanup', 'cleanup')
+                self.app._push(*self.notice(items, bool(self.auto_wait())), 'cleanup', 'cleanup')
         except Exception:
             log('cleanup failed: ' + traceback.format_exc())
         finally:
@@ -311,12 +493,13 @@ class Reaper:
         return f'{d["machine"]}/{d.get("sid") or "pid:" + str(d.get("pid"))}'
 
     @staticmethod
-    def notice(items):
+    def notice(items, auto=False):
+        """The words of the notification. With "Stop idle chats" on, these are the ones it would not stop itself."""
         n, mb = len(items), sum(d['mb'] or 0 for d in items)
         what = 'chat isn\'t' if n == 1 else 'chats aren\'t'
         title = f'{n} {what} in use'
         body = (f"They're using {mb_text(mb)}. " if mb and n > 1 else f"It's using {mb_text(mb)}. " if mb else '') + \
-            'Tap to take a look. Nothing stops unless you say so.'
+            ('Tap to take a look. These stop only if you say so.' if auto else 'Tap to take a look. Nothing stops unless you say so.')
         return title, body, CLEANUP_URL
 
     # ---- what a person asked for
@@ -396,7 +579,8 @@ class Reaper:
             if s.get('status') in LIVE:
                 continue  # running again
             stopped.append({'machine': r['machine'], 'label': self.app._label(r['machine']), 'sid': r['sid'],
-                            'title': s.get('title') or r.get('title'), 'reason': r.get('reason'), 'at': r['at'], 'mb': r.get('mb')})
+                            'title': s.get('title') or r.get('title'), 'reason': r.get('reason'), 'at': r['at'], 'mb': r.get('mb'),
+                            'by': r.get('by') or 'user'})
         return {'ok': True, 'enabled': cfg['enabled'], 'items': items, 'count': len(items),
                 'mb': sum(d['mb'] or 0 for d in items), 'stopped': stopped}
 
@@ -413,7 +597,11 @@ class Reaper:
                     s['cleanup'] = {'reason': d['reason'], 'why': d['why']}
                 r = reaped.get((m['name'], s.get('sid')))
                 if r and m.get('agents_ok') is not False and s.get('status') in (None, 'stopped') and (s.get('active') or 0) <= r['at'] + 60:
-                    s['reaped'] = {'at': r['at'], 'reason': r['reason'], 'idle_h': r.get('idle_h')}
+                    s['reaped'] = {'at': r['at'], 'reason': r['reason'], 'idle_h': r.get('idle_h'), 'by': r.get('by') or 'user'}
+                    if r.get('by') == 'auto' and 'stale' in s:
+                        # nobody chose this stop, so it moves nothing: the chat stays on the board as long as it
+                        # would have running, and goes to Older when it would have
+                        s['stale'] = snap.get('now', r['at']) - (s.get('active') or s.get('mtime') or r['at']) > fleet_mod.STALE_OPEN
         snap['cleanup'] = {k: rep[k] for k in ('items', 'count', 'mb', 'stopped')}
 
 
@@ -1441,6 +1629,12 @@ DISPATCH_NOTE = ('You were sent this by a Claude Code session on {a}. Do the wor
                  'what you did, what changed (paths), what is left.')
 TASK_MAX = 18_000
 SHOW_LIST_S = 120  # a launched chat shows up in its machine's list within a poll or two
+ORIGINS_KEEP = 3000   # chats remembered as sent by a chat (far past the week a task's report is kept)
+SENT_STOP_AFTER = 120  # a finished task's process is stopped this long after its report was kept
+SENT_PER_PASS = 12    # tasks followed after one poll, so a long list never holds the next pass up
+# Links a chat's origin follows: the same chat going on under a new id. Not "same topic", which is a guess.
+ORIGIN_LINKS = ('fresh', 'resumed', 'continued', 'compacted', 'handoff')
+FOR_TAG_RE = re.compile(r'\(for ([A-Za-z0-9 ]{1,20})\)\s*$')
 
 
 def quick_topic(task, room):
@@ -1459,9 +1653,18 @@ class Dispatch:
     def __init__(self, app, auto, http_error):
         self.app, self.auto, self.HttpError = app, auto, http_error
         self.file = app.state_dir / 'dispatch.json'
+        self.origins_file = app.state_dir / 'origins.json'
         self.lock = threading.Lock()
         self.d = jload(self.file, {})
         self.polled = {}
+        self.threads, self.reaper = None, None  # Features hands them over: origins follow threads, stops respect Keep
+        self.passing = threading.Lock()
+        # {"machine/sid": {'machine', 'sid', 'id', 'at'}}: the chat that sent this one, or {'mine': True, 'at'} once
+        # the person took it over. Kept apart from the tasks: those go after a week, a chat's origin does not.
+        self.o = jload(self.origins_file, {})
+        with self.lock:
+            if any([self._origin(did, r) for did, r in list(self.d.items())]):  # tasks sent before origins were kept
+                self._save_origins()
 
     def _save(self):  # caller holds lock
         now = self.app.clock()
@@ -1505,7 +1708,7 @@ class Dispatch:
         if mode == 'ultracode':
             req['model'] = 'opus'
         mkdir = folder if pick and pick.get('create') else None
-        r = app._submit('start', target, {'req': req, 'mkdir': mkdir}, name)
+        r = app._submit('start', target, {'req': req, 'mkdir': mkdir, 'sent': True}, name)  # sent: no push for its launch
         did = 'd-' + os.urandom(6).hex()
         rec = {'job': r['job'], 'from': {'machine': fm, 'sid': fsid}, 'machine': target, 'task': task[:300], 'folder': folder,
                'name': name, 'created': app.clock(), 'state': 'starting'}
@@ -1538,11 +1741,210 @@ class Dispatch:
         """The launch job ended (App._finish). Its outcome is kept with the task right away: jobs are forgotten after
         an hour, tasks are kept a week, and a check() that comes later than the job must still find the chat."""
         with self.lock:
-            hit = [r for r in self.d.values() if r.get('job') == jid and r.get('state') == 'starting' and not r.get('sid')]
-            for rec in hit:
+            hit = [(k, r) for k, r in self.d.items() if r.get('job') == jid and r.get('state') == 'starting' and not r.get('sid')]
+            for did, rec in hit:
                 self._took(rec, j, self.app.clock())
+                if self._origin(did, rec):
+                    self._save_origins()
             if hit:
                 self._save()
+
+    # ---- origins: which chats a chat started, and who sent each
+    def _origin(self, did, rec):  # caller holds lock
+        """Write down that the task's chat was sent by a chat. True when that is news."""
+        src = rec.get('from') if isinstance(rec.get('from'), dict) else {}
+        if not (isinstance(rec.get('sid'), str) and isinstance(rec.get('machine'), str) and isinstance(src.get('machine'), str)):
+            return False
+        k = ck(rec['machine'], rec['sid'])
+        if k in self.o:
+            return False
+        self.o[k] = {'machine': src['machine'], 'sid': src.get('sid'), 'id': did, 'at': rec.get('created') or self.app.clock()}
+        return True
+
+    def _save_origins(self):  # caller holds lock
+        if len(self.o) > ORIGINS_KEEP:
+            self.o = dict(sorted(self.o.items(), key=lambda kv: -(kv[1].get('at') or 0))[:ORIGINS_KEEP])
+        try:
+            jsave(self.origins_file, self.o)
+        except OSError:
+            log('could not save origins.json')
+
+    def _parents(self):
+        try:
+            return self.threads.graph()[1] if self.threads else {}
+        except Exception:
+            return {}
+
+    @staticmethod
+    def _origin_of(origins, key, parents):
+        """(record, own) for the chat that sent `key`, or (None, False) for a person's chat. A chat made from a sent
+        one by Start fresh, Resume, Continue or a compact is the same task going on: it has its origin (own False).
+        The first record met on the way up decides, so "this is my chat now" holds for what comes after it too."""
+        seen, k = set(), key
+        while k not in seen:
+            seen.add(k)
+            rec = origins.get(k)
+            if rec:
+                return (None, False) if rec.get('mine') else (rec, k == key)
+            up = parents.get(k)
+            if not up or up[1] not in ORIGIN_LINKS:
+                break
+            k = up[0]
+        return None, False
+
+    def origin(self, key):
+        with self.lock:
+            origins = dict(self.o)
+        return self._origin_of(origins, key, self._parents())[0]
+
+    def adopt(self, key, on=True):
+        """The person takes a sent task over as their own chat (on), or hands it back (off)."""
+        with self.lock:
+            rec = self.o.get(key) or {}
+            if on:
+                self.o[key] = {'mine': True, 'at': self.app.clock(), 'was': rec.get('was') if rec.get('mine') else (rec or None)}
+            elif rec.get('mine'):
+                if rec.get('was'):
+                    self.o[key] = rec['was']
+                else:
+                    del self.o[key]
+            self._save_origins()
+        return on
+
+    def mark(self, machines):
+        """Every chat a chat sent gets `sent`: {machine, label, sid, title} of the sender, and for the task itself
+        its id and when it finished (done_at), was read by the sender (read_at) and was stopped (stopped_at).
+        Sessions and replaced rows alike; a person's chat gets nothing.
+
+        A chat with no record whose name still ends "(for <a machine>)" was sent before origins were kept: it gets
+        the machine alone. Only a real machine's label counts, so "Gift ideas (for Mum)" stays a person's chat."""
+        parents = self._parents()
+        with self.lock:
+            origins, tasks = dict(self.o), {k: dict(v) for k, v in self.d.items()}
+        titles = {}
+        for m in machines:
+            for s in (m.get('sessions') or []) + (m.get('replaced') or []):
+                titles[ck(m['name'], s.get('sid'))] = s.get('title')
+        chats = self.threads.chats if self.threads else {}
+        # the name's tag is cut to letters, digits and spaces (start): the machines' labels are cut the same way
+        labels = {re.sub(r'[^A-Za-z0-9 ]', '', self.app._label(n))[:20].strip().lower(): n for n in self.app.fleet.machines}
+        labels.pop('', None)
+        for m in machines:
+            for s in (m.get('sessions') or []) + (m.get('replaced') or []):
+                s.pop('sent', None)
+                k = ck(m['name'], s.get('sid'))
+                rec, own = self._origin_of(origins, k, parents)
+                if rec is None:
+                    tag = FOR_TAG_RE.search(' '.join(str(s.get('title') or '').split()))
+                    name = labels.get(tag.group(1).strip().lower()) if tag else None
+                    if name and not self._settled(origins, k, parents):
+                        s['sent'] = {'machine': name, 'label': self.app._label(name)}
+                    continue
+                src = ck(rec['machine'], rec.get('sid'))
+                out = {'machine': rec['machine'], 'label': self.app._label(rec['machine']), 'sid': rec.get('sid'),
+                       'title': titles.get(src) or (chats.get(src) or {}).get('title')}
+                t = tasks.get(rec.get('id')) if own else None
+                if own:
+                    out['id'] = rec.get('id')
+                if t:
+                    for a, b in (('done_at', 'done_at'), ('read_at', 'read_at'), ('stopped_at', 'stopped')):
+                        if isinstance(t.get(b), (int, float)) and t[b] > 0:
+                            out[a] = t[b]
+                    if t.get('state') == 'failed':
+                        out['failed'] = True
+                s['sent'] = out
+
+    @staticmethod
+    def _settled(origins, k, parents):
+        """Someone said this chat is the person's own (it or a chat it came from): its old name tag says nothing."""
+        seen = set()
+        while k not in seen:
+            seen.add(k)
+            if (origins.get(k) or {}).get('mine'):
+                return True
+            up = parents.get(k)
+            if not up or up[1] not in ORIGIN_LINKS:
+                return False
+            k = up[0]
+        return False
+
+    def decorate(self, snap):
+        self.mark(snap['machines'])
+        snap['origins'] = True  # rows say who sent them: an app need not guess from "(for <machine>)" names
+
+    # ---- after each poll: follow the tasks nobody is checking, and stop the ones that are finished
+    def after_poll(self):
+        """A task is followed here too, not only when its sender calls check(): its report is kept as soon as it is
+        done, and its process is stopped then (it holds memory for nothing; the chat can be resumed)."""
+        if not self.passing.acquire(blocking=False):
+            return
+        try:
+            now = self.app.clock()
+            with self.lock:
+                todo = [(did, dict(r)) for did, r in self.d.items() if r.get('sid') and
+                        (r.get('state') in ('starting', 'working') or (r.get('state') == 'done' and 'stopped' not in r))]
+            todo.sort(key=lambda x: x[1].get('followed') or 0)
+            for did, rec in todo[:SENT_PER_PASS]:
+                rec['followed'] = now
+                try:
+                    if rec['state'] != 'done':
+                        self._follow(rec, now, nudge=False)
+                    if rec['state'] == 'done':
+                        self._stop_done(rec, now)
+                except Exception:
+                    log('following a sent task failed: ' + traceback.format_exc(limit=2))
+                with self.lock:
+                    cur = self.d.get(did)
+                    if cur is None:
+                        continue
+                    if cur.get('state') == 'done':  # a check() got there first: what it read stands
+                        rec.update({k: cur[k] for k in ('state', 'report', 'note', 'done_at', 'read_at') if k in cur})
+                        rec.pop('error', None)
+                    self.d[did] = rec
+                    self._save()
+        finally:
+            self.passing.release()
+
+    def _stop_done(self, rec, now):
+        """Stop a finished task's process, unless someone has a use for it: it is open in a terminal or a tab, marked
+        Keep running, taken over by the person, working again, or waiting on a prompt. `stopped` on the task is when
+        (0: there was nothing to stop, or it is left alone for good)."""
+        name, sid = rec['machine'], rec['sid']
+        m = next((m for m in self.app.fleet.snapshot()['machines'] if m['name'] == name), None)
+        if m is None:
+            rec['stopped'] = 0
+            return
+        if not m.get('online') or m.get('agents_ok') is False:
+            return  # nobody knows what runs there now: look again after the next poll
+        row = next((s for s in m.get('sessions') or [] if s.get('sid') == sid), None)
+        k = ck(name, sid)
+        with self.lock:
+            mine = bool((self.o.get(k) or {}).get('mine'))
+        if row is None or row.get('status') not in LIVE or row.get('kind') != 'background' or mine:
+            rec['stopped'] = 0  # gone, stopped already, open in a terminal, or the person's chat now
+            return
+        if now - (rec.get('done_at') or now) < SENT_STOP_AFTER or row.get('status') != 'idle':
+            return
+        if now - last_use(row) < SENT_STOP_AFTER:
+            return  # used since it reported: someone is talking to it
+        if self.app.guard.held(name, sid):
+            return
+        if self.reaper is not None:
+            if k in self.reaper.keep() or k in self.reaper.tab_keys(now) or (name, row.get('bg_id')) in self.reaper.open_now():
+                return
+        if self.app.busy(name, sid)['live']:
+            return
+        try:
+            self.app._call(name, {'verb': 'stop', 'sid': sid}, timeout=40)
+        except Exception as e:
+            rec['stop_tries'] = (rec.get('stop_tries') or 0) + 1
+            log(f'sent task {k}: could not stop it after its report: {str(e)[:160]}')
+            if rec['stop_tries'] >= 3:
+                rec['stopped'] = 0
+            return
+        self.app.fleet.mark_stopped(name, sid)
+        rec['stopped'] = now
+        log(f'sent task {k}: finished and reported, so its process was stopped')
 
     def _poll_soon(self, name):
         now = time.time()
@@ -1572,7 +1974,18 @@ class Dispatch:
                 rec.update(state='failed', error='Switchboard lost track of the launch. Check the list.', done_at=now)
             with self.lock:
                 if did in self.d:
+                    for k in ('stopped', 'stop_tries', 'followed'):  # what the pass after a poll wrote meanwhile
+                        if k in self.d[did]:
+                            rec[k] = self.d[did][k]
+                    if self._origin(did, rec):
+                        self._save_origins()
                     self.d[did] = rec
+                    self._save()
+        if rec['state'] == 'done' and not rec.get('read_at'):  # the sender has its report now
+            rec['read_at'] = now
+            with self.lock:
+                if did in self.d:
+                    self.d[did]['read_at'] = now
                     self._save()
         label = app._label(rec['machine'])
         out = {'ok': True, 'id': did, 'state': rec['state'], 'machine': rec['machine'], 'label': label, 'sid': rec.get('sid'),
@@ -1605,8 +2018,10 @@ class Dispatch:
             return None
         return b['summary'] or 'Its subagents or commands are still running.'
 
-    def _follow(self, rec, now):
-        """A launched chat: working until it is idle after a reply (or stopped); then its last message is the report."""
+    def _follow(self, rec, now, nudge=True):
+        """A launched chat: working until it is idle after a reply (or stopped); then its last message is the report.
+        nudge: ask its machine again soon (a sender is waiting in check(); the pass after a poll just looks again)."""
+        poll_soon = self._poll_soon if nudge else (lambda name: None)
         row, blind = None, False
         for m in self.app.fleet.snapshot()['machines']:
             if m['name'] == rec['machine']:
@@ -1615,13 +2030,13 @@ class Dispatch:
         rec.pop('note', None)
         rec['state'] = 'working'
         if blind:  # its machine could not say what runs: a row without a status is not a chat that stopped
-            self._poll_soon(rec['machine'])
+            poll_soon(rec['machine'])
             return
         if row is None:
             if now - rec['launched'] > SHOW_LIST_S:
                 rec.update(state='failed', error=f'The chat isn\'t in {self.app._label(rec["machine"])}\'s list anymore.', done_at=now)
             else:
-                self._poll_soon(rec['machine'])
+                poll_soon(rec['machine'])
             return
         status = row.get('status')
         if status == 'waiting':
@@ -1631,7 +2046,7 @@ class Dispatch:
             left = self._still_working(rec, row, now) if status == 'idle' else None
             if left:
                 rec['note'] = left
-                self._poll_soon(rec['machine'])
+                poll_soon(rec['machine'])
                 return
             rec.pop('blind', None)
             rec.update(state='done', done_at=now)
@@ -1643,7 +2058,7 @@ class Dispatch:
             except Exception as e:
                 rec.update(report='', note=f'Could not read its report: {str(e)[:160]}')
             return
-        self._poll_soon(rec['machine'])
+        poll_soon(rec['machine'])
 
 
 # ---------------------------------------------------------------- v2: the session browser (every chat, every machine)
@@ -1758,14 +2173,22 @@ class Browse:
             res.append(dict(r, label=self.app._label(name), title=names.get(k) or r.get('title') or 'Untitled',
                             state=browse_state(r, s), status=(s or {}).get('status'), kind=(s or {}).get('kind'),
                             bg_id=(s or {}).get('bg_id'), key=k))
+        by = {}  # who sent each chat, worked out per machine exactly as the board's rows get it
+        for r in res:
+            by.setdefault(r['machine'], []).append(r)
+        try:
+            self.app.feat.dispatch.mark([{'name': n, 'sessions': rows} for n, rows in by.items()])
+        except Exception:
+            log('browse: could not mark sent tasks: ' + traceback.format_exc(limit=1))
         return res
 
     def query(self, q):
-        """GET /api/browse: q, machine, folder, from, to, state, thread=1 (group), offset, limit."""
+        """GET /api/browse: q, machine, folder, from, to, state, by (claude: tasks a chat sent; you: the rest),
+        thread=1 (group), offset, limit."""
         one = lambda k, d='': (q.get(k) or [d])[0]
         rows = self.rows()
         text = query_words(one('q'))
-        machine, folder, state = one('machine'), one('folder').strip('/').lower(), one('state')
+        machine, folder, state, by = one('machine'), one('folder').strip('/').lower(), one('state'), one('by')
         try:
             t_from, t_to = float(one('from', '0') or 0), float(one('to', '0') or 0)
             offset, limit = max(0, int(one('offset', '0'))), max(1, min(BROWSE_PAGE_MAX, int(one('limit', '50'))))
@@ -1773,6 +2196,8 @@ class Browse:
             raise ValueError('from, to, offset and limit are numbers')
         if state and state not in STATES:
             raise ValueError('unknown state')
+        if by not in ('', 'claude', 'you'):
+            raise ValueError('by is claude or you')
 
         def keep(r):
             if machine and r['machine'] != machine:
@@ -1780,6 +2205,8 @@ class Browse:
             if folder and not (r.get('folder') or '').lower().startswith(folder):
                 return False
             if state and r['state'] != state:
+                return False
+            if by and (by == 'claude') != bool(r.get('sent')):
                 return False
             last = r.get('last') or r.get('mtime') or 0
             if (t_from and last < t_from) or (t_to and last > t_to):
@@ -1811,20 +2238,22 @@ class Browse:
             found = order
         facets = {'machines': sorted({(r['machine'], r['label']) for r in rows}),
                   'folders': sorted({r.get('folder') for r in rows if r.get('folder')})[:300],
-                  'states': {s: sum(1 for r in rows if r['state'] == s) for s in STATES}}
+                  'states': {s: sum(1 for r in rows if r['state'] == s) for s in STATES},
+                  'sent': sum(1 for r in rows if r.get('sent'))}
         with self.lock:
             status = {n: {'at': v.get('at'), 'error': v.get('error'), 'partial': v.get('partial'), 'count': len(v.get('rows') or {})}
                       for n, v in self.idx.items()}
         page = found[offset:offset + limit]
         slim = ('machine', 'label', 'sid', 'title', 'folder', 'cwd', 'model', 'ctx', 'size', 'last', 'started', 'state', 'status',
-                'kind', 'bg_id', 'url', 'archived', 'first_prompt', 'last_prompt', 'history', 'history_count', 'replaced', 'handoff')
+                'kind', 'bg_id', 'url', 'archived', 'first_prompt', 'last_prompt', 'history', 'history_count', 'replaced', 'handoff',
+                'sent')
         return {'ok': True, 'total': len(found), 'offset': offset, 'rows': [{k: r.get(k) for k in slim if k in r} for r in page],
                 'facets': {'machines': [{'name': n, 'label': l} for n, l in facets['machines']], 'folders': facets['folders'],
-                           'states': facets['states']}, 'index': status}
+                           'states': facets['states'], 'sent': facets['sent']}, 'index': status}
 
 
 class Features:
-    ACTIONS = ('keep', 'link', 'unlink', 'rename', 'star')
+    ACTIONS = ('keep', 'link', 'unlink', 'rename', 'star', 'adopt')
 
     def __init__(self, app, cfg_dir, http_error):
         self.app, self.cfg_dir, self.HttpError = app, Path(cfg_dir), http_error
@@ -1832,6 +2261,7 @@ class Features:
         self.threads = Threads(app)
         self.auto = Auto(app, self.cfg_dir / 'caps.json', http_error)
         self.dispatch = Dispatch(app, self.auto, http_error)
+        self.dispatch.threads, self.dispatch.reaper = self.threads, self.reaper
         self.browse = Browse(app, self.threads)
         self.library = library_mod.Library(app, http_error)
         self.stars = Stars(self.cfg_dir / 'stars.json', self.threads)
@@ -1859,11 +2289,16 @@ class Features:
         except Exception:
             log('library failed: ' + traceback.format_exc())
         self.budget.after_poll()
+        try:
+            self.dispatch.after_poll()
+        except Exception:
+            log('sent tasks failed: ' + traceback.format_exc())
 
     def decorate(self, snap):
         for m in snap['machines']:  # the fleet's stored rows stay as the machines sent them
             m['replaced'] = [dict(r) for r in m.get('replaced') or []]
-        for part in (self.threads, self.reaper, self.auto, self.library, self.stars, self.groups, self.budget):  # stars and groups after threads: they follow a thread
+        # stars, groups and who sent a chat after threads: they follow a thread
+        for part in (self.threads, self.reaper, self.auto, self.library, self.stars, self.groups, self.budget, self.dispatch):
             try:
                 part.decorate(snap)
             except Exception:
@@ -2002,6 +2437,8 @@ class Features:
         if verb == 'keep':
             on = body.get('on')
             return {'ok': True, 'keep': self.reaper.set_keep(name, sid, on if isinstance(on, bool) else None)}
+        if verb == 'adopt':  # a task a chat sent becomes the person's own chat (on), or goes back (off)
+            return {'ok': True, 'mine': self.dispatch.adopt(k, body.get('on') is not False)}
         if verb == 'star':  # a favorite: the chat and every later part of its thread
             on = body.get('on')
             t = self.threads.thread(name, sid) or {}

@@ -761,6 +761,22 @@ impl Client {
         })
     }
 
+    /// A task a chat sent becomes one of the person's own chats (`on` false: a sent task again).
+    pub fn adopt(&self, machine: &str, sid: &str, on: bool) -> Result<(), CoreError> {
+        let body = ActionBody {
+            machine,
+            verb: "adopt",
+            sid,
+            close: None,
+            on: Some(on),
+            to: None,
+            older: None,
+            name: None,
+            when: None,
+        };
+        self.with_base(|base| self.post_json(base, "/api/action", &body).map(|_| ()))
+    }
+
     /// Star on or off (`on` None toggles). Returns what the server stored.
     pub fn star(&self, machine: &str, sid: &str, on: Option<bool>) -> Result<bool, CoreError> {
         let body =
@@ -1091,6 +1107,14 @@ impl Client {
     /// GET /api/usage: this week by day, the 5-hour window and week, and past weeks.
     pub fn usage(&self) -> Result<crate::api::ApiUsage, CoreError> {
         self.get_json("/api/usage")
+    }
+
+    /// POST /api/usage/refresh: asks one machine's Claude Code for the account's usage now; the usage after it.
+    pub fn usage_refresh(&self) -> Result<crate::api::ApiUsage, CoreError> {
+        self.with_base(|base| {
+            serde_json::from_slice(&self.post_json(base, "/api/usage/refresh", &serde_json::json!({}))?)
+                .map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))
+        })
     }
 
     /// v2: GET /api/summary/<machine>/<sid>

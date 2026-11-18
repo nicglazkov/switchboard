@@ -1035,7 +1035,7 @@ def _strip(data, now, compact_window):
     has_ctx = isinstance(u, dict)           # None until the first reply
     ctx = int(sum(_sl_num(_sl_get(u, x)) or 0 for x in ('input_tokens', 'cache_creation_input_tokens',
                                                         'cache_read_input_tokens'))) if has_ctx else 0
-    limit = int(_sl_num(compact_window) or _sl_num(_sl_get(d, 'context_window', 'context_window_size')) or 300_000)
+    limit = ctx_limit(compact_window, _sl_get(d, 'context_window', 'context_window_size')) or 300_000
     frac = max(0.0, min(1.0, ctx / limit)) if limit > 0 else 0.0
     guard_frac = GUARD_CTX / limit if limit > 0 else 0.5
     exp = _sl_num(_sl_get(d, 'prompt_cache', 'expires_at'))
@@ -1200,9 +1200,18 @@ def write_state(data, now):
           'api_ms': (data.get('cost') or {}).get('total_api_duration_ms') if isinstance(data.get('cost'), dict) else None,
           'model': model.get('display_name') if isinstance(model, dict) else model if isinstance(model, str) else None,
           'transcript_path': data.get('transcript_path'),
+          'ctx_limit': ctx_limit(_compact_window(), _sl_get(data, 'context_window', 'context_window_size')),
           'cols': os.environ.get('COLUMNS')}  # the width Claude Code gives the status line
     st.update(limits_seen(read_state(sid), st, now))
     _jput(paths()['state'] / f'{sid}.json', st)  # its own temp file: two renders of one chat never share one
+
+
+def ctx_limit(window, size):
+    """Where a chat compacts, in tokens: the compact window set on this computer, never past the model's own
+    window (Claude Code caps it there). With no window set, the model's window. None when neither is known."""
+    w, z = _sl_num(window), _sl_num(size)
+    both = [int(x) for x in (w, z) if x and x > 0]
+    return min(both) if both else None
 
 
 def read_state(session_id):
@@ -1306,7 +1315,13 @@ CHILD_LIVE = 90  # a subagent or command output written this recently is still w
 REPLY_LIVE = 15 * 60  # an unfinished turn older than this is a dead one, not a reply in progress
 PENDING_KEEP = 6 * 3600  # a result older than this that never reached the chat is not waited for
 TAIL_BYTES = 2_000_000
-SHELLS = {'bash', 'zsh', 'sh', 'fish', 'dash'}
+SHELLS = {'bash', 'zsh', 'sh', 'fish', 'dash', 'cmd', 'powershell', 'pwsh'}
+
+
+def _is_shell(name):
+    """A shell by its process name: /bin/zsh, -zsh (a login shell), bash.exe, C:\\...\\PowerShell.exe."""
+    base = str(name or '').replace('\\', '/').rsplit('/', 1)[-1].lstrip('-').lower()
+    return (base[:-4] if base.endswith('.exe') else base) in SHELLS
 
 
 def _tail_lines(path, size=TAIL_BYTES):
@@ -1473,8 +1488,7 @@ def busy_report(sid, now, agents=None, procs=None, transcript=None):
                 x.get('status') not in (None, 'stopped') and x.get('state') not in ('done', 'failed'):
             subs.append((x.get('name') or x.get('description') or 'subagent')[:60])
     if a and a.get('pid') and procs:  # shells under the chat's own claude process: background commands, dev servers
-        n = sum(1 for p in procs.values() if p.get('ppid') == a['pid'] and
-                Path(str(p.get('name') or '')).name.lstrip('-') in SHELLS)
+        n = sum(1 for p in procs.values() if p.get('ppid') == a['pid'] and _is_shell(p.get('name')))
         extra = n - len(cmds)
         cmds += ['background command'] * max(0, extra)
     replying = bool(a and a.get('status') == 'busy') or (_turn_open(lines) and now - t_mtime <= REPLY_LIVE)
@@ -1714,6 +1728,8 @@ def remember_identity(req):
         want['roam'] = req['roam']
     if isinstance(req.get('options'), dict):  # the opt-in settings (server/options.py), each true or false
         want['options'] = {k: req['options'].get(k) is True for k in OPTION_KEYS}
+        # where long chats compact, beside its switch; a server that names none (an older one) means 300k
+        want['compact_at'] = compact_ok(req.get('compact_at'))
     cur = agent_conf()
     new = dict(cur, **want)
     if new != cur:
@@ -1723,8 +1739,9 @@ def remember_identity(req):
         except OSError:
             pass
         setup_keys = [k for k in OPTION_KEYS if k.startswith('setup_')]
-        if 'options' in want and {k: (cur.get('options') or {}).get(k) for k in setup_keys} != \
-                {k: want['options'][k] for k in setup_keys}:
+        if 'options' in want and ({k: (cur.get('options') or {}).get(k) for k in setup_keys} !=
+                                  {k: want['options'][k] for k in setup_keys}
+                                  or compact_ok(cur.get('compact_at')) != want['compact_at']):
             try:
                 if (claude_dir() / 'switchboard').resolve() == SB_HOME.resolve():  # only the Claude setup sb.py is installed in
                     apply_setup(claude_dir(), want['options'])
@@ -2290,7 +2307,7 @@ class CfgChanged(RpcError, OSError):
         super().__init__(f'Claude Code was changing {Path(p).name} at the same moment, so nothing was written. Try again.')
 
 
-_cfg_seen = {}
+_cfg_seen = {}  # (file, thread): how the file looked when that thread read it
 
 
 def _cfg_sig(p):
@@ -2309,7 +2326,7 @@ def cfg_read(p):
         text = p.read_text(encoding='utf-8') if sig is not None else None
         if _cfg_sig(p) == sig:
             break
-    _cfg_seen[str(p)] = sig
+    _cfg_seen[str(p), threading.get_ident()] = sig
     return json.loads(text) if text is not None else {}
 
 
@@ -2329,7 +2346,8 @@ def cfg_write(p, data):
             f.write(json.dumps(data, indent=2))
         if not IS_WIN:
             os.chmod(tmp, mode)
-        if str(p) in _cfg_seen and _cfg_sig(p) != _cfg_seen.pop(str(p)):  # as late as it can be asked
+        seen = _cfg_seen.pop((str(p), threading.get_ident()), _cfg_seen)  # this thread's own reading, taken once
+        if seen is not _cfg_seen and _cfg_sig(p) != seen:  # as late as it can be asked
             raise CfgChanged(p)
         os.replace(tmp, real)
     except BaseException:
@@ -2614,6 +2632,90 @@ def stop_bg(bg_id):
         log(f'stop {bg_id}: claude stop did not confirm: {said[-300:]!r}')
         raise RpcError('Claude Code could not confirm it stopped. Try again in a moment.')
     return said
+
+
+SCHEDULE_RE = re.compile(rb'"name":\s*"Cron(Create|Delete)"')
+
+
+def has_schedule(path):
+    """True when the chat set up a scheduled task (CronCreate) and did not take it back, or its transcript cannot be
+    read. Such a task lives only in the running chat: nothing on disk says it is waiting, and a stop would drop it
+    without a word. One that already ran still counts; this errs toward leaving the chat alone."""
+    made = gone = 0
+    try:
+        with open(path, 'rb') as f:
+            for line in f:
+                if b'"Cron' in line:
+                    for m in SCHEDULE_RE.finditer(line):
+                        if m.group(1) == b'Create':
+                            made += 1
+                        else:
+                            gone += 1
+    except OSError:
+        return True
+    return made > gone
+
+
+IDLE_STOP_MIN = 2 * 3600  # the shortest wait the server ever uses, and the one assumed when it names none
+ATTACH_HOSTS = ('node', 'bun')  # what else a `claude attach` can show up as in the process list (Windows)
+
+
+def attached(sid, a, procs):
+    """True when a `claude attach <this chat>` runs on this machine: someone has it open in a terminal, through
+    Switchboard (attach_argv) or by hand. None when the command lines could not be read. The id is matched as a
+    word of its own, in full or cut short (Claude Code prints the first 8 characters), and the session id too."""
+    ids = [x for x in (a.get('id'), sid) if isinstance(x, str) and len(x) >= 8]
+    names = {pid: str(p.get('name') or '') for pid, p in procs.items()}
+    stem = lambda n: n.replace('\\', '/').rsplit('/', 1)[-1].lower().rsplit('.exe', 1)[0]
+    ask = [pid for pid, n in names.items() if not IS_WIN or is_claude_cli(n) or stem(n) in ATTACH_HOSTS]  # one CIM query
+    try:
+        lines = _cmdlines(ask) if ask else {}
+    except Exception:
+        return None
+    if not lines or any(is_claude_cli(names[pid]) and not lines.get(pid) for pid in ask):
+        return None  # nothing came back, or a claude process would not say what it is
+    mine = lambda w: len(w) >= 8 and any(w == x or x.startswith(w) or w.startswith(x) for x in ids)
+    for args in lines.values():
+        args = [str(w) for w in args or []]
+        at = args.index('attach') if 'attach' in args else 0
+        if at and any('claude' in w.lower() for w in args[:at]) and any(mine(w) for w in args[at + 1:]):
+            return True
+    return False
+
+
+def idle_stop_refusal(sid, a, now, agents, idle_s=None):
+    """Why a stop that must cut nothing off (the server's "Stop idle chats") does not go ahead; None when it may.
+    Asked on the chat's own machine at the moment of the stop, so nothing the server saw a minute ago is trusted.
+    idle_s is the wait the server used; anything this machine cannot find out is a reason to leave the chat."""
+    unseen = 'This machine could not see what is running in it.'
+    if a.get('status') != 'idle':
+        return 'It is not idle.'
+    try:
+        procs = claude_procs()
+        tp, _ = find_session(sid)
+        used = Path(tp).stat().st_mtime
+    except Exception:
+        return unseen
+    num = lambda v: isinstance(v, (int, float)) and not isinstance(v, bool)
+    wait = idle_s if num(idle_s) and idle_s > 0 else IDLE_STOP_MIN
+    pid = a.get('pid')
+    if not procs or not num(pid) or pid not in procs or not num(procs[pid].get('age')):
+        return unseen
+    if procs[pid]['age'] < wait:  # resuming or relaunching a chat writes nothing to its transcript: its process says so
+        return 'It was started or resumed a short while ago.'
+    if now - used < wait:  # by this machine's own clock, whatever the server's says
+        return 'It was used a short while ago.'
+    b = busy_report(sid, now, agents, procs, transcript=tp)
+    if b['live']:
+        return b['summary'] or 'Something is still running in it.'
+    at = attached(sid, a, procs)
+    if at is None:
+        return unseen
+    if at:
+        return 'It is open in a terminal.'
+    if has_schedule(tp):
+        return 'It has a scheduled task.'
+    return None
 
 
 JOB_ID_RE = re.compile(r'[0-9A-Za-z_-]{4,40}')
@@ -3655,6 +3757,269 @@ def session_flags(c, launch, base):
     return f
 
 
+# ---------------------------------------------------------------- What each chat used this week
+# For the usage panel's "Most used this week". Every reply's tokens, weighted by COST_RATIOS, go into its chat's
+# 10-minute buckets, kept for 8 days in state/spend.json: so the week can start at any moment the server names, and
+# a chat that was stopped or deleted mid-week keeps what it used. A chat's subagents write their own transcripts
+# under <chat id>/subagents; those count as the chat's.
+#
+# The transcripts are large (a busy week is a gigabyte) and this helper is a new process at every poll, so only the
+# bytes appended since the last pass are read, only when the server asks (every couple of minutes), and for at most
+# SPEND_POLL_S a pass: the first pass after an update finishes over a few polls and nothing is reported until it has.
+#
+# One reply is written as several lines with the same message id and usage, and a resumed chat's file starts with
+# copies of the old chat's lines, so a reply counts once per machine by its id (state/spend.ids, 8 bytes each).
+SPEND_V = 1
+SPEND_BUCKET = 600          # seconds; the week's start is matched to this, so it can be off by up to ten minutes
+SPEND_KEEP = 8 * 86400      # a week, and a day to spare for a reset that moves
+SPEND_POLL_S = 1.0          # the most one poll spends reading transcripts
+SPEND_TOP = 40              # chats named in one answer; the rest are in its total
+SPEND_LOCK_TTL = 60
+SPEND_BUF = 4 * 1024 * 1024  # the one buffer a transcript is read through
+SPEND_CHUNK = 256 * 1024
+SPEND_IDS_TIDY = 4096       # spend.ids is written again without its old ids once this many are past the window
+
+
+def spend_weight(u):
+    """One reply's usage as weighted tokens (COST_RATIOS): an estimate of what it took from the plan."""
+    r = COST_RATIOS
+    n = lambda v: v if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0
+    cc = u.get('cache_creation') if isinstance(u.get('cache_creation'), dict) else {}
+    w5, w1 = n(cc.get('ephemeral_5m_input_tokens')), n(cc.get('ephemeral_1h_input_tokens'))
+    write = w5 * r['cache_write_5m'] + w1 * r['cache_write_1h'] if w5 or w1 \
+        else n(u.get('cache_creation_input_tokens')) * r['cache_write_5m']  # no split given: the shorter cache
+    return n(u.get('input_tokens')) + n(u.get('cache_read_input_tokens')) * r['cache_read'] + write + n(u.get('output_tokens')) * r['output']
+
+
+def _spend_files(now):
+    """Every transcript written to inside the window, as (mtime, size, path, chat id): each chat's own and, under
+    <chat id>/subagents (workflows included), its subagents'."""
+    out, old = [], now - SPEND_KEEP
+
+    def take(e, sid):
+        try:
+            st = e.stat()
+        except OSError:
+            return
+        if st.st_mtime >= old:
+            out.append((st.st_mtime, st.st_size, e.path, sid))
+
+    def under(d, sid, depth):
+        try:
+            with os.scandir(d) as it:
+                for e in it:
+                    if e.name.endswith('.jsonl'):
+                        take(e, sid)
+                    elif depth < 3 and e.is_dir(follow_symlinks=False):
+                        under(e.path, sid, depth + 1)
+        except OSError:
+            pass
+    try:
+        projects = [e.path for e in os.scandir(claude_dir() / 'projects') if e.is_dir(follow_symlinks=False)]
+    except OSError:
+        return out
+    for p in projects:
+        try:
+            with os.scandir(p) as it:
+                for e in it:
+                    if e.name.endswith('.jsonl') and SID_RE.fullmatch(e.name[:-6]):
+                        take(e, e.name[:-6])
+                    elif SID_RE.fullmatch(e.name) and e.is_dir(follow_symlinks=False):
+                        under(os.path.join(e.path, 'subagents'), e.name, 0)
+        except OSError:
+            pass
+    return out
+
+
+def _spend_ids(path, first_day):
+    """The replies already counted, as a set of 8-byte records (2 for the reply's day, 6 of its id's hash). Ids past
+    the window are left out, and written out of the file once enough have piled up."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        return set()
+    raw = raw[:len(raw) - len(raw) % 8]
+    every = [raw[i:i + 8] for i in range(0, len(raw), 8)]
+    lo = (first_day & 0xFFFF).to_bytes(2, 'big')  # days since 1970: two bytes last until 2149
+    keep = [x for x in every if x[:2] >= lo]
+    if len(every) - len(keep) >= SPEND_IDS_TIDY:
+        try:
+            tmp = path.with_name(f'{path.name}.{os.getpid()}.tmp')
+            tmp.write_bytes(b''.join(keep))
+            _replace(tmp, path)
+        except OSError:
+            pass
+    return set(keep)
+
+
+def _spend_line(line, buckets, ids, fresh, first):
+    """One transcript line that may be a reply: its weighted tokens into its bucket, unless it was counted already."""
+    import hashlib
+    try:
+        d = json.loads(line)
+    except ValueError:
+        return
+    m = d.get('message') if isinstance(d, dict) and d.get('type') == 'assistant' else None
+    u = m.get('usage') if isinstance(m, dict) else None
+    ts = _ts(d.get('timestamp')) if isinstance(u, dict) and isinstance(d.get('timestamp'), str) else None
+    if ts is None or ts // SPEND_BUCKET < first:
+        return
+    w = round(spend_weight(u))
+    if w <= 0:
+        return
+    mid = m.get('id') or d.get('uuid')
+    if isinstance(mid, str) and mid:
+        rec = (int(ts // 86400) & 0xFFFF).to_bytes(2, 'big') + hashlib.blake2b(mid.encode('utf-8', 'replace'), digest_size=6).digest()
+        if rec in ids:
+            return  # the same reply again: its next line, or a copy in a resumed chat's file
+        ids.add(rec)
+        fresh.append(rec)
+    b = str(int(ts // SPEND_BUCKET))
+    buckets[b] = buckets.get(b, 0) + w
+
+
+def _spend_read(path, off, buckets, ids, fresh, first, stop, buf=None):
+    """Count the replies in `path` from byte `off` on into `buckets` ({bucket: weighted tokens}). Returns where it
+    got to (the end of the last whole line) and whether it stopped early because stop() said the time is up.
+    The file goes through one fixed buffer (`buf`, shared by a whole pass), so a pass costs SPEND_BUF of memory
+    whatever the transcripts' size; a line longer than the buffer (tool output, never a reply) is skipped unread."""
+    buf = bytearray(SPEND_BUF) if buf is None else buf
+    mv = memoryview(buf)
+    have, skipping = 0, False
+    try:
+        with open(path, 'rb', buffering=0) as f:
+            f.seek(off)
+            while True:
+                n = f.readinto(mv[have:have + SPEND_CHUNK])  # small reads: a slow disk can't hold a poll for long
+                if not n:
+                    return off, False  # what is left has no line end yet: still being written, read by the next pass
+                end, a = have + n, 0
+                if skipping:
+                    b = buf.find(b'\n', 0, end)
+                    if b < 0:
+                        off, have = off + end, 0
+                        continue
+                    off, a, skipping = off + b + 1, b + 1, False
+                while True:
+                    b = buf.find(b'\n', a, end)
+                    if b < 0:
+                        break
+                    # tool output and the person's messages are most of the file, and are never parsed
+                    if buf.find(b'"usage"', a, b) >= 0 and buf.find(b'"assistant"', a, b) >= 0:
+                        _spend_line(bytes(mv[a:b]), buckets, ids, fresh, first)
+                    off, a = off + b + 1 - a, b + 1
+                if a == 0 and end == len(buf):
+                    off, have, skipping = off + end, 0, True
+                elif a:
+                    have = end - a
+                    mv[:have] = mv[a:end]  # the unfinished line moves to the front, with no copy made on the way
+                else:
+                    have = end  # still inside one long line
+                if stop():
+                    return off, True
+    finally:
+        mv.release()
+
+
+def spend_scan(now, budget=SPEND_POLL_S, clock=time.time):
+    """Bring state/spend.json up to date with what the transcripts gained since the last pass, for at most `budget`
+    seconds. Returns ({chat id: {bucket: weighted tokens}}, done): done is False while there is more to read, or
+    another poll is reading right now."""
+    state = paths()['state']
+    file, ids_file, lock = state / 'spend.json', state / 'spend.ids', state / 'spend.lock'
+    c = _jget(file)
+    ok = isinstance(c, dict) and c.get('v') == SPEND_V and isinstance(c.get('files'), dict) and isinstance(c.get('chats'), dict)
+    if not lock_take(lock, now, SPEND_LOCK_TTL):
+        return (c['chats'] if ok else {}), False
+    try:
+        if not ok:  # nothing kept, or kept by another version: the ids go with it, or every reply would look counted
+            c = {'v': SPEND_V, 'files': {}, 'chats': {}}
+            try:
+                ids_file.unlink()
+            except OSError:
+                pass
+        was = json.dumps(c, sort_keys=True)
+        first = int((now - SPEND_KEEP) // SPEND_BUCKET)
+        found = _spend_files(now)
+        seen = lambda path: c['files'].get(path) if isinstance(c['files'].get(path), list) and len(c['files'][path]) == 2 else [0, 0]
+        todo = sorted(x for x in found if seen(x[2])[0] != x[1])  # oldest first: a reply belongs to the chat that made it
+        done, fresh = True, []
+        if todo:
+            ids, t0, buf = _spend_ids(ids_file, int((now - SPEND_KEEP) // 86400)), clock(), bytearray(SPEND_BUF)
+            stop = lambda: clock() - t0 >= budget
+            for i, (_, size, path, sid) in enumerate(todo):
+                if i and stop():  # a pass always reads something, however little time it has
+                    done = False
+                    break
+                off = seen(path)[1]
+                off = off if isinstance(off, int) and 0 <= off <= size else 0  # shorter than it was: read again (ids keep it honest)
+                buckets = c['chats'].setdefault(sid, {})
+                try:
+                    off, cut = _spend_read(path, off, buckets, ids, fresh, first, stop, buf)
+                except OSError:
+                    continue  # gone or unreadable this instant: the next pass tries again
+                c['files'][path] = [-1 if cut else size, off]
+                if cut:
+                    done = False
+                    break
+        # what is past the window goes: old buckets, chats with none left, files no longer written to
+        here = {x[2] for x in found}
+        c['files'] = {k: v for k, v in c['files'].items() if k in here}
+        chats = {}
+        for sid, bs in c['chats'].items():
+            bs = {b: w for b, w in bs.items() if b.isdigit() and int(b) >= first} if isinstance(bs, dict) else {}
+            if bs:
+                chats[sid] = bs
+        c['chats'] = chats
+        if json.dumps(c, sort_keys=True) != was:
+            try:
+                _jput(file, c)
+                if fresh:
+                    with open(ids_file, 'ab') as f:
+                        f.write(b''.join(fresh))
+            except OSError:
+                pass
+        return chats, done
+    finally:
+        lock_drop(lock)
+
+
+def _spend_titles(sids, known):
+    """Names for chats the list itself does not carry (replaced, dismissed, scripted runs), from the index it keeps."""
+    want = set(sids) - set(known)
+    if not want:
+        return {}
+    idx, names = _jget(paths()['state'] / 'index.json') or {}, _jget(paths()['state'] / 'names.json') or {}
+    out = {}
+    for key, c in idx.items():
+        sid = Path(key).stem
+        if sid in want and isinstance(c, dict):
+            t = names.get(sid) or c.get('custom_title') or c.get('title') or c.get('first_prompt')
+            if isinstance(t, str) and t.strip():
+                out[sid] = ' '.join(t.split())[:120]
+    return out
+
+
+def spend_report(ask, now, known=(), budget=SPEND_POLL_S):
+    """What `list` answers under `spend` when the server asks {since}: this machine's chats by weighted tokens used
+    since then (its own clock), the SPEND_TOP biggest by name and the total of all. While the transcripts are still
+    being read for the first time it says only {more: true}: half a count is not a number."""
+    since = ask.get('since') if isinstance(ask, dict) else None
+    since = since if isinstance(since, (int, float)) and not isinstance(since, bool) and since > 0 else None
+    chats, done = spend_scan(now, budget)
+    out = {'v': SPEND_V, 'since': since, 'more': not done, 'at': now}
+    if since is None or not done:
+        return out
+    first = int((since + SPEND_BUCKET / 2) // SPEND_BUCKET)  # the nearest bucket edge: a clock a little off still starts on it
+    rows = [(sum(w for b, w in bs.items() if int(b) >= first and isinstance(w, (int, float))), sid) for sid, bs in chats.items()]
+    rows = sorted((r for r in rows if r[0] > 0), key=lambda r: (-r[0], r[1]))
+    top = rows[:SPEND_TOP]
+    titles = _spend_titles([sid for _, sid in top], known)
+    out.update(total=sum(w for w, _ in rows), n=len(rows),
+               chats=[dict({'sid': sid, 'w': w}, **({'title': titles[sid]} if sid in titles else {})) for w, sid in top])
+    return out
+
+
 LIST_BAD_MAX = 20  # chats one list pass leaves out before it gives up
 
 
@@ -3754,6 +4119,7 @@ def _list_sessions(now, agents, replaced_out, procs, skip, at):
     cond_spent = 0.0  # after an update every row is uncounted at once: a poll counts for a few seconds, the next go on
     model = summary_model()
     ttls = _jget(state_dir / TTL_FILE) or {}
+    here = (compact_or_none() or {}).get('value')  # this computer's compact window, for a chat with no reading yet
     ttls_before = dict(ttls)
     cu_cj = (_jget(claude_json_path()) or {}) if sys.platform == 'darwin' or IS_WIN else None  # computer use, per folder
     for r in show[:LIST_MAX]:
@@ -3776,6 +4142,7 @@ def _list_sessions(now, agents, replaced_out, procs, skip, at):
         s = {
             'sid': sid, 'title': r['title'], 'cwd': c.get('cwd'), 'folder': folder(c), 'mtime': r['mtime'], 'active': active,
             'ctx': max(c.get('ctx_tokens') or 0, cur.get('ctx_tokens') or 0),
+            'limit': state.get('ctx_limit') if isinstance(state.get('ctx_limit'), int) else here,  # where it compacts
             'model': c.get('model'), 'cold': bool(exp) and now > exp, 'cache_left': cache_left(exp, now),
             # raw signals for the server's derive() (server/fleet.py): it alone decides what the apps show
             'cache_expires_at': exp, 'cache_ttl': ttls.get(sid), 'turn_open': turn_open,
@@ -3918,8 +4285,268 @@ def latest_limits(now=None):
         if isinstance(d, dict):
             at = d.get('limits_at')  # a file from before limits_at: when its status line was last drawn
             rows.append(dict({k: d.get(k) for k in LIMIT_KEYS}, updated=at if isinstance(at, (int, float)) else d.get('updated')))
+    try:
+        acct = account_limits(account_cached().get('report'))  # what Claude Code itself last said: one more sighting
+    except Exception:
+        acct = None
+    if acct:
+        rows.append(acct)
     best = merge_limits(rows, time.time() if now is None else now)
     return dict(best, merged=True) if best else None
+
+
+# ---------------------------------------------------------------- the account's own usage report
+# The status line carries two numbers (the 5 hours and the week), and only when a chat here replies. Claude Code itself
+# knows more, and answers a `get_usage` control request with it before any turn: every limit the plan has (per model
+# too), extra usage, and the week by product. No model is asked, so it costs nothing; Claude Code makes the call with
+# its own login, and nothing secret is read or kept here. The server says when a report is due (list's `usage`), one
+# machine at a time; the answer is kept in a file and goes out with every list.
+ACCOUNT_V = 1
+ACCOUNT_MIN_AGE = 20      # seconds: nobody gets a fresher report than this, however often they ask
+ACCOUNT_RETRY = 1800      # a failed try is not repeated by the poll for half an hour (Refresh still may)
+ACCOUNT_TIMEOUT = 25
+ACCOUNT_LOCK_TTL = 60
+ACCOUNT_ROWS = 16
+ACCOUNT_ARGS = ('-p', '--no-session-persistence', '--tools', '', '--setting-sources', '', '--strict-mcp-config',
+                '--input-format', 'stream-json', '--output-format', 'stream-json', '--verbose')
+
+
+def _acct_num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf') else None
+
+
+def _acct_pct(v):
+    """A percent as the apps show it: 0 to 100, None for anything that is not a number."""
+    v = _acct_num(v)
+    return None if v is None else max(0, min(100, v))
+
+
+def _acct_str(v, most=64):
+    return v.strip()[:most] if isinstance(v, str) and v.strip() else None
+
+
+def _acct_time(v):
+    """A reset time as unix seconds, from ISO 8601 or a number; to the minute, so the same window reads the same
+    from here and from a status line (20:59:59.6 and 21:00:00 are one reset). None when it cannot be read."""
+    if isinstance(v, str):
+        try:
+            t = _dt.datetime.fromisoformat(v.strip().replace('Z', '+00:00'))
+        except ValueError:
+            return None
+        v = (t if t.tzinfo else t.replace(tzinfo=_dt.timezone.utc)).timestamp()
+    v = _acct_num(v)
+    return int(round(v / 60.0) * 60) if v and v > 0 else None
+
+
+def _acct_exp(v):
+    return v if isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 4 else 2
+
+
+def _acct_money(m):
+    """{'minor': 7500, 'currency': 'USD', 'exp': 2} from the source's money object; None when it is not one."""
+    if not isinstance(m, dict) or _acct_num(m.get('amount_minor')) is None:
+        return None
+    return {'minor': m['amount_minor'], 'currency': _acct_str(m.get('currency'), 8), 'exp': _acct_exp(m.get('exponent'))}
+
+
+def account_report(resp, now):
+    """Claude Code's get_usage answer as the small report the server keeps: `plan`, `limits` (one row per limit the
+    account has: kind session | weekly_all | weekly_scoped, its percent, reset and what it is for), `extra` (extra
+    usage: amounts in the currency's minor units, as the source sends them, with the exponent that says how many
+    decimals), `products` (the week by product). Only fields of the right shape are kept, so a changed answer loses a
+    section and never breaks the rest. None when the answer is not one."""
+    if not isinstance(resp, dict):
+        return None
+    out = {'v': ACCOUNT_V, 'at': now, 'plan': _acct_str(resp.get('subscription_type'), 32),
+           'available': resp.get('rate_limits_available') is not False, 'limits': [], 'extra': None, 'products': None}
+    rl = resp.get('rate_limits')
+    if not isinstance(rl, dict):
+        out['available'] = False
+        return out
+    rows = []
+
+    def row(kind, pct, reset, label=None, severity=None, active=False):
+        if _acct_pct(pct) is not None and _acct_str(kind):
+            rows.append({'kind': _acct_str(kind), 'pct': _acct_pct(pct), 'reset': _acct_time(reset), 'label': label,
+                         'severity': _acct_str(severity, 16), 'active': active})
+    if isinstance(rl.get('limits'), list):  # the source's own rows, in its order
+        for r in rl['limits']:
+            if isinstance(r, dict):
+                scope = r.get('scope') if isinstance(r.get('scope'), dict) else {}
+                name = lambda k: _acct_str(scope[k].get('display_name')) if isinstance(scope.get(k), dict) else None
+                row(r.get('kind'), r.get('percent'), r.get('resets_at'), name('model') or name('surface'),
+                    r.get('severity'), r.get('is_active') is True)
+    else:  # a Claude Code from before the rows: its named windows say the same
+        for key, kind, label in (('five_hour', 'session', None), ('seven_day', 'weekly_all', None),
+                                 ('seven_day_opus', 'weekly_scoped', 'Opus'), ('seven_day_sonnet', 'weekly_scoped', 'Sonnet')):
+            w = rl.get(key)
+            if isinstance(w, dict):
+                row(kind, w.get('utilization'), w.get('resets_at'), label, None, kind == 'weekly_all')
+        for m in rl.get('model_scoped') if isinstance(rl.get('model_scoped'), list) else []:
+            if isinstance(m, dict) and _acct_str(m.get('display_name')) and not any(r['label'] == _acct_str(m['display_name']) for r in rows):
+                row('weekly_scoped', m.get('utilization'), m.get('resets_at'), _acct_str(m['display_name']))
+    out['limits'] = rows[:ACCOUNT_ROWS]
+    eu, sp = rl.get('extra_usage'), rl.get('spend')
+    eu, sp = eu if isinstance(eu, dict) else {}, sp if isinstance(sp, dict) else {}
+    if eu or sp:
+        cur = {'currency': _acct_str(eu.get('currency'), 8), 'exp': _acct_exp(eu.get('decimal_places'))}
+        legacy = lambda k: dict(cur, minor=eu[k]) if _acct_num(eu.get(k)) is not None else None
+        on = sp.get('enabled') if isinstance(sp.get('enabled'), bool) else eu.get('is_enabled')
+        pct = _acct_pct(sp.get('percent'))
+        reload = sp.get('auto_reload')
+        out['extra'] = {'enabled': on if isinstance(on, bool) else None,
+                        'used': _acct_money(sp.get('used')) or legacy('used_credits'),
+                        'limit': _acct_money(sp.get('limit')) or legacy('monthly_limit'),
+                        'balance': _acct_money(sp.get('balance')),
+                        'pct': pct if pct is not None else _acct_pct(eu.get('utilization')),
+                        'reason': _acct_str(sp.get('disabled_reason')) or _acct_str(eu.get('disabled_reason')),
+                        'limit_reached': eu.get('spend_limit_reached') is True,
+                        'auto_reload': (reload.get('enabled') is not False) if isinstance(reload, dict)
+                        else reload if isinstance(reload, bool) else None}
+    bd = rl.get('seven_day_breakdown')
+    if isinstance(bd, dict) and isinstance(bd.get('rows'), list):
+        prods = [{'key': _acct_str(r.get('key')) or '', 'name': _acct_str(r.get('display_name')) or _acct_str(r.get('key')),
+                  'pct': _acct_pct(r.get('percent')), 'of_limit': _acct_pct(r.get('percent_of_limit'))}
+                 for r in bd['rows'] if isinstance(r, dict)]
+        prods = [p for p in prods if p['name'] and p['pct'] is not None][:ACCOUNT_ROWS]
+        if prods:
+            out['products'] = {'as_of': _acct_time(bd.get('as_of')), 'start': _acct_time(bd.get('window_started_at')), 'rows': prods}
+    return out
+
+
+def account_limits(rep):
+    """The report's 5-hour window and week as one sighting of the plan numbers (LIMIT_KEYS and `updated`), so they
+    join what the chats' status lines saw (merge_limits). None when it has neither."""
+    if not isinstance(rep, dict) or not isinstance(rep.get('limits'), list):
+        return None
+    out = dict.fromkeys(LIMIT_KEYS)
+    for r in rep['limits']:
+        if not isinstance(r, dict):
+            continue
+        for kind, pct, reset in (('session', 'five_hour', 'five_hour_reset'), ('weekly_all', 'seven_day', 'seven_day_reset')):
+            if r.get('kind') == kind and out[pct] is None and _acct_num(r.get('pct')) is not None and _acct_num(r.get('reset')):
+                out[pct], out[reset] = r['pct'], r['reset']
+    if out['five_hour'] is None and out['seven_day'] is None:
+        return None
+    return dict(out, updated=rep.get('at'))
+
+
+def _account_file():
+    return paths()['state'] / 'account_usage.json'
+
+
+def _account_lock():
+    return paths()['state'] / 'account_usage.lock'
+
+
+def ask_account_usage(timeout=ACCOUNT_TIMEOUT):
+    """Claude Code's answer to get_usage (the part inside the control response). Raises when there is none."""
+    req = json.dumps({'type': 'control_request', 'request_id': 'sb-usage',
+                      'request': {'subtype': 'get_usage', 'skip_behaviors': True}}) + '\n'
+    r = run_tree(cmd_safe([_claude_exe(), *ACCOUNT_ARGS]), req, timeout, env=claude_env(), cwd=str(Path.home()))
+    for line in (r.stdout or '').splitlines():
+        try:
+            d = json.loads(line)
+        except ValueError:
+            continue
+        resp = d.get('response') if isinstance(d, dict) and d.get('type') == 'control_response' else None
+        if not isinstance(resp, dict):
+            continue
+        if resp.get('subtype') == 'success' and isinstance(resp.get('response'), dict):
+            return resp['response']
+        raise RuntimeError(str(resp.get('error') or 'Claude Code refused the request')[:160])
+    raise RuntimeError(f'Claude Code did not answer (exit {r.returncode})')
+
+
+def account_cached():
+    d = _jget(_account_file())
+    return d if isinstance(d, dict) and d.get('v') == ACCOUNT_V else {}
+
+
+def account_view():
+    """What `list` sends: the last good report, with `error` and `tried` when the newest try failed. None before any."""
+    c = account_cached()
+    rep = c.get('report') if isinstance(c.get('report'), dict) else None
+    if rep is None and not c.get('error'):
+        return None
+    return dict(rep or {'v': ACCOUNT_V, 'at': None}, error=c.get('error'), tried=c.get('tried'))
+
+
+def refresh_account(now=None, asker=None):
+    """Ask Claude Code now and keep the answer. A failure keeps the last good report beside what went wrong."""
+    now = time.time() if now is None else now
+    old = account_cached()
+    try:
+        rep = account_report((asker or ask_account_usage)(), now)
+        if rep is None:
+            raise RuntimeError('the answer could not be read')
+        new = {'v': ACCOUNT_V, 'report': rep, 'tried': now, 'error': None}
+    except Exception as e:
+        msg = 'Claude Code took too long to answer' if isinstance(e, subprocess.TimeoutExpired) else (str(e).strip() or type(e).__name__)[:160]
+        log(f'account usage failed: {msg}')
+        new = {'v': ACCOUNT_V, 'report': old.get('report'), 'tried': now, 'error': msg}
+    try:
+        _jput(_account_file(), new)
+    except OSError:
+        pass
+    return new
+
+
+def account_due(now, max_age):
+    """Is a new report wanted? Never within ACCOUNT_MIN_AGE of the last try; after a failure the poll waits longer."""
+    c = account_cached()
+    tried = _acct_num(c.get('tried')) or 0
+    asked = _acct_num(max_age) or 0
+    max_age = max(asked, ACCOUNT_MIN_AGE)
+    if c.get('error') and asked > 2 * ACCOUNT_MIN_AGE:
+        max_age = max(max_age, ACCOUNT_RETRY)
+    return not 0 <= now - tried < max_age
+
+
+def spawn_account_refresh(now):
+    """A report in a detached process, so `list` never waits on Claude Code. One at a time per machine."""
+    if not lock_take(_account_lock(), now, ACCOUNT_LOCK_TTL, mine=False):
+        return False
+    args = [sys.executable, str(Path(__file__).resolve()), 'account-usage']
+    kw = {'stdin': subprocess.DEVNULL, 'stdout': subprocess.DEVNULL, 'stderr': subprocess.DEVNULL, 'env': claude_env()}
+    try:
+        if not IS_WIN:
+            subprocess.Popen(args, start_new_session=True, **kw)
+            return True
+        base = 0x00000008 | 0x00000200  # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP
+        try:
+            subprocess.Popen(args, creationflags=base | 0x01000000, **kw)  # CREATE_BREAKAWAY_FROM_JOB
+        except OSError:
+            subprocess.Popen(args, creationflags=base, **kw)
+        return True
+    except OSError:
+        lock_drop(_account_lock())
+        return False
+
+
+def run_account_refresh():
+    """The detached process: one report, then the slot is free."""
+    lock_own(_account_lock(), time.time())
+    try:
+        refresh_account()
+    finally:
+        lock_drop(_account_lock())
+
+
+def account_now(now, max_age, asker=None, wait=12.0):
+    """The `account_usage` verb (Refresh in the apps): a report no older than max_age, asked for here and now. When
+    another process is already asking, its answer is waited for instead of asking twice."""
+    if account_due(now, max_age):
+        if lock_take(_account_lock(), now, ACCOUNT_LOCK_TTL):
+            try:
+                refresh_account(now, asker)
+            finally:
+                lock_drop(_account_lock())
+        else:
+            end, before = time.time() + wait, account_cached().get('tried')
+            while time.time() < end and account_cached().get('tried') == before:
+                time.sleep(0.25)
+    return {'ok': True, 'account': account_view(), 'limits': latest_limits(now), 'now': now, 'clock': time.time()}
 
 
 @cfg_step
@@ -4584,6 +5211,12 @@ def rpc(req, now, agents=None):
             remember_identity(req)
             if isinstance(req.get('budget'), dict):  # the usage budget, kept for the prompt hook (budget_status)
                 budget_put(req['budget'], now)
+            if isinstance(req.get('usage'), dict):  # the server wants Claude Code's own usage report no older than this
+                try:
+                    if account_due(now, req['usage'].get('max_age')):
+                        spawn_account_refresh(now)
+                except Exception:
+                    log(f'account usage failed to start: {traceback.format_exc(limit=2)}')
             replaced, ags = [], get_agents()
             try:
                 procs = claude_procs()
@@ -4605,14 +5238,21 @@ def rpc(req, now, agents=None):
             except Exception:
                 log(f'setup failed: {traceback.format_exc(limit=2)}')
                 setup = []
+            spend = None
+            if isinstance(req.get('spend'), dict):  # the server wants what each chat used since the week began
+                try:
+                    spend = spend_report(req['spend'], now, [s.get('sid') for s in sessions + replaced])
+                except Exception:
+                    log(f'spend failed: {traceback.format_exc(limit=2)}')
             return {'ok': True, 'machine': machine_name(), 'os': device['os'], 'device': device, 'root_set': root_is_set(),
                     'root': trust_key(machine_root()), 'sessions': sessions, 'setup': setup,
-                    'replaced': replaced, 'limits': latest_limits(now), 'now': now,
+                    'replaced': replaced, 'limits': latest_limits(now), 'account': account_view(), 'now': now,
                     'agents_ok': known,  # False: Claude Code could not be asked, so no row says what runs
                     'clock': now + (time.time() - t0),  # as it answers: the server converts this machine's times with it
                     'launcher': {'alive': None} if IS_WIN else launcher_status(now), 'mem': mem_or_none(ags, procs) if known else None,
                     'features': list(AGENT_FEATURES), 'versions': {'agent': agent_version(), 'claude': claude_version()},
-                    'models': models_or_none(), 'root_suggest': None if root_is_set() else root_suggest()}
+                    'models': models_or_none(), 'root_suggest': None if root_is_set() else root_suggest(),
+                    'compact': compact_or_none(), 'spend': spend}
         if verb == 'folders':
             list_sessions(now, _NoAgents())  # for the index only: nobody was asked, so nothing counts as stopped
             if 'parent' in req:  # the tree: one level at a time
@@ -4669,7 +5309,18 @@ def rpc(req, now, agents=None):
             return dict(busy_report(sid, now, get_agents(), procs), ok=True)
         if verb in ('stop', 'dismiss'):
             sid = _need_sid(req)
-            a = _agent_for(sid, sure_agents(get_agents()))  # not known: nothing is hidden or stopped on a guess
+            agents = sure_agents(get_agents())  # not known: nothing is hidden or stopped on a guess
+            a = _agent_for(sid, agents)
+            if verb == 'stop' and req.get('if_idle'):  # nobody asked for this stop: it happens only if it costs nothing
+                if not (a and a.get('kind') == 'background' and a.get('id')):
+                    raise RpcError('It is not a running background chat.')
+                why = idle_stop_refusal(sid, a, now, agents, req.get('idle_s'))
+                if why:
+                    raise RpcError(why)
+                # the checks took a moment: the list is read once more, so a message that came in meanwhile is not cut off
+                a = _agent_for(sid, sure_agents(get_agents()))
+                if not (a and a.get('kind') == 'background' and a.get('id') and a.get('status') == 'idle'):
+                    raise RpcError('It is not idle.')
             if verb == 'dismiss':
                 # One still working keeps writing to its transcript: it stays hidden until that turn is over, so it
                 # comes back only for a reply after it.
@@ -4685,6 +5336,8 @@ def rpc(req, now, agents=None):
                     raise RpcError('This session is open in a terminal on that machine. Close it there.')
                 return {'ok': True, 'note': 'not running'}
             return {'ok': True}
+        if verb == 'account_usage':  # Refresh on the apps' usage page: ask Claude Code now, and wait for it
+            return account_now(now, req.get('max_age'))
         if verb == 'budget_stop':  # the hard limit: stop the busy background chats here (claude stop; resumable)
             return budget_stop(sure_agents(get_agents()))
         if verb in FEAT_VERBS:
@@ -4727,7 +5380,7 @@ def attach_env():
 
 
 TERM_LEFT = 100  # the person left the chat (exit, /exit, the left arrow): the apps close its tab
-AGENT_VIEW_POLL = 0.3
+AGENT_VIEW_POLL = 1.0  # each look starts a pgrep, for as long as the tab is open: one a second, not three
 
 
 def agent_view_children(pid):
@@ -4763,8 +5416,23 @@ def attach_watch(argv, env, popen=None, children=agent_view_children, poll=AGENT
         for n in ('SIGINT', 'SIGQUIT'):
             signal.signal(getattr(signal, n), signal.SIG_DFL)
     old = {n: signal.signal(getattr(signal, n), signal.SIG_IGN) for n in ('SIGINT', 'SIGQUIT')}  # the keys are Claude's
+    box = []
+
+    def pass_on(sig, _frame):  # told to go (the tab closed, the link dropped): the attach under it goes too
+        for q in box:
+            try:
+                q.send_signal(sig)
+            except (OSError, ValueError):
+                pass
+    for n in ('SIGHUP', 'SIGTERM'):
+        if hasattr(signal, n):
+            try:
+                old[n] = signal.signal(getattr(signal, n), pass_on)
+            except (OSError, ValueError):  # not the main thread (a test): nothing to pass on
+                pass
     try:
         p = (popen or subprocess.Popen)(argv, env=env, preexec_fn=child_signals)
+        box.append(p)
         while True:
             try:
                 code = p.wait(timeout=poll)
@@ -7279,7 +7947,8 @@ def mcp_servers():
 
 
 AGENT_FEATURES = ('places', 'setup', 'flags', 'ping', 'cleanup', 'browse', 'rename', 'summary', 'files', 'upload', 'busy', 'relaunch', 'tail', 'compact', 'mcp', 'root_dirs',
-                  'library', 'budget_stop', 'tools_auto', 'computer_use')  # the server checks before it uses one
+                  'library', 'budget_stop', 'tools_auto', 'computer_use', 'stop_if_idle',
+                  'account_usage', 'compact_at', 'spend')  # the server checks before it uses one
 
 
 def rpc_feat(verb, req, now, get_agents):
@@ -7735,11 +8404,13 @@ def ask_worker(stop, ask=None, wait=None):
 
     def answer(f, q):
         try:
-            out = {'ok': True, 'text': ask(q['prompt'], q['system'])}
-        except Exception as e:
-            out = {'ok': False, 'error': f"Claude didn't answer: {str(e)[:200]}"}
-        _jput(d / f'{f.stem}.result.json', out)
-        busy.discard(f.stem)
+            try:
+                out = {'ok': True, 'text': ask(q['prompt'], q['system'])}
+            except Exception as e:
+                out = {'ok': False, 'error': f"Claude didn't answer: {str(e)[:200]}"}
+            _jput(d / f'{f.stem}.result.json', out)
+        finally:
+            busy.discard(f.stem)  # also when the answer could not be written: three of those ended all answering
 
     while not stop.is_set():
         for f in sorted(d.glob('*.json')):
@@ -8123,6 +8794,9 @@ def mcp_handle(msg, tool=None):
     return {'jsonrpc': '2.0', 'id': mid, 'error': {'code': -32601, 'message': f'Method not found: {method}'}}
 
 
+MCP_LINGER = 10  # seconds a tool call may still run after the chat closed the pipe
+
+
 def mcp_serve(inp=None, out=None, handle=None):
     """stdio transport: one JSON-RPC message per line each way. Tool calls run on their own threads, so a long
     check() does not hold up a ping."""
@@ -8150,11 +8824,15 @@ def mcp_serve(inp=None, out=None, handle=None):
         if isinstance(msg, dict) and msg.get('method') == 'tools/call':
             t = threading.Thread(target=reply, args=(msg,), daemon=True)
             t.start()
-            threads.append(t)
+            threads = [x for x in threads if x.is_alive()] + [t]
         else:
             reply(msg)
+    # The chat is gone (its end of the pipe closed): nobody reads an answer now. A call already on its way gets a
+    # moment to finish what it is sending, then this process ends with its chat instead of waiting minutes on a
+    # check() nobody will see.
+    end = time.time() + MCP_LINGER
     for t in threads:
-        t.join(timeout=CHECK_MAX + 30)
+        t.join(timeout=max(0.0, end - time.time()))
     return 0
 
 
@@ -9357,7 +10035,43 @@ CLAUDE_MD_RULE = ('- Subagent models: pick per task when launching an Agent. Use
 
 CLAUDE_MD_OPEN = '<!-- switchboard: subagent models (turn off in Switchboard Settings) -->'
 CLAUDE_MD_CLOSE = '<!-- /switchboard -->'
-COMPACT_WINDOW = '300000'
+COMPACT_KEY = 'CLAUDE_CODE_AUTO_COMPACT_WINDOW'
+COMPACT_WINDOW = '300000'  # the value when the server names none (an older server), and what older helpers wrote
+COMPACT_MIN, COMPACT_MAX = 100_000, 1_000_000  # what Claude Code takes; it holds anything outside to these
+
+
+def compact_ok(v):
+    """A compact window the server sent, when it is a whole number of tokens Claude Code takes; else None."""
+    return v if isinstance(v, int) and not isinstance(v, bool) and COMPACT_MIN <= v <= COMPACT_MAX else None
+
+
+def compact_want():
+    """The env entry Switchboard writes while the setting is on: the server's value, or 300000 when it names none."""
+    v = compact_ok(agent_conf().get('compact_at'))
+    return str(v) if v else COMPACT_WINDOW
+
+
+def window_tokens(v):
+    """A compact window as Claude Code reads it from the env entry: a token count, or one with k or M after it,
+    held to 100k..1M. None for anything else (Claude Code ignores it too)."""
+    m = re.fullmatch(r'\s*(\d{1,9})\s*([kKmM]?)\s*', v) if isinstance(v, str) else None
+    if not m:
+        return None
+    n = int(m.group(1)) * {'': 1, 'k': 1000, 'm': 1_000_000}[m.group(2).lower()]
+    return max(COMPACT_MIN, min(COMPACT_MAX, n))
+
+
+def own_window(s):
+    """The compact window the user chose in Claude Code's own settings, beside the env entry: 'setting'
+    (autoCompactWindow, every model) or 'models' (/autocompact saves one per model). None when there is none.
+    Switchboard's env entry would override either, so it is not added on a computer that has one."""
+    num = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool) or (isinstance(x, str) and window_tokens(x) is not None)
+    if num(s.get('autoCompactWindow')):
+        return 'setting'
+    ms = s.get('modelSettings')
+    if isinstance(ms, dict) and any(isinstance(m, dict) and num(m.get('autoCompactWindow')) for m in ms.values()):
+        return 'models'
+    return None
 
 SB_EVENTS = {'UserPromptSubmit': 10, 'SessionStart': 120, 'SessionEnd': 10, 'Stop': 10, 'Notification': 10}
 
@@ -9435,13 +10149,48 @@ def _setup_have(cdir):
     """Which of the three are in place now, written the way Switchboard writes them."""
     sp, ex, cm = cdir / 'settings.json', cdir / 'agents' / 'Explore.md', cdir / 'CLAUDE.md'
     try:
-        env = (json.loads(sp.read_text()) if sp.exists() else {}).get('env') or {}
+        d = json.loads(sp.read_text()) if sp.exists() else {}
     except ValueError:
-        env = {}
+        d = {}
+    env = d.get('env') if isinstance(d, dict) else None
+    env = env if isinstance(env, dict) else {}  # a settings file of some other shape has no entry of Switchboard's
     text = cm.read_text() if cm.exists() else ''
-    return {'setup_compact_window': env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW') == COMPACT_WINDOW,
+    return {'setup_compact_window': env.get(COMPACT_KEY) == COMPACT_WINDOW,
             'setup_explore_agent': ex.exists() and ex.read_text() == EXPLORE_MD,
             'setup_subagent_rule': _strip_rule(text) != text}
+
+
+def compact_or_none():
+    try:
+        return compact_state()
+    except Exception:
+        log(f'compact state: {traceback.format_exc(limit=2)}')
+        return None
+
+
+def _setup_compact_value(cdir):
+    """The compact window Switchboard wrote here, as text: setup.json says, and before it did, it was 300000."""
+    d = _jget(cdir / 'switchboard' / 'setup.json')
+    v = d.get('compact_value') if isinstance(d, dict) else None
+    return v if isinstance(v, str) and v.isdigit() else COMPACT_WINDOW
+
+
+def compact_state(cdir=None):
+    """What this computer's Claude Code settings say about the compact window, for Settings: the env entry (`set`,
+    `raw` as written, `value` in tokens as Claude Code reads it), whether it is Switchboard's (`own`), and `other`,
+    a window the user chose the other ways (own_window). Read only."""
+    cdir = Path(cdir) if cdir else claude_dir()
+    sp = cdir / 'settings.json'
+    try:
+        s = json.loads(sp.read_text()) if sp.exists() else {}
+    except (OSError, ValueError):
+        return None  # a settings file that cannot be read: nothing is claimed about it
+    s = s if isinstance(s, dict) else {}
+    env = s.get('env') if isinstance(s.get('env'), dict) else {}
+    have = env.get(COMPACT_KEY)
+    own = have is not None and _setup_owned(cdir)['setup_compact_window'] and have == _setup_compact_value(cdir)
+    return {'set': have is not None, 'raw': str(have)[:24] if have is not None else None, 'value': window_tokens(have),
+            'own': bool(own), 'other': own_window(s)}
 
 
 def _setup_owned(cdir):
@@ -9473,9 +10222,10 @@ def _strip_rule(text):
 
 
 @cfg_step
-def apply_setup(cdir, opts, dry_run=False):
+def apply_setup(cdir, opts, dry_run=False, compact=None):
     """Add or take back each opt-in change to the Claude folder `cdir` to match the settings, removing only what
-    Switchboard added. Returns {item: 'added'|'removed'} for what changed."""
+    Switchboard added. `compact` is the compact window to write, as text (the server's, when not given). Returns
+    {item: 'added'|'removed'|'changed'} for what changed."""
     cdir = Path(cdir)
     owned, done = _setup_owned(cdir), {}
     sp, ex, cm = cdir / 'settings.json', cdir / 'agents' / 'Explore.md', cdir / 'CLAUDE.md'
@@ -9483,15 +10233,25 @@ def apply_setup(cdir, opts, dry_run=False):
 
     s = cfg_read(sp)
     env = s.get('env') if isinstance(s.get('env'), dict) else {}
-    have = env.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
+    have = env.get(COMPACT_KEY)
+    target = compact or compact_want()
+    wrote = _setup_compact_value(cdir)
+    # Switchboard's only while it is still exactly what Switchboard wrote: a value the user picked stays theirs
+    ours = owned['setup_compact_window'] and have is not None and have == wrote
     if want('setup_compact_window') and have is None:
-        env['CLAUDE_CODE_AUTO_COMPACT_WINDOW'] = COMPACT_WINDOW
-        owned['setup_compact_window'], done['setup_compact_window'] = True, 'added'
-    elif want('setup_compact_window'):  # already set: Switchboard's only if it set it (a value the user picked stays theirs)
-        owned['setup_compact_window'] = owned['setup_compact_window'] and have == COMPACT_WINDOW
+        if own_window(s):  # the user chose a window in Claude Code's own settings, which this entry would override
+            owned['setup_compact_window'] = False
+        else:
+            env[COMPACT_KEY] = wrote = target
+            owned['setup_compact_window'], done['setup_compact_window'] = True, 'added'
+    elif want('setup_compact_window'):
+        if ours and have != target:  # the slider moved: Switchboard's own value follows it
+            env[COMPACT_KEY] = wrote = target
+            done['setup_compact_window'] = 'changed'
+        owned['setup_compact_window'] = ours
     else:
-        if owned['setup_compact_window'] and have == COMPACT_WINDOW:
-            env.pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
+        if ours:
+            env.pop(COMPACT_KEY)
             done['setup_compact_window'] = 'removed'
         owned['setup_compact_window'] = False
     if 'setup_compact_window' in done and not dry_run:
@@ -9535,7 +10295,8 @@ def apply_setup(cdir, opts, dry_run=False):
         owned['setup_subagent_rule'] = False
 
     if not dry_run:
-        _jput(cdir / 'switchboard' / 'setup.json', {'added': owned})
+        _jput(cdir / 'switchboard' / 'setup.json',
+              dict({'added': owned}, **({'compact_value': wrote} if owned['setup_compact_window'] else {})))
         if done:
             log('setup options: ' + ', '.join(f'{k} {v}' for k, v in done.items()))
     return done
@@ -9600,8 +10361,8 @@ def uninstall(home=None):
     s = cfg_read(sp)
     owned = _setup_owned(cdir)
     _backup(sp)
-    if owned['setup_compact_window'] and (s.get('env') or {}).get('CLAUDE_CODE_AUTO_COMPACT_WINDOW') == COMPACT_WINDOW:
-        s['env'].pop('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
+    if owned['setup_compact_window'] and isinstance(s.get('env'), dict) and s['env'].get(COMPACT_KEY) == _setup_compact_value(cdir):
+        s['env'].pop(COMPACT_KEY)
     prev = cdir / 'switchboard' / 'statusline.prev.json'
     if prev.exists():
         s['statusLine'] = json.loads(prev.read_text())
@@ -9633,8 +10394,7 @@ def uninstall(home=None):
 
 # ---------------------------------------------------------------- CLI
 def _compact_window():
-    v = os.environ.get('CLAUDE_CODE_AUTO_COMPACT_WINDOW')
-    return int(v) if v and v.isdigit() else None
+    return window_tokens(os.environ.get(COMPACT_KEY))
 
 
 def main(argv):
@@ -9692,6 +10452,9 @@ def main(argv):
         if cmd == 'handoff':
             generate_handoff(argv[2], argv[3])
             return 0
+        if cmd == 'account-usage':  # the background ask for Claude Code's own usage report
+            run_account_refresh()
+            return 0
         if cmd == 'need-ask':  # the background Haiku pass behind a waiting chat's ask card
             run_need_ask(argv[2], argv[3], argv[4] if len(argv) > 4 else '')
             return 0
@@ -9734,5 +10497,46 @@ def main(argv):
     return 0
 
 
+# Run as a script, Python compiles this whole file first, and what that takes stays with the process: about 56 MB,
+# against 23 MB when the same code is imported from its cached bytecode (measured, Python 3.14). The helpers that live
+# as long as a chat or a tab (one `mcp` for every chat, one `rpc` for every open terminal, the launcher) start over
+# once as an import of this file, in the same process: same pid, same pipes, a third of the memory.
+LEAN_BOOT = ("import sys; sys.argv = sys.argv[1:]; d = sys.argv[0].rpartition('/')[0]; "
+             "sys.path[:] = [d] + [p for p in sys.path if p and p != d]; import sb; sys.exit(sb.main(sys.argv))")
+
+
+def lean_argv(argv, environ=None, exe=None):
+    """The command that runs this same call from cached bytecode, or None when it is not worth it or not possible:
+    a short call (compiling again would cost more than it saves), Windows (no exec that keeps the process), a file
+    not named sb.py, or a folder Python cannot keep bytecode in."""
+    environ = os.environ if environ is None else environ
+    cmd = argv[1] if len(argv) > 1 else ''
+    long_lived = cmd in ('mcp', 'launcher') or (cmd == 'rpc' and bool(term_request(environ.get('SSH_ORIGINAL_COMMAND'))))
+    exe = sys.executable if exe is None else exe
+    me = Path(__file__).resolve()
+    if IS_WIN or not long_lived or not exe or me.name != 'sb.py' or sys.dont_write_bytecode or environ.get('PYTHONDONTWRITEBYTECODE'):
+        return None
+    if not os.access(str(me.parent), os.W_OK) and not (me.parent / '__pycache__').is_dir():
+        return None
+    try:  # written here when it is missing or old, so the process that stays never compiles (this one is replaced)
+        import importlib.util, py_compile
+        pyc = Path(importlib.util.cache_from_source(str(me)))
+        if not pyc.exists() or pyc.stat().st_mtime < me.stat().st_mtime:
+            py_compile.compile(str(me), doraise=True)
+    except Exception:
+        return None
+    return [exe, *subprocess._args_from_interpreter_flags(), '-c', LEAN_BOOT, me.as_posix(), *argv[1:]]
+
+
 if __name__ == '__main__':
+    _lean = None
+    try:
+        _lean = lean_argv(sys.argv)
+    except Exception:
+        pass
+    if _lean:
+        try:
+            os.execv(_lean[0], _lean)
+        except OSError:
+            pass  # it runs as it always has
     sys.exit(main(sys.argv))

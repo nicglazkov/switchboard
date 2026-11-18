@@ -85,7 +85,7 @@ GROUPS.path.write_text(json.dumps(SEED_GROUPS if os.environ.get('SB_FIXTURE_GROU
 
 FIX = json.loads((ROOT / 'native/scripts/fixtures/fixture.json').read_text())
 START = time.time()
-PREFS = {'chrome_machine': None, 'last': None, 'presets': [],
+PREFS = {'chrome_machine': None, 'last': None, 'presets': [], 'summary_model': 'opus', 'auto_stop_h': 6,
          'appearance': {'theme': 'system', 'term': {'scheme': 'converge-dark', 'size': None, 'size_phone': None,
                                                     'cursor': 'block', 'blink': True}}}
 VERSION = {'version': '0.1.0', 'build': 'fixture'}
@@ -93,6 +93,42 @@ VERSION = {'version': '0.1.0', 'build': 'fixture'}
 # that had them before); SB_FIXTURE_PUSH=1 has iPhone notifications set up.
 OPTIONS = {k: os.environ.get('SB_FIXTURE_OPTIONS') == 'on' for k in options_mod.KEYS}
 PUSH_READY = bool(os.environ.get('SB_FIXTURE_PUSH'))
+
+# SB_FIXTURE_COMPACT: Settings > Context window. Words separated by commas:
+#   a number (500000, 250000)  the value the server starts with, switched on
+#   on                         switched on at 300000
+#   mixed   Laptop has a value its user set (500000), Tower's helper is older (knows 300k only, reports nothing)
+#   models  Laptop has a window per model saved in Claude Code (/autocompact) instead
+#   slow    computers follow a change a few seconds late, to see "Changing to ..."
+#   old     a server from before the value existed: the switch only, and nothing reported per computer
+COMPACT_WORDS = [w for w in (os.environ.get('SB_FIXTURE_COMPACT') or '').split(',') if w]
+COMPACT_OLD = 'old' in COMPACT_WORDS
+COMPACT = {'at': next((int(w) for w in COMPACT_WORDS if w.isdigit()), options_mod.COMPACT_DEFAULT), 'changed': 0.0}
+if any(w.isdigit() or w == 'on' for w in COMPACT_WORDS):
+    OPTIONS['setup_compact_window'] = True
+COMPACT['was'] = (OPTIONS['setup_compact_window'], COMPACT['at'])  # what the computers have until they follow
+
+
+def compact_seen(name):
+    """What one computer's helper reports about its own compact window (agent/sb.py compact_state)."""
+    if COMPACT_OLD or ('mixed' in COMPACT_WORDS and name == 'tower'):
+        return None
+    if 'mixed' in COMPACT_WORDS and name == 'laptop':
+        return {'set': True, 'raw': '500000', 'value': 500_000, 'own': False, 'other': None}
+    if 'models' in COMPACT_WORDS and name == 'laptop':
+        return {'set': False, 'raw': None, 'value': None, 'own': False, 'other': 'models'}
+    late = 'slow' in COMPACT_WORDS and time.time() - COMPACT['changed'] < 6
+    on, at = COMPACT['was'] if late else (OPTIONS['setup_compact_window'], COMPACT['at'])
+    if not late:
+        COMPACT['was'] = (on, at)
+    return {'set': on, 'raw': str(at) if on else None, 'value': at if on else None, 'own': on, 'other': None}
+
+
+def prefs_view():
+    view = options_mod.view(OPTIONS, PUSH_READY, PREFS.get('notify'), COMPACT['at'])
+    if COMPACT_OLD:
+        view.pop('compact')
+    return dict(PREFS, ok=True, **view)
 
 
 # SB_FIXTURE_LIBRARY=auto: a tool library from a server that knows Auto (tools say `auto` and `when`, chats say
@@ -166,6 +202,44 @@ def library():
     return d
 
 
+# SB_FIXTURE_SENT=1: tasks that chats sent with run_on, in every state: working, stopped at a prompt, finished with
+# the report read or not, and stopped without one. They carry `sent` as the server's Dispatch.mark writes it.
+SENT = os.environ.get('SB_FIXTURE_SENT')
+
+
+def sent_tasks(d):
+    now = d['now']
+    boss = next(s for s in d['machines'][0]['sessions'] if s.get('kind') == 'interactive')
+    who = {'machine': d['machines'][0]['name'], 'label': d['machines'][0].get('label') or d['machines'][0]['name'],
+           'sid': boss['sid'], 'title': boss['title']}
+    n = [0]
+
+    def task(title, status, state, ago, ctx=42000, **facts):
+        n[0] += 1
+        facts = {k: now - v if k.endswith('_at') else v for k, v in facts.items()}
+        return {'sid': f'5e170000-0000-4000-8000-{n[0]:012d}', 'title': f'{title} (for {who["label"]})',
+                'cwd': '/Users/you/Claude', 'folder': '', 'mtime': now - ago, 'active': now - ago, 'ctx': ctx,
+                'model': 'claude-opus-5-5', 'cold': ago > 3600, 'cache_left': max(0, 3600 - ago), 'kind': 'background',
+                'status': status, 'state': state, 'bg_id': f'5e17{n[0]:04d}', 'url': None, 'handoff': False,
+                'held': False, 'sent': dict(who, id=f'd-{n[0]:012x}', **facts)}
+
+    by = {m['name']: m for m in d['machines']}
+    if 'tower' in by:
+        by['tower']['sessions'][:0] = [
+            task('Run the maps API test suite', 'busy', 'working', 40),
+            task('Check the Windows build of the tile cache', 'stopped', 'done', 380, done_at=380, read_at=240, stopped_at=260),
+            task('Profile the tile cache under load', 'stopped', 'done', 7400, ctx=88000, done_at=7400, stopped_at=7280),
+            task('List the fonts the installer ships', 'stopped', None, 3000, ctx=0, failed=True, done_at=3000)]
+    if 'laptop' in by:
+        ask = task('Install the test tools for the parser', 'waiting', 'blocked', 540)
+        ask['needs'] = 'Allow it to run npm install in parser/tools?'
+        by['laptop']['sessions'][:0] = [
+            ask,
+            task('Review the parser diff for missed cases', 'busy', 'working', 15, ctx=61000),
+            task('Summarise the course notes on recursion', 'idle', 'done', 90, done_at=80)]
+    d['origins'] = True
+
+
 def shifted():
     """The fixture as if it were fetched now: every timestamp moves by the time since the fixture was taken."""
     d = copy.deepcopy(FIX)
@@ -183,8 +257,13 @@ def shifted():
         if sm.get(k):
             sm[k] += dt
     sm['limits_updated'] = d['now'] - LIMITS_AGE
+    if SENT:
+        sent_tasks(d)
     for m in d['machines']:
+        seen = compact_seen(m['name'])
         for s in m['sessions']:
+            if seen is not None:  # where the chat compacts: the computer's window, or the model's own with none set
+                s['limit'] = seen['value'] or 1_000_000
             if s.get('ctx'):
                 ready = bool(s.get('handoff'))
                 s.setdefault('handoff_fresh', ready)
@@ -282,10 +361,88 @@ def usage():
     days = [start + datetime.timedelta(n) for n in range((today - start).days + 1)]
     shape = [6, 9, 3, 12, 8, 11, 4][:len(days)]
     used = [round(pct * x / sum(shape), 1) for x in shape]
-    return {'ok': True, 'now': now, 'week': {'pct': pct, 'reset': reset, 'pace': min(100, pct * 1.3)},
-            'five': {'pct': sm.get('five_hour'), 'reset': sm.get('five_hour_reset')},
-            'days': [{'day': d.isoformat(), 'used': u} for d, u in zip(days, used)],
-            'weeks': [{'reset': reset - 7 * 86400 * k, 'pct': x} for k, x in ((4, 62), (3, 88), (2, 71), (1, 97))]}
+    out = {'ok': True, 'now': now, 'week': {'pct': pct, 'reset': reset, 'pace': min(100, pct * 1.3)},
+           'five': {'pct': sm.get('five_hour'), 'reset': sm.get('five_hour_reset')},
+           'days': [{'day': d.isoformat(), 'used': u} for d, u in zip(days, used)],
+           'weeks': [{'reset': reset - 7 * 86400 * k, 'pct': x} for k, x in ((4, 62), (3, 88), (2, 71), (1, 97))]}
+    if USAGE_MODE != 'old':
+        out.update(account_usage(now, reset, pct, sm))
+        out['top'] = top_chats(reset - 7 * 86400)
+    return out
+
+
+# SB_FIXTURE_TOP: "Most used this week" on the usage panel. Unset: the fixture's own chats, biggest first (one a
+# thread of three chats, one sent by Claude when SB_FIXTURE_SENT is set, one that no machine lists any more) and
+# more chats than are shown. `long`: the first row has a very long name and a long machine name. `none`: nobody
+# has used anything yet this week. `old`: no machine's helper can count. `reading`: the helpers are still reading
+# their transcripts. An old server (SB_FIXTURE_USAGE=old) has no `top` at all.
+TOP_MODE = os.environ.get('SB_FIXTURE_TOP') or ''
+
+
+def top_chats(since):
+    """What server/fleet.py top_chats answers under GET /api/usage `top`."""
+    d = shifted()
+    n = len(d['machines'])
+    out = {'since': since, 'total': 0, 'chats': 0, 'rows': [], 'able': n, 'machines': n, 'pending': 0}
+    if TOP_MODE in ('none', 'old', 'reading'):
+        return dict(out, able=0 if TOP_MODE == 'old' else n, pending=n if TOP_MODE == 'reading' else 0)
+    listed = [(m, x) for m in d['machines'] for x in m['sessions'] if not x.get('stale')]
+    sent = [mx for mx in listed if mx[1].get('sent')][:1]
+    seen, plain = set(), []
+    for mx in listed:
+        if not mx[1].get('sent') and mx[1].get('title') not in seen:
+            seen.add(mx[1].get('title'))
+            plain.append(mx)
+    picks = plain[:5] + sent
+    weights = [61_400_000, 34_900_000, 21_300_000, 9_800_000, 2_400_000, 14_600_000]
+    rows = []
+    for i, ((m, x), w) in enumerate(zip(picks, weights)):
+        rows.append({'machine': m['name'], 'sid': x['sid'], 'name': x.get('title') or '', 'label': m.get('label') or m['name'],
+                     'weighted': w, 'alive': True, 'sent': bool(x.get('sent')), 'parts': 3 if i == 1 else 1})
+    if d['machines']:
+        m = d['machines'][-1]  # a chat that was stopped and cleared mid-week: named, with nothing to open
+        rows.append({'machine': m['name'], 'sid': '90ee0000-0000-4000-8000-000000000001', 'name': 'Sort the photo library by year',
+                     'label': m.get('label') or m['name'], 'weighted': 17_200_000, 'alive': False, 'sent': False, 'parts': 1})
+    if TOP_MODE == 'long' and rows:
+        rows[0].update(name=LONG_NAME, label='Workshop computer in the back room', parts=4)
+    rows.sort(key=lambda r: -r['weighted'])
+    total = sum(r['weighted'] for r in rows) + 11_900_000  # 23 small chats that are not listed
+    for r in rows:
+        r['share'] = round(100.0 * r['weighted'] / total, 1)
+    return dict(out, total=total, chats=len(rows) + 23, rows=rows[:10])
+
+
+# SB_FIXTURE_USAGE: the account's own usage report on the usage panel. Unset: a full one (every limit, extra usage
+# on, the week by product). `reached`: extra usage at its monthly limit. `failed`: the last refresh failed and the
+# report is hours old. `none`: no machine's helper can report one. `old`: a server from before the report.
+USAGE_MODE = os.environ.get('SB_FIXTURE_USAGE') or ''
+
+
+def account_usage(now, reset, pct, sm):
+    """What server/fleet.py adds to /api/usage: when the numbers were seen, the report, and who could give one."""
+    if USAGE_MODE == 'none':
+        return {'updated': now - 240, 'account': None, 'account_support': {'able': 0, 'online': 0, 'machines': 3}}
+    usd = lambda minor: {'minor': minor, 'currency': 'USD', 'exp': 2}
+    reached, failed = USAGE_MODE == 'reached', USAGE_MODE == 'failed'
+    at = now - (5 * 3600 if failed else 40)
+    limits = []
+    if sm.get('five_hour') is not None:
+        limits.append({'kind': 'session', 'pct': sm['five_hour'], 'reset': sm.get('five_hour_reset'), 'label': None,
+                       'severity': 'normal', 'active': False})
+    limits += [{'kind': 'weekly_all', 'pct': pct, 'reset': reset, 'label': None, 'severity': 'normal', 'active': True},
+               {'kind': 'weekly_scoped', 'pct': 18, 'reset': reset, 'label': 'Fable', 'severity': 'normal', 'active': False},
+               {'kind': 'weekly_scoped', 'pct': 77, 'reset': reset, 'label': 'Sonnet', 'severity': 'warning', 'active': False}]
+    extra = {'enabled': not reached, 'used': usd(7725 if reached else 1234), 'limit': usd(7500), 'balance': None if reached else usd(2500),
+             'pct': 100 if reached else 16, 'reason': 'org_level_disabled_until' if reached else None, 'limit_reached': reached,
+             'auto_reload': None}
+    products = {'as_of': at - 60, 'start': reset - 7 * 86400,
+                'rows': [{'key': 'claude_code', 'name': 'Claude Code', 'pct': 81, 'of_limit': round(pct * 0.81)},
+                         {'key': 'chat', 'name': 'Chats', 'pct': 12, 'of_limit': round(pct * 0.12)},
+                         {'key': 'cowork', 'name': 'Cowork', 'pct': 4, 'of_limit': round(pct * 0.04)},
+                         {'key': 'other', 'name': 'Other', 'pct': 3, 'of_limit': round(pct * 0.03)}]}
+    account = {'at': at, 'tried': now - 300 if failed else at, 'error': 'Claude Code took too long to answer' if failed else None,
+               'machine': 'studio', 'plan': 'max', 'available': True, 'limits': limits, 'extra': extra, 'products': products}
+    return {'updated': at, 'account': account, 'account_support': {'able': 2, 'online': 2, 'machines': 3}}
 
 
 def session_of(machine, sid):
@@ -338,12 +495,15 @@ def browse(q):
             rows.append({'machine': m['name'], 'label': m.get('label'), 'sid': x['sid'], 'title': x.get('title'), 'folder': x.get('folder') or '',
                          'model': x.get('model'), 'ctx': x.get('ctx'), 'size': 180000, 'last': x.get('active') or x.get('mtime'),
                          'started': (x.get('active') or 0) - 7200, 'state': state, 'url': x.get('url'),
-                         'first_prompt': 'Look at how this works and tell me what to change first.', 'history': [], 'history_count': 0})
+                         'first_prompt': 'Look at how this works and tell me what to change first.', 'history': [], 'history_count': 0,
+                         **({'sent': x['sent']} if x.get('sent') else {})})
     one = lambda k: (q.get(k) or [''])[0]
     if one('machine'):
         rows = [r for r in rows if r['machine'] == one('machine')]
     if one('state'):
         rows = [r for r in rows if r['state'] == one('state')]
+    if one('by'):
+        rows = [r for r in rows if (one('by') == 'claude') == bool(r.get('sent'))]
     if one('folder'):
         rows = [r for r in rows if (r['folder'] or '').lower().startswith(one('folder').lower())]
     if one('q'):
@@ -363,7 +523,7 @@ def browse(q):
         rows = [dict(groups[g][0], history=groups[g][1:], history_count=len(groups[g]) - 1) for g in order]
     folders = sorted({r['folder'] for r in rows if r['folder']})
     return {'ok': True, 'total': len(rows), 'rows': rows, 'facets': {'machines': [{'name': m['name'], 'label': m.get('label')} for m in d['machines']],
-                                                                     'folders': folders, 'states': {}}}
+                                                                     'folders': folders, 'states': {}, **({'sent': sum(1 for r in rows if r.get('sent'))} if SENT else {})}}
 
 
 # Settings: each machine's Claude folder, versions, capabilities and MCP servers, changed in memory.
@@ -494,7 +654,9 @@ def machines():
                     'root_shown': root or ('C:\\Users\\you' if win else '/Users/you'), 'needs_root': not root,
                     'root_suggest': '~/Desktop/Claude' if m.get('os') == 'mac' else '~', 'updated': time.time() - 20,
                     'versions': {'agent': '4e73c65'[:7], 'claude': '2.1.296' if name != 'tower' else '2.1.290'},
-                    'features': ['mcp', 'root_dirs', 'files'] + (['places'] if PLACES and name in ROAM else []),
+                    'features': ['mcp', 'root_dirs', 'files'] + (['places'] if PLACES and name in ROAM else [])
+                    + (['compact_at'] if compact_seen(name) is not None else []),
+                    'compact': compact_seen(name),
                     'auto': caps_view(m)['on'], 'can': caps_view(m)['can']})
         if PLACES and name in ROAM:
             out[-1]['roam'] = ROAM[name]
@@ -560,7 +722,7 @@ class H(BaseHTTPRequestHandler):
                   for m in shifted().get('machines') or []]
             return self._json(models_mod.view(ms))
         if p == '/api/prefs':
-            return self._json(dict(PREFS, ok=True, **options_mod.view(OPTIONS, PUSH_READY, PREFS.get('notify'))))
+            return self._json(prefs_view())
         if PLACES and p.startswith('/api/places/'):
             return self._json(places_view(p.split('/')[3]))
         if PLACES and p.startswith('/api/folder_check/'):
@@ -636,8 +798,19 @@ class H(BaseHTTPRequestHandler):
             path = ('C:\\Users\\you\\Claude\\uploads\\' if m.get('os') == 'windows' else '/Users/you/Claude/uploads/') + name
             return self._json({'ok': True, 'path': path})
         if p == '/api/prefs' and isinstance(body, dict):
+            if 'compact_at' in body and not COMPACT_OLD:
+                try:
+                    options_mod.compact_check(body['compact_at'])
+                except ValueError as e:  # as the server: a refused save changes nothing
+                    return self._json({'ok': False, 'error': str(e)}, 400)
             for k, v in body.items():
-                if k == 'appearance' and isinstance(v, dict):
+                if k == 'compact_at':
+                    if not COMPACT_OLD:
+                        COMPACT.update(at=v, changed=time.time())
+                elif k == 'setup_compact_window':
+                    OPTIONS[k] = v is True
+                    COMPACT['changed'] = time.time()
+                elif k == 'appearance' and isinstance(v, dict):
                     PREFS['appearance']['theme'] = v.get('theme', PREFS['appearance']['theme'])
                     PREFS['appearance']['term'].update(v.get('term') or {})
                 elif k in options_mod.KEYS:
@@ -647,6 +820,8 @@ class H(BaseHTTPRequestHandler):
                 else:
                     PREFS[k] = v
             return self._json(dict(PREFS, ok=True))
+        if p == '/api/usage/refresh':  # Refresh on the usage panel: the same report, as if just asked for
+            return self._json(dict(usage(), asked=USAGE_MODE not in ('none', 'old')))
         if p == '/api/action' and body.get('verb') == 'star':
             on = body.get('on')
             return self._json({'ok': True, 'star': True if on is None else bool(on)})

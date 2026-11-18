@@ -103,9 +103,23 @@ pub fn tally<'a>(list: impl IntoIterator<Item = &'a Session>, now: f64) -> Tally
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Lane {
     pub machine: String,
-    /// Session keys per column, in display order.
+    /// Session keys per column, in display order. The person's own chats, and a sent task while it waits for them.
     pub cells: Vec<Vec<String>>,
+    /// Counts over the chats in the columns.
     pub tally: Tally,
+    /// Tasks a chat sent here (run_on) that are not waiting for the person: out of the columns, in the lane's
+    /// "Sent by Claude" line. Working ones first, then finished, newest first.
+    #[serde(default)]
+    pub sent: Vec<String>,
+    /// Of `sent`, how many are still working.
+    #[serde(default)]
+    pub sent_working: u32,
+}
+
+/// Does a session sit in the lane's "Sent by Claude" line instead of a column? A sent task, unless it waits for
+/// the person (then it is in Needs you like any chat that does).
+pub fn in_sent_group(s: &Session, now: f64) -> bool {
+    s.is_sent() && !s.sent_asks(now)
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -132,7 +146,13 @@ pub fn current<'a>(snap: &'a Snapshot, machine: &str, hidden: &HashSet<String>) 
 pub fn build(snap: &Snapshot, now: f64, hidden: &HashSet<String>, only: Option<&str>) -> Board {
     let mut board = Board { column_counts: vec![0; 5], ..Default::default() };
     for m in snap.machines.iter().filter(|m| only.is_none_or(|o| o == m.name)) {
-        let cur = current(snap, &m.name, hidden);
+        let all = current(snap, &m.name, hidden);
+        // Tasks a chat sent are not the person's chats: they leave the columns and the counts for one line of
+        // their own, and leave that too once they are finished and old (Session::sent_on_board).
+        let (sent, cur): (Vec<&Session>, Vec<&Session>) = all.into_iter().partition(|s| in_sent_group(s, now));
+        let mut sent: Vec<&Session> = sent.into_iter().filter(|s| s.sent_on_board(now)).collect();
+        let working = |s: &Session| matches!(s.lamp(now), Lamp::Run | Lamp::Stall);
+        sent.sort_by(|a, b| working(b).cmp(&working(a)).then(b.active.total_cmp(&a.active)));
         let mut cells: Vec<Vec<&Session>> = vec![Vec::new(); 5];
         for s in &cur {
             cells[Column::of(s.lamp(now)).index()].push(s);
@@ -145,7 +165,9 @@ pub fn build(snap: &Snapshot, now: f64, hidden: &HashSet<String>, only: Option<&
             if q.len() < QUIET_KEEP {
                 let mut old: Vec<&Session> = snap
                     .machine(&m.name)
-                    .map(|mm| mm.sessions.iter().filter(|s| s.stale && !hidden.contains(&s.key)).collect())
+                    .map(|mm| {
+                        mm.sessions.iter().filter(|s| s.stale && !s.is_sent() && !hidden.contains(&s.key)).collect()
+                    })
                     .unwrap_or_default();
                 old.sort_by(|a, b| b.active.total_cmp(&a.active));
                 let room = QUIET_KEEP - q.len();
@@ -166,6 +188,8 @@ pub fn build(snap: &Snapshot, now: f64, hidden: &HashSet<String>, only: Option<&
             machine: m.name.clone(),
             cells: cells.iter().map(|c| c.iter().map(|s| s.key.clone()).collect()).collect(),
             tally: tally(cur.iter().copied(), now),
+            sent_working: sent.iter().filter(|s| working(s)).count() as u32,
+            sent: sent.iter().map(|s| s.key.clone()).collect(),
         });
     }
     board

@@ -511,6 +511,7 @@ impl BoardView {
             let can_star = tb.key.is_some();
             let press = t.press;
             let topic = sb_core::names::split(&tb.title).0;
+            let topic_chars = topic.chars().count();
             let editing = self.renaming_tab(i);
             if prev_tab {
                 terms = terms.child(divider(i));
@@ -541,6 +542,16 @@ impl BoardView {
                         }
                     }))
                     // A double-click on a tab names its chat, as on a Chrome tab group.
+                    // The press shows the tab, as a browser's does: a click whose pointer moved a couple of pixels is a
+                    // drag to GPUI and never comes as a click, so a tab that waited for the click sometimes ignored one.
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |this, _: &gpui::MouseDownEvent, _, cx| {
+                            if this.tab != i + 1 {
+                                this.set_tab(i + 1, cx);
+                            }
+                        }),
+                    )
                     .on_click(cx.listener(move |this, ev: &ClickEvent, window, cx| {
                         this.set_tab(i + 1, cx);
                         if ev.click_count() >= 2 {
@@ -631,6 +642,8 @@ impl BoardView {
                         ui::line(topic).flex_grow(1.).flex_shrink(1.).min_w(px(12.)).into_any_element()
                     })
                     .when(!editing && !tb.label.is_empty() && label_w >= 24., |d| {
+                        // A short title leaves room: the label takes it rather than being cut to "Thi…".
+                        let label_w = tab_label_w(tab_w, label_w, topic_chars, tb.label.chars().count());
                         d.child(
                             ui::line(tb.label.clone())
                                 .flex_none()
@@ -1171,8 +1184,8 @@ impl BoardView {
             (None, sb_core::Tone::Warn) => t.cold,
             (None, sb_core::Tone::Bad) => t.bad,
         };
-        div()
-            .id("week")
+        // A keyboard stop like the buttons beside it: Tab reaches it, Enter or Space opens Usage.
+        ui::focusable(div().id("week"), &t)
             .flex_none()
             .h(px(28.))
             .px(px(10.))
@@ -1663,6 +1676,16 @@ pub fn tab_fit(room: f32, n: usize) -> (f32, bool) {
     (w, n as f32 * (w + 5.) <= room)
 }
 
+/// The most a tab's machine label may take. `narrow` is its share on a tab this wide when the title is long (the
+/// title wins the room). When the title and the label both fit whole, by a rough count of their letters, the label
+/// gets its full 72 px, so a shell's "zsh" tab says "This Mac" and not "Thi…".
+pub fn tab_label_w(tab_w: f32, narrow: f32, title_chars: usize, label_chars: usize) -> f32 {
+    // Everything in a tab that is not text: its padding, the dot, the gaps, the star and the close button.
+    const FIXED: f32 = 96.;
+    let words = title_chars as f32 * 7.5 + label_chars as f32 * 7.;
+    if words <= tab_w - FIXED { 72. } else { narrow }
+}
+
 /// How far "+" is from where the header's content starts (`lead`): the tab row ended at `row_right` in the window,
 /// then the row's right arrow and the tab list's button, when they show, and the gaps between.
 fn plus_offset(row_right: f32, arrow: f32, list: f32, lead: f32) -> f32 {
@@ -1759,7 +1782,16 @@ fn next_tab_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{TAB_MIN_W, TAB_W, plus_offset, tab_fit};
+    use super::{TAB_MIN_W, TAB_W, plus_offset, tab_fit, tab_label_w};
+
+    #[test]
+    fn a_short_title_leaves_the_machine_label_whole() {
+        // "zsh" and "This Mac" on a tab at 186 px: both fit, so the label is not cut to its narrow share (36).
+        assert_eq!(tab_label_w(186., 36., 3, 8), 72.);
+        // a long title keeps the room: the label stays at its narrow share
+        assert_eq!(tab_label_w(186., 36., 28, 8), 36.);
+        assert_eq!(tab_label_w(240., 72., 28, 8), 72.);
+    }
 
     #[test]
     fn tabs_narrow_together_before_the_row_scrolls() {

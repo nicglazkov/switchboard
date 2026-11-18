@@ -14,7 +14,7 @@ pub const SMALL: u64 = 60_000;
 pub const LIMITS_FRESH: f64 = 600.0;
 /// The five-hour window: weekly numbers older than this read "at least".
 pub const FIVE_WINDOW: f64 = 5.0 * 3600.0;
-pub const COMPACT: u64 = 300_000;
+pub const COMPACT: u64 = crate::compact::FALLBACK;
 pub const TTL: u64 = 3600;
 pub const STALE_CLOSED: f64 = 2.0 * 86400.0;
 pub const STALE_OPEN: f64 = 7.0 * 86400.0;
@@ -261,6 +261,9 @@ pub struct Session {
     pub project: String,
     pub active: f64,
     pub ctx: u64,
+    /// Where this chat compacts, in tokens, as its computer reports it; 0 when its helper is older and does not
+    /// say (read it through `limit()`).
+    pub ctx_limit: u64,
     /// "Opus 5.5"
     pub model: String,
     pub kind: Kind,
@@ -323,6 +326,62 @@ pub struct Session {
     /// What it needs, shaped by kind, as the agent built it (None on older servers: `ask_now` falls back to `needs`).
     #[serde(default)]
     pub ask: Option<crate::ask::Ask>,
+    /// A chat started this one (run_on): who sent it. None: the person's own chat.
+    #[serde(default)]
+    pub sent: Option<Sent>,
+}
+
+/// The one phrase for a chat that a chat started (run_on), everywhere it is marked.
+pub const SENT_BY: &str = "Sent by Claude";
+/// A finished task stays on the board this long after its sender read the report,
+pub const SENT_READ_KEEP: f64 = 10.0 * 60.0;
+/// and this long when nobody read it. After that it is in History.
+pub const SENT_UNREAD_KEEP: f64 = 24.0 * 3600.0;
+
+/// Who sent a chat that another chat started with run_on. Times are on this computer's clock, 0 when not known.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Sent {
+    /// The sending chat's machine and its label; the chat's id and name when the server knows them.
+    pub machine: Option<String>,
+    pub label: String,
+    pub sid: Option<String>,
+    pub title: Option<String>,
+    /// The task's id (d-...).
+    pub id: Option<String>,
+    pub done_at: f64,
+    pub read_at: f64,
+    pub stopped_at: f64,
+    pub failed: bool,
+}
+
+impl Sent {
+    /// The sending chat's key ("<machine>:<sid>"), when both are known.
+    pub fn from_key(&self) -> Option<String> {
+        Some(format!("{}:{}", self.machine.as_deref()?, self.sid.as_deref()?))
+    }
+    /// "from Ship the widget on Studio", or "from a chat on Studio" when the chat's name is not known.
+    pub fn from_line(&self) -> String {
+        match self.title.as_deref().map(names::plain).filter(|t| !t.is_empty()) {
+            Some(t) => format!("from {t} on {}", self.label),
+            None => format!("from a chat on {}", self.label),
+        }
+    }
+}
+
+/// Where a sent task stands, as its row says it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SentState {
+    /// Stopped at a prompt (a permission, a question mid-turn), or a message to it is held: only the person can
+    /// move it on.
+    Asks,
+    Working,
+    Stalled,
+    /// Its turn is over and its sender has read the report.
+    Read,
+    /// Its turn is over; nobody has read the report yet.
+    Done,
+    /// It stopped without ever answering, or never started.
+    Failed,
 }
 
 /// Why and when the reaper stopped a chat.
@@ -397,8 +456,17 @@ impl Session {
             _ => None,
         }
     }
+    /// Where this chat compacts: its computer's compact window, never past the model's own. 300k when the
+    /// computer does not say, as every chat was measured before.
+    pub fn limit(&self) -> u64 {
+        if self.ctx_limit > 0 { self.ctx_limit } else { COMPACT }
+    }
     pub fn over(&self) -> bool {
-        self.ctx >= COMPACT
+        self.ctx >= self.limit()
+    }
+    /// "98k of 300k", against this chat's own limit.
+    pub fn ctx_of_limit(&self) -> String {
+        crate::compact::of_limit(self.ctx, self.limit())
     }
     /// The details sheet's "Tools: Auto (5)" or "Tools: 3 picked"; None when the server does not say how.
     pub fn tools_word(&self) -> Option<String> {
@@ -412,7 +480,7 @@ impl Session {
         fmt::k(self.ctx)
     }
     pub fn ctx_frac(&self) -> f64 {
-        (self.ctx as f64 / COMPACT as f64).min(1.0)
+        (self.ctx as f64 / self.limit() as f64).min(1.0)
     }
     pub fn cache_left(&self, now: f64) -> u64 {
         if self.cache_until > 0.0 { (self.cache_until - now).round().max(0.0) as u64 } else { 0 }
@@ -483,8 +551,69 @@ impl Session {
     }
 
     /// Needs you now: held, or waiting and not parked. What the badge, the counts and notifications go by.
+    /// A task a chat sent reports to that chat, so a question in its last message is not the person's to answer:
+    /// it needs you only while it is stopped at a prompt (`sent_asks`).
     pub fn needs_you(&self, now: f64) -> bool {
-        self.lamp(now).needs_you() && !self.parked(now)
+        self.lamp(now).needs_you() && !self.parked(now) && (self.sent.is_none() || self.sent_asks(now))
+    }
+
+    /// A chat started this one with run_on.
+    pub fn is_sent(&self) -> bool {
+        self.sent.is_some()
+    }
+
+    /// A sent task that only the person can move on: a message to it is held, or it is stopped at a prompt (a
+    /// permission, a question in the middle of its turn). Its machine says `waiting` for exactly that; a turn that
+    /// ended with a question says `idle`, and its report has gone back to the sender.
+    pub fn sent_asks(&self, now: f64) -> bool {
+        self.is_sent() && (self.held || (self.lamp(now) == Lamp::Wait && self.status.as_deref() == Some("waiting")))
+    }
+
+    /// Where a sent task stands (None for the person's own chat).
+    pub fn sent_state(&self, now: f64) -> Option<SentState> {
+        let sent = self.sent.as_ref()?;
+        Some(if self.sent_asks(now) {
+            SentState::Asks
+        } else {
+            match self.lamp(now) {
+                Lamp::Run => SentState::Working,
+                Lamp::Stall => SentState::Stalled,
+                _ if sent.failed || (self.ctx == 0 && !self.alive) => SentState::Failed,
+                _ if sent.read_at > 0.0 => SentState::Read,
+                _ => SentState::Done,
+            }
+        })
+    }
+
+    /// When a finished sent task finished: when its report was kept, else when it was last used.
+    pub fn sent_done_at(&self) -> f64 {
+        self.sent.as_ref().map(|x| x.done_at).filter(|t| *t > 0.0).unwrap_or(self.active)
+    }
+
+    /// One line for a sent task's row: "Working 4m", "Waiting for you 12m", "Done 2h ago, report read".
+    pub fn sent_line(&self, now: f64) -> Option<String> {
+        let span = |t: f64| fmt::mins((now - t).max(60.0) as u64);
+        let ago = fmt::ago(self.sent_done_at(), now);
+        Some(match self.sent_state(now)? {
+            SentState::Asks if self.held => "Message on hold".to_string(),
+            SentState::Asks => format!("Waiting for you {}", span(self.active)),
+            SentState::Working => "Working".to_string(),
+            SentState::Stalled => format!("Stalled, nothing for {}", span(self.active)),
+            SentState::Read => format!("Done {ago}, report read"),
+            SentState::Done => format!("Done {ago}, report not read yet"),
+            SentState::Failed => format!("Stopped without a report, {ago}"),
+        })
+    }
+
+    /// Does a sent task still belong on the board? While it works or waits, always. Once finished: for
+    /// SENT_READ_KEEP after its sender read the report, or SENT_UNREAD_KEEP when nobody did. Then it is in History.
+    pub fn sent_on_board(&self, now: f64) -> bool {
+        let Some(sent) = &self.sent else { return false };
+        match self.sent_state(now) {
+            Some(SentState::Read) => now - sent.read_at < SENT_READ_KEEP,
+            Some(SentState::Done | SentState::Failed) => now - self.sent_done_at() < SENT_UNREAD_KEEP,
+            _ => true,
+        }
     }
 
     /// Whole days it has been waiting (at least 1).
@@ -1077,6 +1206,9 @@ pub struct Snapshot {
     /// The server's own addresses, for the saved list (empty from older servers).
     #[serde(default)]
     pub addresses: Vec<crate::api::ApiAddress>,
+    /// The server keeps who sent each chat (so "Move to my chats" has somewhere to be written down).
+    #[serde(default)]
+    pub origins: bool,
 }
 
 fn root_label(root: &str) -> String {
@@ -1204,6 +1336,8 @@ pub fn session_at(
 ) -> Session {
     let local = |t: Option<f64>| t.filter(|t| *t > 0.0).map(|t| t + offset);
     let ctx = s.ctx.unwrap_or(0.0).max(0.0) as u64;
+    // a limit outside what Claude Code can have (100k to 1M) is not believed
+    let ctx_limit = s.limit.filter(|l| l.is_finite()).map(|l| l as u64).filter(|l| (100_000..=1_000_000).contains(l));
     let mtime = local(s.mtime).unwrap_or(0.0);
     let active_raw = local(s.active).unwrap_or(0.0);
     let quiet = fetched_at - mtime.max(active_raw);
@@ -1291,6 +1425,7 @@ pub fn session_at(
         project,
         active,
         ctx,
+        ctx_limit: ctx_limit.unwrap_or(0),
         model: fmt::model(s.model.as_deref().unwrap_or("")),
         kind: kind_of(s.kind.as_deref()),
         status: s.status.clone(),
@@ -1324,7 +1459,30 @@ pub fn session_at(
         needs: text_field(s.needs.as_deref(), 300),
         suggested_reply: text_field(s.suggested_reply.as_deref(), 200),
         ask: s.ask.as_ref().map(|a| crate::ask::Ask::from_api(a, s.needs.as_deref())),
+        sent: s.sent.as_ref().map(|x| Sent {
+            machine: x.machine.clone().filter(|m| !m.is_empty()),
+            label: x
+                .label
+                .clone()
+                .or_else(|| x.machine.clone())
+                .filter(|l| !l.is_empty())
+                .unwrap_or_else(|| "another machine".into()),
+            sid: x.sid.clone().filter(|m| !m.is_empty()),
+            title: text_field(x.title.as_deref(), 200),
+            id: x.id.clone().filter(|m| !m.is_empty()),
+            done_at: local(x.done_at).unwrap_or(0.0),
+            read_at: local(x.read_at).unwrap_or(0.0),
+            stopped_at: local(x.stopped_at).unwrap_or(0.0),
+            failed: x.failed == Some(true),
+        }),
     }
+}
+
+/// A machine's label as the "(for <label>)" name tag carries it: letters, digits and spaces, 20 at most
+/// (server/features.py, Dispatch.start).
+fn tag_label(label: &str) -> String {
+    let s: String = label.chars().filter(|c| c.is_ascii_alphanumeric() || *c == ' ').take(20).collect();
+    s.trim().to_lowercase()
 }
 
 pub fn replaced(r: &ApiReplaced, m: &ApiMachine, label: &str, root_lbl: &str) -> Replaced {
@@ -1366,6 +1524,24 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
             let rl = root_label(&root);
             let mut sessions: Vec<Session> =
                 m.sessions.iter().map(|s| session_at(s, m, &label, &rl, fetched_at, offset)).collect();
+            if raw.origins != Some(true) {
+                // An older server does not say who sent a chat. A name that still ends "(for <a machine>)" is a
+                // sent task; any other "(for ...)" is the person's own wording.
+                for s in sessions.iter_mut().filter(|s| s.tag_kind == Some(TagKind::For)) {
+                    let want = s.tag.as_deref().and_then(|t| t.get(4..)).map(tag_label).unwrap_or_default();
+                    let from = raw.machines.iter().find(|o| {
+                        !want.is_empty()
+                            && tag_label(o.label.as_deref().filter(|l| !l.is_empty()).unwrap_or(&o.name)) == want
+                    });
+                    if let Some(o) = from {
+                        s.sent = Some(Sent {
+                            machine: Some(o.name.clone()),
+                            label: o.label.clone().filter(|l| !l.is_empty()).unwrap_or_else(|| o.name.clone()),
+                            ..Default::default()
+                        });
+                    }
+                }
+            }
             sessions.sort_by(|a, b| b.active.total_cmp(&a.active));
             let mut rep: Vec<Replaced> = m.replaced.iter().map(|r| replaced(r, m, &label, &rl)).collect();
             rep.sort_by(|a, b| b.active.total_cmp(&a.active));
@@ -1411,6 +1587,7 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
         groups: crate::groups::from_api(&raw.groups),
         budget: raw.budget.clone(),
         addresses: s.addresses.as_ref().map(|a| a.list.clone()).unwrap_or_default(),
+        origins: raw.origins == Some(true),
     }
 }
 
@@ -1427,6 +1604,7 @@ impl Snapshot {
             groups: Vec::new(),
             budget: None,
             addresses: Vec::new(),
+            origins: false,
         }
     }
     /// The group a chat is in, by its thread (its own sid when it has none), from `groups`.
@@ -1477,6 +1655,39 @@ impl Snapshot {
     pub fn auto_ready(&self) -> bool {
         self.machines.iter().any(|m| m.has_caps && !m.is_offline())
     }
+    /// The tasks a chat sent that are still on the board (`Session::sent_on_board`), newest first.
+    pub fn sent_from(&self, key: &str, now: f64) -> Vec<&Session> {
+        let mut out: Vec<&Session> = self
+            .machines
+            .iter()
+            .flat_map(|m| m.sessions.iter())
+            .filter(|s| !s.stale && s.sent.as_ref().and_then(|x| x.from_key()).as_deref() == Some(key))
+            .filter(|s| s.sent_on_board(now))
+            .collect();
+        out.sort_by(|a, b| b.active.total_cmp(&a.active));
+        out
+    }
+
+    /// "2 tasks out: 1 working, 1 done" for a chat that sent some (None when it sent none that are still around).
+    pub fn sent_out_line(&self, key: &str, now: f64) -> Option<String> {
+        let out = self.sent_from(key, now);
+        if out.is_empty() {
+            return None;
+        }
+        let n = |f: fn(SentState) -> bool| out.iter().filter(|s| s.sent_state(now).is_some_and(f)).count();
+        let parts: Vec<String> = [
+            (n(|x| x == SentState::Asks), "waiting for you"),
+            (n(|x| matches!(x, SentState::Working | SentState::Stalled)), "working"),
+            (n(|x| matches!(x, SentState::Read | SentState::Done)), "done"),
+            (n(|x| x == SentState::Failed), "stopped"),
+        ]
+        .iter()
+        .filter(|(c, _)| *c > 0)
+        .map(|(c, w)| format!("{c} {w}"))
+        .collect();
+        Some(format!("{} {} out: {}", out.len(), if out.len() == 1 { "task" } else { "tasks" }, parts.join(", ")))
+    }
+
     pub fn machine(&self, name: &str) -> Option<&Machine> {
         self.machines.iter().find(|m| m.name == name)
     }
@@ -1691,6 +1902,149 @@ mod tests {
         let snap = normalize(&raw, NOW);
         assert_eq!(snap.session_by_bg("laptop", "c5ba2d9c").map(|s| s.sid.as_str()), Some("new"));
         assert!(snap.session_by_bg("studio", "c5ba2d9c").is_none());
+    }
+
+    /// One machine ("studio", label Studio) and one sender ("laptop", label "Your Laptop!") with these session rows.
+    fn fleet(rows: &str, origins: bool) -> Snapshot {
+        let raw: ApiSessions = serde_json::from_str(&format!(
+            r#"{{"now":{NOW},"origins":{origins},"machines":[
+                {{"name":"studio","label":"Studio","online":true,"sessions":[{rows}]}},
+                {{"name":"laptop","label":"Your Laptop!","online":true,
+                  "sessions":[{{"sid":"boss","title":"Ship the widget","kind":"interactive","status":"busy",
+                               "activity":"working","active":{NOW}}}]}}]}}"#
+        ))
+        .unwrap();
+        normalize(&raw, NOW)
+    }
+
+    const FROM: &str =
+        r#""sent":{"machine":"laptop","label":"Your Laptop!","sid":"boss","title":"Ship the widget","id":"d-1""#;
+
+    #[test]
+    fn a_sent_task_says_who_sent_it() {
+        let snap = fleet(
+            &format!(
+                r#"{{"sid":"t1","title":"Run the tests (for Your Laptop)","kind":"background",
+            "status":"busy","activity":"working","active":{NOW},{FROM}}}}},
+            {{"sid":"mine","title":"Holiday plans","kind":"interactive","status":"idle","activity":"quiet","active":{NOW}}}"#
+            ),
+            true,
+        );
+        let t = snap.session("studio:t1").unwrap();
+        let sent = t.sent.as_ref().unwrap();
+        assert_eq!(sent.from_key().as_deref(), Some("laptop:boss"));
+        assert_eq!(sent.from_line(), "from Ship the widget on Your Laptop!");
+        assert_eq!(t.sent_state(NOW), Some(SentState::Working));
+        let mine = snap.session("studio:mine").unwrap();
+        assert!(!mine.is_sent() && mine.sent_state(NOW).is_none() && mine.sent_line(NOW).is_none());
+        assert_eq!(snap.sent_out_line("laptop:boss", NOW).as_deref(), Some("1 task out: 1 working"));
+        assert_eq!(snap.sent_out_line("studio:mine", NOW), None);
+    }
+
+    #[test]
+    fn a_question_in_a_sent_tasks_report_does_not_need_you_but_a_prompt_does() {
+        // Its turn ended with a question (blocked, idle): the report went to the sender. Not the badge's business.
+        let row = |status: &str, extra: &str| {
+            format!(
+                r#"{{"sid":"t1","title":"Verify the build","kind":"background","status":"{status}","state":"blocked",
+                "activity":"needs","active":{},{FROM}}}{extra}}}"#,
+                NOW - 600.0
+            )
+        };
+        let snap = fleet(&row("idle", ""), true);
+        let s = snap.session("studio:t1").unwrap();
+        assert_eq!(s.lamp(NOW), Lamp::Wait, "its own state is what the machine said");
+        assert!(!s.needs_you(NOW) && !s.sent_asks(NOW));
+        assert_eq!(s.sent_state(NOW), Some(SentState::Done));
+        let b = board::build(&snap, NOW, &Default::default(), None);
+        let lane = b.lane("studio").unwrap();
+        assert_eq!(lane.sent, vec!["studio:t1".to_string()]);
+        assert!(lane.cells.iter().all(|c| c.is_empty()), "not in a column");
+        assert_eq!((b.column_counts[0], lane.tally.n, lane.tally.need), (0, 0, 0));
+        // Stopped at a permission prompt: only the person can move it on. Needs you, in the column, marked as sent.
+        let snap = fleet(&row("waiting", ""), true);
+        let s = snap.session("studio:t1").unwrap();
+        assert!(s.needs_you(NOW) && s.sent_asks(NOW));
+        assert_eq!(s.sent_line(NOW).as_deref(), Some("Waiting for you 10m"));
+        let b = board::build(&snap, NOW, &Default::default(), None);
+        let lane = b.lane("studio").unwrap();
+        assert!(lane.sent.is_empty());
+        assert_eq!(lane.cells[board::Column::Need.index()], vec!["studio:t1".to_string()]);
+        assert_eq!((b.column_counts[0], lane.tally.need), (1, 1));
+        assert_eq!(snap.sent_out_line("laptop:boss", NOW).as_deref(), Some("1 task out: 1 waiting for you"));
+        // A message held for it is the person's own: that counts too.
+        let snap = fleet(&row("idle", "").replace(r#""activity":"needs""#, r#""activity":"held","held":true"#), true);
+        assert!(snap.session("studio:t1").unwrap().needs_you(NOW));
+    }
+
+    #[test]
+    fn a_finished_sent_task_leaves_the_board_soon_after_its_report_is_read() {
+        let row = |done_ago: f64, read_ago: Option<f64>| {
+            let read = read_ago.map(|r| format!(r#","read_at":{}"#, NOW - r)).unwrap_or_default();
+            fleet(
+                &format!(
+                    r#"{{"sid":"t1","title":"Verify","kind":"background","status":"stopped","activity":"quiet","ctx":9000,
+                    "active":{at},{FROM},"done_at":{at}{read}}}}}"#,
+                    at = NOW - done_ago
+                ),
+                true,
+            )
+        };
+        let on = |snap: &Snapshot| {
+            !board::build(snap, NOW, &Default::default(), None).lane("studio").unwrap().sent.is_empty()
+        };
+        let snap = row(300.0, Some(200.0));
+        assert_eq!(snap.session("studio:t1").unwrap().sent_line(NOW).as_deref(), Some("Done 5m ago, report read"));
+        assert!(on(&snap));
+        assert!(!on(&row(3600.0, Some(SENT_READ_KEEP + 1.0))), "read ten minutes ago: History has it");
+        let snap = row(3600.0, None);
+        assert_eq!(
+            snap.session("studio:t1").unwrap().sent_line(NOW).as_deref(),
+            Some("Done 1h ago, report not read yet")
+        );
+        assert!(on(&snap), "nobody read it: it stays a day");
+        assert!(!on(&row(SENT_UNREAD_KEEP + 60.0, None)));
+        // and it never takes a Quiet row from the person's own chats
+        let b = board::build(&row(SENT_UNREAD_KEEP + 60.0, None), NOW, &Default::default(), None);
+        assert!(b.lane("studio").unwrap().cells.iter().all(|c| c.is_empty()));
+    }
+
+    #[test]
+    fn move_to_my_chats_is_offered_for_a_sent_task_when_the_server_can_keep_it() {
+        use crate::actions::{self, ActionId};
+        let rows = format!(
+            r#"{{"sid":"t1","title":"Verify (for Your Laptop)","kind":"background","status":"idle","active":{NOW},{FROM}}}}},
+               {{"sid":"mine","title":"Holiday plans","kind":"interactive","status":"idle","active":{NOW}}}"#
+        );
+        let has = |snap: &Snapshot, key: &str| {
+            actions::for_session(snap.session(key).unwrap(), snap, NOW).iter().any(|x| x.id == ActionId::Adopt)
+        };
+        let snap = fleet(&rows, true);
+        assert!(has(&snap, "studio:t1"));
+        assert!(!has(&snap, "studio:mine"), "nothing to move: it is the person's already");
+        let a = actions::for_session(snap.session("studio:t1").unwrap(), &snap, NOW);
+        assert_eq!(a.iter().find(|x| x.id == ActionId::Adopt).unwrap().title, "Move to my chats");
+        // An older server has nowhere to write it down, so the app does not offer what would not stick.
+        let old = fleet(&rows.replace(&format!(",{FROM}}}"), ""), false);
+        assert!(old.session("studio:t1").unwrap().is_sent() && !has(&old, "studio:t1"));
+    }
+
+    #[test]
+    fn an_older_server_is_read_by_the_name_tag_and_only_for_a_real_machine() {
+        let rows = format!(
+            r#"{{"sid":"t1","title":"Nov 3 2:10p Check the build (for Your Laptop)","kind":"background","status":"idle","active":{NOW}}},
+               {{"sid":"m1","title":"Gift ideas (for Mum)","kind":"interactive","status":"idle","active":{NOW}}}"#
+        );
+        let snap = fleet(&rows, false);
+        let sent = snap.session("studio:t1").unwrap().sent.clone().unwrap();
+        assert_eq!(
+            (sent.machine.as_deref(), sent.label.as_str(), sent.sid.as_deref()),
+            (Some("laptop"), "Your Laptop!", None)
+        );
+        assert_eq!(sent.from_line(), "from a chat on Your Laptop!");
+        assert!(!snap.session("studio:m1").unwrap().is_sent());
+        // A server that keeps origins has the last word: a chat the person took over keeps its old name, not its mark.
+        assert!(!fleet(&rows, true).session("studio:t1").unwrap().is_sent());
     }
 
     #[test]

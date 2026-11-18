@@ -2851,7 +2851,9 @@ impl Render for TermTab {
             // The detail goes first as room runs out (an ellipsis), then the context label shortens, then the meter.
             let ctx_short = strip_w < 700.;
             let meter = strip_w >= 520.;
-            let frac = (ctx_k as f32 / sb_core::model::COMPACT as f32).clamp(0., 1.);
+            // against where this chat compacts (300k when its computer does not say)
+            let ctx_max = snap_s.as_ref().map_or(sb_core::model::COMPACT, |s| s.limit());
+            let frac = (ctx_k as f32 / ctx_max as f32).clamp(0., 1.);
             // Colored as the inspector's context meter: heavy is amber, over is red.
             let fill = match &snap_s {
                 Some(s) if s.over() => ct.bad,
@@ -2941,7 +2943,7 @@ impl Render for TermTab {
                                 .text_size(px(13.))
                                 .text_color(ct.dim)
                                 .font_features(ui::tnum())
-                                .child(sb_core::live::ctx_label(ctx_k, ctx_short)),
+                                .child(sb_core::live::ctx_label(ctx_k, ctx_max, ctx_short)),
                         )
                 })
         });

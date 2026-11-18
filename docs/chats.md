@@ -52,8 +52,9 @@ For a quiet chat, the details compare two ways back, and mark one **Suggested**.
   Claude needs more. The old chat moves to **Replaced**, and the new one is named after it with "(part 2)".
 
 The suggestion follows a few rules, in order: a working chat gets none (open its terminal instead); a held
-message suggests Start fresh; a warm chat, Resume; a chat of 270k or more, close to where Claude Code compacts it anyway,
-Start fresh; otherwise whichever costs less.
+message suggests Start fresh; a warm chat, Resume; a chat within a tenth of where Claude Code compacts it anyway
+(270k or more when chats compact at 300k), Start fresh; otherwise whichever costs less. Where chats compact is
+[Compact long chats at](settings.md#context-window) in Settings.
 
 ??? question "How are the costs estimated?"
     In tokens, weighted by API prices: reading from the cache counts 0.1, writing the cache 1.25 (5-minute cache)
@@ -67,7 +68,7 @@ Start fresh; otherwise whichever costs less.
 
     The details' **How is this estimated?** link shows the numbers for that chat.
 
-Summaries are written by **Opus**, or **Sonnet** if you pick it in **Settings, New sessions** ("Sonnet is quicker
+Summaries are written by **Opus**, or **Sonnet** if you pick it in **Settings, Chats** ("Sonnet is quicker
 and costs less of your plan"). Writing one takes about a minute. If the chat is still working, Switchboard asks
 first: start fresh when it finishes, or now, which stops it.
 

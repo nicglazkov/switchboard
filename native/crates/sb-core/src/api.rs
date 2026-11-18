@@ -28,6 +28,38 @@ pub struct ApiSessions {
     /// The usage budget: its settings and where today stands (missing on older servers).
     #[serde(default, deserialize_with = "lenient_opt")]
     pub budget: Option<ApiBudget>,
+    /// True from a server that says who sent each chat (`sent` on a row). An older one says nothing, and a chat's
+    /// "(for <machine>)" name tag is all there is to go by (model::normalize).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub origins: Option<bool>,
+}
+
+/// Who sent a chat that another chat started with run_on (server/features.py, Dispatch.mark). Times are on the
+/// server's clock.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiSent {
+    /// The sending chat's machine, its label, the chat's id and its name. Only the machine is known for a task
+    /// sent before the server kept origins.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub machine: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub label: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub sid: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub title: Option<String>,
+    /// The task's id (d-...), on the chat the task started (not on one made from it later).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub id: Option<String>,
+    /// When it finished and its report was kept; when the sender read that report; when its process was stopped.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub done_at: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub read_at: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub stopped_at: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub failed: Option<bool>,
 }
 
 /// The usage budget (docs/specs/2026-10-13-usage-budget.md), from the snapshot or GET/POST /api/budget. Percents are
@@ -303,10 +335,17 @@ pub struct ApiPrefs {
     /// Who writes Start fresh and Compact summaries: "opus" (the default) or "sonnet".
     #[serde(default)]
     pub summary_model: Option<String>,
+    /// Stop idle chats: hours a finished, cold chat is left alone before the server stops it; 0 is never. None
+    /// from a server that does not do this.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub auto_stop_h: Option<f64>,
     /// The opt-in switches (server/options.py): features that send chat text to Claude, and changes to each
     /// machine's own Claude setup. All off for a new server. Shown as the server words them.
     #[serde(default, deserialize_with = "lenient_vec")]
     pub options: Vec<ApiOption>,
+    /// Compact long chats at: the value behind the `setup_compact_window` switch. None from an older server.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub compact: Option<ApiCompactAt>,
     /// Whether iPhone notifications are set up on the server, and what that means.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub push: Option<ApiPush>,
@@ -540,6 +579,9 @@ pub struct ApiBrowseRow {
     /// A summary (handoff) is written for this chat.
     #[serde(default)]
     pub handoff: Option<bool>,
+    /// A chat started this one (run_on): who sent it.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub sent: Option<ApiSent>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -551,6 +593,9 @@ pub struct ApiFacets {
     pub folders: Vec<String>,
     #[serde(default)]
     pub states: std::collections::HashMap<String, u64>,
+    /// How many chats were sent by a chat (None on an older server: History then has no filter for them).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub sent: Option<u64>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -815,6 +860,10 @@ pub struct ApiSession {
     pub active: Option<f64>,
     #[serde(default)]
     pub ctx: Option<f64>,
+    /// Where this chat compacts, in tokens: the computer's compact window, never past the model's own. Missing
+    /// from an older helper.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub limit: Option<f64>,
     #[serde(default)]
     pub model: Option<String>,
     #[serde(default)]
@@ -904,6 +953,9 @@ pub struct ApiSession {
     /// What a waiting chat needs, shaped by kind (see `ask`). Present only while it waits; missing on older servers.
     #[serde(default, deserialize_with = "lenient_opt")]
     pub ask: Option<ApiAsk>,
+    /// A chat started this one (run_on): who sent it. Missing on a person's chat and on older servers.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub sent: Option<ApiSent>,
 }
 
 /// The `ask` object on a session row, as the agent builds it. Every field is optional and an odd one is dropped, so
@@ -986,6 +1038,188 @@ pub struct ApiUsage {
     pub days: Vec<ApiUsageDay>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub weeks: Vec<ApiUsageWeek>,
+    /// When the 5-hour and weekly numbers were last seen, on the server's clock. None from an older server.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub updated: Option<f64>,
+    /// The account's own usage report, as Claude Code gave it to one machine. None from an older server, or when
+    /// no machine has reported one (`account_support` says why).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub account: Option<ApiAccount>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub account_support: Option<ApiAccountSupport>,
+    /// The chats that used the most since the week began. None from an older server.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub top: Option<ApiTop>,
+}
+
+/// GET /api/usage `top`: the chats that used the most of the plan since the weekly limit last reset, largest
+/// first, as far as Switchboard's helpers saw. The figures are estimates from each chat's tokens (weighted the way
+/// the cost estimates are), never the plan's own numbers.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiTop {
+    /// When the week began, on the server's clock. None while no reset is known.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub since: Option<f64>,
+    /// Weighted tokens of every chat on every machine this week: what `share` is a percent of.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub total: Option<f64>,
+    /// How many chats that total is made of (a thread counts once where the server could tell).
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub chats: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub rows: Vec<ApiTopRow>,
+    /// Machines whose helper can count, all machines, and those still reading their transcripts for the first time.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub able: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub machines: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub pending: Option<f64>,
+}
+
+/// One chat of `top`. A chat that was resumed, started fresh or compacted is one row with what came before it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiTopRow {
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub machine: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub sid: String,
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub name: String,
+    /// The machine's name for people.
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub label: String,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub weighted: Option<f64>,
+    /// Percent of `total`, 0 to 100.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub share: Option<f64>,
+    /// The apps list this chat now, so it can be opened.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub alive: Option<bool>,
+    /// A chat sent it (run_on).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub sent: Option<bool>,
+    /// How many chats the row adds up.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub parts: Option<f64>,
+}
+
+/// Claude Code's own usage report for the account (its /usage, structured): every limit the plan has, extra usage,
+/// and the week by product. Times are on the server's clock.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAccount {
+    /// When the report was made. None when the only try so far failed (`error` says how).
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub at: Option<f64>,
+    /// When a report was last asked for; later than `at` when that try failed.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub tried: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub error: Option<String>,
+    /// The machine that asked.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub machine: Option<String>,
+    /// "pro", "max", "team", "enterprise"; None for a login that is not a Claude plan.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub plan: Option<String>,
+    /// False when plan limits do not apply to that machine's login (an API key, Bedrock, Vertex).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub available: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub limits: Vec<ApiLimit>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub extra: Option<ApiExtra>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub products: Option<ApiProducts>,
+}
+
+/// One limit of the plan: `kind` is "session" (the 5-hour window), "weekly_all" or "weekly_scoped" (one model or
+/// surface, named by `label`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiLimit {
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub kind: String,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub pct: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub reset: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub label: Option<String>,
+    /// The source's own reading: "normal", "warning", "critical".
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub severity: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub active: Option<bool>,
+}
+
+/// An amount in the currency's minor units (cents for USD), with how many decimals the currency has.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiMoney {
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub minor: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub currency: Option<String>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub exp: Option<f64>,
+}
+
+/// Extra usage: what is spent past the plan's limits this month, and the monthly limit on it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiExtra {
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub enabled: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub used: Option<ApiMoney>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub limit: Option<ApiMoney>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub balance: Option<ApiMoney>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub pct: Option<f64>,
+    /// Why it is off, in the source's words ("org_level_disabled_until").
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub reason: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub limit_reached: Option<bool>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub auto_reload: Option<bool>,
+}
+
+/// The week so far by product (Claude Code, Chats, Cowork, ...), as the account reports it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiProducts {
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub as_of: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub start: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub rows: Vec<ApiProduct>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiProduct {
+    #[serde(default, deserialize_with = "lenient_string")]
+    pub key: String,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub name: Option<String>,
+    /// Share of the week's use so far, 0 to 100.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub pct: Option<f64>,
+    /// The same use as a share of the weekly limit.
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub of_limit: Option<f64>,
+}
+
+/// How many machines could report the account's usage (their helper is new enough), and how many are online.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAccountSupport {
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub able: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub online: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_f64")]
+    pub machines: Option<f64>,
 }
 
 /// The 5-hour window or the week: percent used, when it resets, and (the week) the projected percent at reset.
@@ -1458,6 +1692,40 @@ where
     Ok(if v.is_null() { None } else { serde_json::from_value(v).ok() })
 }
 
+/// "Compact long chats at" as the server holds it (GET /api/prefs `compact`): the value, whether it is applied,
+/// and the range it takes. Missing from a server that only has the switch.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiCompactAt {
+    pub at: u64,
+    #[serde(default)]
+    pub on: bool,
+    #[serde(default)]
+    pub min: Option<u64>,
+    #[serde(default)]
+    pub max: Option<u64>,
+    #[serde(default)]
+    pub recommended: Option<u64>,
+    #[serde(default)]
+    pub stops: Vec<u64>,
+}
+
+/// One computer's own compact window, from its helper: the CLAUDE_CODE_AUTO_COMPACT_WINDOW entry in its Claude
+/// Code settings (`set`, as written in `raw`, `value` as Claude Code reads it), whether Switchboard wrote it
+/// (`own`), and whether a window is chosen another way there (`other`: "setting" or "models").
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiCompactSeen {
+    #[serde(default)]
+    pub set: bool,
+    #[serde(default)]
+    pub own: bool,
+    #[serde(default)]
+    pub value: Option<u64>,
+    #[serde(default)]
+    pub raw: Option<String>,
+    #[serde(default)]
+    pub other: Option<String>,
+}
+
 /// v2: GET /api/flags?machine=&sid=: what one chat runs with (the flags drawer's "Active now").
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ApiFlagsView {
@@ -1591,6 +1859,10 @@ pub struct ApiMachineRow {
     pub versions: Option<ApiVersions>,
     #[serde(default, deserialize_with = "lenient_vec")]
     pub features: Vec<String>,
+    /// What this computer's Claude Code settings say about the compact window, as its helper read them. None from
+    /// an older helper, and when the file could not be read.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub compact: Option<ApiCompactSeen>,
     /// Auto may send work here.
     #[serde(default)]
     pub auto: bool,
@@ -2128,7 +2400,7 @@ mod options_tests {
     use super::*;
 
     /// The shape server/options.py view() returns, inside GET /api/prefs.
-    const PREFS: &str = r#"{"ok": true, "chrome_machine": null, "presets": [], "summary_model": "opus",
+    const PREFS: &str = r#"{"ok": true, "chrome_machine": null, "presets": [], "summary_model": "opus", "auto_stop_h": 6,
       "options": [
         {"key": "ai_ask_cards", "kind": "ai", "label": "Summarize waiting chats", "on": false,
          "explain": "Uses your Claude plan to write a short summary of what a waiting chat is asking. The chat's last message is sent to Claude.",
@@ -2145,6 +2417,9 @@ mod options_tests {
     fn options_and_push_read() {
         let p: ApiPrefs = serde_json::from_str(PREFS).unwrap();
         assert_eq!(p.options.len(), 3, "a row with no key, and one that is not an object, are dropped");
+        assert_eq!(p.auto_stop_h, Some(6.0));
+        let old: ApiPrefs = serde_json::from_str(r#"{"ok": true}"#).unwrap();
+        assert_eq!(old.auto_stop_h, None, "an older server: the setting is not shown");
         let ai: Vec<&str> = p.options_of("ai").map(|o| o.key.as_str()).collect();
         assert_eq!(ai, ["ai_ask_cards", "ai_auto_machine"]);
         assert_eq!(p.options_of("setup").count(), 1);

@@ -97,7 +97,8 @@ impl Theme {
             ink2: c(0xB8BDC3),
             label: c(0xB8BDC3),
             dim: c(0x9AA0A7),
-            faint: c(0x858B92),
+            // The quietest text still reads at 4.5:1 on every surface, the raised one (panel3) included.
+            faint: c(0x8B9198),
             accent: c(0x3CC7C2),
             on_accent: c(0x072624),
             run: c(0x6EA4FF),
@@ -135,8 +136,9 @@ impl Theme {
             ink: c(0x15191C),
             ink2: c(0x454B52),
             label: c(0x454B52),
-            dim: c(0x6A7078),
-            faint: c(0x7B8189),
+            // Both greys are text colors, so both pass 4.5:1 on the window, a panel and a raised panel.
+            dim: c(0x5C6269),
+            faint: c(0x686E76),
             accent: c(0x0C7480),
             on_accent: c(0xFFFFFF),
             run: c(0x2F6FDB),

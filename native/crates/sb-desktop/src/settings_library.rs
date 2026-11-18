@@ -38,6 +38,12 @@ fn size_text(bytes: u64) -> String {
     }
 }
 
+/// A sentence's first letter in capitals, for a reason that came from somewhere else.
+fn first_upper(s: &str) -> String {
+    let mut c = s.chars();
+    c.next().map(|f| f.to_uppercase().collect::<String>() + c.as_str()).unwrap_or_default()
+}
+
 fn kind_label(k: &str) -> String {
     match k {
         "mcp" => "MCP".into(),
@@ -252,8 +258,18 @@ impl SettingsView {
                     vec![Self::crow(
                         t,
                         "Couldn't read the library",
-                        Some(format!("{e}. The server might need an update first.")),
-                        None,
+                        // The reason is the server's own words, which may start small.
+                        Some(format!("{}. The server might need an update first.", first_upper(&e.to_string()))),
+                        Some(
+                            ui::line_btn(t, "lib-again", 30.)
+                                .px(px(12.))
+                                .text_size(px(13.))
+                                .child("Try again")
+                                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                    this.app.update(cx, |s, cx| s.load_library(cx))
+                                }))
+                                .into_any_element(),
+                        ),
                     )],
                 ))
                 .into_any_element(),

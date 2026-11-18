@@ -35,6 +35,10 @@ def _title(s):
 
 
 def _waiting(s):
+    if s.get('sent') and s.get('status') != 'waiting':
+        # A task a chat sent (run_on) reports to that chat. A question in its last message is the chat's to read;
+        # only a prompt it is stopped at (a permission, a question mid-turn) waits for the person.
+        return False
     if 'activity' in s:  # the server's derive() (fleet.py) already decided
         return s['activity'] == 'needs'
     return not s.get('stalled') and (s.get('status') == 'waiting' or (s.get('state') == 'blocked' and s.get('status') not in (None, 'busy', 'stopped')))
@@ -61,10 +65,13 @@ def pick(machines, sm, now=None, held=lambda m, sid: False):
     # 1. Something needs you: Claude asked a question, or a message is held at the cold-chat guard.
     need = [(m, s) for m, s in live if _waiting(s) or held(m['name'], s.get('sid'))]
     if need:
-        m, s = max(need, key=lambda x: x[1].get('active') or 0)
+        # the person's own chats first: a sent task leads the line only when nothing of theirs waits
+        m, s = max(need, key=lambda x: (not x[1].get('sent'), x[1].get('active') or 0))
         more = len(need) - 1
         if held(m['name'], s.get('sid')) and not _waiting(s):
             text = f'A message to {_title(s)} is waiting for your OK.'
+        elif s.get('sent'):
+            text = f'A task Claude sent is waiting on {m.get("label") or m["name"]}: {_title(s)}.'
         else:
             text = f'{_title(s)} is waiting for you on {m.get("label") or m["name"]}.'
         if more:

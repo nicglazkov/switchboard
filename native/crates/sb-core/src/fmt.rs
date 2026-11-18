@@ -161,6 +161,49 @@ pub fn when_at_offset(epoch: f64, now: f64, offset_secs: i32) -> String {
     when_tz(epoch, now, &FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap()))
 }
 
+fn when_exact_tz<Tz: TimeZone>(epoch: f64, now: f64, tz: &Tz) -> String {
+    if epoch <= 0.0 {
+        return String::new();
+    }
+    let t = at(epoch, tz);
+    let n = at(now, tz);
+    let tm = ampm(&t, true);
+    let days = (t.date_naive() - n.date_naive()).num_days();
+    if days == 0 {
+        tm
+    } else if (1..7).contains(&days) {
+        // Within the week a weekday names one day only; the same weekday next week needs its date.
+        format!("{} {}", WEEKDAYS[t.weekday().num_days_from_monday() as usize], tm)
+    } else {
+        format!("{} {}, {}", MONTHS[t.month0() as usize], t.day(), tm)
+    }
+}
+
+/// A time that is always exact, for a limit's reset: "9pm" today, "Tue 9pm" on the next six days, "Nov 24, 9pm"
+/// otherwise. Local time zone, read for that moment itself, so a reset on the far side of a clock change is right.
+pub fn when_exact(epoch: f64, now: f64) -> String {
+    when_exact_tz(epoch, now, &Local)
+}
+
+pub fn when_exact_at_offset(epoch: f64, now: f64, offset_secs: i32) -> String {
+    when_exact_tz(epoch, now, &FixedOffset::east_opt(offset_secs).unwrap_or(FixedOffset::east_opt(0).unwrap()))
+}
+
+/// How long until something, coarse to fine: "6d 20h", "3h 5m", "42m", "under a minute". Never negative.
+pub fn until(secs: f64) -> String {
+    let s = if secs.is_finite() { secs.max(0.0).floor() as u64 } else { 0 };
+    let (d, h, m) = (s / 86400, s % 86400 / 3600, s % 3600 / 60);
+    if d > 0 {
+        if h > 0 { format!("{d}d {h}h") } else { format!("{d}d") }
+    } else if h > 0 {
+        if m > 0 { format!("{h}h {m}m") } else { format!("{h}h") }
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        "under a minute".into()
+    }
+}
+
 /// "6:41pm" (keeps ":00").
 pub fn time(epoch: f64) -> String {
     ampm(&at(epoch, &Local), false)

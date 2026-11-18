@@ -28,6 +28,12 @@ const TICK: Duration = Duration::from_millis(500);
 /// the window's return to notice.
 const IDLE_TICK: Duration = Duration::from_secs(2);
 
+/// How often a window that macOS reports covered, but that is in use, is drawn from here: 20 times a second. A look
+/// that finds nothing changed draws nothing.
+const PUMP: Duration = Duration::from_millis(50);
+/// The covered-but-in-use state is said in the log at most this often.
+const SAY_COVERED_EVERY: Duration = Duration::from_secs(60);
+
 /// The wait before the next look.
 fn next_look(watching: bool) -> Duration {
     if watching { TICK } else { IDLE_TICK }
@@ -164,6 +170,56 @@ pub fn board_wants() {
 /// The board is drawing a frame.
 pub fn board_drew() {
     BOARD_DREW.store(since_start(), Ordering::Relaxed);
+    DRAWN.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Frames the root view has drawn since the app started.
+static DRAWN: AtomicU64 = AtomicU64::new(0);
+
+/// The root view has waited seconds for a frame while it was the active window.
+static VIEW_LATE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The root view changed seconds ago and has not been drawn though the window was active: the watchdog's next look
+/// draws it by hand and writes down what macOS thinks of the window.
+pub fn view_late() {
+    VIEW_LATE.store(true, Ordering::Relaxed);
+}
+
+/// What the window last looked like to AppKit, and when: the watchdog writes it on every look, the quit line reads it.
+static LAST_SEEN: std::sync::Mutex<Option<(Instant, String)>> = std::sync::Mutex::new(None);
+/// The last presses and releases the window got.
+static POINTER: std::sync::Mutex<std::collections::VecDeque<(Instant, String)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// A press or release reached the window: kept for the quit line (and written now under SB_INPUT_LOG).
+pub fn pointer(what: String) {
+    if input_log() {
+        log::info!("input: {what}");
+    }
+    if let Ok(mut q) = POINTER.lock() {
+        if q.len() == 8 {
+            q.pop_front();
+        }
+        q.push_back((Instant::now(), what));
+    }
+}
+
+/// For the log as the app quits: a quit because the window "froze" leaves here whether it was drawing, what AppKit
+/// thought of it, and whether its clicks arrived.
+pub fn quit_report() -> String {
+    let seen = match LAST_SEEN.lock().ok().and_then(|g| g.clone()) {
+        Some((at, line)) => format!("{:.1}s ago: {line}", at.elapsed().as_secs_f32()),
+        None => "never looked".into(),
+    };
+    let pointer = match POINTER.lock() {
+        Ok(q) if !q.is_empty() => q
+            .iter()
+            .map(|(at, what)| format!("{what} {:.1}s ago", at.elapsed().as_secs_f32()))
+            .collect::<Vec<_>>()
+            .join(", "),
+        _ => "none".into(),
+    };
+    format!("{} frames in all; {}; the window {seen}; pointer: {pointer}", DRAWN.load(Ordering::Relaxed), board_state())
 }
 
 fn board_state() -> String {
@@ -183,6 +239,22 @@ pub fn watch(window: &Window) -> Subscription {
     if cfg!(target_os = "macos") {
         window.on_next_frame(frames);
     }
+    if input_log() {
+        window.on_next_frame(|window, cx| {
+            window
+                .spawn(cx, async move |cx| {
+                    let mut before = 0;
+                    loop {
+                        cx.background_executor().timer(Duration::from_secs(2)).await;
+                        let now = DRAWN.load(Ordering::Relaxed);
+                        let line = cx.update(|window, _| describe(window)).unwrap_or_else(|e| format!("{e:#}"));
+                        log::info!("diag: {} frames in 2s; {line}", now - before);
+                        before = now;
+                    }
+                })
+                .detach();
+        });
+    }
     window.observe_window_visibility(|v, window, cx| {
         if v.is_visible() {
             soon(window, cx);
@@ -199,9 +271,42 @@ fn frames(window: &mut Window, cx: &mut App) {
             let served = Rc::new(Cell::new(0u64));
             let mut watch = FrameWatch::default();
             let mut wait = TICK;
+            let mut covered_since: Option<Instant> = None;
+            let mut last_said: Option<Instant> = None;
             loop {
                 cx.background_executor().timer(wait).await;
                 let looked = cx.update(|window, _| {
+                    // macOS says the window is covered, so GPUI has stopped its display link, yet it is the key
+                    // window of the active app: someone is using it. Draw it from here until that ends.
+                    let covered = covered_in_use(window);
+                    if covered {
+                        if covered_since.is_none() {
+                            covered_since = Some(Instant::now());
+                            if last_said.is_none_or(|t| t.elapsed() >= SAY_COVERED_EVERY) {
+                                last_said = Some(Instant::now());
+                                log::warn!(
+                                    "window: macOS reports it covered though it is the key window of the active app; drawing it by timer. {}; in front: {}",
+                                    describe(window),
+                                    in_front(window)
+                                );
+                            }
+                        }
+                        poke(window);
+                    } else if let Some(t) = covered_since.take() {
+                        log::warn!("window: no longer reported covered, after {:.1}s", t.elapsed().as_secs_f32());
+                    }
+                    if let Ok(mut seen) = LAST_SEEN.lock() {
+                        *seen = Some((Instant::now(), describe(window)));
+                    }
+                    if VIEW_LATE.swap(false, Ordering::Relaxed) {
+                        log::warn!(
+                            "window: a change waited seconds for a frame; drawing it by hand. {}; in front: {}; {}",
+                            describe(window),
+                            in_front(window),
+                            board_state()
+                        );
+                        nudge(window);
+                    }
                     let watching = window.is_window_active() && on_screen(window);
                     let look = watch.look(served.get(), watching, Instant::now());
                     if look.arm {
@@ -232,11 +337,14 @@ fn frames(window: &mut Window, cx: &mut App) {
                             after.as_secs_f32()
                         );
                     }
-                    watching
+                    (watching, covered)
                 });
                 match looked {
-                    Ok(watching) => wait = next_look(watching),
-                    Err(_) => break,
+                    Ok((_, true)) => wait = PUMP,
+                    Ok((watching, false)) => wait = next_look(watching),
+                    // The window is in the middle of an update (a look that ran inside one) or is closing: look
+                    // again later. A closed window ends the task with it.
+                    Err(_) => wait = IDLE_TICK,
                 }
             }
         })
@@ -275,6 +383,7 @@ mod mac {
     unsafe extern "C" {
         fn CGMainDisplayID() -> u32;
         fn CGDisplayIsAsleep(display: u32) -> u32;
+        fn CGWindowListCopyWindowInfo(option: u32, relative_to: u32) -> *mut Object;
     }
 
     fn view(window: &Window) -> Option<*mut Object> {
@@ -294,6 +403,102 @@ mod mac {
             if !layer.is_null() {
                 let _: () = msg_send![layer, setNeedsDisplay];
             }
+        }
+    }
+
+    /// Asks the layer to display, as a resize does: GPUI draws a frame then if anything changed, and nothing if not.
+    pub fn poke(window: &Window) {
+        let Some(view) = view(window) else { return };
+        // SAFETY: as in `nudge`.
+        unsafe {
+            let layer: *mut Object = msg_send![view, layer];
+            if !layer.is_null() {
+                let _: () = msg_send![layer, setNeedsDisplay];
+            }
+        }
+    }
+
+    /// The window is the key window of the active app, not minimized, on an awake display, and AppKit still says
+    /// it is not visible. GPUI stops drawing a window AppKit calls covered; this one is being used, so it must draw.
+    pub fn covered_in_use(window: &Window) -> bool {
+        let Some(view) = view(window) else { return false };
+        // SAFETY: as in `nudge`; the window and the app are nil-checked.
+        unsafe {
+            let win: *mut Object = msg_send![view, window];
+            let app: *mut Object = msg_send![class!(NSApplication), sharedApplication];
+            if win.is_null() || app.is_null() {
+                return false;
+            }
+            let occlusion: usize = msg_send![win, occlusionState];
+            if occlusion & OCCLUSION_VISIBLE != 0 {
+                return false;
+            }
+            let key: BOOL = msg_send![win, isKeyWindow];
+            let mini: BOOL = msg_send![win, isMiniaturized];
+            let active: BOOL = msg_send![app, isActive];
+            key != NO && mini == NO && active != NO && CGDisplayIsAsleep(CGMainDisplayID()) == 0
+        }
+    }
+
+    /// The windows in front of this one that cover a good part of it: which app, which level, where. For the log,
+    /// when macOS calls the window covered while it is in use. Names and frames only, which need no permission.
+    pub fn in_front(window: &Window) -> String {
+        const ABOVE: u32 = 1 << 1; // kCGWindowListOptionOnScreenAboveWindow
+        let Some(view) = view(window) else { return "no view".into() };
+        // SAFETY: as in `nudge`. The list is a CFArray of CFDictionary, read as the NSArray and NSDictionary they
+        // bridge to; every value is nil-checked, and the list is released when read.
+        unsafe {
+            let win: *mut Object = msg_send![view, window];
+            if win.is_null() {
+                return "no window".into();
+            }
+            let number: isize = msg_send![win, windowNumber];
+            let list = CGWindowListCopyWindowInfo(ABOVE, number as u32);
+            if list.is_null() {
+                return "unknown".into();
+            }
+            let key = |name: &str| -> *mut Object {
+                let s = std::ffi::CString::new(name).unwrap_or_default();
+                msg_send![class!(NSString), stringWithUTF8String: s.as_ptr()]
+            };
+            let num = |d: *mut Object, name: &str| -> f64 {
+                let v: *mut Object = msg_send![d, objectForKey: key(name)];
+                if v.is_null() { 0. } else { msg_send![v, doubleValue] }
+            };
+            let count: usize = msg_send![list, count];
+            let mut out = Vec::new();
+            for i in 0..count {
+                let w: *mut Object = msg_send![list, objectAtIndex: i];
+                let b: *mut Object = msg_send![w, objectForKey: key("kCGWindowBounds")];
+                if b.is_null() {
+                    continue;
+                }
+                let (bw, bh) = (num(b, "Width"), num(b, "Height"));
+                if bw * bh < 200. * 200. {
+                    continue;
+                }
+                let owner: *mut Object = msg_send![w, objectForKey: key("kCGWindowOwnerName")];
+                let owner = if owner.is_null() {
+                    "?".to_string()
+                } else {
+                    let c: *const std::os::raw::c_char = msg_send![owner, UTF8String];
+                    if c.is_null() { "?".into() } else { std::ffi::CStr::from_ptr(c).to_string_lossy().into_owned() }
+                };
+                out.push(format!(
+                    "{owner} (level {}, {}x{} at {},{}, alpha {:.2})",
+                    num(w, "kCGWindowLayer"),
+                    bw,
+                    bh,
+                    num(b, "X"),
+                    num(b, "Y"),
+                    num(w, "kCGWindowAlpha")
+                ));
+                if out.len() == 8 {
+                    break;
+                }
+            }
+            let _: () = msg_send![list, release];
+            if out.is_empty() { "nothing large".into() } else { out.join("; ") }
         }
     }
 
@@ -346,7 +551,9 @@ mod mac {
 }
 
 #[cfg(target_os = "macos")]
-use mac::{describe, nudge, on_screen};
+pub use mac::poke;
+#[cfg(target_os = "macos")]
+use mac::{covered_in_use, describe, in_front, nudge, on_screen};
 
 #[cfg(not(target_os = "macos"))]
 fn nudge(window: &mut Window) {
@@ -363,6 +570,19 @@ fn on_screen(_: &Window) -> bool {
 fn describe(_: &Window) -> String {
     String::new()
 }
+
+#[cfg(not(target_os = "macos"))]
+fn covered_in_use(_: &Window) -> bool {
+    false
+}
+
+#[cfg(not(target_os = "macos"))]
+fn in_front(_: &Window) -> String {
+    String::new()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn poke(_: &Window) {}
 
 #[cfg(test)]
 mod tests {
@@ -493,4 +713,10 @@ mod tests {
         assert_eq!(stall(&mut w, t0 + Duration::from_secs(60), 2), Some(false));
         assert_eq!(stall(&mut w, t0 + SAMPLE_EVERY + Duration::from_secs(60), 4), Some(true));
     }
+}
+
+/// SB_INPUT_LOG=1 writes every press, release and tab change to the log: for chasing clicks that do nothing.
+pub fn input_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SB_INPUT_LOG").is_some())
 }

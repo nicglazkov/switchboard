@@ -18,6 +18,7 @@ pub mod ask;
 pub mod board;
 pub mod brand;
 pub mod cache;
+pub mod compact;
 pub mod discover;
 pub mod firstrun;
 pub mod flags;
@@ -263,6 +264,11 @@ impl Core {
         self.client.keep(machine, sid, on)
     }
 
+    /// A task a chat sent becomes one of the person's own chats (`on` false: a sent task again).
+    pub fn adopt(&self, machine: &str, sid: &str, on: bool) -> Result<(), CoreError> {
+        self.client.adopt(machine, sid, on)
+    }
+
     /// Star (favorite) on or off; returns what the server stored.
     pub fn star(&self, machine: &str, sid: &str, on: bool) -> Result<bool, CoreError> {
         self.client.star(machine, sid, Some(on))
@@ -468,6 +474,11 @@ impl Core {
     /// The usage panel: this week by day, the 5-hour window and week, and past weeks (GET /api/usage).
     pub fn usage(&self) -> Result<api::ApiUsage, CoreError> {
         self.client.usage()
+    }
+
+    /// Refresh on the usage panel: the account's usage asked for now (POST /api/usage/refresh).
+    pub fn usage_refresh(&self) -> Result<api::ApiUsage, CoreError> {
+        self.client.usage_refresh()
     }
 
     /// Changes the usage budget: {op: "set", ...}, {op: "lift"} or {op: "unlift"}.

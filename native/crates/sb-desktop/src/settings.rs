@@ -1,5 +1,5 @@
-//! Settings (Cmd+Comma): Appearance (light, system or dark), Terminal (scheme, text size, cursor, blink), New sessions
-//! (who writes summaries, saved setups), Machines (rename, reorder, remove, add one over SSH or with Add a machine) with
+//! Settings (Cmd+Comma): Appearance (light, system or dark), Terminal (scheme, text size, cursor, blink), Chats
+//! (who writes summaries, saved setups, when an idle chat is stopped), Machines (rename, reorder, remove, add one over SSH or with Add a machine) with
 //! a page for each machine (its Claude folder, picked by browsing it; its versions; what Auto may count on it for; its
 //! MCP servers, each one a click from the library), Library (settings_library.rs), Notifications and the Chrome
 //! machine. Most of it lives on the server, so every device agrees; what is kept on this computer alone (the default
@@ -20,6 +20,7 @@ mod library_ui;
 #[path = "settings_server.rs"]
 mod server_ui;
 
+use crate::settings_context::ContextPage;
 use crate::state::AppState;
 use crate::term::colors;
 use crate::theme::{Mode, NUM, Theme};
@@ -30,6 +31,8 @@ pub enum Section {
     Appearance,
     Terminal,
     NewSessions,
+    /// Compact long chats at: its own page (settings_context.rs).
+    Context,
     Machines,
     Library,
     Notifications,
@@ -40,20 +43,41 @@ pub enum Section {
     Privacy,
 }
 
-/// About is not here: it is its own window (about.rs), from Switchboard > About Switchboard.
-const SECTIONS: [(Section, &str, &str); 11] = [
-    (Section::Appearance, "Appearance", "sun"),
-    (Section::Terminal, "Terminal", "term"),
-    (Section::NewSessions, "New sessions", "plus"),
-    (Section::Machines, "Machines", "mac"),
-    (Section::Library, "Library", "cube"),
-    (Section::Notifications, "Notifications", "bolt"),
-    (Section::Chrome, "Chrome", "globe"),
-    (Section::Budget, "Budget", "gauge"),
-    (Section::Updates, "Updates", "update"),
-    (Section::Server, "Server", "tower"),
-    (Section::Privacy, "AI and your Claude setup", "spark"),
+impl Section {
+    /// Its name in the sidebar, and its icon.
+    fn nav(self) -> (&'static str, &'static str) {
+        match self {
+            Section::Appearance => ("Appearance", "sun"),
+            Section::Terminal => ("Terminal", "term"),
+            Section::NewSessions => ("Chats", "send"),
+            Section::Context => ("Context window", "mem"),
+            Section::Machines => ("Machines", "mac"),
+            Section::Library => ("Library", "cube"),
+            Section::Notifications => ("Notifications", "bolt"),
+            Section::Chrome => ("Chrome", "globe"),
+            Section::Budget => ("Budget", "gauge"),
+            Section::Updates => ("Updates", "update"),
+            Section::Server => ("Server", "tower"),
+            Section::Privacy => ("AI and your Claude setup", "spark"),
+        }
+    }
+}
+
+/// The sidebar, top to bottom: what belongs together sits under one label.
+const NAV: [(&str, &[Section]); 4] = [
+    ("General", &[Section::Appearance, Section::Notifications]),
+    ("Chats", &[Section::NewSessions, Section::Context, Section::Terminal, Section::Budget]),
+    ("Claude", &[Section::Library, Section::Chrome, Section::Privacy]),
+    ("Machines", &[Section::Machines, Section::Server]),
 ];
+/// Pinned to the sidebar's bottom edge, about the app itself. About comes after these: it is its own window
+/// (about.rs), also at Switchboard > About Switchboard.
+const NAV_FOOT: [Section; 1] = [Section::Updates];
+
+/// Stop idle chats: the waits offered, in hours (0 is never).
+pub(crate) const IDLE_STOP_CHOICES: [(f64, &str); 4] =
+    [(0., "Never"), (2., "2 hours"), (6., "6 hours"), (24., "1 day")];
+const IDLE_STOP_NOTE: &str = "Every computer. A chat that finished its reply and has been left alone this long is stopped to free its memory, and Resume brings it back where it was. Its cache has run out by then, so resuming costs what replying to it would have. Never a chat that is working, waiting on you, running a command or a scheduled task, starred, set to Keep running, or open in a tab.";
 
 /// A "Click again to ..." button stays armed this long (seconds), then goes back to its first label.
 pub(crate) const ARM_FOR: f64 = 4.;
@@ -138,7 +162,14 @@ fn open_with(section: Section, machine: Option<String>, pick: Option<String>, cx
             return;
         }
     }
-    let opts = crate::files::options("Settings, Switchboard", 900., 680., (720., 500.), cx);
+    let (w, h) = (900., 680.);
+    // Screenshots: SB_SETTINGS_SIZE=720x500 opens the window at another size (its smallest, say).
+    #[cfg(feature = "shots")]
+    let (w, h) = std::env::var("SB_SETTINGS_SIZE")
+        .ok()
+        .and_then(|v| v.split_once('x').and_then(|(a, b)| Some((a.parse().ok()?, b.parse().ok()?))))
+        .unwrap_or((w, h));
+    let opts = crate::files::options("Settings, Switchboard", w, h, (720., 500.), cx);
     match cx.open_window(opts, move |window, cx| {
         cx.new(|cx| {
             let mut v = SettingsView::new(section, window, cx);
@@ -583,7 +614,7 @@ impl SettingsView {
 
     // ---------- sections ----------
 
-    fn head(t: &Theme, title: &str, sub: &str) -> AnyElement {
+    pub(crate) fn head(t: &Theme, title: &str, sub: &str) -> AnyElement {
         div()
             .flex()
             .flex_col()
@@ -795,8 +826,33 @@ impl SettingsView {
             .into_any_element()
     }
 
+    /// Stop idle chats: how long a finished chat is left alone before the server stops it to free its memory.
+    /// Kept on the server, so every computer agrees. Not shown for a server that does not do this.
+    fn idle_stop_row(&self, t: &Theme, cx: &Context<Self>) -> Option<AnyElement> {
+        let hours = self.app.read(cx).prefs.as_ref().and_then(|p| p.auto_stop_h)?;
+        let mut seg = ui::seg_box(t);
+        for (i, (h, label)) in IDLE_STOP_CHOICES.into_iter().enumerate() {
+            seg = seg.child(ui::seg_btn(t, ("st-idle-stop", i), hours == h, false).child(label).on_click(cx.listener(
+                move |this, _: &ClickEvent, _, cx| {
+                    this.app.update(cx, |s, cx| {
+                        if let Some(p) = s.prefs.as_mut() {
+                            p.auto_stop_h = Some(h);
+                        }
+                        s.save_prefs(serde_json::json!({"auto_stop_h": h}), Some("Saved".into()), cx)
+                    })
+                },
+            )));
+        }
+        Some(Self::group(
+            t,
+            "Idle chats",
+            None,
+            vec![Self::crow(t, "Stop idle chats", Some(IDLE_STOP_NOTE.into()), Some(seg.into_any_element()))],
+        ))
+    }
+
     /// A titled group of rows on a card, like the Mac's own Settings.
-    fn group(t: &Theme, title: &str, sub: Option<&str>, rows: Vec<AnyElement>) -> AnyElement {
+    pub(crate) fn group(t: &Theme, title: &str, sub: Option<&str>, rows: Vec<AnyElement>) -> AnyElement {
         let mut card = div().rounded(px(ui::R_CARD)).border_1().border_color(t.line).bg(t.bg).flex().flex_col();
         for (i, r) in rows.into_iter().enumerate() {
             card =
@@ -809,7 +865,6 @@ impl SettingsView {
             .gap(px(8.))
             .child(
                 div()
-                    .px(px(2.))
                     .flex()
                     .flex_col()
                     .gap(px(3.))
@@ -2044,7 +2099,7 @@ impl SettingsView {
             ));
         }
         div()
-            .child(Self::head(t, "New sessions", "What new chats start with, and who writes the summary when a chat starts fresh or a thread is compacted."))
+            .child(Self::head(t, "Chats", "What new chats start with, who writes the summary when a chat starts fresh or a thread is compacted, and when an idle chat is stopped."))
             .child(Self::group(t, "Summaries", None, vec![Self::crow(
                 t,
                 "Who writes them",
@@ -2052,6 +2107,7 @@ impl SettingsView {
                 Some(seg.into_any_element()),
             )]))
             .child(Self::group(t, "Saved setups", Some("The New sheet offers these, along with Defaults and Last used."), setups))
+            .children(self.idle_stop_row(t, cx))
             .into_any_element()
     }
 
@@ -2217,8 +2273,10 @@ impl SettingsView {
             return div().child(head).child(body).into_any_element();
         };
         let group = |kind: &str, title: &str| {
-            let rows: Vec<AnyElement> = prefs
+            let mut rows: Vec<AnyElement> = prefs
                 .options_of(kind)
+                // where long chats are compacted has its own page, with a slider (Context window)
+                .filter(|o| o.key != "setup_compact_window")
                 .map(|o| {
                     let (key, on) = (o.key.clone(), o.on);
                     let sw = ui::switch(t, SharedString::from(format!("st-opt-{key}")), on, false).on_click(
@@ -2236,6 +2294,10 @@ impl SettingsView {
                         .into_any_element()
                 })
                 .collect();
+            if kind == "setup" && prefs.option("setup_compact_window").is_some() {
+                let note = "Also written to each machine's Claude Code settings. It has its own page: Context window.";
+                rows.push(Self::crow(t, "Where long chats are compacted", Some(note.into()), None));
+            }
             (!rows.is_empty()).then(|| Self::group(t, title, None, rows))
         };
         div()
@@ -2441,7 +2503,6 @@ impl SettingsView {
             body = body.child(
                 ui::wrap(sum)
                     .mt(px(14.))
-                    .px(px(2.))
                     .text_size(px(12.5))
                     .line_height(relative(1.45))
                     .text_color(if st.over_budget() { t.cold } else { t.dim }),
@@ -2654,6 +2715,37 @@ impl Render for SettingsView {
 }
 
 impl SettingsView {
+    /// One line of the sidebar: an icon and a name, washed when it is the page shown. A keyboard stop.
+    fn nav_item(t: &Theme, id: &str, label: &'static str, ic: &str, on: bool) -> gpui::Stateful<gpui::Div> {
+        let hover = t.hover;
+        ui::focusable(div().id(SharedString::from(id.to_string())), t)
+            .flex_none()
+            .h(px(32.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .rounded(px(ui::R_CTRL))
+            .cursor_pointer()
+            .text_size(px(13.5))
+            .when(on, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
+            .when(!on, |d| d.text_color(t.ink2).hover(move |st| st.bg(hover)))
+            .child(if ic == "mac" {
+                ui::machine_icon("", 15., if on { t.ink } else { t.dim })
+            } else {
+                ui::icon(ic, 15., if on { t.ink } else { t.dim })
+            })
+            .child(ui::line(label))
+    }
+
+    /// A section's line in the sidebar.
+    fn nav_row(&self, t: &Theme, s: Section, cx: &Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let (label, ic) = s.nav();
+        let on = self.section == s && (s != Section::Machines || self.machine.is_none());
+        Self::nav_item(t, &format!("st-nav-{label}"), label, ic, on)
+            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(s, cx)))
+    }
+
     fn body(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         let t = Theme::get(cx);
         let hover = t.hover;
@@ -2669,82 +2761,98 @@ impl SettingsView {
         }
         let mut nav = div()
             .id("st-nav")
-            .flex_none()
-            .w(px(220.))
-            .h_full()
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.nav_scroll)
-            .pt(px(18.))
+            .pt(px(14.))
+            .pb(px(10.))
             .px(px(10.))
             .flex()
             .flex_col()
-            .gap(px(2.))
-            .bg(t.bg)
-            .border_r_1()
-            .border_color(t.line);
-        for (s, label, ic) in SECTIONS {
-            let on = self.section == s && (s != Section::Machines || self.machine.is_none());
+            .gap(px(2.));
+        for (i, (group, sections)) in NAV.into_iter().enumerate() {
             nav = nav.child(
                 div()
-                    .id(SharedString::from(format!("st-nav-{label}")))
-                    .h(px(34.))
+                    .flex_none()
+                    .h(px(24.))
+                    .when(i > 0, |d| d.mt(px(12.)))
                     .px(px(10.))
                     .flex()
                     .items_center()
-                    .gap(px(10.))
-                    .rounded(px(ui::R_CTRL))
-                    .cursor_pointer()
-                    .text_size(px(13.5))
-                    .when(on, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
-                    .when(!on, |d| d.text_color(t.ink2).hover(move |st| st.bg(hover)))
-                    .child(if s == Section::Machines {
-                        ui::machine_icon("", 15., if on { t.ink } else { t.dim })
-                    } else {
-                        ui::icon(ic, 15., if on { t.ink } else { t.dim })
-                    })
-                    .child(label)
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.go(s, cx))),
+                    .text_size(px(11.5))
+                    .font_weight(FontWeight::MEDIUM)
+                    .text_color(t.faint)
+                    .child(group),
             );
-            // Under Machines, each machine: its own page.
-            if s == Section::Machines
-                && let Some(Ok(ms)) = &self.machines
-            {
-                for m in &ms.machines {
-                    let mon = self.section == Section::Machines && self.machine.as_deref() == Some(m.name.as_str());
-                    let name = m.name.clone();
-                    nav = nav.child(
-                        div()
-                            .id(SharedString::from(format!("st-nav-m-{}", m.name)))
-                            .min_h(px(30.))
-                            .py(px(5.))
-                            .pl(px(30.))
-                            .pr(px(10.))
-                            .flex()
-                            .items_center()
-                            .gap(px(8.))
-                            .rounded(px(ui::R_CTRL))
-                            .cursor_pointer()
-                            .text_size(px(13.))
-                            .when(mon, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
-                            .when(!mon, |d| d.text_color(t.dim).hover(move |st| st.bg(hover)))
-                            .child(div().flex_none().size(px(7.)).rounded_full().bg(match m.online {
-                                Some(true) => t.warm,
-                                Some(false) => t.bad,
-                                None => t.cold,
-                            }))
-                            .child(ui::wrap(m.label.clone()).flex_1().min_w_0())
-                            .when(m.needs_root, |d| d.child(ui::icon("info", 13., t.accent)))
-                            .on_click(
-                                cx.listener(move |this, _: &ClickEvent, _, cx| this.open_machine(name.clone(), cx)),
-                            ),
-                    );
+            for &s in sections {
+                nav = nav.child(self.nav_row(&t, s, cx));
+                // Under Machines, each machine: its own page.
+                if s == Section::Machines
+                    && let Some(Ok(ms)) = &self.machines
+                {
+                    for m in &ms.machines {
+                        let mon = self.section == Section::Machines && self.machine.as_deref() == Some(m.name.as_str());
+                        let name = m.name.clone();
+                        nav = nav.child(
+                            ui::focusable(div().id(SharedString::from(format!("st-nav-m-{}", m.name))), &t)
+                                .flex_none()
+                                .min_h(px(30.))
+                                .py(px(5.))
+                                .pl(px(30.))
+                                .pr(px(10.))
+                                .flex()
+                                .items_center()
+                                .gap(px(8.))
+                                .rounded(px(ui::R_CTRL))
+                                .cursor_pointer()
+                                .text_size(px(13.))
+                                .when(mon, |d| d.bg(t.sel).text_color(t.ink).font_weight(FontWeight::SEMIBOLD))
+                                .when(!mon, |d| d.text_color(t.dim).hover(move |st| st.bg(hover)))
+                                .child(div().flex_none().size(px(7.)).rounded_full().bg(match m.online {
+                                    Some(true) => t.warm,
+                                    Some(false) => t.bad,
+                                    None => t.cold,
+                                }))
+                                .child(ui::wrap(m.label.clone()).flex_1().min_w_0())
+                                .when(m.needs_root, |d| d.child(ui::icon("info", 13., t.accent)))
+                                .on_click(
+                                    cx.listener(move |this, _: &ClickEvent, _, cx| this.open_machine(name.clone(), cx)),
+                                ),
+                        );
+                    }
                 }
             }
         }
+        // The app itself, at the bottom edge whatever the window's height: the list above scrolls, this stays.
+        let mut foot =
+            div().flex_none().px(px(10.)).py(px(8.)).flex().flex_col().gap(px(2.)).border_t_1().border_color(t.line);
+        for s in NAV_FOOT {
+            foot = foot.child(self.nav_row(&t, s, cx));
+        }
+        let foot = foot.child(
+            Self::nav_item(&t, "st-nav-about", "About", "info", false)
+                .on_click(|_: &ClickEvent, _, cx| cx.defer(crate::about::open)),
+        );
+        let nav = div()
+            .flex_none()
+            .w(px(220.))
+            .h_full()
+            .flex()
+            .flex_col()
+            .bg(t.bg)
+            .border_r_1()
+            .border_color(t.line)
+            .child(div().relative().flex_1().min_h_0().child(nav).child(ui::scrollbar(&self.nav_scroll)))
+            .child(foot);
         let body = match self.section {
             Section::Appearance => self.appearance(&t, cx),
             Section::Terminal => self.terminal(&t, cx),
             Section::NewSessions => self.new_sessions(&t, cx),
+            Section::Context => {
+                let app = self.app.clone();
+                let page = window.use_keyed_state("st-context", cx, |window, cx| ContextPage::new(app, window, cx));
+                page.into_any_element()
+            }
             Section::Machines => self.machines(&t, window, cx),
             Section::Library => self.library(&t, window, cx),
             Section::Notifications => self.notifications(&t, cx),
@@ -2769,7 +2877,7 @@ impl SettingsView {
             .bg(t.panel)
             .font_family(crate::theme::UI)
             .text_color(t.ink)
-            .child(div().relative().flex_none().h_full().child(nav).child(ui::scrollbar(&self.nav_scroll)))
+            .child(nav)
             .child(
                 div()
                     .relative()
@@ -2799,6 +2907,31 @@ fn pct(x: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_section_is_in_the_sidebar_once() {
+        let all = [
+            Section::Appearance,
+            Section::Terminal,
+            Section::NewSessions,
+            Section::Context,
+            Section::Machines,
+            Section::Library,
+            Section::Notifications,
+            Section::Chrome,
+            Section::Budget,
+            Section::Updates,
+            Section::Server,
+            Section::Privacy,
+        ];
+        let shown: Vec<Section> = NAV.iter().flat_map(|(_, s)| s.iter().copied()).chain(NAV_FOOT).collect();
+        for s in all {
+            assert_eq!(shown.iter().filter(|x| **x == s).count(), 1, "{s:?}");
+            assert!(!s.nav().0.is_empty());
+        }
+        assert_eq!(shown.len(), all.len());
+        assert!(NAV.iter().all(|(name, s)| !name.is_empty() && !s.is_empty()));
+    }
 
     #[test]
     fn a_click_again_button_wants_a_real_second_click() {

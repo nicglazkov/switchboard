@@ -4,6 +4,8 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, time as dtime, timedelta
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
+import options as options_mod  # what a machine says about its compact window, checked
+
 GUARD_CTX = 150_000
 STALE_CLOSED = 2 * 86400  # a chat nothing has open, untouched for 2 days, moves to Older
 STALE_OPEN = 7 * 86400    # one still open in a terminal or the background, after a week
@@ -15,7 +17,15 @@ RESET_SLACK = 3600        # a weekly reset that moves more than this is a new we
 FIVE_HOURS = 5 * 3600
 LIMITS_STEP = 300         # how far an old agent's "numbers seen at" moves before the apps are told again
 PCT_MOST = 200            # a percent past this is not a reading at all; one a little over 100 reads as 100
+ACCOUNT_EVERY = 15 * 60   # Claude Code's own usage report is asked for this often while chats reply,
+ACCOUNT_IDLE = 3600       # this often while nothing here moves,
+ACCOUNT_FRESH = 60        # and Refresh takes one no older than this
+ACCOUNT_FEATURE = 'account_usage'
 GAP = 3 * 3600            # samples further apart than this, with usage growing between them, leave a day unknown
+SPEND_FEATURE = 'spend'   # an agent that can say what each chat used since the week began (agent/sb.py spend_report)
+SPEND_EVERY = 120         # each machine is asked this often; every poll while it is still reading its transcripts
+SPEND_TOP = 10            # chats GET /api/usage lists under `top`
+SPEND_CHATS = 60          # chats kept of one machine's answer (the agent sends 40)
 def server_tz():
     """The time zone the week's days are counted in: SWITCHBOARD_TZ (set it when the server runs in UTC but you do
     not), else the server's own zone (/etc/localtime, or TZ), else UTC."""
@@ -277,13 +287,18 @@ class Fleet:
         self.lock = threading.Lock()
         self.history = None  # a WeekHistory, attached by the server: the week's samples for the iPhone widgets
         self.unlinked = set()  # linked machines the hub no longer lists (nodes.sync): not asked until it does again
+        self._account_busy = threading.Lock()  # one Refresh of the account's usage report at a time
         self._held = {}  # machine: the highest weekly number an agent from before merged limits has shown (limits)
         self.on_change = None  # called with a machine's name when what it reports changed (the server's live updates)
         self.on_save = None  # called with the machine list after it changed (the server writes fleet.json and the hub's file)
         self.servers = []  # the server's own addresses, told to each machine's agent (where its hooks report)
         self.budget_view = None  # set by the server: the usage budget's status, sent with every poll (budget.py)
         self.options = None  # set by the server: the opt-in settings, sent with every poll (options.py)
+        self.compact_at = None  # ... and the compact window that goes with setup_compact_window
         self._digest = {}
+        # What each chat used this week ("Most used this week"): the week's start as the last poll knew it, each
+        # machine's last answer (kept for the week, so a machine that is offline still counts), and what was asked.
+        self._since, self.spend, self._spend_asked, self.spend_file = None, {}, {}, None
         self._save_lock = threading.Lock()  # saves go out one at a time, each with the list as it is then
         self._stopped = {}  # (machine, sid): when Stop succeeded; shown stopped at once, not at the next poll
 
@@ -312,7 +327,7 @@ class Fleet:
 
     @staticmethod
     def _blank():
-        return {'online': None, 'error': None, 'sessions': [], 'replaced': [], 'limits': None, 'updated': None, 'as_of': None, 'skew': 0.0, 'root': None,
+        return {'online': None, 'error': None, 'sessions': [], 'replaced': [], 'limits': None, 'account': None, 'updated': None, 'as_of': None, 'skew': 0.0, 'root': None,
                 'launcher': None, 'mem': None, 'features': [], 'versions': None, 'models': None, 'setup': [], 'root_set': None, 'root_suggest': None, 'agents_ok': True}
 
     def config(self):
@@ -449,6 +464,8 @@ class Fleet:
             req['summary_model'] = self.summary_model
         if isinstance(getattr(self, 'options', None), dict):  # the opt-in settings (options.py), each true or false
             req['options'] = dict(self.options)
+            if getattr(self, 'compact_at', None):  # where long chats compact; an older helper knows only 300k
+                req['compact_at'] = self.compact_at
         view = getattr(self, 'budget_view', None)  # the usage budget's status, cached by the agent for its hooks
         if view:
             try:
@@ -457,7 +474,79 @@ class Fleet:
                 b = None
             if b:
                 req['budget'] = b
+        age = self._account_ask(m['name'])
+        if age:
+            req['usage'] = {'max_age': age}  # this machine's turn to ask Claude Code for the account's usage report
+        since = self._spend_ask(m['name'])
+        if since:
+            req['spend'] = {'since': since}  # what each chat used since the week began, on the machine's own clock
         return req
+
+    def keep_spend(self, path):
+        """Keep the machines' answers in this file, so a restart does not forget a machine that is offline."""
+        self.spend_file = Path(path)
+        try:
+            d = json.loads(self.spend_file.read_text())
+        except (OSError, ValueError):
+            return
+        if isinstance(d, dict):
+            with self.lock:
+                for n, r in d.items():
+                    r = clean_spend(r)
+                    if r and 'total' in r and n in self.machines:
+                        self.spend.setdefault(n, r)
+
+    def _spend_ask(self, name):
+        """The week's start on this machine's clock when it is its turn to say what its chats used, else None: every
+        SPEND_EVERY, at once when the week changed, and at every poll while it is still reading its transcripts."""
+        now = self.clock()
+        with self.lock:
+            st = self.state.get(name) or {}
+            week = self._since
+            if not week or SPEND_FEATURE not in (st.get('features') or []):
+                return None
+            last = self._spend_asked.get(name)
+            if last and last['week'] == week and not last.get('more') and 0 <= now - last['at'] < SPEND_EVERY:
+                return None
+            self._spend_asked[name] = {'week': week, 'at': now}
+            return round(week - (st.get('skew') or 0.0), 1)
+
+    def _spend_got(self, name, said, now):
+        """A machine's answer to the ask above. One that is still reading says only `more`: what it said before stands."""
+        r = clean_spend(said)
+        with self.lock:
+            asked = self._spend_asked.get(name)
+            if r is None or not asked or name not in self.machines:
+                return
+            if 'total' not in r:
+                asked['more'] = bool(r.get('more'))
+                return
+            new = dict(r, since=asked['week'], at=now)  # the week as the server counts it, not the machine's clock
+            old = self.spend.get(name)
+            self.spend[name] = new
+            same = old and {k: v for k, v in old.items() if k != 'at'} == {k: v for k, v in new.items() if k != 'at'}
+            keep = None if same or self.spend_file is None else json.dumps(self.spend)
+        if keep:
+            try:
+                tmp = self.spend_file.with_name(f'{self.spend_file.name}.{os.getpid()}.{threading.get_ident()}.tmp')
+                tmp.write_text(keep)
+                os.replace(tmp, self.spend_file)
+            except OSError:
+                pass
+
+    def spend_view(self):
+        """What the machines said their chats used this week: {since, reports: {machine: answer}, able, machines,
+        pending}. An answer for another week (the reset moved on while its machine was away) is left out. `able`
+        counts machines whose agent can answer, `pending` those online that have not finished their first count."""
+        with self.lock:
+            week = self._since
+            for n in [n for n in self.spend if n not in self.machines]:
+                del self.spend[n]  # unpaired
+            reports = {n: r for n, r in self.spend.items() if week and abs(r['since'] - week) <= RESET_SLACK}
+            can = [n for n in self.order if SPEND_FEATURE in (self.state[n].get('features') or [])]
+            pending = [n for n in can if n not in reports and self.state[n].get('online')]
+            return {'since': week, 'reports': reports, 'able': len(set(can) | set(reports)), 'machines': len(self.order),
+                    'pending': len(pending)}
 
     def _poll_one(self, name, timeout):
         m = self.machines.get(name)
@@ -468,7 +557,8 @@ class Fleet:
         asked = self.clock()  # live guesses older than this are settled by the answer (server.App overlay)
         r = None
         try:
-            r = self.transport(m['target'], self._list_req(m), timeout)
+            req = self._list_req(m)
+            r = self.transport(m['target'], req, timeout)
             if not isinstance(r, dict):
                 raise OSError('its answer could not be read')
             if not r.get('ok'):
@@ -479,11 +569,13 @@ class Fleet:
             rows = lambda k: [s for s in r[k] if isinstance(s, dict)] if isinstance(r.get(k), list) else []
             upd = {'online': True, 'error': None, 'sessions': rows('sessions'), 'replaced': rows('replaced'),
                    'limits': r.get('limits') if isinstance(r.get('limits'), dict) else None,
+                   'account': clean_account(r.get('account')),
                    'updated': time.time(), 'as_of': got, 'skew': round(got - sent, 3) if sent else 0.0, 'root': r.get('root'), 'launcher': r.get('launcher'), 'mem': r.get('mem'),
                    'features': r.get('features') if isinstance(r.get('features'), list) else [], 'asked': asked,
                    'versions': r.get('versions') if isinstance(r.get('versions'), dict) else None,
                    'models': r.get('models') if isinstance(r.get('models'), dict) else None,
                    'setup': [i for i in r.get('setup') or [] if isinstance(i, dict) and i.get('id')][:12],
+                   'compact': options_mod.compact_seen(r.get('compact')),
                    'root_set': r.get('root_set') if isinstance(r.get('root_set'), bool) else None,
                    'root_suggest': r.get('root_suggest') if isinstance(r.get('root_suggest'), str) else None,
                    # False: Claude Code there could not be asked what runs, so no row's kind or status says
@@ -493,6 +585,8 @@ class Fleet:
             upd, r = {'online': False, 'error': _short(e), 'asked': asked}, None
         if r is not None:
             self.learn(name, r)
+            if 'spend' in req:
+                self._spend_got(name, r.get('spend'), upd['as_of'])
         self.store(name, upd)
 
     def store(self, name, upd):
@@ -528,9 +622,12 @@ class Fleet:
 
     def record_week(self):
         """Write down the weekly percent (at most every 15 minutes) for the widgets' week strip and trace."""
+        if self.history is None and not any(SPEND_FEATURE in (st.get('features') or []) for st in self.state.values()):
+            return
+        now = self.clock()
+        lim = self.limits(now)
+        self._since = week_start(lim.get('seven_day_reset'), now)  # the next poll asks the machines from here
         if self.history is not None:
-            now = self.clock()
-            lim = self.limits(now)
             self.history.record(lim.get('seven_day'), lim.get('seven_day_reset'), now)
 
     def poll_one(self, name, timeout=15):
@@ -609,6 +706,68 @@ class Fleet:
             held['updated'] = lim['updated'] = at
         return lim
 
+    def _account_asker(self):
+        """The one machine that asks Claude Code for the account's usage report: the first online one whose agent can
+        (and whose last try worked, when any did), so the fleet makes one small call, not one per machine. Called
+        with the lock held. None when no machine can."""
+        able = [n for n in self.order if self.state[n].get('online') and ACCOUNT_FEATURE in (self.state[n].get('features') or [])]
+        good = [n for n in able if not (self.state[n].get('account') or {}).get('error')]
+        return (good or able or [None])[0]
+
+    def _account_ask(self, name):
+        """How old a report this machine's next poll may answer with (seconds), or None when it is not the asker:
+        a quarter of an hour while chats reply (a status line saw numbers after the last report), an hour otherwise."""
+        with self.lock:
+            if name != self._account_asker():
+                return None
+            at = max((_num((self.state[n].get('account') or {}).get('at')) or 0 for n in self.order), default=0)
+            seen = max((_num((self.state[n].get('limits') or {}).get('updated')) or 0 for n in self.order), default=0)
+        return ACCOUNT_EVERY if seen > at else ACCOUNT_IDLE
+
+    def account(self, snap=None):
+        """The account's usage report for the apps: the newest any machine has, with the machine it came from, its
+        times on the server's clock, and `support` (how many machines could report one, and how many are online)
+        so the apps can say why there is none. One account is assumed, as for the limits."""
+        snap = self.snapshot()['machines'] if snap is None else snap
+        best, failed = None, None
+        for m in snap:
+            a = m.get('account')
+            if not isinstance(a, dict):
+                continue
+            skew = m.get('skew') if isinstance(m.get('skew'), (int, float)) else 0.0
+            a = dict(a, machine=m.get('label') or m.get('name'),
+                     at=round(a['at'] + skew, 1) if _isnum(a.get('at')) else None,
+                     tried=round(a['tried'] + skew, 1) if _isnum(a.get('tried')) else None)
+            if a['at'] and (best is None or a['at'] > best['at']):
+                best = a
+            elif not a['at'] and a.get('error') and failed is None:
+                failed = a
+        able = [m for m in snap if ACCOUNT_FEATURE in (m.get('features') or [])]
+        support = {'able': len(able), 'online': sum(1 for m in able if m.get('online')), 'machines': len(snap)}
+        return best or failed, support
+
+    def refresh_account(self, max_age=ACCOUNT_FRESH, timeout=30):
+        """Refresh in the apps: ask the asker machine for a report now and keep what it says. One at a time; a
+        second Refresh while one runs waits for it and takes its answer. False when nobody could be asked."""
+        with self._account_busy:
+            with self.lock:
+                name = self._account_asker()
+                m = self.machines.get(name) if name else None
+            if not m:
+                return False
+            try:
+                r = self.transport(m['target'], {'verb': 'account_usage', 'max_age': max_age, 'as': name}, timeout)
+            except Exception:
+                return False
+            if not isinstance(r, dict) or not r.get('ok'):
+                return False
+            upd = {'account': clean_account(r.get('account'))}
+            if isinstance(r.get('limits'), dict):
+                upd['limits'] = r['limits']
+            self.store(name, upd)
+            self.record_week()
+            return True
+
     def summary(self):
         snap = self.snapshot()['machines']
         now = self.clock()
@@ -631,12 +790,16 @@ class Fleet:
     def usage(self):
         """GET /api/usage: the plan limits the Week chip shows, this week by day, and past weeks' final percents."""
         now = self.clock()
-        newest = self.limits(now)
+        snap = self.snapshot()['machines']
+        newest = self.limits(now, snap)
         week, reset = newest.get('seven_day'), newest.get('seven_day_reset')
         days, weeks = self.history.usage(week, reset, now) if self.history is not None else ([], [])
+        account, support = self.account(snap)
         return {'ok': True, 'now': now, 'tz': DAY_TZ,
                 'five': {'pct': newest.get('five_hour'), 'reset': newest.get('five_hour_reset')},
                 'week': {'pct': week, 'reset': reset, 'pace': _projected(week, reset, now)},
+                'updated': newest.get('updated'),  # when these two numbers were last seen (server clock)
+                'account': account, 'account_support': support,
                 'days': days, 'weeks': weeks}
 
     def call(self, name, req, timeout=40):
@@ -654,6 +817,88 @@ class Fleet:
             raise err
 
 
+def week_start(reset, now):
+    """When the week the plan is counting began: seven days before its reset; or, when that reset has passed and no
+    chat has seen the next one yet, the passed reset itself (the new week began there). None when no reset is known."""
+    if not _isnum(reset) or reset <= 0 or not _isnum(now):
+        return None
+    if reset > now:
+        return reset - WEEK if reset - WEEK <= now else None
+    return reset + WEEK * int((now - reset) // WEEK)
+
+
+def clean_spend(r):
+    """A machine's answer about what its chats used (agent/sb.py spend_report) with only what has the right shape:
+    {total, n, chats: [{sid, w, title?}]}, or {more: True} while it is still reading. None when it is neither."""
+    if not isinstance(r, dict):
+        return None
+    if r.get('more') is True and 'total' not in r:
+        return {'more': True}
+    if not _isnum(r.get('total')) or not isinstance(r.get('chats'), list):
+        return None
+    chats, seen = [], set()
+    for c in r['chats'][:SPEND_CHATS]:
+        if not isinstance(c, dict) or not isinstance(c.get('sid'), str) or not 0 < len(c['sid']) <= 64 or c['sid'] in seen:
+            continue
+        if not _isnum(c.get('w')) or c['w'] <= 0:
+            continue
+        seen.add(c['sid'])
+        row = {'sid': c['sid'], 'w': int(c['w'])}
+        if isinstance(c.get('title'), str) and c['title'].strip():
+            row['title'] = ' '.join(c['title'].split())[:120]
+        chats.append(row)
+    named = sum(c['w'] for c in chats)
+    out = {'total': max(int(r['total']), named), 'n': max(int(r['n']) if _isnum(r.get('n')) else 0, len(chats)), 'chats': chats}
+    if _isnum(r.get('since')) and _isnum(r.get('at')):  # as kept in the server's own file
+        out.update(since=r['since'], at=r['at'])
+    return out
+
+
+def top_chats(view, listed=None, chats=None, roots=None, labels=None, sent=None, limit=SPEND_TOP):
+    """GET /api/usage `top`: the chats that used the most since the week began, largest first.
+
+    view: Fleet.spend_view(). listed: {"machine/sid": row} for the chats the apps list now. chats and roots: every
+    chat the server remembers and each one's thread ({key: root key}, features.Threads.graph), so a chat that was
+    resumed, started fresh or compacted is one row with what came before it. labels: {machine: its name for people}.
+    sent(key): was this chat sent by a chat (run_on)?
+
+    Each row: machine and sid of the chat to open (the thread's chat the apps list now, else its newest), name,
+    label, weighted (tokens times the cost weights: an estimate, never the plan's own number), share (percent of
+    everything Switchboard saw this week, on every machine), alive (the apps list it now), sent, parts (how many
+    chats the row adds up)."""
+    listed, chats, roots, labels = listed or {}, chats or {}, roots or {}, labels or {}
+    out = {'since': view.get('since'), 'total': 0, 'chats': 0, 'rows': [],
+           'able': view.get('able') or 0, 'machines': view.get('machines') or 0, 'pending': view.get('pending') or 0}
+    groups, total, unnamed = {}, 0, 0
+    for name, r in sorted((view.get('reports') or {}).items()):
+        total += r['total']
+        unnamed += max(0, r['n'] - len(r['chats']))
+        for c in r['chats']:
+            k = f'{name}/{c["sid"]}'
+            g = groups.setdefault(roots.get(k, k), {'w': 0, 'parts': []})
+            g['w'] += c['w']
+            g['parts'].append((k, name, c))
+    if total <= 0:
+        return out
+    ended = lambda k: (chats.get(k) or {}).get('ended') or 0
+    rows = []
+    for g in groups.values():
+        keys = [p[0] for p in g['parts']]
+        # the chat to show for the thread: the one the apps list now (the newest of them), else the newest used
+        shown = [k for k in keys if k in listed]
+        k = max(shown or keys, key=lambda k: ((listed.get(k) or {}).get('active') or ended(k), k))
+        _, name, c = next(p for p in g['parts'] if p[0] == k)
+        row = listed.get(k) or {}
+        title = row.get('title') or (chats.get(k) or {}).get('title') or c.get('title') or ''
+        rows.append({'machine': name, 'sid': c['sid'], 'name': ' '.join(str(title).split())[:120],
+                     'label': labels.get(name) or name, 'weighted': g['w'], 'share': round(100.0 * g['w'] / total, 1),
+                     'alive': k in listed, 'sent': bool(row.get('sent') or (sent(k) if sent else False)),
+                     'parts': len(keys)})
+    rows.sort(key=lambda r: (-r['weighted'], r['machine'], r['sid']))
+    out.update(total=total, chats=len(rows) + unnamed, rows=rows[:limit])
+    return out
+
+
 def _running(sessions):
     return sum(1 for s in sessions if s.get('activity') == 'working')
 
@@ -664,6 +909,47 @@ def _cold(sessions):
 
 def _isnum(v):
     return isinstance(v, (int, float)) and not isinstance(v, bool) and v == v and abs(v) != float('inf')
+
+
+def clean_account(a):
+    """A machine's account usage report (agent/sb.py account_report) with only what has the right shape, so one
+    machine's odd answer never reaches the apps: percents 0 to 100, short strings, money as {minor, currency, exp}.
+    None when it is not a report."""
+    if not isinstance(a, dict):
+        return None
+    text = lambda v, most=64: v.strip()[:most] if isinstance(v, str) and v.strip() else None
+    num = lambda v: v if _isnum(v) else None
+    pct = lambda v: max(0, min(100, v)) if _isnum(v) else None
+
+    def money(m):
+        if not isinstance(m, dict) or not _isnum(m.get('minor')):
+            return None
+        exp = m.get('exp')
+        return {'minor': m['minor'], 'currency': text(m.get('currency'), 8),
+                'exp': exp if isinstance(exp, int) and not isinstance(exp, bool) and 0 <= exp <= 4 else 2}
+    out = {'at': num(a.get('at')), 'tried': num(a.get('tried')), 'error': text(a.get('error'), 160),
+           'plan': text(a.get('plan'), 32), 'available': a.get('available') is not False, 'limits': [], 'extra': None, 'products': None}
+    for r in a.get('limits') if isinstance(a.get('limits'), list) else []:
+        if isinstance(r, dict) and text(r.get('kind')) and pct(r.get('pct')) is not None:
+            out['limits'].append({'kind': text(r['kind']), 'pct': pct(r['pct']), 'reset': num(r.get('reset')), 'label': text(r.get('label')),
+                                  'severity': text(r.get('severity'), 16), 'active': r.get('active') is True})
+    out['limits'] = out['limits'][:16]
+    e = a.get('extra')
+    if isinstance(e, dict):
+        flag = lambda k: e[k] if isinstance(e.get(k), bool) else None
+        out['extra'] = {'enabled': flag('enabled'), 'used': money(e.get('used')), 'limit': money(e.get('limit')),
+                        'balance': money(e.get('balance')), 'pct': pct(e.get('pct')), 'reason': text(e.get('reason')),
+                        'limit_reached': e.get('limit_reached') is True, 'auto_reload': flag('auto_reload')}
+    p = a.get('products')
+    if isinstance(p, dict) and isinstance(p.get('rows'), list):
+        rows = [{'key': text(r.get('key')) or '', 'name': text(r.get('name')), 'pct': pct(r.get('pct')), 'of_limit': pct(r.get('of_limit'))}
+                for r in p['rows'] if isinstance(r, dict)]
+        rows = [r for r in rows if r['name'] and r['pct'] is not None][:16]
+        if rows:
+            out['products'] = {'as_of': num(p.get('as_of')), 'start': num(p.get('start')), 'rows': rows}
+    if out['at'] is None and not out['error']:
+        return None
+    return out
 
 
 def sane_limits(lim, now):

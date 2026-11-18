@@ -29,6 +29,8 @@ const STATES: [(&str, &str); 6] = [
     ("archived", "Archived"),
     ("replaced", "Replaced"),
 ];
+/// Whose chats: the person's own, or tasks a chat sent with run_on. Shown once the server marks them.
+const BY: [(&str, &str); 3] = [("", "All chats"), ("you", "Your chats"), ("claude", sb_core::model::SENT_BY)];
 const PAGE: usize = 200;
 
 /// Opens the browser, or brings it forward when it is open.
@@ -89,6 +91,9 @@ pub struct BrowserView {
     rn: Entity<InputState>,
     machine: String,
     state: &'static str,
+    /// "claude": only tasks a chat sent; "you": only the rest. `can_by`: the server marks them, so the filter shows.
+    by: &'static str,
+    can_by: bool,
     threads: bool,
     rows: Vec<ApiBrowseRow>,
     total: u64,
@@ -149,6 +154,8 @@ impl BrowserView {
             rn,
             machine: String::new(),
             state: "",
+            by: "",
+            can_by: false,
             threads: true,
             rows: Vec::new(),
             total: 0,
@@ -207,6 +214,9 @@ impl BrowserView {
         if !self.state.is_empty() {
             query.push_str(&format!("&state={}", self.state));
         }
+        if !self.by.is_empty() {
+            query.push_str(&format!("&by={}", self.by));
+        }
         if !self.folder.is_empty() {
             query.push_str(&format!("&folder={}", enc(&self.folder)));
         }
@@ -229,6 +239,7 @@ impl BrowserView {
                         s.loaded_at = AppState::now();
                         if let Some(f) = &b.facets {
                             s.folders = f.folders.clone();
+                            s.can_by = f.sent.is_some();
                         }
                         s.total = b.total.unwrap_or(b.rows.len() as u64);
                         if more {
@@ -576,12 +587,23 @@ impl BrowserView {
                                     .line_height(relative(1.35))
                                     .font_weight(FontWeight::MEDIUM)
                                     .text_color(if on { t.ink } else { t.ink2 })
+                                    // Two lines at most, so a narrow window keeps the list a list.
+                                    .line_clamp(2)
+                                    .text_ellipsis()
                                     .child(topic.to_string()),
                             )
-                            .when_some(tag, |d, tg| d.child(ui::tag(t, &tg))),
+                            // a sent task's mark stands in for its "for Studio" name tag
+                            .when_some(tag.filter(|_| r.sent.is_none()), |d, tg| d.child(ui::tag(t, &tg)))
+                            .when(r.sent.is_some(), |d| d.child(ui::sent_mark(t))),
                     )
                     .child(
-                        ui::wrap(meta.join(" · ")).text_size(px(12.)).line_height(relative(1.4)).text_color(t.faint),
+                        // The whole prompt is in the details beside the list: here it stops after two lines.
+                        ui::wrap(meta.join(" · "))
+                            .text_size(px(12.))
+                            .line_height(relative(1.4))
+                            .text_color(t.faint)
+                            .line_clamp(2)
+                            .text_ellipsis(),
                     ),
             )
             .when(n_older > 0, |d| {
@@ -709,7 +731,8 @@ impl BrowserView {
                             .text_color(t.ink)
                             .child(topic),
                     )
-                    .when_some(tag, |d, tg| d.child(ui::tag(t, &tg)))
+                    .when_some(tag.filter(|_| o.sent.is_none()), |d, tg| d.child(ui::tag(t, &tg)))
+                    .when(o.sent.is_some(), |d| d.child(ui::sent_mark(t)))
                     .when(!badge.is_empty(), |d| d.child(ui::tag(t, badge)))
                     .when(o.handoff == Some(true), |d| d.child(ui::note_tag(t, "handoff", "Summary written"))),
             )
@@ -1282,6 +1305,23 @@ impl BrowserView {
             |v| &mut v.drop,
             |v, st, cx| v.set_filter(None, Some(st), cx),
         );
+        let byseg = self.can_by.then(|| {
+            ui::choice(
+                &t,
+                cx,
+                "br-by",
+                self.drop.is_open("br-by"),
+                &BY,
+                self.by,
+                false,
+                None,
+                |v| &mut v.drop,
+                |v, by, cx| {
+                    v.by = by;
+                    v.load(false, cx);
+                },
+            )
+        });
         let threads = self.threads;
         let (hover, accent, line2, on_accent) = (t.hover, t.accent, t.line2, t.on_accent);
         let thread_btn = div()
@@ -1494,6 +1534,7 @@ impl BrowserView {
                             .child(mseg)
                             .child(folder_btn)
                             .child(sseg)
+                            .children(byseg)
                             .child(thread_btn),
                     ),
             )

@@ -642,7 +642,177 @@ impl BoardView {
         } else {
             crate::view::grid_row(label, cells)
         };
-        div().border_b_1().border_color(t.line).child(row).into_any_element()
+        let sent = if offline || shut { None } else { self.sent_group(c, lane, g) };
+        div().border_b_1().border_color(t.line).child(row).children(sent).into_any_element()
+    }
+
+    /// Under a machine's columns: the tasks chats sent here (run_on). They are not the person's chats, so they get
+    /// one quiet line, "Sent by Claude 7"; open, a row each with where it stands, who sent it, and Stop or Clear.
+    fn sent_group(&self, c: &Ctx, lane: &board::Lane, g: Geo) -> Option<AnyElement> {
+        let t = c.t;
+        let rows: Vec<&Session> = lane.sent.iter().filter_map(|k| c.app.snap.session(k)).collect();
+        if rows.is_empty() {
+            return None;
+        }
+        let n = rows.len();
+        let working = (lane.sent_working as usize).min(n);
+        let mut parts = Vec::new();
+        if working > 0 {
+            parts.push(format!("{working} working"));
+        }
+        if n > working {
+            parts.push(format!("{} finished", n - working));
+        }
+        let open = self.sent_open.contains(&lane.machine);
+        let m = lane.machine.clone();
+        let hover = t.hover;
+        let head = div()
+            .id(SharedString::from(format!("sent-{m}")))
+            .h(px(30.))
+            .px(px(6.))
+            .rounded(px(ui::R_ITEM))
+            .flex()
+            .items_center()
+            .gap(px(7.))
+            .text_size(px(12.5))
+            .text_color(t.faint)
+            .cursor_pointer()
+            .hover(move |s| s.bg(hover))
+            .child(ui::icon(if open { "down" } else { "chev" }, 11., t.faint))
+            .child(ui::icon("for", 12., t.dim))
+            .child(
+                div().flex_none().font_weight(FontWeight::SEMIBOLD).text_color(t.ink2).child(sb_core::model::SENT_BY),
+            )
+            .child(div().flex_none().font_weight(FontWeight::SEMIBOLD).child(n.to_string()))
+            .child(ui::line(parts.join(", ")).flex_1().ml(px(6.)))
+            .on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| {
+                if !this.sent_open.remove(&m) {
+                    this.sent_open.insert(m.clone());
+                }
+                cx.notify();
+            }));
+        let mut out = div()
+            // under the columns, not under the machine's name: its edge is the cards' edge
+            .pl(px(if g.label > 0. { g.label + 10. } else { 0. } + 6.))
+            .pr(px(6.))
+            .pb(px(8.))
+            .flex()
+            .flex_col()
+            .child(head);
+        if open {
+            for s in rows {
+                out = out.child(self.sent_row(c, s));
+            }
+            out = out.child(
+                ui::wrap("A finished task moves to History 10 minutes after its report is read, or after a day.")
+                    .px(px(6.))
+                    .pt(px(4.))
+                    .text_size(px(12.))
+                    .text_color(t.faint),
+            );
+        }
+        Some(out.into_any_element())
+    }
+
+    /// One sent task: its lamp and name (click for the details, twice for its terminal), where it stands, who sent
+    /// it (click to go to that chat), and Stop while it runs or Clear once it has stopped.
+    fn sent_row(&self, c: &Ctx, s: &Session) -> AnyElement {
+        let t = c.t;
+        let now = c.now;
+        let on = self.sel.as_deref() == Some(s.key.as_str());
+        let ink = t.ink;
+        let state = s.sent_state(now);
+        let lamp = match state {
+            Some(sb_core::model::SentState::Working) => Lamp::Run,
+            Some(sb_core::model::SentState::Stalled) => Lamp::Stall,
+            _ => Lamp::Idle,
+        };
+        let from = s.sent.as_ref().map(|x| x.from_line()).unwrap_or_default();
+        let from_key = s.sent.as_ref().and_then(|x| x.from_key()).filter(|k| c.app.snap.session(k).is_some());
+        let busy = c.app.busy.contains(&format!("{}:stop", s.key));
+        let (key, k2, k3) = (s.key.clone(), s.key.clone(), s.key.clone());
+        div()
+            .id(SharedString::from(format!("sent-row-{}", s.key)))
+            .min_h(px(32.))
+            .px(px(6.))
+            .rounded(px(ui::R_ITEM))
+            .flex()
+            .items_center()
+            .gap(px(10.))
+            .text_size(px(13.))
+            .when(on, |d| d.bg(t.sel))
+            .on_mouse_down(
+                MouseButton::Right,
+                c.cx.listener({
+                    let k = s.key.clone();
+                    move |this, ev: &gpui::MouseDownEvent, _, cx| this.open_menu(k.clone(), ev.position, cx)
+                }),
+            )
+            .child(ui::lamp(&t, lamp, 7.))
+            .child(
+                div()
+                    .id(SharedString::from(format!("sent-n-{}", s.key)))
+                    .flex_basis(px(0.))
+                    .flex_grow(1.3)
+                    .min_w_0()
+                    .text_color(if on { t.ink } else { t.ink2 })
+                    .cursor_pointer()
+                    .hover(move |st| st.text_color(ink))
+                    .child(ui::line(s.topic.clone()))
+                    .on_click(c.cx.listener(move |this, ev: &ClickEvent, _, cx| {
+                        if ev.click_count() >= 2 {
+                            this.enter(key.clone(), cx);
+                        } else {
+                            this.select(Some(key.clone()), cx);
+                        }
+                    })),
+            )
+            .child(
+                ui::line(s.sent_line(now).unwrap_or_default())
+                    .flex_basis(px(0.))
+                    .flex_grow(1.)
+                    .text_size(px(12.5))
+                    .text_color(t.dim),
+            )
+            .child(
+                div()
+                    .id(SharedString::from(format!("sent-f-{}", s.key)))
+                    .flex_basis(px(0.))
+                    .flex_grow(1.3)
+                    .min_w_0()
+                    .text_size(px(12.5))
+                    .text_color(t.faint)
+                    .child(ui::line(from))
+                    .when_some(from_key, |d, fk| {
+                        d.cursor_pointer().hover(move |st| st.text_color(ink)).on_click(
+                            c.cx.listener(move |this, _: &ClickEvent, _, cx| this.select(Some(fk.clone()), cx)),
+                        )
+                    }),
+            )
+            .child(div().flex_none().w(px(96.)).flex().justify_end().child(if busy {
+                div().text_size(px(12.5)).text_color(t.faint).child("Stopping").into_any_element()
+            } else if s.background() && s.alive {
+                self.stop_btn(c, format!("sent-{}", s.key), "Stop", s.topic.clone(), None, move |this, cx| {
+                    let k = k2.clone();
+                    this.app.update(cx, |a, cx| a.act(sb_core::ActionId::Stop, &k, cx));
+                })
+            } else if s.alive {
+                div().into_any_element() // open in a terminal on its machine: not ours to stop or to hide
+            } else {
+                ui::ghost(&t, SharedString::from(format!("sent-c-{}", s.key)), Some("Clear"), None)
+                    .h(px(26.))
+                    .px(px(10.))
+                    .text_size(px(12.5))
+                    .on_click(c.cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        let k = k3.clone();
+                        if this.sel.as_deref() == Some(k.as_str()) {
+                            this.sel = None;
+                        }
+                        this.app.update(cx, |a, cx| a.act(sb_core::ActionId::Dismiss, &k, cx));
+                    }))
+                    .into_any_element()
+            }))
+            .into_any_element()
     }
 
     fn machine_cell(&self, c: &Ctx, machine: &str, lane: &board::Lane, g: Geo, shut: bool) -> AnyElement {
@@ -886,7 +1056,9 @@ impl BoardView {
         // A big chat says so: "expensive", or what the next message re-reads once it is cold (the Cold column's line
         // already gives the cost, so its cards skip it).
         let cost = live.expensive.clone().filter(|_| job.is_none() && col != Column::Cold);
-        let tag = s.tag.as_ref().filter(|_| s.tag_kind.is_some_and(|k| k.on_card()));
+        // A sent task's own mark says more than its "for Studio" name tag.
+        let tag = s.tag.as_ref().filter(|_| s.tag_kind.is_some_and(|k| k.on_card()) && !s.is_sent());
+        let from = s.sent.as_ref().map(|x| cap(&x.from_line()));
         let line2 = t.line2;
         let accent = t.accent;
         let need = t.need;
@@ -980,7 +1152,8 @@ impl BoardView {
                                     .text_color(t.ink)
                                     .child(s.topic.clone()),
                             )
-                            .when_some(tag, |d, tg| d.child(ui::name_tag(&t, tg, s.tag_kind))),
+                            .when_some(tag, |d, tg| d.child(ui::name_tag(&t, tg, s.tag_kind)))
+                            .when(s.is_sent(), |d| d.child(ui::sent_mark(&t))),
                     )
                     // In a tab group: a small dot in its color, apart from the star and the pill.
                     .when_some(c.app.snap.group_of(s).map(|g| g.color), |d, gc| {
@@ -990,6 +1163,8 @@ impl BoardView {
                     .when(s.star, |d| d.child(div().flex_none().mt(px(5.)).child(ui::icon("star-on", 12., t.cold))))
                     .when_some(pill, |d, (w, pc)| d.child(ui::state_pill(&t, w, pc).mt(px(1.)))),
             )
+            // who sent it, right under its name and mark, so the state and the ask below stay together
+            .when_some(from, |d, f| d.child(ui::line(f).text_size(px(12.)).text_color(t.faint)))
             .child(
                 // One line: the state, the size when there is room, and the flags button at the right edge.
                 div()

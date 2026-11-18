@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 
 const REFRESH: Duration = Duration::from_secs(10);
 const TOAST_SECS: f64 = 3.8;
+/// While the usage panel is open its numbers are read again this often (seconds).
+const USAGE_EVERY: f64 = 120.0;
 
 /// Opens a link: a Claude Code session in the Claude desktop app when it is installed, anything else in the browser.
 /// `shots` builds (driven tests) only log it, so a test never opens a tab or the Claude app.
@@ -531,6 +533,12 @@ pub struct AppState {
     pub usage: Option<sb_core::api::ApiUsage>,
     pub usage_loading: bool,
     pub usage_error: Option<String>,
+    /// Refresh on the usage panel: a machine's Claude Code is being asked for the account's usage right now.
+    pub usage_asking: bool,
+    /// When the panel's numbers were last read, and when the panel was last drawn (so they stay current while it
+    /// is open, without the panel having to say when it closes).
+    usage_loaded: f64,
+    pub usage_shown: std::cell::Cell<f64>,
     /// v2: threads by chat key, for History and "This continues...".
     pub threads: HashMap<String, ThreadView>,
     needs: Option<HashSet<String>>,
@@ -679,6 +687,9 @@ impl AppState {
                 usage: None,
                 usage_loading: false,
                 usage_error: None,
+                usage_asking: false,
+                usage_loaded: 0.0,
+                usage_shown: std::cell::Cell::new(0.0),
                 threads: HashMap::new(),
                 needs: None,
                 notified: HashMap::new(),
@@ -1011,6 +1022,10 @@ impl AppState {
         if seconds || minute != self.minute || nt != self.toasts.len() || nj != self.jobs.len() {
             self.minute = minute;
             cx.notify();
+        }
+        // The usage panel is open (it was drawn within the last minute and a half): keep its numbers current.
+        if now - self.usage_shown.get() < 90.0 && now - self.usage_loaded >= USAGE_EVERY {
+            self.load_usage(cx);
         }
     }
 
@@ -1478,10 +1493,16 @@ impl AppState {
         }
         for key in &new {
             let Some(s) = self.snap.session(key) else { continue };
+            // A sent task says so first: it is not a chat the person started, and they may not know its name.
+            let (title, body) = if s.is_sent() {
+                ("A task Claude sent is waiting".to_string(), format!("{}, on {}", s.topic, s.machine_label))
+            } else {
+                (s.topic.clone(), format!("{}, on {}", s.phrase(now), s.machine_label))
+            };
             cx.show_system_notification(SystemNotification {
                 tag: key.clone().into(),
-                title: s.topic.clone().into(),
-                body: format!("{}, on {}", s.phrase(now), s.machine_label).into(),
+                title: title.into(),
+                body: body.into(),
                 actions: vec![],
             });
         }
@@ -1615,6 +1636,7 @@ impl AppState {
             }
             ActionId::Newer | ActionId::Continue | ActionId::Link | ActionId::Rename => return,
             ActionId::Keep => return self.keep(key, cx),
+            ActionId::Adopt => return self.adopt(key, cx),
             ActionId::Unlink => return self.unlink(key, false, cx),
             ActionId::Split => return self.unlink(key, true, cx),
             _ => {}
@@ -1974,10 +1996,81 @@ impl AppState {
     /// Fetches the New sheet's prefs; `done` hears them (or the copy from before, when the server cannot be reached).
     /// Reads the usage panel's numbers. The last ones stay on screen while it reads, so reopening never flashes empty.
     pub fn load_usage(&mut self, cx: &mut Context<Self>) {
+        if self.usage_loading || self.usage_asking {
+            return;
+        }
+        self.usage_loading = true;
+        self.usage_loaded = Self::now();
+        cx.notify();
+        self.call(
+            cx,
+            |core| core.usage(),
+            |st, res, cx| {
+                st.usage_loading = false;
+                match res {
+                    Ok(u) => {
+                        // The account's report older than a couple of minutes (five while the panel stays open):
+                        // ask for a new one, so opening the panel is all it takes to see current numbers.
+                        let first = st.usage.is_none();
+                        let ask =
+                            sb_core::usage::wants_refresh(Some(&u), Self::now(), if first { 120.0 } else { 300.0 });
+                        st.usage = Some(u);
+                        st.usage_error = None;
+                        if ask {
+                            st.refresh_usage(cx);
+                        }
+                    }
+                    Err(e) => {
+                        log::info!("usage: {e}");
+                        st.usage_error = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Refresh on the usage panel: asks one machine's Claude Code for the account's usage now and shows the answer.
+    /// One at a time; the server answers with a report under a minute old as it is, so clicking again costs nothing.
+    pub fn refresh_usage(&mut self, cx: &mut Context<Self>) {
+        if self.usage_asking {
+            return;
+        }
+        // An older server has no such route: read what it has again instead.
+        if self.usage.as_ref().is_some_and(|u| u.account_support.is_none()) {
+            self.usage_loading = false;
+            return self.reload_usage(cx);
+        }
+        self.usage_asking = true;
+        self.usage_loaded = Self::now();
+        cx.notify();
+        self.call(
+            cx,
+            |core| core.usage_refresh(),
+            |st, res, cx| {
+                st.usage_asking = false;
+                match res {
+                    Ok(u) => {
+                        st.usage = Some(u);
+                        st.usage_error = None;
+                    }
+                    Err(e) => {
+                        log::info!("usage refresh: {e}");
+                        st.usage_error = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            },
+        );
+    }
+
+    /// Reads /api/usage again without asking any machine.
+    fn reload_usage(&mut self, cx: &mut Context<Self>) {
         if self.usage_loading {
             return;
         }
         self.usage_loading = true;
+        self.usage_loaded = Self::now();
         cx.notify();
         self.call(
             cx,
@@ -1989,10 +2082,7 @@ impl AppState {
                         st.usage = Some(u);
                         st.usage_error = None;
                     }
-                    Err(e) => {
-                        log::info!("usage: {e}");
-                        st.usage_error = Some(e.to_string());
-                    }
+                    Err(e) => st.usage_error = Some(e.to_string()),
                 }
                 cx.notify();
             },
@@ -2357,6 +2447,44 @@ impl AppState {
             s.star = *on;
             now - *at < 15.0
         });
+    }
+
+    /// "Move to my chats": a task a chat sent becomes the person's own, at once here and for good on the server.
+    pub fn adopt(&mut self, key: &str, cx: &mut Context<Self>) {
+        let Some(s) = self.snap.session(key) else { return };
+        let (machine, sid) = (s.machine.clone(), s.sid.clone());
+        let busy = format!("{key}:adopt");
+        if !self.busy.insert(busy.clone()) {
+            return;
+        }
+        cx.notify();
+        let key = key.to_string();
+        self.call(
+            cx,
+            move |core| core.adopt(&machine, &sid, true),
+            move |st, res, cx| {
+                st.busy.remove(&busy);
+                match res {
+                    Ok(()) => {
+                        if let Some((m, sid)) = key.split_once(':')
+                            && let Some(s) = st
+                                .snap
+                                .machines
+                                .iter_mut()
+                                .find(|x| x.name == m)
+                                .and_then(|x| x.sessions.iter_mut().find(|x| x.sid == sid))
+                        {
+                            s.sent = None;
+                        }
+                        st.edits += 1;
+                        st.toast("Moved to your chats.", None, false, cx);
+                        st.refresh_in(Duration::from_millis(400), cx);
+                    }
+                    Err(e) => st.toast(e.to_string(), None, true, cx),
+                }
+                cx.notify();
+            },
+        );
     }
 
     pub fn keep(&mut self, key: &str, cx: &mut Context<Self>) {

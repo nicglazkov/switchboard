@@ -8,7 +8,6 @@ use gpui::{
 use sb_core::actions::{self as acts, Action, ActionId, Pick};
 use sb_core::api::ApiThreadChat;
 use sb_core::live::{Live, LiveKind};
-use sb_core::model::COMPACT;
 use sb_core::names::{self, TagKind};
 use sb_core::{Replaced, Session, TextRun, fmt};
 
@@ -331,7 +330,7 @@ impl BoardView {
                 let can = !o.detached && c.app.snap.can_rename(&s.machine);
                 div()
                     .id("ins-title")
-                    .child(self.ins_title(c, &s.topic, s.tag.as_ref(), s.tag_kind))
+                    .child(self.ins_title(c, &s.topic, s.tag.as_ref().filter(|_| !s.is_sent()), s.tag_kind))
                     .when(can, |d| {
                         d.on_click(c.cx.listener(move |this, ev: &ClickEvent, window, cx| {
                             if ev.click_count() >= 2 {
@@ -352,6 +351,40 @@ impl BoardView {
                     .child(ui::icon("folder", 13., t.faint).flex_none())
                     .child(ui::wrap(format!("{}, {}", s.machine_label, s.folder)).flex_1()),
             )
+            // A task a chat sent: its mark and who sent it (click to go there). On the sender: its tasks out.
+            .when_some(s.sent.as_ref(), |d, x| {
+                let ink = t.ink;
+                let fk = x.from_key().filter(|k| c.app.snap.session(k).is_some());
+                d.child(
+                    div().mt(px(8.)).flex().items_center().gap(px(8.)).child(ui::sent_mark(&t)).child(
+                        div()
+                            .id("ins-sent-from")
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(12.5))
+                            .text_color(t.dim)
+                            .child(ui::line(x.from_line()))
+                            .when_some(fk, |d, fk| {
+                                d.cursor_pointer().hover(move |st| st.text_color(ink)).on_click(
+                                    c.cx.listener(move |this, _: &ClickEvent, _, cx| this.select(Some(fk.clone()), cx)),
+                                )
+                            }),
+                    ),
+                )
+            })
+            .when_some(c.app.snap.sent_out_line(&s.key, now), |d, line| {
+                d.child(
+                    div()
+                        .mt(px(8.))
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .text_size(px(12.5))
+                        .text_color(t.dim)
+                        .child(ui::icon("for", 12., t.faint))
+                        .child(ui::wrap(line).flex_1()),
+                )
+            })
             // A waiting chat's "Needs you" card, the only place with the full controls (askcard.rs).
             .children(self.ask_card(c, s, offline))
             .child(
@@ -716,7 +749,7 @@ impl BoardView {
         let txt = |v: String| {
             div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(v).into_any_element()
         };
-        let frac = (s.ctx as f32 / COMPACT as f32).clamp(0., 1.);
+        let frac = s.ctx_frac() as f32;
         let tone = if s.over() {
             t.bad
         } else if s.heavy() {
@@ -729,7 +762,7 @@ impl BoardView {
             .flex_col()
             .gap(px(5.))
             .child(div().text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(if s.ctx > 0 {
-                format!("{} of 300k", s.ctx_label())
+                s.ctx_of_limit()
             } else {
                 "None yet".into()
             }))

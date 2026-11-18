@@ -49,7 +49,7 @@ computer:
 |---|---|---|
 | **Subagent model rule** | Adds a short rule to `~/.claude/CLAUDE.md`: Haiku for single lookups, Sonnet for search and reading, the default model for design and code | Removes only the rule it added |
 | **Explore agent on Sonnet** | Writes `~/.claude/agents/Explore.md`, so the Explore agent runs on Sonnet and only reads. One you wrote yourself is left alone | Deletes the file only if Switchboard wrote it |
-| **Compact at 300k tokens** | Sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW=300000` in `~/.claude/settings.json` | Removes it only if it's still Switchboard's value |
+| **Compact long chats at** (Settings, Context window) | Sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW` to the value you pick (300000 for 300k) in `~/.claude/settings.json`. A computer where you chose a compact window yourself is left alone | On **Default**, removes it only if it's still the value Switchboard wrote |
 
 ## No passwords, on purpose
 

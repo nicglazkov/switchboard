@@ -1,0 +1,55 @@
+{
+ "session": {"total_cost_usd": 0, "total_api_duration_ms": 0, "total_duration_ms": 0, "total_lines_added": 0, "total_lines_removed": 0, "model_usage": {}},
+ "subscription_type": "max",
+ "rate_limits_available": true,
+ "rate_limits": {
+  "five_hour": {"utilization": 41, "resets_at": "2033-05-18T06:59:59.617172+00:00"},
+  "seven_day": {"utilization": 62, "resets_at": "2033-05-21T20:59:59.617172+00:00", "limit_dollars": null, "used_dollars": null},
+  "seven_day_oauth_apps": null,
+  "seven_day_opus": null,
+  "seven_day_sonnet": null,
+  "some_new_window": null,
+  "extra_usage": {
+   "is_enabled": true,
+   "monthly_limit": 7500,
+   "used_credits": 1234,
+   "utilization": 16,
+   "currency": "USD",
+   "decimal_places": 2,
+   "disabled_reason": null,
+   "user_disabled": false,
+   "spend_limit_reached": false
+  },
+  "limits": [
+   {"kind": "session", "group": "session", "percent": 41, "severity": "normal", "resets_at": "2033-05-18T06:59:59.617172+00:00", "scope": null, "is_active": false},
+   {"kind": "weekly_all", "group": "weekly", "percent": 62, "severity": "warning", "resets_at": "2033-05-21T20:59:59.617172+00:00", "scope": null, "is_active": true},
+   {"kind": "weekly_scoped", "group": "weekly", "percent": 18, "severity": "normal", "resets_at": "2033-05-21T20:59:59.617322+00:00",
+    "scope": {"model": {"id": null, "display_name": "Fable"}, "surface": null}, "is_active": false}
+  ],
+  "spend": {
+   "used": {"amount_minor": 1234, "currency": "USD", "exponent": 2},
+   "limit": {"amount_minor": 7500, "currency": "USD", "exponent": 2},
+   "percent": 16,
+   "severity": "normal",
+   "enabled": true,
+   "disabled_reason": null,
+   "cap": {"money": null, "credits": {"amount_minor": 7500, "exponent": 2}},
+   "balance": {"amount_minor": 2500, "currency": "USD", "exponent": 2},
+   "auto_reload": null,
+   "can_purchase_credits": true,
+   "can_toggle": true
+  },
+  "seven_day_breakdown": {
+   "as_of": "2033-05-18T03:56:14.658114+00:00",
+   "window_started_at": "2033-05-14T20:59:59.617172+00:00",
+   "rows": [
+    {"key": "claude_code", "display_name": "Claude Code", "percent": 81, "percent_of_limit": 50},
+    {"key": "chat", "display_name": "Chats", "percent": 12, "percent_of_limit": 8},
+    {"key": "cowork", "display_name": "Cowork", "percent": 4, "percent_of_limit": 2},
+    {"key": "other", "display_name": "Other", "percent": 3, "percent_of_limit": 2}
+   ]
+  },
+  "model_scoped": [{"display_name": "Fable", "utilization": 18, "resets_at": "2033-05-21T20:59:59.617322+00:00"}]
+ },
+ "behaviors": null
+}

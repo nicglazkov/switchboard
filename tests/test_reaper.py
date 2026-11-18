@@ -27,6 +27,8 @@ def bg(n, status='idle', quiet_h=0.0, kind='background', bg_id=True, **kw):
 class Machine:
     def __init__(self):
         self.sessions, self.replaced, self.mem, self.calls, self.fail_stop = {}, {}, {}, [], False
+        self.features, self.in_use = (), set()  # what the helper says it can do; chats it finds something running in
+        self.stop_lies = False  # the stop goes through, but its answer says it did not (or never arrives)
 
     def __call__(self, target, req, timeout):
         name = 'desk' if target == 'me@x' else 'tower'
@@ -34,13 +36,17 @@ class Machine:
         v = req['verb']
         if v == 'list':
             return {'ok': True, 'sessions': self.sessions.get(name, []), 'replaced': self.replaced.get(name, []),
-                    'mem': self.mem.get(name), 'limits': None}
+                    'mem': self.mem.get(name), 'limits': None, 'features': list(self.features)}
         if v == 'stop':
             if self.fail_stop:
                 return {'ok': False, 'error': 'claude stop failed'}
+            if req.get('if_idle') and req['sid'] in self.in_use:
+                return {'ok': False, 'error': '1 background command is still running.'}
             for s in self.sessions.get(name, []) + self.replaced.get(name, []):
                 if s['sid'] == req['sid']:
                     s['status'] = 'stopped'
+            if self.stop_lies:
+                return {'ok': False, 'error': 'Claude Code could not confirm it stopped. Try again in a moment.'}
             return {'ok': True}
         if v == 'reap_orphans':
             return {'ok': True, 'killed': [{'pid': p, 'mb': 410, 'age_h': 30.0} for p in req.get('pids') or [] if p == 501],
@@ -112,8 +118,10 @@ class CleanupTest(unittest.TestCase):
         self.assertEqual(app.feat.reaper.decisions(), [])
         self.assertEqual(app.get('/api/cleanup')['count'], 0)
 
-    def test_nothing_stops_by_itself(self):
-        app = self.make({'enabled': True, 'dry_run': False})  # even the old "live" setting stops nothing now
+    def test_a_suggestion_never_stops_by_itself(self):
+        # What does stop by itself is AutoStopTest's: a finished, cold chat, checked by its own machine. Not these
+        # (no last message known, one still busy, a bare process), and never on a helper that cannot check.
+        app = self.make({'enabled': True, 'dry_run': False})
         self.m.sessions['desk'] = [bg(1, 'idle', 99, mb=365), bg(2, 'busy', 30, mb=432)]
         self.m.mem['desk'] = {'claude_mb': 3100, 'procs': 7, 'orphans': [{'pid': 501, 'mb': 410, 'age_h': 30.0}]}
         app.fleet.poll()
@@ -127,7 +135,7 @@ class CleanupTest(unittest.TestCase):
         self.m.sessions['desk'] = [bg(1, 'idle', 99, mb=365), bg(2, 'busy', 30, mb=432)]
         app.fleet.poll()
         app.feat.after_poll()
-        self.assertEqual(self.pushes, [("2 chats aren't in use", "They're using 797 MB. Tap to take a look. Nothing stops unless you say so.",
+        self.assertEqual(self.pushes, [("2 chats aren't in use", "They're using 797 MB. Tap to take a look. These stop only if you say so.",
                                         '/?cleanup=1')])
         app.feat.after_poll()
         self.assertEqual(len(self.pushes), 1, 'the same ones again: no notice')
@@ -312,6 +320,194 @@ class CleanupTest(unittest.TestCase):
         s1, s2 = snap['machines'][0]['sessions']
         self.assertEqual(s1['cleanup'], {'reason': 'idle', 'why': 'Idle 4 days'})
         self.assertNotIn('cleanup', s2)
+
+
+def cold(n, quiet_h, **kw):
+    """A background chat that finished its turn quiet_h hours ago and whose cache ran out an hour after that."""
+    t = NOW - quiet_h * H
+    return bg(n, kw.pop('status', 'idle'), quiet_h, **dict({'last_ts': t, 'state': 'done', 'cache_expires_at': t + H, 'mb': 600}, **kw))
+
+
+class AutoStopTest(unittest.TestCase):
+    """"Stop idle chats": a finished, cold chat left alone for hours stops by itself, and nothing else ever does."""
+    make, calls = CleanupTest.make, CleanupTest.calls
+
+    def auto(self, prefs=None, features=('busy', 'stop_if_idle'), **kw):
+        app = self.make(**kw)
+        self.m.features = features
+        if prefs is not None:
+            app.post('/api/prefs', prefs)
+        return app
+
+    def look(self, app, later=features.AUTO_EVERY + 1):
+        self.now[0] += later
+        app.fleet.poll()
+        app.feat.after_poll()
+        return [c['sid'] for c in self.calls('stop')]
+
+    def test_an_idle_cold_chat_stops_after_the_wait_and_says_so(self):
+        app = self.auto()
+        self.assertEqual(app.prefs()['auto_stop_h'], 6, 'on, six hours, with no setting touched')
+        self.m.sessions['desk'] = [cold(1, 7), cold(2, 5)]
+        self.assertEqual(self.look(app), [sid(1)])
+        self.assertEqual(self.calls('stop'), [{'verb': 'stop', 'sid': sid(1), 'if_idle': True, 'idle_s': 6 * H}],
+                         'the machine has the last word, and is told the wait so it can check it on its own clock')
+        self.assertEqual(self.pushes, [], 'quietly')
+        log = json.loads((self.state / 'reaped.json').read_text())
+        self.assertEqual((log[-1]['sid'], log[-1]['by'], log[-1]['reason'], log[-1]['idle_h']), (sid(1), 'auto', 'idle', 7))
+        snap = app.sessions()
+        row = next(x for x in snap['machines'][0]['sessions'] if x['sid'] == sid(1))
+        self.assertEqual((row['status'], row['reaped']['reason'], row['reaped']['by']), ('stopped', 'idle', 'auto'))
+        self.assertEqual([(x['sid'], x['by']) for x in snap['cleanup']['stopped']], [(sid(1), 'auto')], 'listed with Resume')
+        self.assertEqual(snap['prefs']['auto_stop_h'], 6)
+        self.assertEqual(self.look(app), [sid(1)], 'and only once')
+
+    def test_what_never_stops_by_itself(self):
+        app = self.auto(opened=[('desk', sid(20)[:8])])
+        t = NOW - 30 * H
+        rows = [
+            cold(1, 30, status='busy'), cold(2, 30, status='waiting'),          # working / a permission prompt
+            cold(3, 30, state='blocked'), cold(4, 30, needs='say which one'),   # it asked for something
+            cold(5, 30, turn_open=True), cold(6, 30, child_ts=NOW - 60),        # a turn or a subagent still going
+            cold(7, 30, cache_expires_at=NOW + 600),                            # warm: stopping would cost a re-read
+            bg(8, 'idle', 30, last_ts=t, state='done'),                         # cache not known
+            cold(9, 30, kind='interactive'), cold(10, 30, bg_id=False),         # a terminal chat
+            cold(11, 30), cold(12, 30), cold(13, 30), cold(14, 30),             # starred, kept, in a tab, held
+            cold(20, 30),                                                       # open in a terminal on the hub
+            cold(21, 30, status='busy', last_ts=NOW - 13 * H),                  # "stalled" is a suggestion only
+        ]
+        self.m.sessions['desk'] = rows
+        self.m.mem['desk'] = {'orphans': [{'pid': 501, 'mb': 410, 'age_h': 30.0}]}
+        app.fleet.poll()
+        app.post('/api/action', {'machine': 'desk', 'verb': 'star', 'sid': sid(11)})
+        app.post('/api/action', {'machine': 'desk', 'verb': 'keep', 'sid': sid(12)})
+        app.post('/api/tabs', {'device': 'studio', 'tabs': [f'desk:{sid(13)}']})
+        app.guard.held = lambda machine, s: s == sid(14)
+        for _ in range(4):
+            self.assertEqual(self.look(app), [])
+        self.assertEqual(self.calls('reap_orphans'), [])
+
+    def test_off_or_an_older_helper_or_a_silent_hub_stops_nothing(self):
+        for kw in ({'prefs': {'auto_stop_h': 0}}, {'features': ('busy',)}, {'cfg': {'enabled': False}}):
+            app = self.auto(**kw)
+            self.m.sessions['desk'] = [cold(1, 99)]
+            self.assertEqual(self.look(app), [], kw)
+        app = self.auto()
+        app.feat.reaper.opened = lambda: None  # the hub does not answer: a terminal may be open on that chat
+        self.m.sessions['desk'] = [cold(1, 99)]
+        self.assertEqual(self.look(app), [])
+        self.m.sessions['tower'] = [cold(2, 99)]
+        app = self.auto()
+        self.m.sessions['desk'] = []
+        app.fleet.poll()
+        app.fleet.state['tower']['online'] = False
+        app.feat.after_poll()
+        self.assertEqual(self.calls('stop'), [], 'an offline machine')
+
+    def test_the_wait_is_the_setting(self):
+        app = self.auto({'auto_stop_h': 24})
+        self.m.sessions['desk'] = [cold(1, 7)]
+        self.assertEqual(self.look(app), [])
+        self.assertEqual(app.post('/api/prefs', {'auto_stop_h': 2})['auto_stop_h'], 2)
+        self.assertEqual(self.look(app), [sid(1)])
+        for bad in (1, -3, 'soon', True, 100000, None):
+            with self.assertRaises(server.HttpError, msg=bad) as cm:
+                app.post('/api/prefs', {'auto_stop_h': bad})
+            self.assertEqual(cm.exception.code, 400, bad)
+        self.assertEqual(app.prefs()['auto_stop_h'], 2)
+        self.assertEqual([features.auto_hours(v) for v in (None, 'x', True, 1, 0, 12, 9999)], [6, 6, 6, 6, 0, 12, 6])
+
+    def test_a_machine_that_finds_something_running_is_believed_and_not_asked_again_at_once(self):
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(1, 9)]
+        self.m.in_use = {sid(1)}
+        self.assertEqual(len(self.look(app)), 1, 'asked once')
+        self.assertNotIn('status', [x.get('status') for x in self.m.sessions['desk'] if x['status'] == 'stopped'])
+        self.assertFalse((self.state / 'reaped.json').exists(), 'nothing is written down as stopped')
+        self.assertNotIn('reaped', app.sessions()['machines'][0]['sessions'][0])
+        self.assertEqual(len(self.look(app)), 1, 'left alone for a while')
+        self.m.in_use = set()
+        self.assertEqual(len(self.look(app, features.AUTO_RETRY + 1)), 2, 'then asked again')
+
+    def test_a_chat_used_between_the_two_looks_is_left(self):
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(1, 9)]
+        app.fleet.poll()
+        self.m.sessions['desk'] = [cold(1, 0, status='busy')]  # the machine's fresh list, asked just before the stop
+        self.now[0] += features.AUTO_EVERY + 1
+        app.feat.after_poll()
+        self.assertEqual(self.calls('stop'), [])
+
+    def test_a_task_someone_waits_on_and_a_job_on_its_way_are_left(self):
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(1, 9), cold(2, 9), cold(3, 9)]
+        app.feat.dispatch.d['d-1'] = {'machine': 'desk', 'sid': sid(1), 'state': 'working', 'created': NOW}
+        app.feat.dispatch.d['d-2'] = {'machine': 'other', 'sid': sid(9), 'state': 'working', 'created': NOW,
+                                      'from': {'machine': 'desk', 'sid': sid(3)}}  # the chat that sent a task and waits for it
+        app.jobs['s-1'] = {'kind': 'resume', 'machine': 'desk', 'state': 'queued', 'plan': {'req': {'verb': 'resume', 'sid': sid(2)}}}
+        self.assertEqual(self.look(app), [])
+        app.feat.dispatch.d['d-1']['state'] = 'done'
+        app.jobs['s-1'].update(state='done', finished=self.now[0])
+        self.assertEqual(self.look(app), [sid(1)], 'a chat just resumed was just used: its transcript says nothing of it')
+        app.feat.dispatch.d['d-2']['state'] = 'failed'
+        self.assertEqual(self.look(app)[1:], [sid(3)])
+
+    def test_a_chat_resumed_or_relaunched_is_left_for_the_whole_wait_again(self):
+        for kind in ('resume', 'relaunch', 'start'):
+            app = self.auto()
+            self.m.sessions['desk'] = [cold(1, 9)]
+            job = {'kind': kind, 'machine': 'desk', 'state': 'done', 'finished': self.now[0], 'plan': {'req': {'verb': kind}}}
+            job.update({'sid': sid(1)} if kind == 'start' else {'plan': {'req': {'verb': kind, 'sid': sid(1)}}})
+            app.jobs['s-1'] = job
+            self.assertEqual(self.look(app), [], kind)
+            del app.jobs['s-1']  # the server forgets a finished job after an hour; the chat is still left
+            self.assertEqual(self.look(app, 5 * H), [], kind)
+            self.assertEqual(self.look(app, H), [sid(1)], kind)
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(1, 9), cold(2, 9)]
+        app.jobs['s-1'] = {'kind': 'stop', 'machine': 'desk', 'state': 'error', 'finished': self.now[0],
+                           'plan': {'req': {'verb': 'stop', 'sid': sid(1)}}}  # a stop that did not happen is not use
+        app.jobs['s-2'] = {'kind': 'resume', 'machine': 'desk', 'state': 'error', 'finished': self.now[0],
+                           'plan': {'req': {'verb': 'resume', 'sid': sid(2)}}}  # nor a resume that failed
+        self.assertEqual(sorted(self.look(app)), [sid(1), sid(2)])
+
+    def test_a_stop_that_went_through_but_said_it_failed_is_still_written_down(self):
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(1, 9)]
+        self.m.stop_lies = True
+        self.assertEqual(self.look(app), [sid(1)])
+        log = json.loads((self.state / 'reaped.json').read_text())
+        self.assertEqual((log[-1]['sid'], log[-1]['by'], log[-1]['reason']), (sid(1), 'auto', 'idle'))
+        row = app.sessions()['machines'][0]['sessions'][0]
+        self.assertEqual((row['status'], row['reaped']['by']), ('stopped', 'auto'), 'its card says why it stopped')
+
+    def test_replaced_and_archived_chats_wait_as_long_as_the_setting(self):
+        app = self.auto({'auto_stop_h': 24})
+        self.m.sessions['desk'] = [cold(1, 9, archived=NOW - 8 * H)]
+        self.m.replaced['desk'] = [cold(2, 9)]
+        self.assertEqual(self.look(app), [])
+        self.assertEqual(sorted(self.look(app, 16 * H)), [sid(1), sid(2)])
+        self.assertEqual({c['idle_s'] for c in self.calls('stop')}, {24 * H})
+
+    def test_a_few_at_a_time_and_replaced_and_archived_ones_too(self):
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(n, 9, mb=100 * n) for n in (1, 2, 3)] + [cold(4, 7, archived=NOW - 6.5 * H)]
+        self.m.replaced['desk'] = [cold(5, 7, mb=50), cold(6, 5, mb=50)]
+        self.assertEqual(self.look(app), [sid(4), sid(3)], 'two in one look, the most memory first')
+        self.assertEqual(sorted(self.look(app)[2:]), [sid(1), sid(2)])
+        self.assertEqual(self.look(app)[4:], [sid(5)], 'a replaced one, but not inside the wait')
+
+    def test_a_chat_stopped_by_itself_stays_on_the_board_as_long_as_a_running_one(self):
+        app = self.auto()
+        self.m.sessions['desk'] = [cold(1, 60), cold(2, 60, status='stopped')]
+        self.assertEqual(self.look(app), [sid(1)])
+        rows = {x['sid']: x for x in app.sessions()['machines'][0]['sessions']}
+        self.assertEqual((rows[sid(1)]['status'], rows[sid(1)]['stale']), ('stopped', False), 'not moved to Older by the stop')
+        self.assertTrue(rows[sid(2)]['stale'], 'one the user stopped goes after two days, as before')
+
+    def test_the_notice_no_longer_promises_that_nothing_stops(self):
+        self.assertIn('These stop only if you say so.', features.Reaper.notice([{'mb': 5}], True)[1])
+        self.assertIn('Nothing stops unless you say so.', features.Reaper.notice([{'mb': 5}])[1])
 
 
 class HubOpenTest(unittest.TestCase):

@@ -37,6 +37,8 @@ pub enum ActionId {
     Split,
     /// Give the chat a name of its own (the window opens a field for it; POST /api/action verb rename).
     Rename,
+    /// A task a chat sent (run_on): from here on it is one of the person's own chats (POST /api/action verb adopt).
+    Adopt,
 }
 
 impl ActionId {
@@ -213,6 +215,14 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
         let mut stop = a(ActionId::Stop, "Stop", "Ends the background session; you can resume it later", "stop");
         stop.danger = true;
         items.push(stop);
+    }
+    if s.is_sent() && snap.origins {
+        items.push(a(
+            ActionId::Adopt,
+            "Move to my chats",
+            "It joins your own chats in the columns and is left running like them",
+            "user",
+        ));
     }
     items.push(a(
         ActionId::Dismiss,
@@ -467,8 +477,8 @@ pub struct Suggest {
     pub how: Option<String>,
 }
 
-/// Where Claude squeezes a chat down; past this a fresh start is the better pick even when it is small enough to read.
-const NEAR_COMPACT: u64 = 270_000;
+// Close to where Claude Code compacts a chat (nine tenths of the chat's own limit, compact::near), a fresh start is
+// the better pick even when the chat is small enough to read.
 
 pub fn suggest(s: &Session, now: f64) -> Suggest {
     let left = s.cache_left(now);
@@ -490,9 +500,13 @@ pub fn suggest(s: &Session, now: f64) -> Suggest {
             Some(Pick::Resume),
             format!("It's still warm for {}, so resuming only pays for your new message.", crate::fmt::mins(left)),
         ),
-        _ if s.ctx >= NEAR_COMPACT => {
-            (Some(Pick::Fresh), format!("At {kk} it's close to the 300k point where Claude squeezes the chat down."))
-        }
+        _ if s.ctx >= crate::compact::near(s.limit()) => (
+            Some(Pick::Fresh),
+            format!(
+                "At {kk} it's close to the {} point where Claude squeezes the chat down.",
+                crate::compact::k(s.limit())
+            ),
+        ),
         _ if s.ctx == 0 => (Some(Pick::Resume), "It has no history to re-read yet.".to_string()),
         _ => {
             // Cold: the cheaper one up front by the cost model, else by size band.

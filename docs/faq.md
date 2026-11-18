@@ -43,8 +43,11 @@ description: Common questions about Switchboard, what it is, what it costs, what
     reach. [Why](privacy.md#no-passwords-on-purpose)
 
 ??? question "Will it stop my chats?"
-    Only when you say so, or when you turn on the budget's hard limit. It suggests stopping chats that have sat
-    idle for days, and never suggests one you marked **Keep running** or one open in a terminal.
+    Only ones that lose nothing by it: a chat that finished its reply, has been left alone for 6 hours and has
+    nothing running is stopped to free its memory, and **Resume** brings it back where it was. Never one that is
+    working, waiting on you, starred, marked **Keep running** or open in a terminal. You can change the wait or
+    turn it off in **Settings > Terminal**. Anything else stops only when you say so, or when you turn on the
+    budget's hard limit.
     [Tidy up](board.md#tidy-up)
 
 ??? question "Where are the numbers for my plan from?"

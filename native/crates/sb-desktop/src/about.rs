@@ -19,6 +19,20 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.21",
+        &[
+            "Mac: the window keeps drawing when macOS reports it covered while you are using it. That state left the window movable but showing nothing new, while typing still reached the chat. The app now draws such a window itself, draws by hand any change that has waited seconds for a frame, and writes down at quit whether the window was drawing, what macOS thought of it and the last clicks, so a freeze that still happens explains itself in the log.",
+            "Tabs show on the press: a click that moved a couple of pixels was taken for a drag and did not switch tabs.",
+            "Idle chats stop by themselves: a chat that finished its reply and has been left alone for 6 hours is stopped to free its memory, and Resume brings it back where it was. Never a chat that is working, waiting on you, running a command, subagent or scheduled task, starred, set to Keep running, open in a tab or terminal, or resumed within the wait; its own computer checks once more at the moment of the stop. Change the wait or turn it off in Settings > Chats > Stop idle chats. A stopped chat can't be reached from the Claude phone app until you resume it.",
+            "Less memory on each computer: the helpers behind every chat and terminal tab take about 24 MB instead of 55, a tab's helper no longer starts a process three times a second, and a closed tab's helpers leave sooner.",
+            "Sent by Claude: tasks a chat sent to another computer are told apart from your own chats. They sit in a folded \"Sent by Claude\" line per computer, do not count in Needs you or the Board badge unless one is really stopped at a prompt, are stopped two minutes after they report, and move to History once the report is read. History can filter them, and Move to my chats keeps one.",
+            "Usage: the panel now shows what Claude's own usage page shows: every plan limit with its reset time and time left, each model's weekly limit, extra usage (spent, monthly limit, left, balance), and this week by product. It says when it was updated, has Refresh, and links to claude.ai to change limits. Most used this week replaces Costly to go back to: the chats that used the most since the weekly reset, with each one's share (an estimate from its tokens). The numbers come from Claude Code on one of your computers; Switchboard never reads your sign-in.",
+            "Context window: Settings > Context window replaces the \"Compact at 300k\" switch with one slider (150k, 200k, 300k recommended, 500k, or Claude Code's default) that says what each choice keeps and costs. Context meters and the Start fresh suggestion follow it. A value you set by hand on a computer is left alone and shown as such.",
+            "Settings: the sidebar is grouped (General, Chats, Claude, Machines) with Updates and About at the bottom, every line is reachable with Tab, and Stop idle chats sits with Chats.",
+            "Polish: grey text is easier to read in both themes, shell tab names are no longer cut short, History rows stay two lines in a small window, an empty search says what to try, a Library that fails to load offers Try again, and close buttons are larger.",
+        ],
+    ),
+    (
         "0.8.20",
         &[
             "Usage numbers hold still: the weekly and 5-hour figures are now worked out from every chat's latest reading for each window, so they no longer jump between old values when an idle chat redraws. A 5-hour window that has ended reads as empty instead of showing its last number, and a reading that cannot be right (a reset further away than the window is long) is ignored.",

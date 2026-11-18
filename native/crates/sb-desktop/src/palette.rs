@@ -495,7 +495,7 @@ impl BoardView {
                 .py(px(24.))
                 .text_size(px(13.))
                 .text_color(t.faint)
-                .child(format!("Nothing matches \"{q}\"."))
+                .child(format!("Nothing matches \"{q}\". Try part of a chat's name, a machine or a command."))
                 .into_any_element()
         };
         let cap = |k: &str| ui::kbd(&t, k);

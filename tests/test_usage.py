@@ -125,7 +125,7 @@ class UsageEndpointTest(unittest.TestCase):
         m.week = 33
         f.poll()
         u = app.get('/api/usage')
-        self.assertEqual(set(u), {'ok', 'now', 'tz', 'five', 'week', 'days', 'weeks'})
+        self.assertEqual(set(u), {'ok', 'now', 'tz', 'five', 'week', 'days', 'weeks', 'updated', 'account', 'account_support', 'top'})
         self.assertTrue(u['ok'])
         self.assertEqual(u['five'], {'pct': 12, 'reset': None})
         self.assertEqual((u['week']['pct'], u['week']['reset']), (33, RESET))
