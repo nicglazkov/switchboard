@@ -4270,7 +4270,7 @@ def merge_limits(rows, now):
     # No open 5-hour window: the last one any chat saw within the week (its reset time says it is over), else what
     # the newest reply saw. Nothing there means the plan does not report one.
     past = [r for r in rows if num(r.get('five_hour')) and num(r.get('five_hour_reset')) and r['five_hour_reset'] > now - 7 * 86400]
-    five = window('five_hour', 'five_hour_reset') or max(past, key=lambda r: r['five_hour_reset'], default=None) or newest
+    five = window('five_hour', 'five_hour_reset') or max(past, key=lambda r: (r['five_hour_reset'], at(r)), default=None) or newest
     week = week or {}
     return {'five_hour': five.get('five_hour'), 'seven_day': week.get('seven_day'),
             'five_hour_reset': five.get('five_hour_reset') if five.get('five_hour') is not None else None,

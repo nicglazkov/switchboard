@@ -32,9 +32,11 @@ class LeanStartTest(unittest.TestCase):
             self.assertIsNone(self.argv('mcp', exe='python'), 'Windows has no exec that keeps the process')
 
     def test_the_bytecode_is_written_before_the_restart(self):
-        self.assertFalse((self.copy.parent / '__pycache__').exists())
+        import importlib.util
+        pyc = Path(importlib.util.cache_from_source(str(self.copy.resolve())))  # Apple's Python keeps it elsewhere
+        self.assertFalse(pyc.exists())
         self.assertIsNotNone(self.argv('mcp', exe=sys.executable))
-        self.assertEqual(len(list((self.copy.parent / '__pycache__').glob('sb.*.pyc'))), 1)
+        self.assertTrue(pyc.exists())
 
     def test_a_folder_that_cannot_keep_bytecode_runs_as_before(self):
         with mock.patch('py_compile.compile', side_effect=OSError('read-only')):

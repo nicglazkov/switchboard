@@ -584,6 +584,12 @@ fn in_front(_: &Window) -> String {
 #[cfg(not(target_os = "macos"))]
 pub fn poke(_: &Window) {}
 
+/// SB_INPUT_LOG=1 writes every press, release and tab change to the log: for chasing clicks that do nothing.
+pub fn input_log() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("SB_INPUT_LOG").is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -713,10 +719,4 @@ mod tests {
         assert_eq!(stall(&mut w, t0 + Duration::from_secs(60), 2), Some(false));
         assert_eq!(stall(&mut w, t0 + SAMPLE_EVERY + Duration::from_secs(60), 4), Some(true));
     }
-}
-
-/// SB_INPUT_LOG=1 writes every press, release and tab change to the log: for chasing clicks that do nothing.
-pub fn input_log() -> bool {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("SB_INPUT_LOG").is_some())
 }
