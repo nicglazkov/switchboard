@@ -1,8 +1,8 @@
 {% extends "base.html" %}
 
 {% block extrahead %}
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Manrope:wght@700;800&display=swap">
+  <meta name="theme-color" content="#0c0e12" media="(prefers-color-scheme: dark)">
+  <meta name="theme-color" content="#f6f7f9" media="(prefers-color-scheme: light)">
   {% set title = page.meta.title if page and page.meta and page.meta.title else (page.title ~ " · " ~ config.site_name if page and page.title and not page.is_homepage else config.site_name) %}
   {% set description = page.meta.description if page and page.meta and page.meta.description else config.site_description %}
   <meta property="og:type" content="website">
