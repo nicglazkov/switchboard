@@ -4,6 +4,14 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.9.2 (2026-11-25)
+
+- Settings > Notifications on the iPhone now says whether notifications work: when the last one was sent, or what is wrong and where to fix it (the iPhone's own switch, a phone that never registered, a missing or refused key on the home computer). It no longer says only that they are off.
+- Send a test, in the same place, sends one notification to every registered phone and reports how each went.
+- A home computer whose notification setup was broken picks the fix up within a minute, without a restart, and its log and the apps name what was wrong.
+- On Windows, changes made at the same moment to one of Switchboard's files (by the status line, the agent and a chat's hooks) are no longer lost or refused, and a CLAUDE.md keeps the line endings it had.
+- A Windows home computer keeps its terminal key across restarts. About one key in eight was thrown away at the next start, which closed open terminals.
+
 ## 0.9.1 (2026-11-25)
 
 - iPhone notifications work again on a home computer updated to 0.9.0. That version ran the server on its own Python, which lacked a package the notifications needed, so they turned off. The server now signs Apple's token itself and needs no package for it.

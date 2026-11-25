@@ -229,6 +229,10 @@ class CompactTest(unittest.TestCase):
         c = [c for c in self.m.calls if c['verb'] == 'compact'][0]
         self.assertEqual((c['sid'], [p['sid'] for p in c['pieces']]), (SID, [OLD, SID]))
         new = self.m.result['sid']
+        for _ in range(200):  # the link is written just after the job says done (features.job_done)
+            if f'desk/{new}' in app.feat.threads.store()['auto']:
+                break
+            time.sleep(0.01)
         link = app.feat.threads.store()['auto'][f'desk/{new}']
         self.assertEqual((link['to'], link['how']), (f'desk/{SID}', 'compacted'))
 

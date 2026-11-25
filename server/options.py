@@ -85,8 +85,26 @@ def notify_clean(d):
 
 PUSH_ON = ('Notifications go through Apple. The server sends each one (chat names, machine names and short '
            'status lines) to Apple\'s push service, which delivers it to your iPhone.')
-PUSH_OFF = ('Notifications are off. To turn them on, add an APNs key and ~/.config/switchboard/apns.json to the '
-            'server. After that, each one (chat names, machine names and short status lines) goes through Apple\'s push service.')
+PUSH_OFF = ('This home computer is not set up to send notifications yet. It needs an APNs key and '
+            '~/.config/switchboard/apns.json. After that, each one (chat names, machine names and short status lines) '
+            'goes through Apple\'s push service.')
+PUSH_BROKEN = ('Notifications are not being sent. {why} Fix it on the home computer; Switchboard there picks the '
+               'change up within a minute.')
+PUSH_NO_PHONE = ('The home computer is ready to send notifications, but no phone has registered with it. Open the app on '
+                 'the phone and allow notifications.')
+
+
+def push_view(ready, state=None):
+    """The "push" part of GET /api/prefs. `state` (Pushers.state) adds what an app needs to say more than on or off:
+    "state" (ready, unset, broken), "why" when broken, how many phones are registered, and what became of the last
+    notification. Without it (an App with no Pushers, as in tests) only ready and the words are known."""
+    state = dict(state or {})
+    kind = state.get('state') or ('ready' if ready else 'unset')
+    explain = PUSH_OFF if kind == 'unset' else PUSH_BROKEN.replace('{why}', state.get('why') or '') if kind == 'broken' else PUSH_ON
+    if kind == 'ready' and state.get('devices') == 0:
+        explain = PUSH_NO_PHONE
+    return {'ready': bool(ready), 'explain': explain, 'setup': None if ready else '~/.config/switchboard/apns.json',
+            'state': kind, 'why': state.get('why'), 'devices': state.get('devices'), 'last': state.get('last'), 'test': bool(ready)}
 
 
 def clean(d):
@@ -107,7 +125,7 @@ def migrate(stored, existing):
     return opts, done + [MIGRATION], True
 
 
-def view(opts, push_ready, notify=None, compact=None):
+def view(opts, push_ready, notify=None, compact=None, push=None):
     """GET /api/prefs: each option with its words, the compact window with its range and stops, and whether
     notifications are set up."""
     at = compact_at(compact)
@@ -117,5 +135,4 @@ def view(opts, push_ready, notify=None, compact=None):
             'compact': {'at': at, 'on': bool(opts.get('setup_compact_window')), 'min': COMPACT_MIN, 'max': COMPACT_MAX,
                         'recommended': COMPACT_DEFAULT, 'stops': list(COMPACT_STOPS)},
             'notify_kinds': [{'key': k, 'label': label, 'explain': what, 'on': notify_clean(notify)[k]} for k, label, what in NOTIFY],
-            'push': {'ready': bool(push_ready), 'explain': PUSH_ON if push_ready else PUSH_OFF,
-                     'setup': None if push_ready else '~/.config/switchboard/apns.json'}}
+            'push': push_view(push_ready, push)}

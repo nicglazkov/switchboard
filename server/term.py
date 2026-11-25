@@ -60,7 +60,9 @@ def load_or_create_key(path):
         pass
     key = secrets.token_bytes(KEY_LEN)
     tmp = path.with_name(f'.term.key.{os.getpid()}.tmp')
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    # O_BINARY: without it Windows writes a key byte of 0x0A as two bytes, and the next start finds 33 bytes, calls
+    # it no key and makes another, so every open terminal's ticket stops working.
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0), 0o600)
     try:
         os.write(fd, key)
         os.fsync(fd)

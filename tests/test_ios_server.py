@@ -367,6 +367,80 @@ class PushTokensTest(unittest.TestCase):
         self.assertEqual(set(self.app.devices()), {self.DEV, self.STORE, self.DEAD, self.BUSY}, 'only the one Apple unregistered went')
         self.assertEqual(len(self.app.widget_tokens()), 5)
 
+    def test_the_apps_are_told_how_notifications_are_doing(self):
+        self.make()
+        st = self.app.get('/api/prefs')['push']
+        self.assertEqual((st['ready'], st['state'], st['devices'], st['last'], st['test']), (True, 'ready', 5, None, True))
+        self.push.alert('Done', 'b', '/')
+        last = self.app.get('/api/prefs')['push']['last']
+        self.assertEqual((last['ok'], last['title'], last['sent'], last['of']), (False, 'Done', 2, 5))
+        self.assertIn('phone', last['why'], 'the first phone that did not get it says why, in words')
+
+    def test_send_a_test_says_how_each_phone_went(self):
+        self.make()
+        r = self.app.post('/api/push/test', {})
+        self.assertFalse(r['ok'])
+        self.assertEqual([d['ok'] for d in r['devices']], [True, True, False, False, False])
+        self.assertTrue(all(d['why'] for d in r['devices'] if not d['ok']))
+        r = self.app.post('/api/push/test', {})  # the two Apple no longer knows are forgotten; the busy one stays
+        self.assertEqual([d['ok'] for d in r['devices']], [True, True, False])
+        self.assertIn('slow down', r['why'])
+        for t in (self.BUSY,):
+            self.app.token_gone('devices.json', t)
+        r = self.app.post('/api/push/test', {})
+        self.assertEqual((r['ok'], r['why'], len(r['devices'])), (True, None, 2))
+        self.assertTrue(self.app.get('/api/prefs')['push']['last']['ok'])
+
+    def test_a_test_with_no_phone_or_no_setup_says_what_is_missing(self):
+        app = server.App(fleet.Fleet([], lambda t, r, to: {'ok': True}), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()),
+                         cfg_dir=Path(mkdtemp()), poll_every=0)
+        r = app.post('/api/push/test', {})
+        self.assertEqual((r['ok'], r['devices']), (False, []))
+        self.assertIn('apns.json', r['why'])
+        push = server.Pushers(FakeApple({}), sleep=lambda s: None)
+        push.attach(app)
+        r = app.post('/api/push/test', {})
+        self.assertFalse(r['ok'])
+        self.assertIn('no phone has registered', r['why'])
+        self.assertIn('no phone has registered', app.get('/api/prefs')['push']['explain'])
+
+    def test_a_broken_setup_is_named_and_picked_up_once_fixed(self):
+        cfg = Path(mkdtemp())
+        self.assertEqual(server.load_push(cfg), (None, None), 'no apns.json: never set up')
+        (cfg / 'apns.json').write_text('{"key_id": "K", "team": "T", "topic": "x.y"')
+        self.assertEqual(server.load_push(cfg)[1], 'apns.json is not valid JSON.')
+        (cfg / 'apns.json').write_text('{"key_id": "K", "topic": "x.y"}')
+        self.assertEqual(server.load_push(cfg)[1], 'apns.json has no "team".')
+        (cfg / 'apns.json').write_text('{"key_id": "K", "team": "T", "topic": "x.y"}')
+        why = server.load_push(cfg)[1]
+        self.assertRegex(why, r'^The key file AuthKey_K\.p8 is missing\.$')
+        now = [1000.0]
+        loads = [(None, why), (FakeApple({}), None)]
+        app = server.App(fleet.Fleet([], lambda t, r, to: {'ok': True}), state_dir=Path(mkdtemp()), web_dir=Path(mkdtemp()),
+                         cfg_dir=Path(mkdtemp()), poll_every=0)
+        push = server.Pushers(None, sleep=lambda s: None, why=why, load=lambda: loads.pop(0), clock=lambda: now[0])
+        push.attach(app)
+        st = app.get('/api/prefs')['push']
+        self.assertEqual((st['ready'], st['state'], st['test']), (False, 'broken', False))
+        self.assertIn('AuthKey_K.p8 is missing', st['explain'])
+        self.assertNotIn('Notifications are off', st['explain'])
+        self.assertEqual(len(loads), 2, 'not read again within the minute')
+        now[0] += 61
+        self.assertEqual(app.get('/api/prefs')['push']['state'], 'broken')
+        now[0] += 61
+        st = app.get('/api/prefs')['push']
+        self.assertEqual((st['ready'], st['state']), (True, 'ready'))
+        self.assertTrue(app.push_ready and app.widget_pusher)
+
+    def test_apples_answers_come_in_words(self):
+        import apns
+        self.assertIsNone(apns.why(200, ''))
+        self.assertIn('could not be reached', apns.why(0, 'curl: (7)'))
+        self.assertIn('"key_id" and "team"', apns.why(403, '{"reason":"InvalidProviderToken"}'))
+        self.assertIn('"topic"', apns.why(400, '{"reason":"DeviceTokenNotForTopic"}'))
+        self.assertEqual(apns.why(400, '{"reason":"PayloadTooLarge"}'), 'Apple refused the notification: PayloadTooLarge.')
+        self.assertIn('problem right now', apns.why(503, ''))
+
     def test_widget_and_activity_tokens_follow_the_same_rule(self):
         self.make()
         self.push.widgets()

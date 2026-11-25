@@ -95,6 +95,51 @@ class Apns:
 
 SENT, GONE, RETRY, FAILED = 'sent', 'gone', 'retry', 'failed'
 
+# Apple's reason for refusing a push, in words a person can act on. Anything else is shown as Apple gave it.
+REASONS = {
+    'InvalidProviderToken': 'Apple refused the key. Check "key_id" and "team" in apns.json against the key file.',
+    'ExpiredProviderToken': 'Apple says the sign-in token is too old. Check the clock on the home computer.',
+    'BadDeviceToken': 'Apple does not know this phone for this app. Open the app on the phone so it registers again.',
+    'Unregistered': 'The app was removed from this phone, or notifications were reset. Open the app on the phone.',
+    'DeviceTokenNotForTopic': 'The key is for another app than the one on this phone. Check "topic" in apns.json.',
+    'TopicDisallowed': 'The key may not send to this app. Check "topic" in apns.json.',
+    'BadTopic': 'Apple does not know the app named by "topic" in apns.json.',
+    'TooManyRequests': 'Apple asked to slow down for this phone. It will work again shortly.',
+    'TooManyProviderTokenUpdates': 'Apple asked to slow down. It will work again shortly.',
+}
+
+
+def why(status, resp):
+    """One sentence for a push that was not delivered to Apple: (HTTP status, Apple's answer) -> words."""
+    if status == 200:
+        return None
+    if status == 0:
+        return "Apple's notification service could not be reached from the home computer." + (f' ({resp[:80]})' if resp else '')
+    reason = None
+    try:
+        reason = json.loads(resp).get('reason')
+    except (ValueError, AttributeError):
+        pass
+    if reason in REASONS:
+        return REASONS[reason]
+    if status >= 500:
+        return "Apple's notification service has a problem right now. It will be tried again."
+    return f'Apple refused the notification: {reason or (resp[:80] if resp else status)}.'
+
+
+def setup_problem(e):
+    """Why apns.json or its key could not be used, in words: the exception from loading them -> one sentence."""
+    if isinstance(e, json.JSONDecodeError):
+        return 'apns.json is not valid JSON.'
+    if isinstance(e, KeyError):
+        return f'apns.json has no "{e.args[0]}".'
+    if isinstance(e, FileNotFoundError):
+        return f'The key file {Path(e.filename).name if e.filename else ""} is missing.'.replace('  ', ' ')
+    if isinstance(e, PermissionError):
+        return f'The key file {Path(e.filename).name if e.filename else ""} cannot be read by this user.'.replace('  ', ' ')
+    text = str(e).strip() or type(e).__name__
+    return text[0].upper() + text[1:] + ('' if text.endswith('.') else '.')
+
 
 class Router:
     """Sends a push to the service its token belongs to, and says what became of it.

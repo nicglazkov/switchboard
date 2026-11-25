@@ -56,6 +56,15 @@ class ClaudeMdTest(unittest.TestCase):
         (self.cdir / 'switchboard').mkdir(parents=True)
         self.cm = self.cdir / 'CLAUDE.md'
 
+    def test_the_file_keeps_the_line_ends_it_had(self):
+        for sep in (b'\n', b'\r\n'):
+            self.cm.write_bytes(b'# Mine' + sep + b'one' + sep)
+            self.sb.apply_setup(self.cdir, RULE)
+            after = self.cm.read_bytes()
+            self.assertTrue(after.startswith(b'# Mine' + sep + b'one'), after[:40])
+            self.assertEqual(after.count(b'\n'), after.count(sep), 'one kind of line end in the whole file')
+            self.sb.apply_setup(self.cdir, {})
+
     def test_bytes_that_are_not_utf8_come_back_out_as_they_went_in(self):
         mine = '# Mes règles 日本\n'.encode('utf-8') + b'caf\xe9 \x81\x8d\x8f\x90\x9d\n'
         self.cm.write_bytes(mine)

@@ -491,6 +491,15 @@ class HistoryTest(unittest.TestCase):
 
 
 class TermKeyTest(unittest.TestCase):
+    def test_a_key_with_a_line_feed_in_it_is_stored_byte_for_byte(self):
+        # Windows wrote 0x0A as two bytes, and the next start threw the 33-byte file away as no key.
+        raw = b'\n' * 31 + b'\x01'
+        p = Path(mkdtemp()) / 'term.key'
+        with mock.patch.object(term.secrets, 'token_bytes', lambda n: raw):
+            self.assertEqual(term.load_or_create_key(p), raw)
+        self.assertEqual(p.read_bytes(), raw)
+        self.assertEqual(term.load_or_create_key(p), raw)
+
     def test_a_key_of_the_wrong_length_is_put_aside_and_a_new_one_made(self):
         for raw in (ZEROS[:32], b'', b'short', b'x' * 33):
             p = Path(mkdtemp()) / 'term.key'

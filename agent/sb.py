@@ -482,10 +482,25 @@ def _file_has(path, needle, chunk=None):
             keep = (keep + b)[-(len(needle) - 1):] if len(needle) > 1 else b''
 
 
+def _swap(tmp, p):
+    """os.replace. Windows refuses for the instant another writer or a reader has p open (the status line, the agent
+    and Claude Code write the same files), so there it is tried again for up to two seconds before giving up;
+    without that, writers at the same moment lost their change or failed."""
+    end = time.monotonic() + 2.0
+    while True:
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:
+            if os.name != 'nt' or time.monotonic() >= end:
+                raise
+            time.sleep(0.005)
+
+
 def _replace(tmp, p):
-    """os.replace, and no temp file left behind when it fails (Windows refuses while another process has p open)."""
+    """_swap, and no temp file left behind when it fails."""
     try:
-        os.replace(tmp, p)
+        _swap(tmp, p)
     except OSError:
         try:
             tmp.unlink()
@@ -562,12 +577,20 @@ def sweep_tmp(now=None):
 def _lock_read(p):
     """A claim file as {'pid', 'ts', 'raw'}; None when it is gone. An older helper wrote only the time. A file just
     created is still empty (its owner has not written yet): its age on disk counts then ('empty')."""
-    try:
-        raw = p.read_text(encoding='utf-8', errors='replace').strip()  # bytes that are no text: a stale claim, not a crash
-        if not raw:
-            return {'pid': None, 'ts': p.stat().st_mtime, 'raw': raw, 'empty': True}
-    except OSError:
-        return None
+    end = time.monotonic() + 0.25
+    while True:
+        try:
+            raw = p.read_text(encoding='utf-8', errors='replace').strip()  # bytes that are no text: a stale claim, not a crash
+            if not raw:
+                return {'pid': None, 'ts': p.stat().st_mtime, 'raw': raw, 'empty': True}
+            break
+        except PermissionError:
+            # Windows, for the instant another process is deleting or replacing the file: it is not gone yet.
+            if not IS_WIN or time.monotonic() >= end:
+                return None
+            time.sleep(0.002)
+        except OSError:
+            return None
     try:
         d = json.loads(raw)
     except ValueError:
@@ -647,10 +670,19 @@ def lock_drop(p):
     cur = _lock_read(p)
     if cur is None or cur['pid'] not in (None, os.getpid()):
         return
-    try:
-        p.unlink()
-    except OSError:
-        pass
+    end = time.monotonic() + 1.0
+    while True:
+        try:
+            p.unlink()
+            return
+        except PermissionError:
+            # Windows refuses while someone waiting for the claim is reading it. Left there, the claim held for its
+            # whole ttl, everyone waiting gave up and wrote without it, and changes were lost.
+            if not IS_WIN or time.monotonic() >= end:
+                return
+            time.sleep(0.002)
+        except OSError:
+            return
 
 
 UPDATE_LOCK_TTL, UPDATE_LOCK_WAIT = 10, 1.0
@@ -674,7 +706,9 @@ class held:
                 self.got = False
             if self.got or time.time() >= deadline:
                 return self
-            time.sleep(0.01)
+            # Short: a writer that frees the claim and wants it again takes it back within a millisecond, and on
+            # Windows, where a sleep is coarse, a waiter that looked every 10 ms could miss every gap for a second.
+            time.sleep(0.002)
 
     def __exit__(self, *exc):
         if self.got:
@@ -2849,7 +2883,7 @@ def cfg_write(p, data):
         seen = _cfg_seen.pop((str(p), threading.get_ident()), _cfg_seen)  # this thread's own reading, taken once
         if seen is not _cfg_seen and _cfg_sig(p) != seen:  # as late as it can be asked
             raise CfgChanged(p)
-        os.replace(tmp, real)
+        _swap(tmp, real)
     except BaseException:
         try:
             os.unlink(tmp)
@@ -10931,7 +10965,7 @@ class FileSecrets:
             _to_disk(f)
         if not IS_WIN:
             os.chmod(tmp, 0o600)
-        os.replace(tmp, self.path)
+        _swap(tmp, self.path)
         # The copy _jsafe goes back to is of what was just written (same mode), never of the file before: a secret
         # that was removed or replaced must not stay on disk in it.
         _jkeep(self.path, copy=True)
@@ -11354,11 +11388,17 @@ def _text_get(p):
 
 
 def _text_put(p, text):
-    """Write it back with this system's line ends, as write_text did, but never half-written: a temp file forced to
-    disk, then renamed over the real file (the one a link points at, so a linked CLAUDE.md stays a link). The file
-    keeps the permissions it had."""
-    _write_then_replace(Path(os.path.realpath(p)), text.replace('\n', os.linesep).encode('utf-8', 'surrogateescape'),
-                        same_mode=True)
+    """Write it back with the line ends the file already has (a new file gets this system's), never half-written:
+    a temp file forced to disk, then renamed over the real file (the one a link points at, so a linked CLAUDE.md
+    stays a link). The file keeps the permissions it had. It used to write this system's line ends always, which
+    on Windows rewrote every line of a CLAUDE.md kept with plain \n."""
+    real = Path(os.path.realpath(p))
+    try:
+        old = real.read_bytes()
+        sep = '\r\n' if b'\r\n' in old else '\n' if b'\n' in old else os.linesep
+    except OSError:
+        sep = os.linesep
+    _write_then_replace(real, text.replace('\n', sep).encode('utf-8', 'surrogateescape'), same_mode=True)
 
 
 def _strip_rule(text):

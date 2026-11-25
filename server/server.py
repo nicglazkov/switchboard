@@ -364,6 +364,8 @@ class App:
         self.direct = keys_mod.Direct(self.state_dir / 'direct_seen.json', clock=clock)
         self.live_pusher = None  # Live Activity pushes (main wires it to APNs)
         self.push_ready = False  # main sets it when <config>/apns.json and its key load
+        self.push_state = lambda: None  # Pushers.state, once attached: what the apps show about notifications
+        self.push_test = None  # Pushers.test
         self.fleet_cfg = fleet_mod.FleetConfig(self.cfg_dir / 'fleet.json')
         self.prefs_lock = threading.RLock()  # prefs.json: read, change and save as one step
         if hasattr(fleet, 'on_save'):
@@ -1993,10 +1995,11 @@ class App:
         if path == '/api/machines':
             return self.machines_view()
         if path == '/api/prefs':
+            push = self.push_state()  # first: it may find that a broken setup was fixed, which sets push_ready
             return dict(self.prefs(), ok=True, flags=sorted(flags_mod.START_FLAGS), chips=flags_mod.CHIP_FLAGS,
                         takes={k: v is not None for k, v in flags_mod.START_FLAGS.items()}, aliases=flags_mod.ALIASES,
                         live=flags_mod.LIVE, labels=flags_mod.LABELS,
-                        **options_mod.view(self.options(), self.push_ready, self._prefs_raw().get('notify'), self.prefs()['compact_at']))
+                        **options_mod.view(self.options(), self.push_ready, self._prefs_raw().get('notify'), self.prefs()['compact_at'], push))
         if path == '/api/summary':
             return self.summary()
         if path == '/api/usage':
@@ -2306,9 +2309,12 @@ class App:
             seal = seal if isinstance(seal, str) and re.fullmatch(r'[A-Za-z0-9_-]{43}', seal) else None
             self._token_add('devices.json', tok, body.get('name'), DEVICES_MAX, seal)
             if not self.push_ready:  # the phone is kept, so pushes start once the server is set up
-                return {'ok': True, 'push': False, 'note': "Notifications aren't set up on this server yet. "
-                        'They need an APNs key and ~/.config/switchboard/apns.json.'}
+                return {'ok': True, 'push': False, 'note': options_mod.push_view(False, self.push_state())['explain']}
             return {'ok': True, 'push': True}
+        if path == '/api/push/test':  # "Send a test" in an app's settings: one notification to every registered phone
+            if not self.push_test:
+                return {'ok': False, 'why': options_mod.push_view(False, self.push_state())['explain'], 'devices': []}
+            return self.push_test()
         r = self.feat.post(path, body, origin)
         if r is not None:
             return r
@@ -2588,30 +2594,106 @@ def apns_key_path(cfg, conf):
 
 class Pushers:
     """What the app sends to phones through Apple: alerts, widget reloads, Live Activity updates. A token is dropped
-    only when Apple says it is gone (apns.Router), and from the file as it is at that moment (App.token_gone)."""
+    only when Apple says it is gone (apns.Router), and from the file as it is at that moment (App.token_gone).
 
-    def __init__(self, apns, app=None, sleep=time.sleep):
+    It also knows how notifications are doing, for the apps to show (state): whether this computer can send at all
+    and why not, how many phones are registered, and what became of the last alert. `load()` -> (sender, why) reads
+    apns.json again; while sending is not possible it is tried at most once a minute, so a fixed file is picked up
+    without a restart."""
+    RETRY_LOAD = 60
+
+    def __init__(self, apns, app=None, sleep=time.sleep, why=None, load=None, clock=time.time):
         import apns as apns_mod
-        self.apns, self.app, self.m = apns, app, apns_mod
-        self.router = apns_mod.Router(apns, sleep) if apns else None
+        self.app, self.m, self.sleep, self.clock = app, apns_mod, sleep, clock
+        self.why, self.load, self.tried = why, load, clock()
+        self.last, self.lock = None, threading.Lock()  # the newest alert's outcome
+        self._use(apns)
+
+    def _use(self, apns):
+        self.apns = apns
+        self.router = self.m.Router(apns, self.sleep) if apns else None
 
     def attach(self, app):
         self.app = app
-        app.push_ready = bool(self.apns)
+        app.push_state, app.push_test = self.state, self.test
+        self._wire()
+
+    def _wire(self):
+        self.app.push_ready = bool(self.apns)
         if self.apns:
-            app.widget_pusher, app.live_pusher = self.widgets, self.live
+            self.app.widget_pusher, self.app.live_pusher = self.widgets, self.live
+
+    def _reload(self):
+        """While this computer cannot send: read apns.json again, at most once a minute."""
+        if self.apns or not self.load or self.clock() - self.tried < self.RETRY_LOAD:
+            return
+        self.tried = self.clock()
+        try:
+            apns, why = self.load()
+        except Exception as e:
+            apns, why = None, str(e)
+        if apns:
+            log('push enabled: apns.json and its key load now')
+            self._use(apns)
+            self.why = None
+            if self.app:
+                self._wire()
+        elif why != self.why:
+            log(f'push disabled: {why}' if why else 'push disabled: no apns.json')
+            self.why = why
+
+    def state(self):
+        self._reload()
+        with self.lock:
+            last = dict(self.last) if self.last else None
+        return {'state': 'ready' if self.apns else 'broken' if self.why else 'unset', 'why': None if self.apns else self.why,
+                'devices': len(self.app.devices()) if self.app else 0, 'last': last}
+
+    def _alert_one(self, tok, title, body, url, kind, group):
+        """One alert to one phone: (outcome, why not). The token is forgotten when Apple says it is gone."""
+        seen = []
+
+        def call(sb):
+            seen.append(self.apns.push(tok, title, body, url, thread=kind, collapse=group, sandbox=sb))
+            return seen[-1]
+        try:
+            got = self.router.send(tok, call, lambda line: log('apns ' + line))
+            status, resp = seen[-1] if seen else (0, '')
+            why = None if got == self.m.SENT else self.m.why(status, resp or '')
+            if got == self.m.GONE:
+                self.app.token_gone('devices.json', tok)
+        except Exception as e:
+            log(f'apns {str(tok)[:8]} failed: {e}')
+            got, why = self.m.FAILED, f'The home computer could not send it: {e}'
+        return got, why
 
     def alert(self, title, body, url, kind='jobs', group=None):
+        """Every registered phone gets it. [{name, ok, why}] per phone, for a caller that wants to say how it went."""
+        self._reload()
         if not self.apns:
-            return
-        for tok in list(self.app.devices()):
-            try:  # one phone's trouble never keeps the push from the others
-                got = self.router.send(tok, lambda sb: self.apns.push(tok, title, body, url, thread=kind, collapse=group, sandbox=sb),
-                                       lambda line: log('apns ' + line))
-                if got == self.m.GONE:
-                    self.app.token_gone('devices.json', tok)
-            except Exception as e:
-                log(f'apns {str(tok)[:8]} failed: {e}')
+            return []
+        out = []
+        for tok, d in list(self.app.devices().items()):  # one phone's trouble never keeps the push from the others
+            got, why = self._alert_one(tok, title, body, url, kind, group)
+            out.append({'name': (d or {}).get('name') if isinstance(d, dict) else None, 'ok': got == self.m.SENT, 'why': why})
+        if out:
+            bad = next((o for o in out if not o['ok']), None)
+            with self.lock:
+                self.last = {'at': self.clock(), 'ok': bad is None, 'why': bad['why'] if bad else None, 'title': title,
+                             'sent': sum(o['ok'] for o in out), 'of': len(out)}
+        return out
+
+    def test(self):
+        """POST /api/push/test: one notification to every registered phone, and how each went."""
+        st = self.state()
+        if not self.apns:
+            return {'ok': False, 'why': options_mod.push_view(False, st)['explain'], 'devices': []}
+        if not st['devices']:
+            return {'ok': False, 'why': options_mod.PUSH_NO_PHONE, 'devices': []}
+        log('push test')
+        out = self.alert('Switchboard', 'Notifications work on this phone.', '/', kind='test', group='push-test')
+        bad = next((o for o in out if not o['ok']), None)
+        return {'ok': bool(out) and bad is None, 'why': bad['why'] if bad else None, 'devices': out}
 
     def widgets(self):
         for tok in list(self.app.widget_tokens()):
@@ -2627,6 +2709,22 @@ class Pushers:
         got = self.router.send(tok, lambda sb: self.apns.push_activity(tok, state, end=end, dismiss_after=dismiss_after, sandbox=sb),
                                lambda line: log('live activity push ' + line))
         return True if got == self.m.GONE else 'retry' if got == self.m.RETRY else False
+
+
+def load_push(cfg, recipient=None):
+    """(sender, why): the push sender apns.json asks for, or None with one sentence saying what is wrong with the
+    setup. (None, None): there is no apns.json, so notifications were never set up here."""
+    import apns as apns_mod
+    try:
+        text = (cfg / 'apns.json').read_text(encoding='utf-8')
+    except FileNotFoundError:
+        return None, None
+    except OSError as e:
+        return None, f'apns.json cannot be read: {e.strerror or e}.'
+    try:
+        return push_sender(cfg, json.loads(text), recipient), None
+    except Exception as e:
+        return None, apns_mod.setup_problem(e)
 
 
 def announce(server_cfg, how=None):
@@ -2691,15 +2789,12 @@ def main():
     if held is None:
         log('another Switchboard server is running on this state folder, so this one stops')
         raise SystemExit(1)
-    apns = None
     holder = []  # the Pushers, once made: a gateway sender asks its app for a phone's sealing key
-    try:
-        conf = json.loads((cfg / 'apns.json').read_text(encoding='utf-8'))
-        apns = push_sender(cfg, conf, lambda tok: holder[0].app.push_key(tok) if holder and holder[0].app else None)
-    except Exception as e:
-        log(f'push disabled: {e}')
-
-    push = Pushers(apns)
+    load = lambda: load_push(cfg, lambda tok: holder[0].app.push_key(tok) if holder and holder[0].app else None)  # noqa: E731
+    apns, why = load()
+    if not apns:
+        log(f'push disabled: {why}' if why else 'push disabled: no apns.json')
+    push = Pushers(apns, why=why, load=load)
     holder.append(push)
 
     server_cfg = ServerConfig(cfg, state)

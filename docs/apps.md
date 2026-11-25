@@ -169,6 +169,11 @@ To set up iPhone notifications, on the home computer:
     switchboard restart
     ```
 
+To check the setup, open Settings > Notifications in the iPhone app. The first row says whether notifications work
+and, when they do not, what is wrong: the iPhone's own switch for the app, a phone that has not registered, or the
+key on the home computer. Select **Send a test** to get one notification on every registered phone. A setup that
+you fix on the home computer is picked up within a minute.
+
 Sending needs a `curl` with HTTP/2 on the home computer, and nothing else: since version 0.9.1 the server signs
 Apple's token itself. If the key or `curl` cannot be used, the server's log says `push disabled` and why.
 
