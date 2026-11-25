@@ -13,25 +13,22 @@ def _b64(b):
 
 class Apns:
     def __init__(self, key_path, key_id, team, topic, sandbox=True, runner=subprocess.run, clock=time.time):
-        from cryptography.hazmat.primitives import serialization
-        self.key = serialization.load_pem_private_key(open(key_path, 'rb').read(), None)
+        import es256  # plain Python: the server needs nothing installed to sign Apple's token
+        self.es256, self.key = es256, es256.load_pem(Path(key_path).read_bytes())
         self.key_id, self.team, self.topic, self.sandbox = key_id, team, topic, sandbox
         self.runner, self.clock = runner, clock
         self._tok, self._iat = None, 0
         self.lock = threading.Lock()
 
     def jwt(self):
-        from cryptography.hazmat.primitives import hashes
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives.asymmetric.utils import decode_dss_signature
         with self.lock:
             now = int(self.clock())
             if self._tok and now - self._iat < 3000:  # Apple wants a refresh between 20 and 60 min
                 return self._tok
             h = _b64(json.dumps({'alg': 'ES256', 'kid': self.key_id}, separators=(',', ':')).encode())
             c = _b64(json.dumps({'iss': self.team, 'iat': now}, separators=(',', ':')).encode())
-            r, s = decode_dss_signature(self.key.sign(f'{h}.{c}'.encode(), ec.ECDSA(hashes.SHA256())))
-            self._tok, self._iat = f'{h}.{c}.{_b64(r.to_bytes(32, "big") + s.to_bytes(32, "big"))}', now
+            sig = self.es256.raw(*self.es256.sign(self.key, f'{h}.{c}'.encode()))
+            self._tok, self._iat = f'{h}.{c}.{_b64(sig)}', now
             return self._tok
 
     def _auth(self):

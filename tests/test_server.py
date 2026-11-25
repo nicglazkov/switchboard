@@ -186,16 +186,19 @@ class GuardTimerTest(unittest.TestCase):
 
 
 class ApnsTest(unittest.TestCase):
+    # RFC 6979 A.2.5's P-256 key, in the PKCS #8 file Apple gives. No package is needed to read or use it.
+    D = 0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721
+
     def setUp(self):
+        import es256
         try:
-            from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.hazmat.primitives import serialization
+            from tests.test_es256 import pkcs8_pem
         except ImportError:
-            self.skipTest('cryptography is not installed')
-        self.key = ec.generate_private_key(ec.SECP256R1())
+            from test_es256 import pkcs8_pem
+        self.es256 = es256
         d = Path(mkdtemp())
         self.kp = d / 'k.p8'
-        self.kp.write_bytes(self.key.private_bytes(serialization.Encoding.PEM, serialization.PrivateFormat.PKCS8, serialization.NoEncryption()))
+        self.kp.write_text(pkcs8_pem(self.D))
         self.ran = []
 
     def runner(self, status='200', body=''):
@@ -208,9 +211,6 @@ class ApnsTest(unittest.TestCase):
 
     def test_jwt_verifies_and_is_cached(self):
         import base64
-        from cryptography.hazmat.primitives.asymmetric import ec
-        from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
-        from cryptography.hazmat.primitives import hashes
         now = [1000.0]
         a = apns.Apns(self.kp, 'KID123', 'TEAM', 'com.x', runner=self.runner(), clock=lambda: now[0])
         tok = a.jwt()
@@ -220,8 +220,9 @@ class ApnsTest(unittest.TestCase):
         self.assertEqual(json.loads(base64.urlsafe_b64decode(pad(c))), {'iss': 'TEAM', 'iat': 1000})
         raw = base64.urlsafe_b64decode(pad(sig))
         self.assertEqual(len(raw), 64)
-        der = encode_dss_signature(int.from_bytes(raw[:32], 'big'), int.from_bytes(raw[32:], 'big'))
-        self.key.public_key().verify(der, f'{h}.{c}'.encode(), ec.ECDSA(hashes.SHA256()))
+        r, sg = int.from_bytes(raw[:32], 'big'), int.from_bytes(raw[32:], 'big')
+        self.assertTrue(self.es256.verify(self.es256.public(self.D), f'{h}.{c}'.encode(), r, sg))
+        self.assertFalse(self.es256.verify(self.es256.public(self.D), f'{h}.{c}x'.encode(), r, sg))
         now[0] += 600
         self.assertEqual(a.jwt(), tok)
         now[0] += 3000

@@ -169,8 +169,8 @@ To set up iPhone notifications, on the home computer:
     switchboard restart
     ```
 
-Sending needs the Python `cryptography` package and a `curl` with HTTP/2 on the home computer. If either is
-missing, the server's log says `push disabled` and why.
+Sending needs a `curl` with HTTP/2 on the home computer, and nothing else: since version 0.9.1 the server signs
+Apple's token itself. If the key or `curl` cannot be used, the server's log says `push disabled` and why.
 
 For what the notifications are and what they carry, refer to [Notifications](features/notifications.md).
 

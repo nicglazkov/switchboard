@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-install", "crates/sb-link", "crates/sb-mobile", "crates/sb-node"]
 
 [workspace.package]
-version = "0.9.0"
+version = "0.9.1"
 edition = "2024"
 rust-version = "1.91"
 license = "AGPL-3.0-only"

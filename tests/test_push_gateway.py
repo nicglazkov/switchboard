@@ -304,13 +304,11 @@ class Config(unittest.TestCase):
 
     def test_direct_mode_is_the_default_and_unchanged(self):
         try:
-            from cryptography.hazmat.primitives.asymmetric import ec
-            from cryptography.hazmat.primitives import serialization as s
+            from tests.test_es256 import pkcs8_pem
         except ImportError:
-            self.skipTest('cryptography is not installed')
+            from test_es256 import pkcs8_pem
         (self.cfg / 'apns').mkdir()
-        (self.cfg / 'apns' / 'AuthKey_KID.p8').write_bytes(ec.generate_private_key(ec.SECP256R1()).private_bytes(
-            s.Encoding.PEM, s.PrivateFormat.PKCS8, s.NoEncryption()))
+        (self.cfg / 'apns' / 'AuthKey_KID.p8').write_text(pkcs8_pem(0xC9AFA9D845BA75166B5C215767B1D6934E50C3DB36E89B127B8A622B120F6721))
         for conf in ({'key_id': 'KID', 'team': 'TEAM', 'topic': 'com.example.sb'},
                      {'mode': 'direct', 'key_id': 'KID', 'team': 'TEAM', 'topic': 'com.example.sb', 'sandbox': False}):
             a = server.push_sender(self.cfg, conf)

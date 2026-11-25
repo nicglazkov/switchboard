@@ -4,6 +4,10 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.9.1 (2026-11-25)
+
+- iPhone notifications work again on a home computer updated to 0.9.0. That version ran the server on its own Python, which lacked a package the notifications needed, so they turned off. The server now signs Apple's token itself and needs no package for it.
+
 ## 0.9.0 (2026-11-25)
 
 - Device keys: a computer can now reach your home computer by its own key in place of an address. You make a short code or a link on the home computer, enter it on the other one, and the two stay connected at home or away, encrypted between the two, with nothing to open on your router. Keys are off until you turn them on (`switchboard keys on`, or Settings > Devices).
