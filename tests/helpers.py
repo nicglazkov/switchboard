@@ -1,6 +1,12 @@
 import json, os, sys, tempfile, importlib
 from pathlib import Path
 
+try:  # one temp folder for the run (temproot.py), also when a test file is run by itself
+    from tests import temproot  # noqa: F401
+except ImportError:
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    import temproot  # noqa: F401
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / 'agent'))
 
