@@ -19,11 +19,32 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.9.0",
+        &[
+            "Device keys: a computer can now reach your home computer by its own key in place of an address. You make a short code or a link on the home computer, enter it on the other one, and the two stay connected at home or away, encrypted between the two, with nothing to open on your router. Keys are off until you turn them on (`switchboard keys on`, or Settings > Devices).",
+            "Devices: Settings has a new Devices section on the home computer. It lists the paired computers and phones, makes pairing codes, and removes or blocks a device.",
+            "When the home computer is away: with keys on, each paired computer answers for its own chats while the home computer is off or out of reach. You still see those chats, open their terminals and reply. The board says what is missing and goes back by itself when the home computer answers again.",
+            "Move or replace the home computer: the home computer can be moved to another of your computers, backed up behind a recovery code and restored on a new computer, with nothing to pair again. Command line only for now.",
+            "Your own relay: two computers that cannot reach each other directly can meet through a relay you run. A script installs it on a small Linux server. The relay cannot read what passes through it.",
+            "Its own Python: the installers bring Python 3.13 for Switchboard's own use, so the home computer and the computers you add need no Python of their own.",
+            "The home computer adds itself: a first install links the home computer's own chats to the board with nothing to paste. `switchboard link` does it later.",
+            "One command to remove everything: `switchboard uninstall` takes Switchboard off a computer, and `--purge` takes its settings and history too.",
+            "A Windows home computer gets the hub: chat terminals and adding a computer with a code now work on a home computer that runs Windows.",
+            "A busy computer is no longer called offline: a computer that took longer than 15 seconds to list its chats was shown offline and came back seconds later, which closed and reopened its chats in the apps. It now takes three slow answers in a row, and listing chats on a computer with a very full temp folder is about twenty times faster.",
+            "After a restore from an old backup: a home computer brought back from a backup made before another one replaced it now hears of the newer one and stands down, so two computers never answer as home.",
+            "Home is noticed sooner: a paired computer notices the home computer coming back in about 10 seconds, not up to a minute, and no longer says that no other computer can be reached while it is still asking them.",
+            "Pairing on Linux with Docker: a pairing code no longer carries an address from a container or virtual machine network in place of the one that works.",
+            "The home computer's name: a paired computer shows what the home computer is called now, after a rename or a move, not the name from the day it was paired.",
+        ],
+    ),
+    (
         "0.8.23",
         &[
             "Only your own networks: the server now looks at the address each request really comes from, and answers only this computer, home and office networks, link-local addresses and Tailscale. A request from anywhere else is refused, whatever name it asks for. Nothing changes on a home network or Tailscale. To let another network in, add it to \"peers\" in server.json.",
             "Damaged files: a settings or state file that cannot be read after a power cut or a full disk is no longer taken for an empty one and written over. The server keeps a copy of each file from before its last change and goes back to it, and keeps the damaged file beside it. With no copy to go back to it picks the careful answer, not the open one: a lost settings file no longer turns the opt-in settings on, a lost computer list no longer gives every computer its whole home folder, a lost server.json answers this computer only, and chats do not stop by themselves while the list of kept chats or open tabs is lost. A terminal key that was cut short is replaced instead of failing every terminal.",
             "Damaged files on each computer: the names you gave chats, the list of installed tools, and the secrets file on a Linux computer without a keychain are kept the same way. A damaged one goes back to its last good copy instead of being written over with the one entry that changed. A state file that holds the wrong kind of thing no longer breaks the list of chats.",
+            "Damaged files in the app and on a linked computer: the app's settings and a linked computer's link to the server are kept the same way. One that a power cut emptied goes back to its last good copy, so the app keeps your settings and the computer stays linked without pairing again. With no copy, the app uses its defaults and does not save them until you change a setting. On the server, the tool library goes back to its last good copy too, and a damaged list of launches is put aside and starts over.",
+            "Windows: the node on a linked PC is started again within seconds if it stops or is ended in Task Manager. After a restart or a power cut it returns when you sign in to Windows.",
             "Budget: two devices changing the budget at the same moment both keep their change, and lifting the hard limit while it is being checked is not lost.",
             "A request that got lost: a chat you started, resumed or moved always gets an answer. If the helper stopped right after taking the request, or could not read it, you are told to try again at once instead of waiting for the timeout.",
             "Behind a proxy: the server's calls to its own hub and each computer's calls to your server no longer go through http_proxy, which made linked computers look offline.",
@@ -422,6 +443,88 @@ fn os_arch() -> String {
     format!("{os}, {arch}")
 }
 
+/// The system the notes are worded for. They are written once, as a Mac says them; `note` rewords them elsewhere.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Os {
+    Mac,
+    Windows,
+    Linux,
+}
+
+impl Os {
+    pub(crate) fn here() -> Os {
+        if cfg!(target_os = "macos") {
+            Os::Mac
+        } else if ui::win() {
+            Os::Windows
+        } else {
+            Os::Linux
+        }
+    }
+}
+
+/// Phrases in the notes that name a Mac's keys, menus or apps, as written in RELEASES, with what a Windows and a
+/// Linux computer call the same thing. The keys are the ones bound in view.rs and term/mod.rs: Ctrl where a Mac
+/// has Cmd, Ctrl+Shift for the ones a terminal would otherwise take.
+const WORDING: &[(&str, &str, &str)] = &[
+    ("Cmd/Ctrl+W on the board", "Ctrl+W on the board", "Ctrl+W on the board"),
+    ("(X, Cmd+W,", "(X, Ctrl+Shift+W,", "(X, Ctrl+Shift+W,"),
+    ("looks like Finder or File Explorer", "looks like File Explorer", "looks like a file manager"),
+    ("Redraw (Cmd+Shift+R)", "Redraw (Ctrl+Shift+R)", "Redraw (Ctrl+Shift+R)"),
+    ("(Cmd+K, Cmd+T)", "(Ctrl+K, Ctrl+T)", "(Ctrl+K, Ctrl+T)"),
+    ("Cmd+1 to 9", "Ctrl+1 to 9", "Ctrl+1 to 9"),
+    (
+        "the View menu and Shift Cmd L",
+        "the menu at the top right and Ctrl+Shift+L",
+        "the menu at the top right and Ctrl+Shift+L",
+    ),
+    (
+        "so every Mac shows the same ones (folding is per Mac)",
+        "so every computer shows the same ones (folding is per computer)",
+        "so every computer shows the same ones (folding is per computer)",
+    ),
+    ("or the Mac is asleep", "or the computer is asleep", "or the computer is asleep"),
+    ("under Switchboard > About Switchboard", "in the menu at the top right", "in the menu at the top right"),
+];
+
+/// Notes about the Mac app alone (its disk image, the key field that saves into the Mac's keychain), by how they
+/// start: left out on Windows and Linux. A note that starts "Mac:" stays everywhere: it is labelled, and a Mac may
+/// be one of the computers this app looks after.
+const MAC_APP_ONLY: &[&str] = &[
+    "The disk image's window",
+    "The installer's \"Eject the disk image\"",
+    "Settings > Library > Set key... on this Mac",
+];
+
+/// One note as this system should read it, or None when it is about another system's app alone.
+pub(crate) fn note(text: &str, os: Os) -> Option<String> {
+    if os == Os::Mac {
+        return Some(text.to_string());
+    }
+    if MAC_APP_ONLY.iter().any(|p| text.starts_with(p)) {
+        return None;
+    }
+    let mut out = text.to_string();
+    for (mac, win, linux) in WORDING {
+        if out.contains(mac) {
+            out = out.replace(mac, if os == Os::Windows { win } else { linux });
+        }
+    }
+    Some(out)
+}
+
+/// The versions What's new lists in a build of `version`: that one and the ones before it. Notes for a version
+/// this build is not yet (they are written before the number goes up) are left out. A version that cannot be read
+/// hides nothing.
+pub(crate) fn releases_upto(version: &str) -> impl Iterator<Item = &'static (&'static str, &'static [&'static str])> {
+    use sb_core::update::Ver;
+    let mine = Ver::parse(version);
+    RELEASES.iter().filter(move |(v, _)| match (&mine, Ver::parse(v)) {
+        (Some(mine), Some(v)) => v <= *mine,
+        _ => true,
+    })
+}
+
 /// The notices built into the app, for a build that has no copy next to it (a dev build, the bare Linux binary).
 const NOTICES: &str = include_str!("../../../packaging/THIRD-PARTY-NOTICES.txt");
 const NOTICES_FILE: &str = "THIRD-PARTY-NOTICES.txt";
@@ -630,10 +733,11 @@ impl Render for AboutView {
                 }
             }));
         let mut news = div().flex().flex_col().gap(px(10.));
-        for (v, notes) in RELEASES {
+        let os = Os::here();
+        for (v, notes) in releases_upto(version) {
             let current = *v == version;
             let mut list = div().flex().flex_col().gap(px(7.));
-            for n in notes.iter() {
+            for n in notes.iter().filter_map(|n| note(n, os)) {
                 list = list.child(
                     div()
                         .flex()
@@ -645,7 +749,7 @@ impl Render for AboutView {
                             t.faint
                         }))
                         .child(
-                            ui::wrap(n.to_string())
+                            ui::wrap(n)
                                 .flex_1()
                                 .min_w_0()
                                 .text_size(px(13.))
@@ -715,6 +819,61 @@ impl Render for AboutView {
 
 #[cfg(test)]
 mod tests {
+    use super::{MAC_APP_ONLY, Os, RELEASES, WORDING, note, releases_upto};
+
+    fn all_notes() -> impl Iterator<Item = &'static str> {
+        RELEASES.iter().flat_map(|(_, notes)| notes.iter().copied())
+    }
+
+    #[test]
+    fn whats_new_stops_at_the_version_that_is_running() {
+        let shown = |v: &str| releases_upto(v).map(|(v, _)| *v).collect::<Vec<_>>();
+        assert!(RELEASES.iter().any(|(v, _)| *v == "0.8.22"));
+        let at = shown("0.8.22");
+        assert_eq!(at.first(), Some(&"0.8.22"), "the running version leads");
+        assert!(!at.contains(&"0.8.23") && at.contains(&"0.8.21"));
+        assert_eq!(shown("0.8.19").first(), Some(&"0.8.19"));
+        // A version past every note, and one that cannot be read: all of them.
+        assert_eq!(shown("99.0.0").len(), RELEASES.len());
+        assert_eq!(shown("dev").len(), RELEASES.len());
+        // Whatever this build is, it never lists a version after its own.
+        let mine = sb_core::update::Ver::parse(sb_core::version()).expect("the app's version parses");
+        for (v, _) in releases_upto(sb_core::version()) {
+            assert!(sb_core::update::Ver::parse(v).is_none_or(|v| v <= mine), "{v}");
+        }
+    }
+
+    #[test]
+    fn notes_say_ctrl_and_the_right_file_manager_off_a_mac() {
+        // A Mac reads the notes as they are written.
+        for n in all_notes() {
+            assert_eq!(note(n, Os::Mac).as_deref(), Some(n));
+        }
+        // Every phrase the table rewords is still in the notes, and so is every Mac-only note.
+        for (mac, win, linux) in WORDING {
+            assert!(all_notes().any(|n| n.contains(mac)), "no note says {mac:?} any more");
+            assert!(!win.contains("Cmd") && !linux.contains("Cmd") && !linux.contains("Explorer"));
+        }
+        for p in MAC_APP_ONLY {
+            assert!(all_notes().any(|n| n.starts_with(p)), "no note starts {p:?} any more");
+        }
+        // Elsewhere: no Mac key, menu or app is named. "Mac" itself may be: a note can be about a Mac computer.
+        for os in [Os::Windows, Os::Linux] {
+            for n in all_notes().filter_map(|n| note(n, os)) {
+                for mac in ["Cmd", "⌘", "⌥", "Finder", "View menu", "this Mac", "Switchboard > About", "disk image"]
+                {
+                    assert!(!n.contains(mac), "{os:?} would read {mac:?} in: {n}");
+                }
+            }
+        }
+        let folder = all_notes().find(|n| n.starts_with("Choosing a folder looks like")).unwrap();
+        assert!(note(folder, Os::Windows).unwrap().starts_with("Choosing a folder looks like File Explorer: "));
+        assert!(note(folder, Os::Linux).unwrap().starts_with("Choosing a folder looks like a file manager: "));
+        let close = all_notes().find(|n| n.starts_with("Closing a tab leaves its chat running")).unwrap();
+        assert!(note(close, Os::Windows).unwrap().contains("(X, Ctrl+Shift+W, closing its group)"));
+        assert_eq!(note("The disk image's window has room.", Os::Linux), None);
+    }
+
     #[test]
     fn diagnostics_have_the_version_the_os_and_the_log_tail() {
         let dir = std::env::temp_dir().join(format!("sb-diag-{}", std::process::id()));

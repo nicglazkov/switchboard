@@ -1,0 +1,35 @@
+<svg viewBox="0 0 880 400" role="img" aria-labelledby="fig-states-flow-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-states-flow-t">The five states in the order of the board, with arrows for what moves a chat between them: Claude asks, you answer, a reply ends, the cache runs out, and you reply.</title>
+<text class="d-title" x="40" y="52">What moves a chat</text>
+<rect class="d-node-sel" x="40" y="176" width="120" height="48" rx="24"/>
+<text class="mid on-sel" x="100" y="205">Needs you</text>
+<rect class="d-panel" x="210" y="176" width="120" height="48" rx="24"/>
+<text class="mid" x="270" y="205">Working</text>
+<rect class="d-panel" x="380" y="176" width="120" height="48" rx="24"/>
+<text class="mid" x="440" y="205">Warm now</text>
+<rect class="d-panel" x="550" y="176" width="120" height="48" rx="24"/>
+<text class="mid" x="610" y="205">Gone cold</text>
+<rect class="d-panel" x="720" y="176" width="120" height="48" rx="24"/>
+<text class="mid" x="780" y="205">Quiet</text>
+<path class="d-line" d="M206 188H164"/><path class="d-line" d="M173 180L164 188L173 196"/>
+<path class="d-line" d="M164 212H206"/><path class="d-line" d="M197 204L206 212L197 220"/>
+<path class="d-line" d="M334 200H376"/><path class="d-line" d="M367 192L376 200L367 208"/>
+<path class="d-line" d="M504 200H546"/><path class="d-line" d="M537 192L546 200L537 208"/>
+<text class="mid" x="185" y="160">Claude asks</text>
+<text class="mid" x="185" y="252">You answer</text>
+<text class="mid" x="355" y="160">Reply ends</text>
+<text class="mid" x="525" y="140">Cache runs out</text>
+<text class="d-sub mid" x="525" y="160">big chat</text>
+<path class="d-line" d="M610 172V112a12 12 0 0 0-12-12H112a12 12 0 0 0-12 12V172"/>
+<path class="d-line" d="M92 163L100 172L108 163"/>
+<text class="mid" x="355" y="88">You reply, and the reply is held</text>
+<path class="d-line" d="M420 228V258a12 12 0 0 1-12 12H302a12 12 0 0 1-12-12V228"/>
+<path class="d-line" d="M282 237L290 228L298 237"/>
+<text class="mid" x="355" y="294">You reply</text>
+<path class="d-line" d="M460 228V258a12 12 0 0 0 12 12H748a12 12 0 0 0 12-12V228"/>
+<path class="d-line" d="M752 237L760 228L768 237"/>
+<text class="mid" x="610" y="294">Cache runs out, smaller chat</text>
+<path class="d-line" d="M800 228V328a12 12 0 0 1-12 12H262a12 12 0 0 1-12-12V228"/>
+<path class="d-line" d="M242 237L250 228L258 237"/>
+<text class="mid" x="525" y="364">You reply, or resume a stopped chat</text>
+</svg>

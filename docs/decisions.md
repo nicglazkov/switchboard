@@ -1,4 +1,10 @@
+---
+description: For developers. The judgment calls made while building Switchboard, one line each with its date, newest last.
+---
+
 # Decisions
+
+<p class="sb-meta">Last validated: Nov 23, 2026</p>
 
 One line per judgment call, newest last. Older history lives with the private working copy.
 

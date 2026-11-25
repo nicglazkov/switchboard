@@ -1,6 +1,7 @@
 """Relaunch, stop, move and start fresh never cut off a chat's own work without asking: subagents, background
 commands, a reply mid-way, results that have not reached the chat yet (2026-10-12)."""
 import json, os, sys, tempfile, threading, time, unittest
+import unittest.mock
 from pathlib import Path
 from tempfile import mkdtemp
 from tests.helpers import fresh_sb, user, assistant, entry, write_transcript
@@ -64,6 +65,31 @@ class BusyReportTest(unittest.TestCase):
         self.assertEqual(self.sb.children_active_ts(SID), 0)
         self.assertAlmostEqual(self.sb.children_active_ts(SID, 'c0ffee00'), self.now - 30, delta=2)
         self.assertEqual(self.sb.children_active_ts(SID, '../x'), 0)
+
+    def test_the_folders_are_listed_once_for_many_chats(self):
+        # 2026-11-25: a temp folder with 109,000 entries was read twice per chat, 11 to 15 s for a list of 16
+        self.sub('a1', 30)
+        self.task('b1', 20)
+        self.sb._task_roots_at = None
+        real, seen = os.scandir, []
+
+        def counting(p='.'):
+            seen.append(str(p))
+            return real(p)
+        with unittest.mock.patch.object(self.sb.os, 'scandir', counting):
+            first = self.sb.children_active_ts(SID)
+            for i in range(20):
+                self.sb.children_active_ts(f'{i:08x}-1111-4111-8111-111111111111', f'{i:08x}')
+        self.assertAlmostEqual(first, self.now - 20, delta=2)
+        self.assertEqual(seen.count(tempfile.gettempdir()), 1)
+        self.assertEqual(seen.count(str(Path(self.tmp) / 'claude' / 'projects')), 1)
+
+    def test_a_folder_made_after_the_list_was_kept_is_found_once_it_is_listed_again(self):
+        self.sb._task_roots_at = None
+        self.assertEqual(self.sb.children_active_ts(SID), 0)
+        self.sub('a1', 30)
+        self.sb._task_roots_at = None  # as after TASK_ROOTS_KEEP seconds
+        self.assertAlmostEqual(self.sb.children_active_ts(SID), self.now - 30, delta=2)
 
     def test_a_quiet_chat_is_not_busy(self):
         self.sub('old1', 7200)

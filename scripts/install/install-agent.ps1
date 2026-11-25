@@ -6,12 +6,19 @@
 #
 #   -Server ADDR    the Switchboard server (an address or name; its downloads are at http://ADDR:8131)
 #   -Code CODE      link with this code from Add a machine (no ssh into this PC)
+#   -Pair CODE      join a home computer that uses keys, with the code or the link "switchboard code" printed
+#                   there (no address to type; needs -Node PATH, or -Server ADDR to download the node)
+#   -Relay URL      with -Pair: the relay to find the home computer through, when a code needs one
 #   -SshKey "KEY"   let the server in over ssh with this public key, limited to the agent (no shell)
 #   -Name ID        this PC's id (lowercase letters and digits; default: from its name)
 #   -Label NAME     this PC's name in Switchboard (default: its own name)
 #   -Sb PATH        use this sb.py instead of downloading one
 #   -Node PATH      use this switchboard-node.exe instead of downloading one
 #   -Update         replace an agent that is already here (by default it is kept)
+#
+# Python: the agent runs with Switchboard's own Python, in %LOCALAPPDATA%\Switchboard\python. When that is not here
+# yet it is downloaded from the server (http://ADDR:8131/python/, checked against the SHA256SUMS there). This PC's
+# own Python (3.9 or newer) is used only when the server has none for Windows, or when that one does not run here.
 param(
     [string]$Server = '',
     [string]$Code = '',
@@ -20,6 +27,8 @@ param(
     [string]$Label = '',
     [string]$Sb = '',
     [string]$Node = '',
+    [string]$Pair = '',
+    [string]$Relay = '',
     [switch]$Update
 )
 $ErrorActionPreference = 'Stop'
@@ -31,11 +40,81 @@ function Die([string]$m) { Write-Host "install-agent: $m" -ForegroundColor Red; 
 if ($Server -and $Server -notmatch '^[A-Za-z0-9][A-Za-z0-9.:_-]*$|^\[[0-9A-Fa-f:.]+\]$') { Die '-Server takes an address or a name, like 10.0.0.5 or studio.local' }
 if ($Code -and $Code -notmatch '^[A-Za-z0-9-]{4,20}$') { Die '-Code takes the code shown in Add a machine' }
 if (($Code -or $SshKey) -and -not $Server -and -not $Node) { Die '-Code needs -Server (where to link)' }
+# -Pair: a short code (letters, digits and dashes) or a switchboard://pair/ link. Checked before anything is changed.
+if ($Pair -and $Code) { Die '-Pair and -Code are two ways to join: use one.' }
+if ($Pair -and ($Pair.Length -gt 2000 -or $Pair -notmatch '^[A-Za-z0-9-]{4,40}$|^switchboard://pair/[A-Za-z0-9?&=%._~:/+-]+$')) { Die '-Pair takes the code or the link that "switchboard code" printed on the home computer' }
+if ($Relay -and -not $Pair) { Die '-Relay goes with -Pair' }
+if ($Relay -and $Relay -notmatch '^https?://[\]\[A-Za-z0-9.:_-]+(/[A-Za-z0-9._~:/%-]*)?$') { Die "-Relay takes a relay's address, like https://relay.example.com" }
+if ($Pair -and -not $Node -and -not $Server) { Die '-Pair needs switchboard-node: pass -Node PATH, or -Server ADDR to download it from a home computer that still answers by address.' }
+
+$Dl = if ($Server) { "http://${Server}:8131/node" } else { '' }
+$Tmp = Join-Path ([IO.Path]::GetTempPath()) ("switchboard-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
+New-Item -ItemType Directory -Force $Tmp | Out-Null
 
 # ---------------------------------------------------------------- Python
-# The Microsoft Store puts a "python" that only opens the Store; ask each candidate for its version instead.
+# Switchboard's own Python, in %LOCALAPPDATA%\Switchboard\python. An archive is unpacked beside it, tried, and moved
+# into place; one that is here already and is the same build (its .pin) is kept as it is. When the folder cannot be
+# replaced because a program still runs from it, the one that is here stays.
+$OwnPy = Join-Path (Join-Path $env:LOCALAPPDATA 'Switchboard') 'python'
+function PyRuns([string]$exe) {
+    try { & $exe -c 'import sys, ssl, hashlib; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>$null | Out-Null; return ($LASTEXITCODE -eq 0) } catch { return $false }
+}
+function OwnPython([string]$archive, [string]$pin) {
+    $exe = Join-Path $OwnPy 'python.exe'
+    # (one an earlier run could not delete, because a program still ran from it)
+    if (Test-Path $OwnPy) { Remove-Item -Recurse -Force "$OwnPy.old" -ErrorAction SilentlyContinue }
+    $has = (Test-Path $exe) -and (PyRuns $exe)
+    $same = $has -and ((Get-Content (Join-Path $OwnPy '.pin') -ErrorAction SilentlyContinue | Select-Object -First 1) -eq $pin)
+    if ($same) { return $exe }
+    if ((Get-FileHash -Algorithm SHA256 $archive).Hash.ToLower() -ne $pin.ToLower()) { Die 'Python for this PC did not match its checksum; nothing was changed.' }
+    $new = "$OwnPy.new"
+    Remove-Item -Recurse -Force $new -ErrorAction SilentlyContinue
+    New-Item -ItemType Directory -Force $new | Out-Null
+    & tar.exe -xzf $archive -C $new --strip-components 1 2>$null | Out-Null
+    if ($LASTEXITCODE -ne 0 -or -not (PyRuns (Join-Path $new 'python.exe'))) {
+        Remove-Item -Recurse -Force $new -ErrorAction SilentlyContinue
+        if ($has) { return $exe }
+        Say "(Switchboard's own Python does not run on this PC, so this PC's own is used.)"
+        return $null
+    }
+    Set-Content -Path (Join-Path $new '.pin') -Value $pin -Encoding ascii
+    try {
+        if (Test-Path $OwnPy) { Remove-Item -Recurse -Force "$OwnPy.old" -ErrorAction SilentlyContinue; Move-Item $OwnPy "$OwnPy.old" }
+        Move-Item $new $OwnPy
+        Remove-Item -Recurse -Force "$OwnPy.old" -ErrorAction SilentlyContinue
+    } catch {
+        Remove-Item -Recurse -Force $new -ErrorAction SilentlyContinue
+        if (-not (Test-Path $OwnPy) -and (Test-Path "$OwnPy.old")) { Move-Item "$OwnPy.old" $OwnPy }
+        if ($has) { Say "(Switchboard's own Python is in use, so the one that is here stays until the next update.)"; return $exe }
+        return $null
+    }
+    return $exe
+}
+function PinOf([string]$sums, [string]$name) {
+    foreach ($l in ($sums -split "`n")) {
+        $p = $l.Trim() -split '\s+', 2
+        if ($p.Count -eq 2 -and $p[1].TrimStart('*') -eq $name) { return $p[0] }
+    }
+    return $null
+}
 $Py = $null
+if ((Test-Path (Join-Path $OwnPy 'python.exe')) -and (PyRuns (Join-Path $OwnPy 'python.exe'))) { $Py = Join-Path $OwnPy 'python.exe' }
+elseif ($Server -and [Environment]::Is64BitOperatingSystem) {
+    try {
+        $pyName = 'python-windows-x86_64.tar.gz'
+        $pin = PinOf (Invoke-WebRequest -UseBasicParsing -Uri "http://${Server}:8131/python/SHA256SUMS" -TimeoutSec 30).Content $pyName
+        if ($pin) {
+            Invoke-WebRequest -UseBasicParsing -Uri "http://${Server}:8131/python/$pyName" -OutFile (Join-Path $Tmp $pyName) -TimeoutSec 600
+            $Py = OwnPython (Join-Path $Tmp $pyName) $pin
+        }
+    } catch {
+        if ("$_" -like '*checksum*') { Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue; throw }
+        $Py = $null  # the server has none to give: this PC's own is looked for below
+    }
+}
+# The Microsoft Store puts a "python" that only opens the Store; ask each candidate for its version instead.
 foreach ($c in @('python', 'py')) {
+    if ($Py) { break }
     $cmd = Get-Command $c -ErrorAction SilentlyContinue
     if (-not $cmd) { continue }
     $args0 = @(); if ($c -eq 'py') { $args0 = @('-3') }
@@ -46,16 +125,13 @@ foreach ($c in @('python', 'py')) {
     }
 }
 if (-not $Py) {
-    Say 'Python 3 is not installed. The agent is a Python program (3.9 or newer).'
+    Remove-Item -Recurse -Force $Tmp -ErrorAction SilentlyContinue
+    Say 'Python 3 is not installed, and the server has none to give this PC. The agent is a Python program (3.9 or newer).'
     Say 'Install it with:  winget install -e --id Python.Python.3.12'
     Say '(or from https://www.python.org/downloads/, ticking "Add python.exe to PATH"), then open a new PowerShell and run this again.'
     return  # not exit: pasted as a script block, exit would close the person's PowerShell
 }
 Say "Python at $Py"
-
-$Dl = if ($Server) { "http://${Server}:8131/node" } else { '' }
-$Tmp = Join-Path ([IO.Path]::GetTempPath()) ("switchboard-" + [guid]::NewGuid().ToString('N').Substring(0, 8))
-New-Item -ItemType Directory -Force $Tmp | Out-Null
 
 function Fetch([string]$url, [string]$file) { Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $file -TimeoutSec 120 }
 function SumsOk([string]$file, [string]$name) {
@@ -102,8 +178,10 @@ try {
         Say "Agent installed: Claude Code's hooks, status line and the switchboard MCP server are set up in $HOME\.claude."
     }
 
-    # ------------------------------------------------------------ link with a code
-    if ($Code) {
+    # ------------------------------------------------------------ link with a code, or pair with a key
+    # -Code is the hub's code and its address; -Pair is a home computer's code or link, and the node finds the
+    # home computer by its key. Either way the node is then set to run at logon.
+    if ($Code -or $Pair) {
         $exe = Join-Path $Tmp 'switchboard-node.exe'
         if ($Node) { Copy-Item $Node $exe }
         else {
@@ -111,11 +189,23 @@ try {
             if (-not (SumsOk $exe 'switchboard-node.exe')) { Die "switchboard-node.exe from $Dl did not match its checksum; nothing was changed." }
         }
         Unblock-File $exe -ErrorAction SilentlyContinue
-        $pairArgs = @('pair', "${Server}:8132", $Code)
-        if ($Name) { $pairArgs += @('--name', $Name) }
-        if ($Label) { $pairArgs += @('--label', $Label) }
-        & $exe @pairArgs
-        if ($LASTEXITCODE -ne 0) { Die "linking failed (see above). Codes work once, for 10 minutes: get a new one with 'switchboard setup --code' on the server." }
+        if ($Pair) {
+            if ($Relay) {
+                & $exe relay $Relay
+                if ($LASTEXITCODE -ne 0) { Die 'the relay could not be set (see above); nothing was paired.' }
+            }
+            $pairArgs = @('pair', $Pair)
+            # (the name shown on the home computer; its id there is made from it)
+            if ($Label) { $pairArgs += @('--name', $Label) } elseif ($Name) { $pairArgs += @('--name', $Name) }
+            & $exe @pairArgs
+            if ($LASTEXITCODE -ne 0) { Die "pairing failed (see above). A code or a link works once, for a few minutes: get a new one with 'switchboard code' on the home computer." }
+        } else {
+            $pairArgs = @('pair', "${Server}:8132", $Code)
+            if ($Name) { $pairArgs += @('--name', $Name) }
+            if ($Label) { $pairArgs += @('--label', $Label) }
+            & $exe @pairArgs
+            if ($LASTEXITCODE -ne 0) { Die "linking failed (see above). Codes work once, for 10 minutes: get a new one with 'switchboard setup --code' on the server." }
+        }
         & $exe install
         if ($LASTEXITCODE -ne 0) { Die 'the link is saved, but the node could not be set to run at logon (see above).' }
     }

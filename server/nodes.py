@@ -161,6 +161,15 @@ def install_lines(addr, code, base):
     return {'mac': unix('mac'), 'linux': unix('linux'), 'windows': win}
 
 
+def agent_lines(host, code):
+    """The same link through this server's own install script (install-agent.sh and .ps1 in its downloads): it also
+    brings Switchboard's own Python when the new computer has none, and checks each download against SHA256SUMS."""
+    dl = f'http://{host}:{DOWNLOADS_PORT}'
+    unix = f'curl -fsSL {dl}/install-agent.sh | bash -s -- --server {host} --code {code}'
+    win = f'& ([scriptblock]::Create((iwr -UseBasicParsing {dl}/install-agent.ps1).Content)) -Server {host} -Code {code}'
+    return {'mac': unix, 'linux': unix, 'windows': win}
+
+
 def _loopback(h):
     try:
         return h.strip('[]') == 'localhost' or ipaddress.ip_address(h.strip('[]')).is_loopback
@@ -178,7 +187,121 @@ def pair(host, hub=None, cfg_dir=None, origins=(), kit_node=KIT_NODE):
     addr = f'{h}:{HUB_PORT}'
     base, line = downloads_base(cfg_dir, h, kit_node), f'switchboard-node pair {addr} {r["code"]}'
     out = {'ok': True, 'code': r['code'], 'expires': r['expires'], 'hub': addr, 'pair': line}
+    scripts = Path(kit_node).parent
+    if base == f'http://{h}:{DOWNLOADS_PORT}/node' and all((scripts / f).is_file() for f in ('install-agent.sh', 'install-agent.ps1')):
+        return dict(out, install=agent_lines(h, r['code']))  # this server's own downloads, with its install script
     if base:
         return dict(out, install=install_lines(addr, r['code'], base))
     return dict(out, install={'mac': line, 'linux': line, 'windows': line},  # nowhere to download from: the pair line alone
                 note='Install switchboard-node on the new machine first, then run this line there.')
+
+
+# ---------------------------------------------------------------- the node's control API (keys)
+#
+# The node on this computer answers on 127.0.0.1:8137 once keys are on (the control API, section 3.5 of
+# docs/plans/2026-11-22-keys-phase-1-2.md; native/crates/sb-node/src/control.rs). What is here is the server's side, a
+# thin proxy to it. With keys off, or no node, every call below raises OSError and the routes that use them say the
+# node did not answer.
+#
+# The routes it uses:
+#   GET  /status          -> {"ok": true, "machine": "<this computer's name in the list, when it has one>", ...}
+#   GET  /devices         -> {"ok": true, "devices": [{"id", "name", "kind": "computer"|"phone", "machine"?,
+#                             "paired": <time>, "via": "code"|"link"|"upgrade",
+#                             "last_seen": <time or null>, "path": "direct"|"relay"|null,
+#                             "ver"?: "<the version its helper runs>", "answers_away"?: <whether it took the
+#                             home computer's list of devices, so it can answer while home is away>}],
+#                             "roster"?: {"epoch", "seq", "at", "expires"} (the list of devices as last signed)}
+#   POST /pair/new    {}  -> {"ok": true, "code": "ABCD-EFGH", "link": "switchboard://pair/1?...", "expires": <time>}
+#                            ("code" is null when the home has no relay: the link alone pairs the device)
+#   POST /devices/remove {"id": "<device id>"} -> {"ok": true}
+# The server's routes for these are GET and POST /api/keys/devices and POST /api/pair_device (the plan says
+# /api/devices, but POST /api/devices is already where a phone registers for notifications).
+# The control API refuses a request with an Origin, a Host that is not this computer, or a POST that is not JSON
+# (as the hub's internal routes do), so nothing is sent on from the client's own headers.
+
+CONTROL_PORT = 8137
+CONTROL = (os.environ.get('SWITCHBOARD_NODE_CONTROL') or f'http://127.0.0.1:{CONTROL_PORT}').rstrip('/')
+DEVICE_ID_RE = re.compile(r'[A-Za-z0-9_-]{8,128}')
+DEVICE_KEYS = ('id', 'name', 'kind', 'machine', 'paired', 'via', 'last_seen', 'path')
+ROSTER_KEYS = ('epoch', 'seq', 'at', 'expires')
+PAIR_KEYS = ('code', 'link', 'expires')
+
+
+def control_call(method, path, body=None, timeout=10, control=None):
+    """JSON from the node's control API on this computer; OSError with the node's own words when it says no, or
+    when nothing answers there."""
+    base = (control or CONTROL).rstrip('/')
+    u = urlsplit(base)
+    try:
+        local = u.scheme == 'http' and ipaddress.ip_address(u.hostname or '').is_loopback
+    except ValueError:
+        local = False
+    if not local:  # the control API is this computer's own: a setting that points elsewhere is not followed
+        raise OSError('the node address is not on this computer')
+    data = None if body is None else json.dumps(body).encode()
+    req = urllib.request.Request(base + path, data=data, method=method, headers={'Content-Type': 'application/json'})
+    try:
+        with direct_open(req, timeout=timeout) as r:
+            v = json.loads(r.read(1_000_000) or b'{}')
+    except urllib.error.HTTPError as e:
+        try:
+            v = json.loads(e.read(100_000) or b'{}')
+        except (ValueError, OSError):
+            v = {}
+        e.close()
+        raise OSError(str((v.get('error') if isinstance(v, dict) else None) or f'the node answered {e.code}')[:200])
+    except urllib.error.URLError as e:
+        raise OSError(f'the node is not reachable ({getattr(e, "reason", e)})')
+    except (TimeoutError, ConnectionError) as e:
+        raise OSError(f'the node did not answer ({e or type(e).__name__})')
+    except ValueError:
+        raise OSError("the node's answer could not be read")
+    if not isinstance(v, dict):
+        raise OSError("the node's answer could not be read")
+    return v
+
+
+def node_status(control=None):
+    """The control API's GET /status, as it is."""
+    return control_call('GET', '/status', timeout=5, control=control)
+
+
+def devices(control=None):
+    """GET /api/keys/devices: {"ok": true, "devices": [...], "roster": {...} or null}, the devices paired with this
+    home computer, and when it last signed its list of them. Only the fields named above are passed on, so nothing
+    else the node keeps beside a device can reach an app. "ver" and "answers_away" are there only when the node
+    knows them (keys phase 4a): a text and a true or false."""
+    v = control_call('GET', '/devices', timeout=5, control=control)
+    rows = v.get('devices')
+    if not isinstance(rows, list):
+        raise OSError("the node's answer could not be read")
+    out = []
+    for d in rows:
+        if not (isinstance(d, dict) and isinstance(d.get('id'), str)):
+            continue
+        row = {k: d[k] for k in DEVICE_KEYS if k in d}
+        if isinstance(d.get('ver'), str) and d['ver']:
+            row['ver'] = d['ver'][:40]
+        if isinstance(d.get('answers_away'), bool):
+            row['answers_away'] = d['answers_away']
+        out.append(row)
+    number = lambda x: isinstance(x, (int, float)) and not isinstance(x, bool)
+    r = v.get('roster')
+    roster = {k: r[k] for k in ROSTER_KEYS} if isinstance(r, dict) and all(number(r.get(k)) for k in ROSTER_KEYS) else None
+    return {'ok': True, 'devices': out, 'roster': roster}
+
+
+def pair_device(control=None):
+    """POST /api/pair_device: {"ok": true, "code", "link", "expires"}, a code and a link that pair one device.
+    "code" is null when this home computer has no relay: the link still pairs it."""
+    v = control_call('POST', '/pair/new', {}, control=control)
+    if not isinstance(v.get('link'), str) or not (v.get('code') is None or isinstance(v.get('code'), str)):
+        raise OSError("the node's answer could not be read")
+    v.setdefault('code', None)
+    return dict({'ok': True}, **{k: v[k] for k in PAIR_KEYS if k in v})
+
+
+def device_remove(dev, control=None):
+    """POST /api/keys/devices {"remove": id}: that device's key stops working."""
+    control_call('POST', '/devices/remove', {'id': dev}, control=control)
+    return {'ok': True}

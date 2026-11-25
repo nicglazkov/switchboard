@@ -55,12 +55,21 @@ pub(crate) fn files_ok(m: &Machine) -> bool {
     m.online != Some(false) && m.features.iter().any(|f| f == "files")
 }
 
+/// A window's title. A Mac's title bar and Window menu name the window alone ("Settings"): the menu bar already
+/// says whose it is. Windows and Linux keep the app's name, which is what their task bars and switchers show.
+pub(crate) fn window_title(title: &str, mac: bool) -> &str {
+    if mac { title.strip_suffix(", Switchboard").unwrap_or(title) } else { title }
+}
+
 pub(crate) fn options(title: &str, w: f32, h: f32, min: (f32, f32), cx: &App) -> WindowOptions {
+    // On Windows the window draws its own caption (frame::framed), inside the size asked for: the page keeps its
+    // height.
+    let h = if cfg!(target_os = "windows") { h + crate::ui::header() } else { h };
     WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(gpui::Bounds::centered(None, size(px(w), px(h)), cx))),
         titlebar: Some(TitlebarOptions {
-            title: Some(title.to_string().into()),
-            appears_transparent: false,
+            title: Some(window_title(title, crate::ui::MAC).to_string().into()),
+            appears_transparent: cfg!(target_os = "windows"),
             traffic_light_position: None,
         }),
         window_min_size: Some(size(px(min.0), px(min.1))),
@@ -74,6 +83,9 @@ pub(crate) fn options(title: &str, w: f32, h: f32, min: (f32, f32), cx: &App) ->
 /// Opens Files, or brings it forward when it is open.
 pub fn open_files(cx: &mut App) {
     let app = crate::state::app(cx);
+    if app.update(cx, |s, cx| s.needs_home(cx)) {
+        return;
+    }
     if let Some(h) = app.read(cx).files_win
         && h.update(cx, |_, window, _| window.activate_window()).is_ok()
     {
@@ -1441,6 +1453,7 @@ impl FilesView {
                     &t,
                     "fx-machine",
                     items,
+                    None,
                     cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
                         this.drop.close_out();
                         cx.notify();
@@ -1849,7 +1862,7 @@ impl PairView {
             .text_color(t.ink)
             .child(div().text_size(px(18.)).font_weight(FontWeight::BOLD).child("Add a machine"))
             .child(div().text_size(px(13.)).text_color(t.dim).child(
-                "Link another computer that runs Claude Code. It connects out to this hub, so you don't need SSH, just your network or tailnet.",
+                "Link another computer that runs Claude Code. It connects out to your home computer, so you need no SSH, just your network or Tailscale.",
             ));
         let err = self.error.clone().map(|e| div().text_size(px(12.5)).text_color(t.bad).child(e));
         let Some(r) = self.r.clone() else {
@@ -2013,6 +2026,15 @@ fn still_asked(asked: (u64, u64), now: (u64, u64)) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_mac_window_is_titled_by_what_it_is_and_the_others_keep_the_apps_name() {
+        use super::window_title;
+        assert_eq!(window_title("Settings, Switchboard", true), "Settings");
+        assert_eq!(window_title("Add a machine, Switchboard", true), "Add a machine");
+        assert_eq!(window_title("Settings, Switchboard", false), "Settings, Switchboard");
+        assert_eq!(window_title("Switchboard", true), "Switchboard");
+    }
+
     #[test]
     fn a_preview_that_comes_back_late_is_dropped() {
         use super::still_asked;

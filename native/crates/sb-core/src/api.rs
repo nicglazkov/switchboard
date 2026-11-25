@@ -32,6 +32,111 @@ pub struct ApiSessions {
     /// "(for <machine>)" name tag is all there is to go by (model::normalize).
     #[serde(default, deserialize_with = "lenient_opt")]
     pub origins: Option<bool>,
+    /// Set when this is not the home computer answering: it is away, and the helper on this computer put the
+    /// board together from what the other computers say about their own chats (sb-link standin.rs).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub away: Option<ApiAway>,
+}
+
+/// The home computer is away, and what is shown in its place. Every sentence is the stand-in's own.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAway {
+    /// Since when (unix seconds, this computer's clock).
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub since: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub home: Option<ApiAwayHome>,
+    /// The computers whose chats are showing, and the ones that are not, with why ("unreachable",
+    /// "needs_update", "refused", "is_home").
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub showing: Vec<ApiAwayComputer>,
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub missing: Vec<ApiAwayComputer>,
+    /// The list of devices this was put together from: when the home computer signed it and when it runs out.
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub roster: Option<ApiAwayRoster>,
+    /// "Home is away. Showing chats from Laptop and Tower."
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub line: Option<String>,
+    /// "Mini needs an update before it can answer while the home computer is away."
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub notes: Vec<String>,
+    /// What cannot be done meanwhile ("new_chat", "move", "history", "files", "usage", "library", "settings",
+    /// "notifications"), and the one sentence that says so.
+    #[serde(default, deserialize_with = "lenient_vec")]
+    pub lacks: Vec<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub lacks_line: Option<String>,
+}
+
+impl ApiAway {
+    /// The banner's line. An answer without one still says the one thing that is known.
+    pub fn line(&self) -> &str {
+        self.line.as_deref().map(str::trim).filter(|l| !l.is_empty()).unwrap_or("Home is away.")
+    }
+    /// A computer whose chats are not showing, by its machine name.
+    pub fn missing_of(&self, machine: &str) -> Option<&ApiAwayComputer> {
+        self.missing.iter().find(|c| c.machine == machine)
+    }
+    /// The one reason for everything that is greyed out.
+    pub fn reason(&self) -> &str {
+        self.lacks_line.as_deref().map(str::trim).filter(|l| !l.is_empty()).unwrap_or(AWAY_REASON)
+    }
+}
+
+/// Said of one thing that needs the home computer while it is away (the stand-in's own refusal).
+pub const AWAY_REASON: &str = "The home computer is away. This needs the home computer.";
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAwayHome {
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub id: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub name: Option<String>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub last_seen: Option<f64>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAwayComputer {
+    #[serde(default)]
+    pub machine: String,
+    #[serde(default)]
+    pub label: String,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub why: Option<String>,
+}
+
+impl ApiAwayComputer {
+    /// Why its chats are not showing, as its row of the board says it (the stand-in's own sentences).
+    pub fn sentence(&self) -> String {
+        let label = if self.label.trim().is_empty() { &self.machine } else { &self.label };
+        match self.why.as_deref() {
+            Some("is_home") => "The home computer is away.".to_string(),
+            Some("needs_update") => {
+                format!("{label} needs an update before it can answer while the home computer is away.")
+            }
+            Some("refused") => format!("{label} does not answer this device."),
+            _ => format!("{label} cannot be reached just now."),
+        }
+    }
+    /// The same in a word or two, under the computer's name.
+    pub fn word(&self) -> &'static str {
+        match self.why.as_deref() {
+            Some("is_home") => "Away",
+            Some("needs_update") => "Needs an update",
+            Some("refused") => "Not answering",
+            _ => "Not reachable",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ApiAwayRoster {
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub at: Option<f64>,
+    #[serde(default, deserialize_with = "lenient_opt")]
+    pub expires: Option<f64>,
 }
 
 /// Who sent a chat that another chat started with run_on (server/features.py, Dispatch.mark). Times are on the

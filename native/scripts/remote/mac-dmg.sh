@@ -66,6 +66,7 @@ if [ -n "${SB_SIGN_IDENTITY:-}" ]; then
   for b in dist/Switchboard.app/Contents/Resources/server-kit/native/dist/switchboard-*; do
     if [ -f "$b" ]; then codesign --force --options runtime --timestamp -s "$SB_SIGN_IDENTITY" "$b"; fi
   done
+  bash scripts/sign-python.sh dist/Switchboard.app/Contents/Resources/server-kit/python "$SB_SIGN_IDENTITY" --options runtime --timestamp
   for app in dist/Switchboard.app "$I"; do
     codesign --force --deep --options runtime --timestamp -s "$SB_SIGN_IDENTITY" "$app"
     codesign --verify --deep --strict "$app"

@@ -1,0 +1,53 @@
+<svg viewBox="0 0 880 420" role="img" aria-labelledby="fig-quickstart-flow-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-quickstart-flow-t">Switchboard is installed on the home computer in the middle. One line links the closet PC on the left to it, and the app on the laptop on the right finds it. A chat on the closet PC then asks a question, the board shows it, you answer on the laptop, and the answer goes back to the chat.</title>
+<text class="d-title" x="40" y="52">From nothing to your first answer</text>
+<rect class="d-panel" x="40" y="84" width="200" height="260" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="94" y="120">Closet PC</text>
+<rect class="d-chip" x="60" y="150" width="160" height="40" rx="20"/>
+<text class="d-small mid" x="140" y="175">Helper</text>
+<rect class="d-chip" x="60" y="230" width="160" height="90" rx="14"/>
+<text class="mid" x="140" y="272">A chat</text>
+<text class="d-sub mid" x="140" y="294">in Claude Code</text>
+<rect class="d-chip-sel" x="340" y="84" width="200" height="260" rx="16"/>
+<g class="d-ico sel" transform="translate(360 102)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text class="t-sel" x="394" y="120">Home</text>
+<circle class="d-num-sel" cx="506" cy="114" r="13"/>
+<text class="d-num" x="506" y="114" dy="4.5">1</text>
+<rect class="d-panel" x="360" y="150" width="160" height="40" rx="20"/>
+<text class="d-small mid" x="440" y="175">Switchboard</text>
+<rect class="d-panel" x="360" y="230" width="160" height="90" rx="14"/>
+<text class="mid" x="440" y="272">The board</text>
+<text class="d-sub mid" x="440" y="294">Needs you</text>
+<rect class="d-panel" x="640" y="84" width="200" height="260" rx="14"/>
+<g class="d-ico" transform="translate(660 102)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="694" y="120">Laptop</text>
+<rect class="d-chip" x="660" y="150" width="160" height="40" rx="20"/>
+<text class="d-small mid" x="740" y="175">The app</text>
+<rect class="d-chip" x="660" y="230" width="160" height="90" rx="14"/>
+<g class="d-ico" transform="translate(728 244)"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></g>
+<text class="mid" x="740" y="294">You</text>
+<path class="d-req" d="M336 170H244"/>
+<path class="d-req" d="M253 162L244 170L253 178"/>
+<circle class="d-num-req" cx="290" cy="170" r="13"/>
+<text class="d-num" x="290" y="170" dy="4.5">2</text>
+<path class="d-req" d="M636 170H544"/>
+<path class="d-req" d="M553 162L544 170L553 178"/>
+<circle class="d-num-req" cx="590" cy="170" r="13"/>
+<text class="d-num" x="590" y="170" dy="4.5">3</text>
+<path class="d-req" d="M244 254H336"/>
+<path class="d-req" d="M327 246L336 254L327 262"/>
+<circle class="d-num-req" cx="290" cy="254" r="13"/>
+<text class="d-num" x="290" y="254" dy="4.5">4</text>
+<path class="d-ret" d="M636 296H544"/>
+<path class="d-ret" d="M553 288L544 296L553 304"/>
+<circle class="d-num-ret" cx="590" cy="296" r="13"/>
+<text class="d-num" x="590" y="296" dy="4.5">5</text>
+<path class="d-ret" d="M336 296H244"/>
+<path class="d-ret" d="M253 288L244 296L253 304"/>
+<circle class="d-num-ret" cx="290" cy="296" r="13"/>
+<text class="d-num" x="290" y="296" dy="4.5">6</text>
+<text class="d-sub mid" x="140" y="378">Runs the chat.</text>
+<text class="d-sub mid" x="440" y="378">Keeps the board.</text>
+<text class="d-sub mid" x="740" y="378">Shows the board.</text>
+</svg>

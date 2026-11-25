@@ -24,6 +24,16 @@ sb_update_env() {
     *[!A-Za-z0-9+/=:._/%~-]*) echo "SB_UPDATE_PUBKEY or SB_UPDATE_FEED has characters no key or URL has" >&2; exit 1 ;;
   esac
   [ -n "$SB_UPDATE_PUBKEY" ] || echo "note: SB_UPDATE_PUBKEY is not set, so this build has updates off" >&2
+  # The relay a node uses when nothing else names one (sb-node, keys.rs: after SWITCHBOARD_RELAY, node.json and the
+  # home computer's own). Empty by default: such a build has no relay of its own.
+  sb_host_opt SB_RELAY_DEFAULT || SB_RELAY_DEFAULT=""
+  case "$SB_RELAY_DEFAULT" in
+    "" | http://?* | https://?*) ;;
+    *) echo "SB_RELAY_DEFAULT must be a relay's http:// or https:// address, or empty" >&2; exit 1 ;;
+  esac
+  case "$SB_RELAY_DEFAULT" in
+    *[!A-Za-z0-9:._/%~\[\]-]*) echo "SB_RELAY_DEFAULT has characters no URL has" >&2; exit 1 ;;
+  esac
 }
 
 sb_hosts() {

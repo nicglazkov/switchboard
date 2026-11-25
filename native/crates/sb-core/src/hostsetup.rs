@@ -229,7 +229,14 @@ pub fn python_new_enough(v: (u32, u32, u32)) -> bool {
 /// Python 3 on this computer: the program and its version, or why there is none, in plain words.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Python {
-    Found { path: PathBuf, version: String },
+    Found {
+        path: PathBuf,
+        version: String,
+    },
+    /// The kit carries Switchboard's own Python for this computer, so it needs none of its own.
+    Own {
+        version: String,
+    },
     Missing(String),
     TooOld(String),
 }
@@ -256,6 +263,29 @@ fn python_candidates(os: Os) -> Vec<PathBuf> {
         }
     }
     out
+}
+
+/// The names of the kinds of computer a kit may carry Python for here (scripts/install/python-pins.txt). A Mac's kit
+/// carries both of its kinds, and install-server.sh picks the one for the chip.
+pub fn python_kinds(os: Os, arch: &str) -> Vec<String> {
+    let arch = match arch {
+        "aarch64" | "arm64" => "arm64",
+        "x86_64" | "amd64" => "x86_64",
+        _ => return Vec::new(),
+    };
+    match os {
+        Os::Mac => vec!["mac-arm64".into(), "mac-x86_64".into()],
+        _ => vec![format!("{}-{arch}", os.short())],
+    }
+}
+
+/// Python for this computer: the kit's own when it carries one (the installer uses that one first), else what
+/// find_python finds on the computer.
+pub fn python_for(os: Os, kit: Option<&Kit>) -> Python {
+    match kit.and_then(|k| k.python(os, std::env::consts::ARCH)) {
+        Some(version) => Python::Own { version },
+        None => find_python(os),
+    }
 }
 
 /// Finds Python 3. On a Mac, /usr/bin/python3 is only a stand-in until Apple's command line tools are installed
@@ -410,7 +440,7 @@ pub fn checks(os: Os, f: &Facts) -> Vec<Check> {
             mark: Mark::Warn,
             detail: format!(
                 "{why} A laptop probably isn't a good fit for the server: it sleeps when the lid closes and leaves \
-                 the network when it goes with you, and then your phone and your other machines lose Switchboard. A \
+                 the network when it goes with you, and then your phone and your other computers lose Switchboard. A \
                  computer that stays on at home, like a desktop or a Mac mini, works best."
             ),
         },
@@ -438,6 +468,12 @@ pub fn checks(os: Os, f: &Facts) -> Vec<Check> {
             title: format!("Python {version} is here"),
             mark: Mark::Ok,
             detail: "The server is a Python program, and this is all it needs.".into(),
+        },
+        Some(Python::Own { version }) => Check {
+            key: Key::Python,
+            title: format!("Python {version} comes with Switchboard"),
+            mark: Mark::Ok,
+            detail: "The server is a Python program. Switchboard brings its own, so this computer needs none.".into(),
         },
         Some(Python::Missing(why)) => {
             Check { key: Key::Python, title: "Python 3 is missing".into(), mark: Mark::Bad, detail: why.clone() }
@@ -497,7 +533,7 @@ pub fn checks(os: Os, f: &Facts) -> Vec<Check> {
             key: Key::Others,
             title: "No other server on this network".into(),
             mark: Mark::Ok,
-            detail: "This will be the one your machines and phones use.".into(),
+            detail: "This will be the one your computers and phones use.".into(),
         }
     } else {
         let names: Vec<String> = f.others.iter().map(|o| o.name.clone()).collect();
@@ -505,7 +541,7 @@ pub fn checks(os: Os, f: &Facts) -> Vec<Check> {
             key: Key::Others,
             title: format!("{} already runs a server", and_list(&names)),
             mark: Mark::Warn,
-            detail: "One server is enough for all your machines. You can still set up another one here, but the \
+            detail: "One server is enough for all your computers. You can still set up another one here, but the \
                      apps on this network will then ask which to use."
                 .into(),
         }
@@ -576,6 +612,24 @@ impl Kit {
     pub fn hub(&self, os: Os) -> Option<PathBuf> {
         let p = self.root.join("native/dist").join(format!("switchboard-hub-{}", os.short()));
         p.is_file().then_some(p)
+    }
+
+    /// The version of the Python the kit carries for this kind of computer, when it carries one: laid out as
+    /// python/<kind>/ (a Mac's kit, so its programs can be signed) or as python/python-<kind>.tar.gz. "3" when the
+    /// kit does not say which (python/VERSION).
+    pub fn python(&self, os: Os, arch: &str) -> Option<String> {
+        let dir = self.root.join("python");
+        let exe = if os == Os::Windows { "python.exe" } else { "bin/python3" };
+        let has = python_kinds(os, arch)
+            .iter()
+            .any(|k| dir.join(k).join(exe).is_file() || dir.join(format!("python-{k}.tar.gz")).is_file());
+        has.then(|| {
+            std::fs::read_to_string(dir.join("VERSION"))
+                .ok()
+                .and_then(|t| t.split_whitespace().next().map(str::to_string))
+                .filter(|v| python_version(v).is_some())
+                .unwrap_or_else(|| "3".into())
+        })
     }
 
     /// The installer and its arguments, run as the user who runs the app (never with sudo).
@@ -689,10 +743,11 @@ pub fn step_title(raw: &str) -> String {
         ("Checking this machine", "Checking this computer"),
         ("Checking this PC", "Checking this computer"),
         ("Putting the server in place", "Putting the server in place"),
-        ("The hub", "Adding the hub, for terminals and linked machines"),
-        ("Downloads for Add a machine", "Getting downloads ready for your other machines"),
-        ("Downloads for adding machines", "Getting downloads ready for your other machines"),
+        ("The hub", "Adding the hub, for terminals and linked computers"),
+        ("Downloads for Add a machine", "Getting downloads ready for your other computers"),
+        ("Downloads for adding machines", "Getting downloads ready for your other computers"),
         ("Running it", "Starting Switchboard and keeping it running"),
+        ("This computer", "Linking this computer to its own server"),
         ("First-run setup", "First-run setup"),
     ];
     known.iter().find(|(k, _)| r.starts_with(k)).map(|(_, v)| v.to_string()).unwrap_or_else(|| r.to_string())
@@ -820,7 +875,7 @@ pub fn awake_tip(os: Os, laptop: bool) -> (String, Option<(&'static str, &'stati
 
 /// How phones and the other machines find the new server.
 pub fn find_tip(os: Os) -> String {
-    let mut s = "Your iPhone and your other computers on this network find it by themselves: open Switchboard there \
+    let mut s = "Your phone and your other computers on this network find it by themselves: open Switchboard there \
                  and it shows up while it searches. To run chats on another machine, use Add a machine in Settings."
         .to_string();
     if os == Os::Mac {
@@ -876,6 +931,35 @@ mod tests {
         assert!(python_new_enough((3, 9, 0)));
         assert!(!python_new_enough((3, 8, 18)));
         assert!(python_new_enough((4, 0, 0)));
+    }
+
+    #[test]
+    fn a_kit_with_its_own_python_needs_none_on_the_computer() {
+        let d = std::env::temp_dir().join(format!("sb-kit-python-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("python/mac-arm64/bin")).unwrap();
+        let kit = Kit { root: d.clone() };
+        assert_eq!(kit.python(Os::Mac, "aarch64"), None, "a folder with no program in it is not a Python");
+        std::fs::write(d.join("python/mac-arm64/bin/python3"), "").unwrap();
+        // a Mac's kit carries both kinds, so either chip is served; other systems get nothing from it
+        assert_eq!(kit.python(Os::Mac, "aarch64").as_deref(), Some("3"));
+        assert_eq!(kit.python(Os::Mac, "x86_64").as_deref(), Some("3"));
+        assert_eq!(kit.python(Os::Linux, "x86_64"), None);
+        assert_eq!(kit.python(Os::Mac, "riscv64"), None);
+        std::fs::write(d.join("python/VERSION"), "3.13.18 20261110\n").unwrap();
+        assert_eq!(kit.python(Os::Mac, "aarch64").as_deref(), Some("3.13.18"));
+        // elsewhere it is an archive, for this kind of computer only
+        std::fs::write(d.join("python/python-linux-x86_64.tar.gz"), "").unwrap();
+        assert_eq!(kit.python(Os::Linux, "x86_64").as_deref(), Some("3.13.18"));
+        assert_eq!(kit.python(Os::Linux, "aarch64"), None);
+        assert_eq!(python_kinds(Os::Windows, "x86_64"), vec!["windows-x86_64".to_string()]);
+        let _ = std::fs::remove_dir_all(&d);
+
+        let mut f = all_good();
+        f.python = Some(Python::Own { version: "3.13.18".into() });
+        let c = checks(Os::Mac, &f).into_iter().find(|c| c.key == Key::Python).unwrap();
+        assert_eq!((c.mark, c.title.as_str()), (Mark::Ok, "Python 3.13.18 comes with Switchboard"));
+        assert_eq!(step_title("This computer"), "Linking this computer to its own server");
     }
 
     fn all_good() -> Facts {
@@ -1017,7 +1101,7 @@ mod tests {
         i.line("== Running it");
         assert_eq!(i.steps.len(), 4, "{:?}", i.steps);
         assert_eq!(i.steps[0].title, "Checking this computer");
-        assert_eq!(i.steps[2].title, "Getting downloads ready for your other machines");
+        assert_eq!(i.steps[2].title, "Getting downloads ready for your other computers");
         assert_eq!((i.steps[2].state, i.steps[3].state), (StepState::Done, StepState::Now));
 
         let mut i = Install::new(&plan(Os::Mac, true));
@@ -1073,6 +1157,11 @@ mod tests {
         assert!(awake_tip(Os::Linux, false).1.is_none());
         assert!(find_tip(Os::Mac).contains("Allow"));
         assert!(!find_tip(Os::Linux).contains("Allow"));
+        // The phone may be an iPhone or an Android phone: the tip names neither.
+        for os in [Os::Mac, Os::Windows, Os::Linux] {
+            assert!(find_tip(os).starts_with("Your phone and your other computers"), "{}", find_tip(os));
+            assert!(!find_tip(os).contains("iPhone"));
+        }
         assert_eq!(and_list(&["a".into(), "b".into(), "c".into()]), "a, b and c");
     }
 }

@@ -14,6 +14,12 @@ use crate::theme::{Mode, Theme};
 use crate::ui;
 use crate::view::{BoardView, Ctx};
 
+/// The words in the empty palette. The field draws its caret at its left edge, on top of whatever is there, so the
+/// words start one space in and the caret stands before them, not across the first letter.
+pub const HINT: &str = " Search chats and commands";
+/// The same for the palette of chats alone.
+pub const HINT_CHATS: &str = " Open a chat in a terminal";
+
 #[derive(Clone)]
 pub enum PalIcon {
     Icon(String),
@@ -94,7 +100,7 @@ impl BoardView {
             PalRun::Chats,
         ));
         out.push(row(
-            "Browse every session",
+            "Browse every chat",
             Some("Search, threads, summaries".into()),
             PalIcon::Icon("search".into()),
             Some(&ui::term_cap("B")),
@@ -116,7 +122,7 @@ impl BoardView {
         ));
         for m in snap.machines.iter().filter(|m| !m.is_offline()) {
             out.push(row(
-                format!("New session on {}", m.label),
+                format!("New chat on {}", m.label),
                 None,
                 PalIcon::Machine(m.name.clone()),
                 None,

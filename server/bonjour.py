@@ -6,6 +6,7 @@ import ipaddress, os, shutil, socket, subprocess, sys, threading
 from urllib.parse import urlsplit
 
 TYPE = '_switchboard._tcp'
+_running = []  # what announces right now: ('zeroconf', its Zeroconf) or ('child', the tool's process), for stop()
 
 
 def _lan(origin):
@@ -75,6 +76,7 @@ def announce(port, cfg, log, which=shutil.which, popen=subprocess.Popen, zerocon
                                server=f'{socket.gethostname().split(".")[0]}.local.',
                                addresses=[socket.inet_aton(ip)] if ip else None)
             threading.Thread(target=zc.register_service, args=(info,), daemon=True).start()
+            _running.append(('zeroconf', zc))
             log(f'bonjour: announcing {url} (zeroconf)')
             return 'zeroconf'
         except Exception as e:
@@ -85,11 +87,41 @@ def announce(port, cfg, log, which=shutil.which, popen=subprocess.Popen, zerocon
         if not exe:
             continue
         try:
-            # it announces for as long as it runs; it goes when the server does
-            popen([exe] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            # it announces for as long as it runs, and nothing ends it when the server ends: stop() does
+            child = popen([exe] + args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, stdin=subprocess.DEVNULL)
+            _running.append(('child', child))
             log(f'bonjour: announcing {url} ({tool})')
             return 'dns-sd' if tool == 'dns-sd' else 'avahi'
         except OSError as e:
             log(f'bonjour: {tool} failed ({e})')
     log('bonjour: not announced (install python3-zeroconf, or avahi-utils on Linux, for the iPhone app to find this server)')
     return None
+
+
+def stop(log=None, wait=2):
+    """Stops announcing: ends the tool that was started (dns-sd, avahi-publish-service), or takes the zeroconf
+    record back. The server calls this when it stops and before it restarts into keys only. Safe to call twice,
+    and with nothing announced. How many announcements it ended."""
+    n = 0
+    while _running:
+        kind, it = _running.pop()
+        try:
+            if kind == 'child':
+                if it.poll() is None:
+                    it.terminate()
+                    try:
+                        it.wait(timeout=wait)
+                    except subprocess.TimeoutExpired:
+                        it.kill()
+                        it.wait(timeout=wait)
+            else:
+                t = threading.Thread(target=it.close, daemon=True)  # says goodbye on the network: bounded
+                t.start()
+                t.join(wait)
+            n += 1
+        except Exception as e:
+            if log:
+                log(f'bonjour: could not stop announcing ({e})')
+    if n and log:
+        log('bonjour: no longer announcing')
+    return n

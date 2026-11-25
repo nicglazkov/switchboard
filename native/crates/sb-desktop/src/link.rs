@@ -69,7 +69,7 @@ impl LinkSheet {
                 (m.to_string(), s.to_string(), String::new())
             }
         };
-        let (topic, tag) = names::split(first_line(Some(raw.as_str()), "Untitled session"));
+        let (topic, tag) = names::split(first_line(Some(raw.as_str()), "Untitled chat"));
         let kind = names::tag_kind(tag.as_deref());
         let mut s = LinkSheet {
             app,
@@ -201,7 +201,7 @@ impl LinkSheet {
         let key = format!("{}:{}", c.machine, c.sid);
         let current = parent == Some(key.as_str());
         let sending = self.sending.as_deref() == Some(key.as_str());
-        let (topic, tag) = names::split(first_line(c.title.as_deref(), "Untitled session"));
+        let (topic, tag) = names::split(first_line(c.title.as_deref(), "Untitled chat"));
         let kind = names::tag_kind(tag.as_deref());
         let label = c
             .label

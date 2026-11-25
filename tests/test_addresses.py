@@ -175,5 +175,33 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(app.sessions()['summary']['addresses']['port'], 8130)
 
 
+class KeysTest(unittest.TestCase):
+    """server.json's "keys" (server/keys.py) and the address list."""
+
+    def app(self, **kw):
+        import fleet
+        d = Path(mkdtemp())
+        (d / 'cfg').mkdir()
+        (d / 'cfg' / 'server.json').write_text(json.dumps(dict({'bind': ['192.0.2.10'], 'hosts': [], 'origins': []}, **kw)))
+        cfg = server.ServerConfig(d / 'cfg', d / 'state')
+        f = fleet.Fleet([], lambda *a: {'ok': True, 'sessions': []}, clock=lambda: 1000.0)
+        return server.App(f, d / 'state', d / 'web', cfg_dir=d / 'cfg', server_cfg=cfg)
+
+    def test_with_no_keys_entry_and_with_both_the_addresses_are_listed_as_before(self):
+        for kw in ({}, {'keys': 'off'}, {'keys': 'both'}):
+            app = self.app(**kw)
+            self.assertIsInstance(app.addresses, addresses.Addresses, kw)
+            self.assertEqual(app.addresses.bind, ['192.0.2.10'], kw)
+            app.addresses = make()
+            app.addresses.refresh()
+            self.assertEqual(app.summary()['addresses']['list'][0]['host'], '192.0.2.10', kw)
+
+    def test_with_keys_only_no_address_is_listed(self):
+        app = self.app(keys='only')
+        self.assertIsNone(app.addresses)
+        self.assertNotIn('addresses', app.summary())
+        self.assertNotIn('addresses', app.sessions()['summary'])
+
+
 if __name__ == '__main__':
     unittest.main()

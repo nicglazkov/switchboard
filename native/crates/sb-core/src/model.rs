@@ -1213,6 +1213,9 @@ pub struct Snapshot {
     /// The server keeps who sent each chat (so "Move to my chats" has somewhere to be written down).
     #[serde(default)]
     pub origins: bool,
+    /// The home computer is away, and this board is what the other computers say about their own chats.
+    #[serde(default)]
+    pub away: Option<crate::api::ApiAway>,
 }
 
 fn root_label(root: &str) -> String {
@@ -1599,6 +1602,7 @@ pub fn normalize(raw: &ApiSessions, fetched_at: f64) -> Snapshot {
         budget: raw.budget.clone(),
         addresses: s.addresses.as_ref().map(|a| a.list.clone()).unwrap_or_default(),
         origins: raw.origins == Some(true),
+        away: raw.away.clone(),
     }
 }
 
@@ -1616,6 +1620,7 @@ impl Snapshot {
             budget: None,
             addresses: Vec::new(),
             origins: false,
+            away: None,
         }
     }
     /// The group a chat is in, by its thread (its own sid when it has none), from `groups`.
@@ -1636,6 +1641,7 @@ impl Snapshot {
     /// brings nothing new then costs no redraw.
     pub fn same_board(&self, o: &Snapshot) -> bool {
         self.plan == o.plan
+            && self.away == o.away
             && self.web == o.web
             && self.cleanup == o.cleanup
             && self.groups == o.groups

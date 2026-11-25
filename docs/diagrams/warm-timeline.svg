@@ -1,0 +1,29 @@
+<svg viewBox="0 0 880 460" role="img" aria-labelledby="fig-warm-timeline-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-warm-timeline-t">A timeline of one chat. After Claude replies the chat is warm for 5 minutes or 1 hour, and a message sent then reads the whole chat from the cache. After the cache runs out the chat is cold, and the next message reads most of the chat again in full.</title>
+<text class="d-title" x="40" y="52">A chat's cache over time</text>
+<text x="52" y="96">Claude replies</text>
+<text class="mid" x="440" y="96">The cache runs out</text>
+<path class="d-line-sel" d="M60 120H440"/>
+<path class="d-bad" d="M440 120H820"/>
+<path class="d-bad" d="M811 112L820 120L811 128"/>
+<circle class="d-node-sel" cx="60" cy="120" r="8"/>
+<circle class="d-node-bad" cx="440" cy="120" r="8"/>
+<text class="mid t-sel" x="230" y="152">Warm for 5 minutes or 1 hour</text>
+<text class="mid t-bad" x="650" y="152">Cold until the next message</text>
+<path class="d-line-sel" d="M230 168V200"/>
+<path class="d-bad" d="M650 168V200"/>
+<rect class="d-panel" x="40" y="200" width="380" height="220" rx="14"/>
+<text x="60" y="234">A message sent while warm</text>
+<rect class="d-chip-sel" x="60" y="252" width="340" height="120" rx="12"/>
+<text x="80" y="306">The whole chat, 180k tokens</text>
+<text class="d-sub" x="80" y="328">Read from the cache, at a tenth of the price</text>
+<text x="60" y="402">Counts as about 18k tokens</text>
+<rect class="d-panel" x="460" y="200" width="380" height="220" rx="14"/>
+<text x="480" y="234">A message sent once cold</text>
+<rect class="d-chip" x="480" y="252" width="340" height="36" rx="12"/>
+<text class="d-small" x="500" y="275">Claude Code's own start, 29k: still cached</text>
+<rect class="d-chip-bad" x="480" y="296" width="340" height="76" rx="12"/>
+<text x="500" y="328">The rest of the chat, 151k tokens</text>
+<text class="d-sub" x="500" y="350">Read in full and written back to the cache</text>
+<text class="t-bad" x="480" y="402">Counts as about 305k tokens</text>
+</svg>

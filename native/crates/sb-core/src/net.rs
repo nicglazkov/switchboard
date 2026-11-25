@@ -1089,6 +1089,56 @@ impl Client {
         })
     }
 
+    /// GET /api/keys/readiness: how devices connect to this server and what is left before the network port can
+    /// close. None from a server that has no such route (every one from before keys).
+    pub fn keys_readiness(&self) -> Result<Option<crate::keys::Readiness>, CoreError> {
+        match self.get_json::<serde_json::Value>("/api/keys/readiness") {
+            Ok(v) => Ok(Some(crate::keys::read_readiness(&v))),
+            Err(CoreError::Server { status: 404, .. }) => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// GET /api/keys/devices: the devices paired with the home computer.
+    pub fn keys_devices(&self) -> Result<Vec<crate::keys::Device>, CoreError> {
+        let v: serde_json::Value = self.get_json("/api/keys/devices")?;
+        crate::keys::read_devices(&v).ok_or_else(|| CoreError::Bad("Unexpected reply: no list of devices".into()))
+    }
+
+    /// POST /api/keys/devices {"remove": id}: turns one device's key off.
+    pub fn keys_remove_device(&self, id: &str) -> Result<(), CoreError> {
+        let body = serde_json::json!({ "remove": id });
+        self.with_base(|base| self.post_json(base, "/api/keys/devices", &body).map(|_| ()))
+    }
+
+    /// POST /api/keys/mode {"keys": "off" | "both" | "only"} (`keys::CLOSE_PORT_ROUTE`): how devices connect to
+    /// the server. Ok(Ok(restarting)) when the server took it, Ok(Err(..)) for its 409 in its own words (what is
+    /// in the way, or the command to run when it cannot restart itself), Err for anything else.
+    pub fn keys_set_mode(&self, mode: &str) -> Result<Result<bool, crate::keys::ModeRefusal>, CoreError> {
+        let Some(route) = crate::keys::CLOSE_PORT_ROUTE else {
+            return Err(CoreError::Bad(crate::keys::CLOSE_BY_HAND.into()));
+        };
+        let body = serde_json::json!({ "keys": mode });
+        self.with_base(|base| {
+            let (status, out) = self.post_raw(base, route, &body)?;
+            if let Some(answer) = crate::keys::read_mode_answer(status, &out) {
+                return Ok(answer);
+            }
+            check(status, &out)?;
+            Err(CoreError::Bad("Unexpected reply to the change".into()))
+        })
+    }
+
+    /// POST /api/pair_device: a code and a link that pair one device with the home computer.
+    pub fn pair_device(&self) -> Result<crate::keys::PairOffer, CoreError> {
+        self.with_base(|base| {
+            let raw = self.post_json(base, "/api/pair_device", &serde_json::json!({}))?;
+            let v: serde_json::Value =
+                serde_json::from_slice(&raw).map_err(|e| CoreError::Bad(format!("Unexpected reply: {e}")))?;
+            crate::keys::read_offer(&v).ok_or_else(|| CoreError::Bad("Unexpected reply: no code".into()))
+        })
+    }
+
     /// POST /api/compact: the cost of compacting this chat's History thread, or with `confirm`, the job.
     pub fn compact(&self, machine: &str, sid: &str, confirm: bool) -> Result<crate::api::ApiCompact, CoreError> {
         let body = serde_json::json!({ "machine": machine, "sid": sid, "confirm": confirm });

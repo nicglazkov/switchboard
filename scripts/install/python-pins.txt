@@ -1,0 +1,18 @@
+# Switchboard's own Python: the builds fetch-python.sh downloads, and the SHA-256 each must have.
+#
+# They are python-build-standalone's "install_only_stripped" builds of CPython (the whole standard library, nothing
+# else; https://github.com/astral-sh/python-build-standalone). To move to a newer one, change the release and the
+# version, and copy each asset's SHA-256 from that release's SHA256SUMS file. Nothing is downloaded that is not
+# listed here, and a download that does not match its line is refused.
+#
+# The Linux builds need glibc 2.17 or newer. On a computer where the build does not run (Alpine, a very old
+# system), the installers use that computer's own Python 3.9 or newer instead.
+release 20261110
+version 3.13.18
+base https://github.com/astral-sh/python-build-standalone/releases/download
+# kind           sha256                                                            asset
+mac-arm64        7a2384641584ab9984221fcb0fc9265df465922af71be71410529e2a9c3f0540  cpython-3.13.18+20261110-aarch64-apple-darwin-install_only_stripped.tar.gz
+mac-x86_64       d27d59a722db9f69926eb6d9564071247221f45a04da920ea7f3001c97e32f9b  cpython-3.13.18+20261110-x86_64-apple-darwin-install_only_stripped.tar.gz
+linux-x86_64     f2d2199eb25880e07863b391cf7124e7ffa1338b0d65600dfcec117c4223a7fb  cpython-3.13.18+20261110-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz
+linux-arm64      55c00325f7c1fddf325dfc621aabdfbbac4dc54adda224af88ec411dc12db239  cpython-3.13.18+20261110-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz
+windows-x86_64   2e0fed09d48989f64c9305da9ff2d37a41c0d13ab2aa6283405b2b620dfbf805  cpython-3.13.18+20261110-x86_64-pc-windows-msvc-install_only_stripped.tar.gz

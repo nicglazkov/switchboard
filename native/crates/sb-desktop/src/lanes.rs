@@ -29,25 +29,34 @@ pub struct Geo {
 }
 
 /// The narrowest a state column gets before the board scrolls sideways instead (a card's name needs this much
-/// beside its pills to read as words).
-const COL_MIN: f32 = 220.;
+/// beside its pills to read as words). The five share the row a little unevenly (view::grid_row: Quiet, one line a
+/// chat, takes less), so at this floor a card column is 212 px. Low enough that a 1280 px window, the size of
+/// many laptop screens, shows all five without scrolling.
+const COL_MIN: f32 = 204.;
+/// The machine column: roomy where the window has the width to spare, else just wide enough.
+const LABEL_WIDE: f32 = 196.;
+const LABEL: f32 = 150.;
+/// The gaps between the grid's six columns (view::grid_row).
+const GAPS: f32 = 50.;
 
 impl Geo {
     /// `sheet`: the detail sheet's width when it is open, else 0.
     pub fn at(w: f32, solo: bool, sheet: f32) -> Geo {
         let wide = w >= 1280.;
-        // Next to the sheet the machine column narrows first, so the five state columns keep their room.
+        let pad = if wide { ui::EDGE } else { 14. };
+        let sheet = if sheet > 0. { sheet + 24. } else { 0. };
+        // The machine column gives way first: next to the sheet, and in a window where the roomy one would push
+        // the last state column off the edge (1280 to about 1300 wide).
         let label = if solo {
             0.
         } else if sheet > 0. {
             132.
-        } else if wide {
-            196.
+        } else if wide && w - pad * 2. >= LABEL_WIDE + 5. * COL_MIN + GAPS {
+            LABEL_WIDE
         } else {
-            150.
+            LABEL
         };
-        let sheet = if sheet > 0. { sheet + 24. } else { 0. };
-        Geo { pad: if wide { ui::EDGE } else { 14. }, label, wide, sheet, grid_min: label + 5. * COL_MIN + 50. }
+        Geo { pad, label, wide, sheet, grid_min: label + 5. * COL_MIN + GAPS }
     }
 
     /// The width the board has to itself: the window less the sheet.
@@ -119,6 +128,10 @@ impl BoardView {
             if self.find_shot || app.core.needs_server() {
                 return self.server_screen(c, true, "");
             }
+            // Just paired with a code, and the home computer has not answered yet: "Paired. Opening the board."
+            if !app.live && self.join_wanted(c, false) {
+                return self.join_screen(c, false);
+            }
             if let Some(e) = &app.error {
                 return self.server_screen(c, false, e);
             }
@@ -188,23 +201,58 @@ impl BoardView {
             .overflow_y_scroll()
             .track_scroll(&self.board_scroll)
             .pb(px(40.))
-            .children(rows);
+            .children(rows)
+            // Computers but not one chat on any of them: say what starts one, instead of five empty columns.
+            .when(self.solo.is_none() && app.snap.sessions().is_empty(), |d| {
+                d.child(
+                    div()
+                        .pt(px(28.))
+                        .flex()
+                        .justify_center()
+                        .text_size(px(13.))
+                        .text_color(t.dim)
+                        .child("No chats yet. Press N to start one on any of these computers."),
+                )
+            });
         let lanes =
             div().flex_1().min_h_0().relative().flex().flex_col().child(lanes).child(ui::scrollbar(&self.board_scroll));
         // Next to the detail sheet the columns share what is left; when that is too little for five columns,
         // the heads and rows scroll sideways together rather than slide under the sheet.
         let grid = if g.scrolls(w) {
-            div().flex_1().min_h_0().min_w_0().px(px(g.pad)).child(
-                div().id("lanes-x").size_full().overflow_x_scroll().child(
-                    div()
-                        .w(px(g.grid_min))
-                        .h_full()
-                        .flex()
-                        .flex_col()
-                        .child(div().flex_none().child(head))
-                        .child(lanes),
-                ),
-            )
+            // A column cut by the window's edge fades out there, so it reads as "more this way" and never as
+            // text that was simply chopped. The fade leaves an end once the board is scrolled all the way to it.
+            let (left, right) = x_fades(g.grid_min, g.board_w(w) - g.pad * 2., f32::from(self.lanes_x.offset().x));
+            let bg = t.bg;
+            let fade = |at_left: bool| {
+                let (from, to) = if at_left { (bg, bg.opacity(0.)) } else { (bg.opacity(0.), bg) };
+                div()
+                    .absolute()
+                    .top_0()
+                    .bottom_0()
+                    .w(px(X_FADE))
+                    .when(at_left, |d| d.left(px(g.pad)))
+                    .when(!at_left, |d| d.right(px(g.pad)))
+                    .bg(gpui::linear_gradient(90., gpui::linear_color_stop(from, 0.), gpui::linear_color_stop(to, 1.)))
+            };
+            div()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .min_w_0()
+                .px(px(g.pad))
+                .child(
+                    div().id("lanes-x").size_full().overflow_x_scroll().track_scroll(&self.lanes_x).child(
+                        div()
+                            .w(px(g.grid_min))
+                            .h_full()
+                            .flex()
+                            .flex_col()
+                            .child(div().flex_none().child(head))
+                            .child(lanes),
+                    ),
+                )
+                .when(left, |d| d.child(fade(true)))
+                .when(right, |d| d.child(fade(false)))
         } else {
             div()
                 .flex_1()
@@ -230,9 +278,12 @@ impl BoardView {
     }
 
     /// The status line: the server's note (or a calm word), its one action, and "Stopped today" on the right.
-    fn sub_bar(&self, c: &Ctx, g: Geo) -> impl IntoElement {
+    fn sub_bar(&self, c: &Ctx, g: Geo) -> AnyElement {
         let t = c.t;
         let cx = c.cx;
+        if let Some(away) = c.app.away() {
+            return self.away_bar(c, g, away).into_any_element();
+        }
         let note = c.app.snap.plan.note.clone();
         let (dot, text) = match &note {
             Some(n) => (
@@ -289,6 +340,44 @@ impl BoardView {
                     .into_any_element()
             }))
             .child(self.stopped_pill(c))
+            .into_any_element()
+    }
+
+    /// The status line while the home computer is away: the helper's own line ("Home is away. Showing chats
+    /// from Laptop and Tower."), and under it, once, what is not available meanwhile. Calm: nothing is wrong
+    /// with this computer, and nothing here can be clicked.
+    fn away_bar(&self, c: &Ctx, g: Geo, away: &sb_core::api::ApiAway) -> impl IntoElement {
+        let t = c.t;
+        let mut under = vec![away.reason().to_string()];
+        under.extend(away.notes.iter().filter(|n| !n.trim().is_empty()).cloned());
+        div()
+            .id("away-bar")
+            .flex_none()
+            .min_h(px(52.))
+            .px(px(g.pad))
+            .py(px(10.))
+            .flex()
+            .items_start()
+            .gap(px(14.))
+            // (on the first line's centre: 14 px text on a 1.4 line)
+            .child(div().flex_none().mt(px(6.)).size(px(8.)).rounded_full().bg(t.cold))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .flex()
+                    .flex_col()
+                    .gap(px(2.))
+                    .child(
+                        ui::wrap(away.line().to_string())
+                            .text_size(px(14.))
+                            .line_height(relative(1.4))
+                            .text_color(t.ink2),
+                    )
+                    .children(under.into_iter().map(|line| {
+                        ui::wrap(line).text_size(px(12.5)).line_height(relative(1.45)).text_color(t.faint)
+                    })),
+            )
     }
 
     /// "Stopped today 3, freed 1.2 GB": where stopped chats land. The freed memory ticks up as one arrives.
@@ -605,7 +694,10 @@ impl BoardView {
                     .px(px(6.))
                     .text_size(px(13.))
                     .text_color(t.faint)
-                    .child(if n > 0 {
+                    .child(if let Some(why) = c.app.away().and_then(|a| a.missing_of(&lane.machine)) {
+                        // (the home computer is away: why this one's chats are not among those showing)
+                        why.sentence()
+                    } else if n > 0 {
                         format!("{name} is offline. Its {} will show here when it is back.", plural(n, "chat"))
                     } else {
                         format!("{name} is offline.")
@@ -824,7 +916,9 @@ impl BoardView {
         let ml = m.map(|m| m.lamp()).unwrap_or(sb_core::MachineLamp::Warn);
         let n = lane.tally.n as usize;
         let os = os_name(m.and_then(|m| m.os.as_deref()));
-        let line1 = if offline {
+        let line1 = if let Some(why) = c.app.away().and_then(|a| a.missing_of(machine)).filter(|_| offline) {
+            why.word().to_string()
+        } else if offline {
             "Offline".to_string()
         } else if os.is_empty() {
             plural(n, "chat")
@@ -928,6 +1022,7 @@ impl BoardView {
                 .when(!offline, |d| {
                     d.child(
                         ui::ghost(&t, SharedString::from(format!("new-{machine}")), None, None)
+                            .when_some(c.app.away_reason(), |d, why| d.opacity(ui::OFF).tooltip(ui::tip_text(why)))
                             .mt(px(6.))
                             .ml(px(10.))
                             .h(px(28.))
@@ -1084,6 +1179,7 @@ impl BoardView {
             });
         }
         let quick = ask.as_ref().map(|a| self.card_quick(c, s, a, if parked { t.dim } else { t.ink2 }));
+        let state_len = state.to_string();
         div()
             .id(SharedString::from(format!("card-{}", s.key)))
             .relative()
@@ -1185,7 +1281,7 @@ impl BoardView {
                     )
                     // The context size goes on narrow windows (the state line says what matters), as in the design.
                     // A big chat's badge takes its place: it names the cost the size stands for.
-                    .when_some(cost.clone().filter(|_| c.card_w >= 170.), |d, e| {
+                    .when_some(cost.clone().filter(|e| cost_fits(c.card_w, &state_len, e, stale)), |d, e| {
                         d.child(crate::chrome::cost_badge(&t, &e, stale))
                     })
                     .when(cost.is_none() && col != Column::Cold && s.ctx > 0 && c.card_w >= 190., |d| {
@@ -1292,6 +1388,8 @@ impl BoardView {
                 .child(div().ml(px(4.)).child(text.to_string()))
         };
         let full = w >= 1280.;
+        // No computers to show (finding the server, joining, setting one up): the board's keys do nothing there.
+        let board = !c.app.snap.machines.is_empty();
         let link = |id: &'static str, ic: &'static str, label: String| {
             ui::ghost(&t, id, None, None)
                 .h(px(24.))
@@ -1316,17 +1414,19 @@ impl BoardView {
             .text_color(t.faint)
             .child(hint(&[&ui::mod_cap("K")], "commands"))
             .child(hint(&[&ui::mod_cap("T")], "terminal"))
-            .child(hint(&["N"], "new"))
-            .when(full, |d| {
+            .when(board, |d| d.child(hint(&["N"], "new")))
+            .when(full && board, |d| {
                 d.child(hint(&["J", "K"], "chats")).child(hint(&["H", "L"], "columns")).child(hint(&["F"], "fresh"))
             })
             .child(ui::spacer())
             .child(
                 link("sb-files", "folder", "Files".into())
+                    .when_some(c.app.away_reason(), |d, why| d.opacity(ui::OFF).tooltip(ui::tip_text(why)))
                     .on_click(cx.listener(|_, _: &ClickEvent, _, cx| crate::files::open_files(cx))),
             )
             .child(
                 link("sb-history", "history", "History".into())
+                    .when_some(c.app.away_reason(), |d, why| d.opacity(ui::OFF).tooltip(ui::tip_text(why)))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.view_history(cx))),
             )
             .when(rep > 0, |d| {
@@ -1346,5 +1446,73 @@ fn cap(s: &str) -> String {
     match c.next() {
         Some(f) => f.to_uppercase().chain(c).collect(),
         None => String::new(),
+    }
+}
+
+/// How wide the fade is at an edge the board scrolls past.
+const X_FADE: f32 = 36.;
+
+/// Which edges of a sideways-scrolling board fade out: (left, right). `grid` is the grid's width, `view` the width
+/// that shows, `offset` how far it is scrolled (zero at the start, negative further along).
+fn x_fades(grid: f32, view: f32, offset: f32) -> (bool, bool) {
+    let max = (grid - view).max(0.);
+    (offset < -1., max > 1. && offset > -max + 1.)
+}
+
+/// Whether a card's cost badge ("expensive") fits on the state line beside the state without breaking it in two
+/// ("Waiting" over "10m"). Widths are estimates for 12 px text, which is close enough: the badge is either clearly
+/// in or out. `card_w` is the board's estimate of a card's width, 14 px more than what the line has.
+fn cost_fits(card_w: f32, state: &str, badge: &str, stale: bool) -> bool {
+    let text = |s: &str, per: f32| s.chars().count() as f32 * per;
+    let clock = if stale { 17. } else { 0. };
+    // the badge's own padding and icon, the gaps either side of it, and the flags button at the right edge
+    card_w >= 170. && clock + text(state, 6.6) + text(badge, 6.2) + 26. + 12. + 24. <= card_w - 14.
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Geo, cost_fits, x_fades};
+
+    #[test]
+    fn the_cost_badge_shows_only_where_the_state_keeps_to_one_line() {
+        // A 1280 window's card: "Working" and the badge fit; a longer state keeps the line to itself.
+        assert!(cost_fits(194., "Working", "expensive", false));
+        assert!(!cost_fits(194., "Waiting 10m", "expensive", false), "it broke into Waiting / 10m");
+        assert!(!cost_fits(194., "As of 35s ago", "expensive", true), "it broke into As of / 35s ago");
+        // A wide window has room for both.
+        assert!(cost_fits(300., "Waiting 10m", "expensive", false));
+        assert!(cost_fits(300., "As of 35s ago", "expensive", true));
+        // Too narrow for a badge at all, as before.
+        assert!(!cost_fits(160., "Working", "expensive", false));
+    }
+
+    #[test]
+    fn five_columns_fit_a_1280_window_without_scrolling() {
+        // The audit's window: 1280 wide, Quiet was cut by the edge. Now every column shows.
+        for w in [1280., 1300., 1366., 1440., 1920.] {
+            assert!(!Geo::at(w, false, 0.).scrolls(w), "{w}");
+        }
+        // The roomy machine column only where it costs no state column.
+        assert_eq!(Geo::at(1280., false, 0.).label, 150.);
+        assert_eq!(Geo::at(1440., false, 0.).label, 196.);
+        // A window at its narrowest still has to scroll: five columns of cards do not fit in 900 px.
+        assert!(Geo::at(900., false, 0.).scrolls(900.));
+        assert!(Geo::at(1200., false, 0.).scrolls(1200.));
+        // Just fitting or just not: never a grid wider than the room it reports having.
+        for w in (900..1500).map(|w| w as f32) {
+            let g = Geo::at(w, false, 0.);
+            assert_eq!(g.scrolls(w), g.grid_min > w - g.pad * 2., "{w}");
+        }
+    }
+
+    #[test]
+    fn a_scrolling_board_fades_at_the_edges_it_runs_past() {
+        // 1220 of grid in 872 of window: at the start only the right edge has more.
+        assert_eq!(x_fades(1220., 872., 0.), (false, true));
+        assert_eq!(x_fades(1220., 872., -100.), (true, true));
+        // Scrolled to the end: only the left.
+        assert_eq!(x_fades(1220., 872., -348.), (true, false));
+        // A grid that fits has neither.
+        assert_eq!(x_fades(1000., 1200., 0.), (false, false));
     }
 }

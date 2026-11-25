@@ -1,0 +1,38 @@
+<svg viewBox="0 0 880 300" role="img" aria-labelledby="fig-updates-flow-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-updates-flow-t">The app asks the home computer for the list of builds. The home computer reads the newest release on GitHub and passes the list and its signature back unchanged, and the app checks the signature with its update key.</title>
+<text class="d-title" x="40" y="52">Where an update comes from</text>
+<rect class="d-panel" x="40" y="100" width="220" height="160" rx="14"/>
+<g class="d-ico" transform="translate(60 118)"><circle cx="12" cy="12" r="8.5"/><path d="M3.500 12h17M12 3.500c2.500 2.500 3.500 5.300 3.500 8.500s-1 6-3.500 8.500c-2.500-2.500-3.500-5.300-3.500-8.500s1-6 3.500-8.500z"/></g>
+<text x="94" y="136">GitHub release</text>
+<text class="d-sub" x="60" y="180">The list of builds</text>
+<text class="d-sub" x="60" y="202">The list's signature</text>
+<text class="d-sub" x="60" y="224">The files</text>
+<rect class="d-panel" x="330" y="100" width="220" height="160" rx="14"/>
+<g class="d-ico" transform="translate(350 118)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="384" y="136">Home computer</text>
+<text class="d-sub" x="350" y="180">Passes the list on</text>
+<text class="d-sub" x="350" y="202">exactly as it is</text>
+<rect class="d-chip-sel" x="620" y="100" width="220" height="160" rx="14"/>
+<g class="d-ico sel" transform="translate(640 118)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text class="t-sel" x="674" y="136">The app</text>
+<circle class="d-num-sel" cx="653" cy="186" r="13"/>
+<text class="d-num" x="653" y="186" dy="4.5">5</text>
+<text class="d-sub" x="676" y="180">Checks the list with</text>
+<text class="d-sub" x="676" y="202">its update key</text>
+<path class="d-req" d="M616 160H554"/>
+<path class="d-req" d="M563 152L554 160L563 168"/>
+<circle class="d-num-req" cx="585" cy="160" r="13"/>
+<text class="d-num" x="585" y="160" dy="4.5">1</text>
+<path class="d-req" d="M326 160H264"/>
+<path class="d-req" d="M273 152L264 160L273 168"/>
+<circle class="d-num-req" cx="295" cy="160" r="13"/>
+<text class="d-num" x="295" y="160" dy="4.5">2</text>
+<path class="d-ret" d="M264 220H326"/>
+<path class="d-ret" d="M317 212L326 220L317 228"/>
+<circle class="d-num-ret" cx="295" cy="220" r="13"/>
+<text class="d-num" x="295" y="220" dy="4.5">3</text>
+<path class="d-ret" d="M554 220H616"/>
+<path class="d-ret" d="M607 212L616 220L607 228"/>
+<circle class="d-num-ret" cx="585" cy="220" r="13"/>
+<text class="d-num" x="585" y="220" dy="4.5">4</text>
+</svg>

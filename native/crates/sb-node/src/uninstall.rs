@@ -47,6 +47,15 @@ pub struct Places {
     pub running_from_program: bool,
     /// Programs an update moved aside, still in the folder (Windows).
     pub old: Vec<PathBuf>,
+    /// What is kept beside node.json for when it cannot be read (its .bak, and damaged ones put aside): each may
+    /// hold the token.
+    pub copies: Vec<PathBuf>,
+    /// `--purge`: this computer's key and its list of paired devices go as well.
+    pub purge: bool,
+    /// device.key, its copies and keys.lock.
+    pub key: Vec<PathBuf>,
+    /// paired.json and its copies (a home computer has one).
+    pub paired: Vec<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -58,6 +67,8 @@ pub enum Step {
     Remove { what: &'static str, path: PathBuf },
     /// A file that has to stay for now, and why.
     Leave { path: PathBuf, why: &'static str },
+    /// Something to say, when any of these files is there.
+    Note { text: &'static str, if_any: Vec<PathBuf> },
 }
 
 fn run(cmd: &'static str, args: &[&str], did: &str) -> Step {
@@ -139,9 +150,53 @@ pub fn plan(p: &Places) -> Vec<Step> {
         steps.push(Step::Remove { what: "the program", path: p.program.clone() });
     }
     steps.push(Step::Remove { what: "its settings and the token for the server", path: p.config.clone() });
+    for copy in &p.copies {
+        steps.push(Step::Remove { what: "a copy of its settings", path: copy.clone() });
+    }
     steps.push(Step::Remove { what: "its lock file", path: p.lock.clone() });
+    steps.extend(keys_plan(p));
     steps.extend(last);
     steps
+}
+
+pub const KEPT: &str = "Left this computer's key and its list of paired devices, so installing again needs no pairing \
+                        again. To remove them as well: switchboard-node uninstall --purge";
+pub const PURGED: &str = "Removing this computer's key and its list of paired devices: every device paired with this \
+                          computer, and this computer where it was paired with a home computer, will need to pair again.";
+
+/// What becomes of this computer's key and its list of paired devices: they stay, and that is said, unless
+/// `--purge` was asked for. Nothing at all on a computer that never had keys.
+fn keys_plan(p: &Places) -> Vec<Step> {
+    let all: Vec<PathBuf> = p.key.iter().chain(&p.paired).cloned().collect();
+    if all.is_empty() {
+        return vec![];
+    }
+    // (the lock alone is not worth a word: it is empty, and a node that runs makes it again)
+    let worth: Vec<PathBuf> = all.iter().filter(|f| f.extension().is_none_or(|e| e != "lock")).cloned().collect();
+    if !p.purge {
+        return vec![Step::Note { text: KEPT, if_any: worth }];
+    }
+    let mut steps = vec![Step::Note { text: PURGED, if_any: worth }];
+    for (i, f) in p.key.iter().enumerate() {
+        let what = match (i, f.extension().is_some_and(|e| e == "lock")) {
+            (_, true) => "the lock file of its key",
+            (0, _) => "this computer's key",
+            _ => "a copy of this computer's key",
+        };
+        steps.push(Step::Remove { what, path: f.clone() });
+    }
+    for (i, f) in p.paired.iter().enumerate() {
+        let what = if i == 0 { "the list of paired devices" } else { "a copy of the list of paired devices" };
+        steps.push(Step::Remove { what, path: f.clone() });
+    }
+    steps
+}
+
+/// A file and what is kept beside it (`config_copies`).
+pub fn with_copies(path: &Path) -> Vec<PathBuf> {
+    let mut out = vec![path.to_path_buf()];
+    out.extend(config_copies(path));
+    out
 }
 
 /// Runs a command with its arguments: what it printed, or why it failed.
@@ -202,9 +257,22 @@ pub fn carry_out_saying(steps: &[Step], sh: Sh, patience: Duration, say: &mut dy
                     say(format!("Left {}: {why}.", path.display()));
                 }
             }
+            Step::Note { text, if_any } => {
+                if if_any.iter().any(|f| f.exists()) {
+                    say(text.to_string());
+                }
+            }
         }
     }
     failed
+}
+
+/// The files kept beside node.json by durable.rs: node.json.bak and every node.json.bad-<time>.
+pub fn config_copies(config: &Path) -> Vec<PathBuf> {
+    let Some(name) = config.file_name().map(|n| n.to_string_lossy().into_owned()) else { return vec![] };
+    let mut out = vec![config.with_file_name(format!("{name}.bak"))];
+    out.extend(sb_core::durable::bads(config).into_iter().map(|n| config.with_file_name(n)));
+    out
 }
 
 /// The moved-aside programs ("switchboard-node.<pid>.old") in the folder of `program`.
@@ -232,7 +300,9 @@ mod tests {
     fn places(os: Os, home: &Path) -> Places {
         let program = match os {
             Os::Windows => home.join("AppData/Local/Switchboard/switchboard-node.exe"),
-            _ => home.join(".local/bin/switchboard-node"),
+            // (spelled out: this path goes into the pkill pattern as text, and on a Windows host `join` would
+            // put a backslash in a Mac or Linux path)
+            _ => PathBuf::from(format!("{}/.local/bin/switchboard-node", home.display())),
         };
         Places {
             os,
@@ -244,7 +314,31 @@ mod tests {
             pid: 4242,
             running_from_program: false,
             old: vec![],
+            copies: vec![],
+            purge: false,
+            key: vec![],
+            paired: vec![],
         }
+    }
+
+    #[test]
+    fn the_copies_kept_beside_node_json_go_with_it() {
+        // each may hold the token (durable.rs keeps node.json.bak, and a damaged node.json as node.json.bad-<time>)
+        let home = std::env::temp_dir().join(format!("sbnode-copies-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let mut p = places(Os::Linux, &home);
+        let dir = p.config.parent().unwrap().to_path_buf();
+        std::fs::create_dir_all(&dir).unwrap();
+        for n in ["node.json", "node.json.bak", "node.json.bad-20261122-101500", "config.json", "config.json.bak"] {
+            std::fs::write(dir.join(n), "{}").unwrap();
+        }
+        p.copies = config_copies(&p.config);
+        let all = lines(&p);
+        for n in ["node.json", "node.json.bak", "node.json.bad-20261122-101500"] {
+            assert!(all.contains(&format!("rm .config/switchboard/{n}")), "{n}: {all:?}");
+        }
+        assert!(!all.iter().any(|l| l.contains("config.json")), "the helper's own files are not the node's: {all:?}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     /// The plan as short lines: "run <cmd> <args>", "rm <path under home>", "leave <path under home>".
@@ -256,6 +350,7 @@ mod tests {
                 Step::Run { cmd, args, .. } => format!("run {cmd} {}", args.join(" ")),
                 Step::Remove { path, .. } => format!("rm {}", rel(path)),
                 Step::Leave { path, .. } => format!("leave {}", rel(path)),
+                Step::Note { text, .. } => format!("say {text}"),
             })
             .collect()
     }
@@ -314,6 +409,75 @@ mod tests {
         let mut mac = places(Os::Mac, home);
         mac.running_from_program = true;
         assert!(lines(&mac).contains(&"rm .local/bin/switchboard-node".to_string()));
+    }
+
+    #[test]
+    fn the_key_and_the_paired_devices_stay_unless_purged() {
+        let home = std::env::temp_dir().join(format!("sb-node-uninstall-keys-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let cfg = home.join(".config/switchboard");
+        let share = home.join(".local/share/switchboard");
+        let files = || {
+            for d in [&cfg, &share] {
+                std::fs::create_dir_all(d).unwrap();
+            }
+            for f in ["node.json", "device.key", "device.key.bak", "keys.lock"] {
+                std::fs::write(cfg.join(f), "x").unwrap();
+            }
+            for f in ["paired.json", "paired.json.bak"] {
+                std::fs::write(share.join(f), "{}").unwrap();
+            }
+        };
+        let with_keys = |purge: bool| {
+            let mut p = places(Os::Linux, &home);
+            p.purge = purge;
+            p.key = with_copies(&cfg.join("device.key")).into_iter().chain([cfg.join("keys.lock")]).collect();
+            p.paired = with_copies(&share.join("paired.json"));
+            p
+        };
+        let quiet = |_: &str, _: &[String]| Err("nothing".to_string());
+
+        // plain: the key and the list stay, and one line says so and how to remove them
+        files();
+        let (said, failed) = carry_out(&plan(&with_keys(false)), &quiet, Duration::ZERO);
+        assert!(!failed);
+        // (the path in the first line is spelled as the system spells it, so only its start is compared)
+        assert_eq!(said.len(), 2, "{said:?}");
+        assert!(said[0].starts_with("Removed its settings and the token for the server: "), "{said:?}");
+        assert!(said[0].ends_with("node.json"), "{said:?}");
+        assert_eq!(said[1], KEPT);
+        for f in ["device.key", "device.key.bak", "keys.lock"] {
+            assert!(cfg.join(f).exists(), "{f}");
+        }
+        assert!(share.join("paired.json").exists() && share.join("paired.json.bak").exists());
+
+        // --purge: all of it goes, after a line that says what that costs
+        files();
+        let (said, failed) = carry_out(&plan(&with_keys(true)), &quiet, Duration::ZERO);
+        assert!(!failed);
+        assert_eq!(said[1], PURGED);
+        assert!(PURGED.contains("will need to pair again"));
+        assert_eq!(
+            said[2..].iter().map(|l| l.split(':').next().unwrap()).collect::<Vec<_>>(),
+            [
+                "Removed this computer's key",
+                "Removed a copy of this computer's key",
+                "Removed the lock file of its key",
+                "Removed the list of paired devices",
+                "Removed a copy of the list of paired devices",
+            ]
+        );
+        assert!(
+            std::fs::read_dir(&cfg).unwrap().next().is_none() && std::fs::read_dir(&share).unwrap().next().is_none()
+        );
+
+        // a computer that never had keys hears nothing about them, purged or not
+        std::fs::write(cfg.join("node.json"), "x").unwrap();
+        for purge in [false, true] {
+            let (said, _) = carry_out(&plan(&with_keys(purge)), &quiet, Duration::ZERO);
+            assert_eq!(said.len(), usize::from(!purge), "only node.json, the first time: {said:?}");
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]

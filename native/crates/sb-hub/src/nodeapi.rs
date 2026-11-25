@@ -7,7 +7,7 @@
 //! POST /internal/rpc/<machine>    body: an sb.py RPC request -> its answer   (?timeout=seconds, default 40)
 //! POST /internal/unpair/<machine> forget a node; its token stops working
 //!
-//! `/internal/*` answers only this machine, like `/internal/open`.
+//! `/internal/*` answers only this machine, like `/internal/open`, and is not there at all on the tunnel listener.
 
 use crate::link::{Link, RpcError};
 use crate::link_proto::CLOSE_UNPAIRED;
@@ -29,12 +29,18 @@ use std::time::{Duration, Instant};
 /// The hub pings each link this often, and drops one it has not heard from in three times as long.
 const PING_EVERY: Duration = Duration::from_secs(20);
 const RPC_TIMEOUT: u64 = 40;
+/// How the server's machine list writes a linked machine's target (`server/nodes.py`, `PREFIX`).
+const NODE_TARGET: &str = "node:";
 const RPC_TIMEOUT_MAX: u64 = 300;
 
+/// What another computer may ask: its link, and pairing with a code. The tunnel listener has these and no more
+/// of this file (server.rs `public_router`).
+pub fn public_routes() -> Router<Arc<Hub>> {
+    Router::new().route("/node", get(node)).route("/pair", post(pair))
+}
+
 pub fn routes() -> Router<Arc<Hub>> {
-    Router::new()
-        .route("/node", get(node))
-        .route("/pair", post(pair))
+    public_routes()
         .route("/internal/pair", post(internal_pair))
         .route("/internal/nodes", get(internal_nodes))
         .route("/internal/rpc/{machine}", post(internal_rpc))
@@ -78,10 +84,12 @@ async fn pair(State(hub): State<Arc<Hub>>, ConnectInfo(peer): ConnectInfo<Socket
     let Ok(req) = serde_json::from_str::<PairReq>(&body) else {
         return err(400, "Send {\"code\", \"name\"} as JSON.");
     };
-    // a name an ssh machine already has stays that machine's
+    // A name an ssh machine already has stays that machine's. The server's list also holds every linked machine
+    // (target `node:<name>`), and keeps one that was unlinked so that it has its place when it is linked again:
+    // those rows are not owners of the name. Whether a linked machine may be paired again is decided just below.
     let taken = machines::load(&hub.cfg.machines_path)
         .ok()
-        .and_then(|f| f.machines.into_iter().find(|m| m.name == req.name))
+        .and_then(|f| f.machines.into_iter().find(|m| m.name == req.name && !m.target.starts_with(NODE_TARGET)))
         .map(|m| m.label().to_string())
         // ... and so does a linked machine's, unless the one asking holds its token (never a hijack with a stray code)
         .or_else(|| {

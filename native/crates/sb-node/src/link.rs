@@ -2,6 +2,7 @@
 //! `sb.py rpc`) and terminals (a PTY running sb.py's term mode, which execs `claude attach <bg>`, exactly what the
 //! hub's ssh gets). Closing a terminal only detaches; the session keeps running.
 
+use crate::keys::Shared;
 use crate::{NodeConfig, Own, VERSION};
 use futures_util::{SinkExt, StreamExt};
 use sb_hub::link_proto::{self, CLOSE_REPLACED, CLOSE_UNPAIRED, FromNode, ToNode};
@@ -45,7 +46,7 @@ const OUTPUT_MAX: usize = 8 << 20;
 const ERRORS_KEPT: usize = 64 << 10;
 
 pub(crate) fn log(msg: impl AsRef<str>) {
-    eprintln!("switchboard-node: {}", msg.as_ref());
+    complain!("switchboard-node: {}", msg.as_ref());
 }
 
 /// Why reconnecting at once cannot help.
@@ -101,15 +102,32 @@ pub fn held_elsewhere(lock: &Path) -> bool {
 /// was at the start, to tell an update's leftover process (Windows) from a second node. `lock` is the file held
 /// while linked. `again` is a retry of a token the hub turned down or another node took: it says nothing unless
 /// something changes.
-pub async fn run(cfg: NodeConfig, own: Option<&Own>, lock: &Path, again: bool) -> End {
-    if !again {
+pub async fn run(cfg: NodeConfig, own: Option<&Own>, lock: &Path, again: bool, keys: Option<&Arc<Shared>>) -> End {
+    if !again && cfg.hub.is_empty() {
+        log(format!("{VERSION} linking {} to the hub through the home computer", cfg.machine));
+    } else if !again {
         log(format!("{VERSION} linking {} to the hub at {}", cfg.machine, cfg.hub));
     }
+    let mut cfg = cfg;
     let forever = async {
         let mut wait = 1u64;
         loop {
+            // The settings can change under a running helper: the home computer moved to this computer or away
+            // from it (the hub's address changes, the token stays), or this computer was linked again while its
+            // old hub could not be reached (both change). What is on disk is the link. Without this a helper whose
+            // old hub is gone would try it for ever and never see the new link.
+            let on_disk = keys.and_then(|k| k.config()).or_else(|| crate::load_raw(&lock.with_extension("json")));
+            if let Some(now) = on_disk
+                && !now.token.is_empty()
+                && (now.hub != cfg.hub || now.token != cfg.token)
+            {
+                cfg = now;
+                wait = 1;
+            }
+            let at =
+                if cfg.hub.is_empty() { "through the home computer".to_string() } else { format!("at {}", cfg.hub) };
             let began = Instant::now();
-            match link_once(&cfg, lock).await {
+            match link_once(&cfg, lock, keys).await {
                 Ok(why) => log(format!("link closed: {why}")),
                 Err(Ok(Stop::Unpaired { why, linked })) => return End::Unpaired { why, linked },
                 Err(Ok(Stop::Replaced)) => {
@@ -121,7 +139,7 @@ pub async fn run(cfg: NodeConfig, own: Option<&Own>, lock: &Path, again: bool) -
                     }
                     return End::Replaced;
                 }
-                Err(Err(e)) => log(format!("cannot reach the hub at {} ({e}); trying again in {wait} s", cfg.hub)),
+                Err(Err(e)) => log(format!("cannot reach the hub {at} ({e}); trying again in {wait} s")),
             }
             if began.elapsed() > Duration::from_secs(60) {
                 wait = 1;
@@ -162,16 +180,118 @@ pub async fn shutdown() {
 const RPC_GRACE: Duration = Duration::from_secs(10);
 
 /// One link, from connect to close. Ok(why) means try again; Err(Ok) means stop; Err(Err) is a failed connect.
-async fn link_once(cfg: &NodeConfig, lock: &Path) -> Result<String, Result<Stop, String>> {
-    link_for(cfg, lock, RPC_GRACE).await
+async fn link_once(cfg: &NodeConfig, lock: &Path, keys: Option<&Arc<Shared>>) -> Result<String, Result<Stop, String>> {
+    link_for(cfg, lock, RPC_GRACE, keys).await
 }
 
-async fn link_for(cfg: &NodeConfig, lock: &Path, grace: Duration) -> Result<String, Result<Stop, String>> {
-    let mut req = format!("ws://{}/node", cfg.hub).into_client_request().map_err(|e| Err(e.to_string()))?;
+/// What the link's WebSocket runs over: a connection to the hub's address, or a stream through the tunnel to
+/// the home computer, which hands it to the hub there.
+pub enum Wire {
+    Tcp(tokio::net::TcpStream),
+    Iroh(sb_link::endpoint::LinkStream),
+}
+
+impl AsyncRead for Wire {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Wire::Tcp(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+            Wire::Iroh(s) => std::pin::Pin::new(s).poll_read(cx, buf),
+        }
+    }
+}
+
+impl tokio::io::AsyncWrite for Wire {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        match self.get_mut() {
+            Wire::Tcp(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+            Wire::Iroh(s) => std::pin::Pin::new(s).poll_write(cx, buf),
+        }
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Wire::Tcp(s) => std::pin::Pin::new(s).poll_flush(cx),
+            Wire::Iroh(s) => std::pin::Pin::new(s).poll_flush(cx),
+        }
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        match self.get_mut() {
+            Wire::Tcp(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+            Wire::Iroh(s) => std::pin::Pin::new(s).poll_shutdown(cx),
+        }
+    }
+}
+
+/// How the link reaches the hub.
+pub enum Dialer {
+    /// By the hub's address, as always.
+    Tcp,
+    /// Through the tunnel to the home computer.
+    Iroh(Arc<sb_link::endpoint::Tunnel>),
+}
+
+impl Dialer {
+    /// Which one to use now: the tunnel when keys are on here and it is up, or when there is no address to
+    /// fall back to; else the address.
+    pub fn pick(cfg: &NodeConfig, keys: Option<&Arc<Shared>>) -> Dialer {
+        match keys.and_then(|k| k.tunnel()) {
+            Some(t) if t.status().connected || cfg.hub.is_empty() => Dialer::Iroh(t),
+            _ => Dialer::Tcp,
+        }
+    }
+
+    pub async fn dial(&self, cfg: &NodeConfig) -> std::io::Result<Wire> {
+        match self {
+            // (no address and no tunnel: keys have not started the tunnel yet, and this is tried again shortly)
+            Dialer::Tcp if cfg.hub.is_empty() => Err(std::io::Error::other("not connected to it yet")),
+            Dialer::Tcp => Ok(Wire::Tcp(tokio::net::TcpStream::connect(cfg.hub.as_str()).await?)),
+            Dialer::Iroh(t) => {
+                let mut s = t.open().await?;
+                sb_link::tunnel::write_header(&mut s, sb_link::tunnel::Target::Hub).await?;
+                Ok(Wire::Iroh(s))
+            }
+        }
+    }
+}
+
+async fn link_for(
+    cfg: &NodeConfig,
+    lock: &Path,
+    grace: Duration,
+    keys: Option<&Arc<Shared>>,
+) -> Result<String, Result<Stop, String>> {
+    // (through the tunnel the request still names a host: the hub's tunnel listener on the home computer)
+    let host = if cfg.hub.is_empty() { "127.0.0.1" } else { cfg.hub.as_str() };
+    let mut req = format!("ws://{host}/node").into_client_request().map_err(|e| Err(e.to_string()))?;
     let auth =
         format!("Bearer {}", cfg.token).parse().map_err(|_| Err("the saved token is not valid text".to_string()))?;
     req.headers_mut().insert("Authorization", auth);
-    let ws = match tokio::time::timeout(Duration::from_secs(15), tokio_tungstenite::connect_async(req)).await {
+    let dialer = Dialer::pick(cfg, keys);
+    let connect = async {
+        let wire = match dialer.dial(cfg).await {
+            Ok(w) => w,
+            // the tunnel went away between the look and the dial: the address still works where there is one
+            Err(_) if matches!(dialer, Dialer::Iroh(_)) && !cfg.hub.is_empty() => Dialer::Tcp.dial(cfg).await?,
+            Err(e) => return Err(tungstenite::Error::Io(e)),
+        };
+        tokio_tungstenite::client_async(req, wire).await
+    };
+    let ws = match tokio::time::timeout(Duration::from_secs(15), connect).await {
         Err(_) => return Err(Err("timed out".into())),
         Ok(Err(tungstenite::Error::Http(r))) if r.status() == 401 => {
             let why = "The hub does not know this machine's token any more.".to_string();
@@ -181,7 +301,7 @@ async fn link_for(cfg: &NodeConfig, lock: &Path, grace: Duration) -> Result<Stri
         Ok(Err(e)) => return Err(Err(e.to_string())),
         Ok(Ok((ws, _))) => ws,
     };
-    log("linked");
+    log(if matches!(dialer, Dialer::Iroh(_)) { "linked through the home computer" } else { "linked" });
     let mut holding = Holding { path: lock.to_path_buf(), file: None };
     holding.take();
     let (mut sink, mut stream) = ws.split();
@@ -222,8 +342,12 @@ async fn link_for(cfg: &NodeConfig, lock: &Path, grace: Duration) -> Result<Stri
                     Some(Ok(Message::Text(t))) => match serde_json::from_str::<ToNode>(t.as_str()) {
                         Ok(ToNode::Rpc { id, req, timeout }) => {
                             let (tx, cfg) = (tx.clone(), cfg.clone());
+                            let own = answered_here(keys, &req);
                             rpcs.spawn(async move {
-                                let res = rpc(&cfg, &req, timeout).await;
+                                let res = match own {
+                                    Some(res) => res,
+                                    None => rpc(&cfg, &req, timeout).await,
+                                };
                                 let _ = tx.send(Message::Text(result_message(id, res).into())).await;
                             });
                         }
@@ -404,8 +528,19 @@ async fn read_tail(from: Option<impl AsyncRead + Unpin>, keep: usize) -> Vec<u8>
     }
 }
 
+/// What this helper answers itself, and sb.py never sees: the home computer asking this one to switch to keys,
+/// and the home computer's signed list of devices.
+pub(crate) fn answered_here(keys: Option<&Arc<Shared>>, req: &Value) -> Option<Value> {
+    let k = keys?;
+    match req["verb"].as_str()? {
+        "node.keys" => Some(k.node_keys(req)),
+        "node.roster" => Some(k.node_roster(req)),
+        _ => None,
+    }
+}
+
 /// `sb.py rpc` with the request on stdin; its JSON answer (the last line it prints), or why there is none.
-async fn rpc(cfg: &NodeConfig, req: &Value, timeout: u64) -> Value {
+pub(crate) async fn rpc(cfg: &NodeConfig, req: &Value, timeout: u64) -> Value {
     rpc_capped(cfg, req, timeout, OUTPUT_MAX).await
 }
 
@@ -553,6 +688,7 @@ mod tests {
             token: "t".into(),
             sb: sb.map(|p| p.display().to_string()),
             python: sb.map(|_| "/bin/sh".to_string()),
+            ..Default::default()
         }
     }
 
@@ -654,8 +790,9 @@ mod tests {
         let cfg = lab_cfg(&addr, Some(&sb));
         let lock = dir.join("node.lock");
         let grace = Duration::from_millis(500);
-        let end =
-            tokio::time::timeout(Duration::from_secs(10), link_for(&cfg, &lock, grace)).await.expect("never ended");
+        let end = tokio::time::timeout(Duration::from_secs(10), link_for(&cfg, &lock, grace, None))
+            .await
+            .expect("never ended");
         assert!(end.is_ok(), "the link just dropped");
         assert!(dir.join("began").exists(), "the request was running");
         tokio::time::sleep(Duration::from_secs(4)).await;
@@ -682,7 +819,7 @@ mod tests {
         let cfg = lab_cfg(&addr, Some(&sb));
         let lock = dir.join("node.lock");
         let began = Instant::now();
-        let end = tokio::time::timeout(Duration::from_secs(10), link_for(&cfg, &lock, RPC_GRACE)).await;
+        let end = tokio::time::timeout(Duration::from_secs(10), link_for(&cfg, &lock, RPC_GRACE, None)).await;
         assert!(end.expect("never ended").is_ok(), "the link just dropped");
         assert!(began.elapsed() < Duration::from_millis(1900), "the next link does not wait for it");
         assert!(dir.join("began").exists() && !dir.join("finished").exists(), "the request was running");
@@ -798,8 +935,9 @@ mod tests {
         let cfg = lab_cfg(&addr, Some(&sb));
         let began = Instant::now();
         let lock = sb.with_file_name("node.lock");
-        let end =
-            tokio::time::timeout(Duration::from_secs(30), link_once(&cfg, &lock)).await.expect("the link never ended");
+        let end = tokio::time::timeout(Duration::from_secs(30), link_once(&cfg, &lock, None))
+            .await
+            .expect("the link never ended");
         assert_eq!(end.ok(), Some("the hub stopped taking messages".to_string()));
         assert!(began.elapsed() < Duration::from_secs(25), "{:?}", began.elapsed());
         let _ = std::fs::remove_dir_all(sb.parent().unwrap());

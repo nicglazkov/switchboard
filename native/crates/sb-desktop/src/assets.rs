@@ -111,6 +111,8 @@ static ICONS: &[(&str, &[u8])] = icons![
     "pencil",
     "spinner",
     "ring",
+    "phone",
+    "key",
 ];
 
 /// The app's own icon (the AppIcon.icns artwork at 512 px, with the macOS rounded square and its margin), for About.

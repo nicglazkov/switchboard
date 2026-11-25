@@ -14,7 +14,19 @@ path = "src/main.rs"
 [dependencies]
 # The link messages and the PTY code are the hub's own (link_proto.rs, pty.rs), so the two sides never drift.
 sb-hub = { path = "../sb-hub" }
-tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util"] }
+# durable.rs: node.json survives a power cut. (sb-hub already builds sb-core.)
+sb-core = { path = "../sb-core" }
+# Keys: the endpoint, pairing and the tunnel (keys.rs).
+sb-link = { path = "../sb-link", features = ["standin"] }
+# The control API on this computer (control.rs). The hub's own version and features, so nothing new is built.
+axum = { version = "=0.8.9", default-features = false, features = ["http1", "tokio", "json", "ws", "query"] }
+# This computer's own surface (own.rs) is HTTP served on a tunnel stream, not on a port: hyper's connection driver
+# over any stream, with WebSocket upgrades. Both are what axum is built on, so nothing new is compiled.
+hyper = { version = "=1.12.0", default-features = false, features = ["http1", "server"] }
+hyper-util = { version = "=0.1.21", default-features = false, features = ["tokio", "service"] }
+# `switchboard-node code` draws the link as a QR code in the terminal. No image formats.
+qrcode = { version = "=0.14.1", default-features = false }
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "macros", "net", "sync", "time", "signal", "process", "io-util", "fs"] }
 tokio-tungstenite = "=0.29.0"
 futures-util = "=0.3.34"
 serde.workspace = true

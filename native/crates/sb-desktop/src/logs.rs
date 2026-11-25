@@ -192,7 +192,10 @@ impl log::Log for Logger {
         if !self.enabled(record.metadata()) {
             return;
         }
-        let line = Logger::line(record);
+        let mut line = Logger::line(record);
+        if let Some(trace) = borrow_trace(record) {
+            line.push_str(&trace);
+        }
         if self.echo {
             eprint!("{line}");
         }
@@ -208,6 +211,21 @@ impl log::Log for Logger {
             let _ = f.flush();
         }
     }
+}
+
+/// The UI library logs "RefCell already borrowed" with no word on where: something of its own ran while the app
+/// was in the middle of a change, and was dropped. In a debug build, or with SB_LOG_TRACE set, the first one of a
+/// run is followed by where it came from, so it can be told apart: ours to fix, or the library's.
+fn borrow_trace(record: &log::Record<'_>) -> Option<String> {
+    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    if record.level() != log::Level::Error || !(cfg!(debug_assertions) || std::env::var_os("SB_LOG_TRACE").is_some()) {
+        return None;
+    }
+    if !record.args().to_string().contains("already borrowed") || SAID.swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+        return None;
+    }
+    Some(format!("where it came from (said once a run):\n{}\n", std::backtrace::Backtrace::force_capture()))
 }
 
 /// Installs the logger once, at the start of main. No log folder (no HOME) leaves logging off, as before.

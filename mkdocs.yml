@@ -22,6 +22,7 @@ exclude_docs: |
   /rebuild.md
   /requirements.txt
   /overrides/
+  /diagrams/README.md
 
 theme:
   name: material
@@ -31,7 +32,7 @@ theme:
   icon:
     repo: fontawesome/brands/github
   font:
-    text: Inter Tight
+    text: Inter
     code: JetBrains Mono
   palette:
     - media: "(prefers-color-scheme)"
@@ -53,8 +54,7 @@ theme:
         icon: material/weather-night
         name: Follow the system
   features:
-    - navigation.tabs
-    - navigation.tabs.sticky
+    - navigation.path
     - navigation.sections
     - navigation.top
     - navigation.footer
@@ -94,6 +94,8 @@ markdown_extensions:
   - md_in_html
   - tables
   - toc:
+      title: On this page
+      toc_depth: 3
       permalink: true
       permalink_title: Link to this section
   - pymdownx.betterem
@@ -125,27 +127,70 @@ markdown_extensions:
 
 nav:
   - Home: index.md
-  - Get started:
+  - Start:
+      - Quickstart: quickstart.md
+      - What is Switchboard?: concepts/what-is-switchboard.md
       - Install: install.md
       - Add your computers: machines.md
+      - Pair a computer: features/pair-a-computer.md
+      - Pair a phone: features/pair-a-phone.md
+      - When the home computer is away: features/when-home-is-away.md
+      - Move or replace the home computer: features/move-or-replace-home.md
+      - Run your own relay: features/run-your-own-relay.md
       - The apps: apps.md
-  - Use it:
+  - Chats:
       - The board: board.md
       - Chats and what they cost: chats.md
+      - Start a chat: features/start-a-chat.md
+      - Answer from the board: features/answer-from-the-board.md
+      - Resume or start fresh: features/resume-or-start-fresh.md
+      - Cold chat guard: features/cold-chat-guard.md
+      - Continue on another computer: features/continue-on-another-computer.md
+      - Chats sent by Claude: features/chats-sent-by-claude.md
+      - Tidy up: features/tidy-up.md
+  - Tools:
       - Terminals: terminals.md
       - History and files: history-files.md
+      - History: features/history.md
+      - Files: features/files.md
+      - Library: features/library.md
       - Usage and budget: usage.md
-      - Keyboard shortcuts: shortcuts.md
+      - Daily budget: features/daily-budget.md
+      - Notifications: features/notifications.md
       - Settings: settings.md
+  - Concepts:
+      - How Switchboard works: concepts/how-switchboard-works.md
+      - Chat states: concepts/chat-states.md
+      - Warm and cold: concepts/warm-and-cold.md
+      - What a chat costs: concepts/what-a-chat-costs.md
+      - Places and folders: concepts/places-and-folders.md
+      - Device keys and pairing: concepts/device-keys-and-pairing.md
+      - Connections: concepts/connections.md
   - Help:
-      - Troubleshooting: troubleshooting.md
+      - Troubleshooting:
+          - troubleshooting.md
+          - The installer stops with a message: troubleshooting/installer-stops.md
+          - A code is wrong or has expired: troubleshooting/code-wrong-or-expired.md
+          - Switchboard isn't running after a restart: troubleshooting/not-running-after-restart.md
+          - The app can't find the home computer: troubleshooting/app-cant-find-home.md
+          - The board is out of reach away from home: troubleshooting/away-from-home.md
+          - A phone can't join or can't reach home: troubleshooting/phone-cant-join.md
+          - Settings are back to defaults after a power cut: troubleshooting/settings-reset-after-power-cut.md
+          - A computer is offline or missing: troubleshooting/computer-offline.md
+          - A Mac goes offline after its helper updates: troubleshooting/mac-offline-after-update.md
+          - Windows Defender removed the helper: troubleshooting/windows-defender-removed-helper.md
+          - A Windows computer doesn't come back after a restart: troubleshooting/windows-after-restart.md
+          - The home computer refuses a computer: troubleshooting/hub-refused-computer.md
+          - A chat says cold sooner than you expect: troubleshooting/chat-cold-too-soon.md
       - Questions: faq.md
       - Updates: updates.md
       - Privacy and security: privacy.md
       - Get help: support.md
   - Reference:
       - Commands: commands.md
+      - Keyboard shortcuts: shortcuts.md
       - Ports, files and settings: reference.md
+      - Terminology: reference/glossary.md
       - Changelog: changelog.md
   - Develop:
       - How the pieces fit: architecture.md

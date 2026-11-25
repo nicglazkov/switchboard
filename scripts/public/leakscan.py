@@ -26,6 +26,8 @@ SKIP_DIRS = {'.git', 'target', 'node_modules', '__pycache__', '.pytest_cache', '
 # Addresses and names that are fine to publish.
 DOC_IPS = re.compile(r'^(192\.0\.2|198\.51\.100|203\.0\.113)\.')
 PLACEHOLDER_USERS = {'you', 'yourname', 'shared', 'public', 'runner', 'example'}
+# Not folders: the paths of the helper's own API for the home computer (sb-node control.rs, own.rs).
+HOME_ROUTES = {'status', 'move', 'backup', 'restore', 'receive', 'commit', 'discard'}
 OK_EMAIL_DOMAINS = ('example.com', 'example.org', 'example.net', 'users.noreply.github.com',
                     'anthropic.com', 'example', '.local', '.lan', '.internal', '.ts.net')
 # GitHub's own address: it commits pull request merge refs and web-UI merges, so it shows up in history.
@@ -68,6 +70,8 @@ def allowed(rule, m):
         # Stand-ins that tests use for "some LAN", "some tailnet address" and the Android emulator's host.
         return s.startswith(('10.0.0.', '100.64.0.')) or s == '10.0.2.2'
     if rule == 'home folder':
+        if m.group(1) == '/home/' and m.group(2) in HOME_ROUTES:
+            return True
         return m.group(2).lower() in PLACEHOLDER_USERS or m.group(2).startswith(('$', '%', '<'))
     if rule == 'email address':
         d = s.split('@', 1)[1].lower()
@@ -93,8 +97,11 @@ def load_deny(path):
 def check_text(where, text, deny, prose, found, binary=False, third_party=False):
     if third_party:
         deny, prose = [], False
+    above = ''
     for n, line in enumerate(text.splitlines(), 1):
-        if 'leakscan: allow' in line:
+        # ("allow next line" on the line above, for a line a formatter will not leave a comment on)
+        skip, above = 'leakscan: allow' in line or 'leakscan: allow next line' in above, line
+        if skip:
             continue
         for rule, rx in RULES:
             if (binary or third_party) and rule in THIRD_PARTY_SKIP:

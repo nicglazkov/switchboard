@@ -1,11 +1,11 @@
 [workspace]
 resolver = "3"
-members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-install", "crates/sb-node"]
+members = ["crates/sb-core", "crates/sb-desktop", "crates/sb-hub", "crates/sb-install", "crates/sb-link", "crates/sb-mobile", "crates/sb-node"]
 
 [workspace.package]
-version = "0.8.23"
+version = "0.9.0"
 edition = "2024"
-rust-version = "1.90"
+rust-version = "1.91"
 license = "AGPL-3.0-only"
 publish = false
 
@@ -62,3 +62,11 @@ opt-level = 1
 [profile.dev.package."*"]
 # GPUI is very slow unoptimized; build dependencies optimized even in dev.
 opt-level = 2
+
+# The phone apps' library (crates/sb-mobile; scripts/build-mobile-ios.sh and build-mobile-android.sh): built for
+# size, since it ships inside an app people download over mobile data, and with nothing split off beside it.
+[profile.mobile]
+inherits = "release"
+opt-level = "s"
+debug = false
+split-debuginfo = "off"

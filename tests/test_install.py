@@ -59,6 +59,37 @@ class InstallTest(unittest.TestCase):
         s = self.sb.merge_settings({}, 'C:\\Users\\you\\.claude\\switchboard\\sb.py', 'python')
         self.assertEqual(s['statusLine']['command'], 'python C:/Users/you/.claude/switchboard/sb.py statusline')
 
+    def test_switchboards_own_python_is_what_claude_code_is_told_to_run(self):
+        # no Python of Switchboard's on this computer: the one on PATH, by name
+        self.sb.install(home=self.home)
+        s = json.loads(self.settings.read_text())
+        self.assertEqual(s['statusLine']['command'], f'python3 {self.home}/.claude/switchboard/sb.py statusline')
+        # the installer put one in place: hooks, status line and the MCP server name it by its full path
+        own = self.home / '.local' / 'share' / 'switchboard' / 'python' / 'bin' / 'python3'
+        own.parent.mkdir(parents=True)
+        own.write_text('#!/bin/sh\n')
+        self.assertIsNone(self.sb.own_python(self.home), 'a file that cannot be run is not a Python')
+        own.chmod(0o755)
+        self.sb.install(home=self.home)
+        s = json.loads(self.settings.read_text())
+        self.assertEqual(s['statusLine']['command'], f'{own} {self.home}/.claude/switchboard/sb.py statusline')
+        for ev in ('UserPromptSubmit', 'SessionStart', 'SessionEnd'):
+            cmds = [h['command'] for g in s['hooks'][ev] for h in g['hooks'] if 'sb.py' in h['command']]
+            self.assertEqual(cmds, [f'{own} {self.home}/.claude/switchboard/sb.py hook'], ev)
+        mcp = json.loads((self.home / '.claude.json').read_text())['mcpServers']['switchboard']
+        self.assertEqual(mcp['command'], str(own))
+        # and uninstall still knows its own hooks when they are written that way
+        self.sb.uninstall(home=self.home)
+        s = json.loads(self.settings.read_text())
+        self.assertFalse(any('sb.py' in h['command'] for gs in s.get('hooks', {}).values() for g in gs for h in g['hooks']))
+        self.assertEqual(s['statusLine']['command'], 'printf old')
+
+    def test_a_home_folder_with_a_space_quotes_the_python_too(self):
+        s = self.sb.merge_settings({}, '/Users/Example User/.claude/switchboard/sb.py', '/Users/Example User/.local/share/switchboard/python/bin/python3')
+        cmd = s['hooks']['SessionStart'][0]['hooks'][0]['command']
+        self.assertEqual(cmd, '"/Users/Example User/.local/share/switchboard/python/bin/python3" "/Users/Example User/.claude/switchboard/sb.py" hook')
+        self.assertTrue(self.sb._sb_hook(cmd))
+
     def test_dry_run_changes_nothing(self):
         before = self.settings.read_text()
         self.sb.install(dry_run=True, home=self.home)

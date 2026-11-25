@@ -1,13 +1,20 @@
+---
+description: For developers. The programs that make up Switchboard, the protocols between them, and how device keys, the tunnel, the relay and the push gateway fit in.
+---
+
 # How the pieces fit
 
-Switchboard is four programs. This page says what each one does and how they talk, so you know where to look when
-you change something.
+<p class="sb-meta">Last validated: Nov 22, 2026</p>
 
-```
-  app (sb-desktop)  --HTTP :8130-->  server (server/)   --ssh, or through the hub-->  helper (agent/sb.py)
-        |                                 |                                               ^
-        +--------WebSocket :8132--------> hub (sb-hub) <----WebSocket, outgoing---- switchboard-node
-```
+Switchboard is four programs. This page says what each one does and how they talk, so you know where to look when
+you change something. It uses the names in the code: the server is what the other pages call the home
+computer's software, a machine is a computer, and a node is the helper program `switchboard-node`.
+
+- **The app** (`sb-desktop`) talks HTTP to the server on port 8130, and WebSocket to the hub on port 8132 for
+  terminals.
+- **The server** (`server/`) reaches the helper on each computer over ssh, or through the hub.
+- **The hub** (`sb-hub`) holds one outgoing WebSocket from each `switchboard-node`.
+- **The helper** (`agent/sb.py`) runs on each computer, inside Claude Code.
 
 ## The server: `server/`
 
@@ -23,6 +30,8 @@ Module map: `server.py` (HTTP routes, the poller), `fleet.py` (calls to the comp
 through the hub), `term.py` (terminal tickets), `features.py` (cleanup, threads, picking a computer, dispatch),
 `budget.py` (the usage budget), `library.py` (tools shared between computers), `flags.py`, `notes.py`,
 `bonjour.py` (finding the server on the local network), `addresses.py` (the addresses it tells the apps to keep).
+Version 0.9.0 added `keys.py` (the keys mode, and whether keys only is safe), `pushcrypto.py` (signing and
+sealing pushes for the gateway) and `downloads.py` (port 8131).
 
 ## The helper: `agent/sb.py`
 
@@ -59,8 +68,13 @@ never by a full path:
   `privacy_settings` opens that pane on the Mac's own screen.
 
 Routes:
+
 - `GET /api/places/<m>`: the sidebar.
 - `GET /api/files/<m>?folder=`: one folder, or one file with `&name=`.
+- `GET /api/transcript/<m>/<sid>`: a chat as its messages, for the phone apps' chat page: what was typed, what
+  Claude wrote, and each tool call with its output or its changes, a slice at a time (`?before=` pages back,
+  `?after=` asks for what is new). The computer the chat is on reads it from Claude Code's own transcript when
+  asked. Nothing is kept by the server, and long output is cut to its start and its end.
 - `GET /api/folder_check/<m>?folder=`: answers `yes`, `ask` or `no`.
 - `POST /api/machines {op: "roam"}`: turns "Anywhere in home" on or off.
 - `POST /api/privacy_settings {machine}`: opens the Files and Folders pane on that Mac's screen.
@@ -97,6 +111,120 @@ its computer. It also holds the links from `switchboard-node` and the pairing co
 
 A small Rust program on computers added with a code. It keeps one outgoing WebSocket open to the hub, so the
 service can reach that computer without ssh.
+
+Since version 0.9.0 it also holds the computer's device key and runs the tunnel and the control API, described
+under [Device keys and the tunnel](#device-keys-and-the-tunnel).
+
+## Device keys and the tunnel
+
+!!! note ""
+    This section describes what arrived with version 0.9.0. Keys are off until
+    `switchboard keys on` turns them on.
+
+With keys on, a paired computer reaches home by its key, not by an address. Nothing in the app, the server or
+`sb.py` changes for this: they keep talking plain HTTP and WebSocket to a port on their own computer, and
+`switchboard-node` carries those connections.
+
+<figure class="sb-fig" markdown="0">
+--8<-- "docs/diagrams/arch-tunnel.svg"
+<figcaption>Figure 1. The app and sb.py connect to sb-node on their own computer. It carries each connection to
+sb-node at home, which hands it to the server or to the hub's tunnel listener.</figcaption>
+</figure>
+
+### The crate: `native/crates/sb-link`
+
+`sb-link` has the keys, pairing and the tunnel. Its modules don't know how two computers reach each other, except
+`endpoint`, which is the only file that names the network library, iroh.
+
+- `identity`: the device key: 32 random bytes in `~/.config/switchboard/device.key`, an Ed25519 secret key. The device's id is its public key.
+- `paired`: `~/.local/share/switchboard/paired.json`, the devices home has paired with. It is the allow list for the tunnel, and a list that can't be read allows nobody.
+- `code`: what a person carries to the joining device: a short code of 8 letters, shown as `K7PM-2XQ9`, or a link `switchboard://pair/1?h=&r=&s=&n=` with a 128-bit secret.
+- `pairing`: the exchange in which both ends prove they hold the code or the link's secret, bound to both ids and to the channel under it, so a middleman ends up with keys that don't match.
+- `tunnel`: one stream for each connection, with a first line that says where it goes.
+- `endpoint`: one iroh endpoint for each computer, with the computer's key. It speaks `switchboard/tunnel/1` and `switchboard/pair/1`.
+- `control`: the control API's answers as data, shared by the node, the server and the command line.
+
+### The tunnel
+
+On a paired computer that is not home, `sb-node` listens on `127.0.0.1:8130` and `127.0.0.1:8132`. For each
+connection it opens one stream to home and writes one line of JSON, `{"to":"api"}` or `{"to":"hub"}`. From then
+on it copies bytes both ways.
+
+Home's side reads the line and connects to the local address its own settings give for that name: the server
+on `127.0.0.1:8130` for `api`, the hub's tunnel listener on `127.0.0.1:8136` for `hub`. A name it has no address
+for is refused, so the other side never picks an address.
+
+Who may open a stream is decided before that. The endpoint refuses a device that isn't on the paired list when
+its connection arrives, when the connection is taken, and again at every stream. A device that is removed is
+cut off without a restart, and its open connections are closed. `switchboard/pair/1` is open to anyone who can
+reach the endpoint, and leads to the pairing exchange and nothing else.
+
+The endpoint uses no servers but the relay it is given: no DNS or pkarr lookup, no mDNS and no port mapping.
+
+### The control API
+
+`sb-node` serves a control API on `127.0.0.1:8137` whenever it runs, with keys on or off
+(`sb-node/src/control.rs`). It is how the server and the command line on the same computer talk to keys in the
+running node.
+
+| Route | What it does |
+|---|---|
+| `GET /status` | What keys are doing on this computer |
+| `POST /pair/new` | At home: a code and a link for one new device |
+| `POST /pair/join` | On any other computer: pair with a home computer |
+| `GET /devices` | At home: the paired devices |
+| `POST /devices/remove` | At home: forget a device and cut it off |
+| `POST /relay` | Set the relay, or none |
+
+It answers its own computer only. The connection must come from this computer, the `Host` must name it, there
+must be no `Origin` or `Sec-Fetch-Site`, and a POST must be JSON. A refusal carries a sentence for the person in
+`error` and one word for the program in `kind`.
+
+The server passes these on to the apps (`server/nodes.py`): `GET` and `POST /api/keys/devices`,
+`POST /api/pair_device`, `GET /api/keys/readiness` and `POST /api/keys/mode`. The desktop app's **Settings**,
+**Devices** page uses them. `POST /api/keys/mode` writes the mode and restarts the server. Where the server
+can't restart itself, as on Windows, it answers 409 with the command to run by hand, and the app shows it.
+`GET /api/keys/readiness` takes `?days=N`, and otherwise uses `keys_ready_days` from `server.json`.
+
+### Phones: `native/crates/sb-mobile`
+
+A phone has no node, so the same pieces of `sb-link` run inside the phone apps, behind a few calls that Swift
+and Kotlin reach through generated code (UniFFI). The app gets two loopback ports, one for the server's API and
+one for the hub, and its HTTP and WebSocket code points at them. Each connection there becomes one stream to
+home. Other apps on the phone can connect to `127.0.0.1` too, so the ports ask for a secret first.
+
+The crate keeps no secrets. The app stores the phone's key, in the iOS Keychain or an Android Keystore-wrapped
+file, and remembers which home it paired with. The phone apps that use it are not released yet.
+
+### The hub's tunnel listener
+
+With keys on, the hub has two listeners. The main one on port 8132 keeps every route. The second, on
+`127.0.0.1:8136`, is where connections that arrived through a tunnel come in, and it has the routes a paired
+computer needs and no others: `/term`, `/node`, `/pair` and `/healthz`. `SWITCHBOARD_HUB_TUNNEL_LISTEN` moves it,
+to an address on the same computer only. The hub reads the mode from `keys` in `server.json`: `off`, `both` or
+`only`, where a value it doesn't know counts as `only`.
+
+### The relay
+
+Two computers that can't reach each other directly meet at a relay, which passes encrypted packets and can't
+read them. The relay is the stock `iroh-relay`, version 1.5.0. `scripts/deploy-relay.sh` sets one up, and
+`scripts/relay/README.md` describes it. A short code needs a relay, because the code alone must find home. A
+link carries home's id and works without one.
+
+### The push gateway: `gateway/`
+
+Apple and Google accept notifications only from whoever published the app. The gateway is a small Go service
+that holds those keys, so that no home computer has to. It has one route, `POST /v1/push`.
+
+- The home computer signs each request with its device key. The gateway checks the signature and passes the push
+  on to APNs or FCM.
+- The words of a notification are sealed on the home computer for one phone (`server/pushcrypto.py`: Ed25519,
+  and HPKE with X25519, HKDF-SHA256 and ChaCha20-Poly1305). The gateway can't read them.
+- It keeps nothing on disk. Its replay and rate-limit counters are in memory.
+- `"mode": "direct"` in `apns.json` still sends straight to Apple with your own key, for someone who builds the
+  app themselves.
+
+`gateway/README.md` has the request format and the sealed format for the phone's side.
 
 ## The app: `native/crates/sb-desktop` and `sb-core`
 
@@ -242,7 +370,8 @@ it out. The log folder is `~/Library/Logs/Switchboard` on macOS, `%LOCALAPPDATA%
   The default is `info`.
 - Lines never hold the home folder (it is written as `~`) or a token in a URL, and the app does not log chat text.
 - A panic (`src/panics.rs`) goes to the log and to `crash-<time>.txt` in the same folder, the 10 newest kept, and
-  then ends the process as before. [building.md](building.md) explains how to read its backtrace.
+  then ends the process as before. To read its backtrace, refer to
+  [Building and releasing](building.md).
 - About has Show log (opens the folder), Copy diagnostics (version, build, OS and the last 200 log lines, without the
   server address) and Open source licenses.
 - `switchboard-hub` and `switchboard-node` print to stderr and keep no log files of their own; whatever runs them
@@ -279,5 +408,7 @@ app's color tokens from `sb-desktop/src/theme.rs` and uses its fonts and icons.
 | 8130 | The server's API |
 | 8131 | Downloads for adding a computer |
 | 8132 | The hub: terminals and linked computers |
+| 8136 | Since version 0.9.0: the hub's tunnel listener, on `127.0.0.1` only, while keys are on |
+| 8137 | Since version 0.9.0: the node's control API, on `127.0.0.1` only |
 
-None of them has a password. See [Privacy and security](privacy.md).
+None of them has a password. Refer to [Privacy and security](privacy.md).

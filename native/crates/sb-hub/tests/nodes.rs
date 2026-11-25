@@ -18,6 +18,8 @@ type Ws = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<t
 
 struct Lab {
     addr: std::net::SocketAddr,
+    /// The same hub's tunnel listener (server.rs `public_router`): what a tunnel forwards to.
+    tunnel: std::net::SocketAddr,
     key: Vec<u8>,
     dir: PathBuf,
 }
@@ -54,8 +56,27 @@ async fn lab_with(tweak: impl FnOnce(&mut Config)) -> Lab {
     let key = std::fs::read(&cfg.key_path).unwrap();
     let listener = TcpListener::bind(cfg.listen).await.unwrap();
     let addr = listener.local_addr().unwrap();
+    let public = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let tunnel = public.local_addr().unwrap();
+    tokio::spawn(server::serve_public(hub.clone(), public));
     tokio::spawn(server::serve(hub, listener));
-    Lab { addr, key, dir }
+    Lab { addr, tunnel, key, dir }
+}
+
+async fn node_at(addr: std::net::SocketAddr, token: &str) -> Result<Ws, tungstenite::Error> {
+    let mut req = format!("ws://{addr}/node").into_client_request().unwrap();
+    req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
+    let (mut ws, _) = tokio_tungstenite::connect_async(req).await?;
+    let hello = FromNode::Hello { version: "9.9.9".into(), os: "linux".into(), label: "labhost".into() };
+    ws.send(Message::Text(link_proto::encode(&hello).into())).await.unwrap();
+    Ok(ws)
+}
+
+async fn term_at(addr: std::net::SocketAddr, key: &[u8], bg: &str) -> Ws {
+    let t = ticket::mint(key, "lab", bg, server::unix_now(), ticket::TTL);
+    let mut req = format!("ws://{addr}/term?t={t}&cols=90&rows=30").into_client_request().unwrap();
+    req.headers_mut().insert("Origin", "http://10.0.0.5:8130".parse().unwrap());
+    tokio_tungstenite::connect_async(req).await.unwrap().0
 }
 
 async fn http(addr: std::net::SocketAddr, method: &str, path: &str, body: &str) -> (u16, Value) {
@@ -88,19 +109,11 @@ impl Lab {
     }
 
     async fn node(&self, token: &str) -> Result<Ws, tungstenite::Error> {
-        let mut req = format!("ws://{}/node", self.addr).into_client_request().unwrap();
-        req.headers_mut().insert("Authorization", format!("Bearer {token}").parse().unwrap());
-        let (mut ws, _) = tokio_tungstenite::connect_async(req).await?;
-        let hello = FromNode::Hello { version: "9.9.9".into(), os: "linux".into(), label: "labhost".into() };
-        ws.send(Message::Text(link_proto::encode(&hello).into())).await.unwrap();
-        Ok(ws)
+        node_at(self.addr, token).await
     }
 
     async fn term(&self, bg: &str) -> Ws {
-        let t = ticket::mint(&self.key, "lab", bg, server::unix_now(), ticket::TTL);
-        let mut req = format!("ws://{}/term?t={t}&cols=90&rows=30", self.addr).into_client_request().unwrap();
-        req.headers_mut().insert("Origin", "http://10.0.0.5:8130".parse().unwrap());
-        tokio_tungstenite::connect_async(req).await.unwrap().0
+        term_at(self.addr, &self.key, bg).await
     }
 }
 
@@ -205,6 +218,44 @@ async fn pairing_rules() {
     assert_eq!(v["error"], "lab is not linked to the hub right now.");
     let (st, _) = lab.http("POST", "/internal/rpc/nope", r#"{"verb":"list"}"#).await;
     assert_eq!(st, 404);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_linked_machine_in_the_servers_list_pairs_again_under_its_name() {
+    let lab = lab().await;
+    let pair = async |body: serde_json::Value| {
+        let (_, c) = lab.http("POST", "/internal/pair", "").await;
+        let mut body = body;
+        body["code"] = c["code"].clone();
+        lab.http("POST", "/pair", &body.to_string()).await
+    };
+    let (st, v) = pair(json!({"name": "tower"})).await;
+    assert_eq!(st, 200, "{v}");
+    let first = v["token"].as_str().unwrap().to_string();
+    // the server now lists it, as it does every linked machine
+    std::fs::write(
+        lab.dir.join("machines.json"),
+        r#"{"machines":[{"name":"desk","label":"Desk","target":"me@desk","os":"mac"},
+            {"name":"tower","label":"Tower","target":"node:tower","os":"windows"}]}"#,
+    )
+    .unwrap();
+
+    // with its token it pairs again; a stranger with a fresh code still does not get the name
+    let (st, v) = pair(json!({"name": "tower"})).await;
+    assert_eq!(st, 409, "{v}");
+    let (st, v) = pair(json!({"name": "tower", "token": first})).await;
+    assert_eq!(st, 200, "the row in the server's list is not somebody else: {v}");
+
+    // unlinked (its token file was lost, say): the row stays in the server's list, and a new code links it again
+    let (st, _) = lab.http("POST", "/internal/unpair/tower", "").await;
+    assert_eq!(st, 200);
+    let (st, v) = pair(json!({"name": "tower"})).await;
+    assert_eq!(st, 200, "{v}");
+    assert_eq!(v["machine"], "tower");
+
+    // an ssh machine's name is still its own
+    let (st, _) = pair(json!({"name": "desk"})).await;
+    assert_eq!(st, 409);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -352,6 +403,256 @@ async fn internal_routes_refuse_pages() {
         200,
         "other routes as before"
     );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tunnel_listener_has_no_internal_routes() {
+    // A connection a tunnel forwards arrives from 127.0.0.1. On the main listener that is all `/internal/*` asks
+    // for, so the tunnel listener must not have those routes at all: 404, never 403, and nothing happens.
+    let lab = lab().await;
+    let token = lab.pair("lab").await;
+    let mut node = lab.node(&token).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let json = "Content-Type: application/json\r\n";
+    // each asked the way the server on this computer asks, which the main listener answers
+    let asks = [
+        ("GET", "/internal/open"),
+        ("GET", "/internal/nodes"),
+        ("POST", "/internal/pair"),
+        ("POST", "/internal/rpc/lab?timeout=1"),
+        ("POST", "/internal/unpair/nope"),
+    ];
+    for (method, path) in asks {
+        let head = format!("{method} {path} HTTP/1.1\r\nHost: 127.0.0.1:8132\r\n{json}");
+        assert_eq!(raw_status(lab.tunnel, &head).await, 404, "{method} {path} on the tunnel listener");
+    }
+    // nothing was done: no command reached the linked computer, and it is still paired and linked
+    let quiet = tokio::time::timeout(Duration::from_millis(300), node.next()).await;
+    assert!(quiet.is_err(), "the node heard something: {quiet:?}");
+    let (st, _) = http(lab.tunnel, "POST", "/internal/unpair/lab", "").await;
+    assert_eq!(st, 404);
+    let (_, v) = lab.http("GET", "/internal/nodes", "").await;
+    assert_eq!((v["nodes"][0]["name"].clone(), v["nodes"][0]["online"].clone()), (json!("lab"), json!(true)));
+    // ... and no code was made there: the answer has none
+    let (st, v) = http(lab.tunnel, "POST", "/internal/pair", "").await;
+    assert_eq!((st, v), (404, json!({"ok": false, "error": "not found"})));
+    // other spellings and other methods find nothing either
+    for head in [
+        "GET //internal/open HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /internal HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /internal/ HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /INTERNAL/open HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /%69nternal/open HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /term/../internal/open HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /healthz/../internal/nodes HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET http://127.0.0.1:8132/internal/open HTTP/1.1\r\nHost: 127.0.0.1:8132\r\n",
+        "OPTIONS /internal/pair HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET / HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+        "GET /api/sessions HTTP/1.1\r\nHost: 127.0.0.1\r\n",
+    ] {
+        assert_eq!(raw_status(lab.tunnel, head).await, 404, "{head}");
+    }
+    // the same asks on the main listener, from this computer: answered, as the server needs
+    assert_eq!(raw_status(lab.addr, "GET /internal/open HTTP/1.1\r\nHost: 127.0.0.1:8132\r\n").await, 200);
+    assert_eq!(raw_status(lab.addr, "GET /internal/nodes HTTP/1.1\r\nHost: 127.0.0.1:8132\r\n").await, 200);
+    // what the tunnel listener does have
+    let (st, v) = http(lab.tunnel, "GET", "/healthz", "").await;
+    assert_eq!((st, v["ok"].clone(), v["linked"].clone()), (200, json!(true), json!(1)));
+    let (st, v) = http(lab.tunnel, "POST", "/pair", r#"{"code":"ZZZZZZ","name":"other"}"#).await;
+    assert_eq!(st, 403, "pairing is there, and a wrong code is a wrong code: {v}");
+    assert_eq!(http_status(node_at(lab.tunnel, &"0".repeat(64)).await.err().unwrap()), 401, "and so is /node");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_computer_pairs_links_and_shows_a_terminal_through_the_tunnel_listener() {
+    let lab = lab().await;
+    // the code comes from the server on this computer (main listener); the new computer uses it through the tunnel
+    let (_, v) = lab.http("POST", "/internal/pair", "").await;
+    let body = json!({"code": v["code"], "name": "lab", "label": "Lab box", "os": "linux"}).to_string();
+    let (st, v) = http(lab.tunnel, "POST", "/pair", &body).await;
+    assert_eq!(st, 200, "{v}");
+    let token = v["token"].as_str().unwrap().to_string();
+    let mut node = node_at(lab.tunnel, &token).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    // one hub behind both listeners: the server sees the link, and its RPC goes down it
+    let (_, v) = lab.http("GET", "/internal/nodes", "").await;
+    assert_eq!(v["nodes"][0]["online"], true);
+    let ask = tokio::spawn(http(lab.addr, "POST", "/internal/rpc/lab?timeout=20", r#"{"verb":"list"}"#));
+    let Got::Msg(ToNode::Rpc { id, .. }) = from_hub(&mut node).await else { panic!("expected an rpc") };
+    let res = FromNode::RpcResult { id, res: json!({"ok": true}) };
+    node.send(Message::Text(link_proto::encode(&res).into())).await.unwrap();
+    assert_eq!(ask.await.unwrap(), (200, json!({"ok": true})));
+    // a terminal opened through the tunnel listener, with a ticket from the server as always
+    let mut term = term_at(lab.tunnel, &lab.key, "c03ef0d9").await;
+    let Got::Msg(ToNode::TermOpen { ch, bg, .. }) = from_hub(&mut node).await else { panic!("expected term.open") };
+    assert_eq!(bg, "c03ef0d9");
+    node.send(Message::Binary(link_proto::frame(ch, b"hello through the tunnel\r\n").into())).await.unwrap();
+    let (_, out, _) = viewer(&mut term, |_, o| o.contains("hello through the tunnel")).await;
+    assert!(out.contains("hello through the tunnel"), "{out}");
+    // a ticket is still needed there, and a page that is not the server's own is still refused
+    let mut req = format!("ws://{}/term?t=nope", lab.tunnel).into_client_request().unwrap();
+    req.headers_mut().insert("Origin", "http://10.0.0.5:8130".parse().unwrap());
+    let mut bad = tokio_tungstenite::connect_async(req).await.unwrap().0;
+    let (_, _, close) = viewer(&mut bad, |_, _| false).await;
+    assert_eq!(close, Some(sb_hub::proto::CLOSE_TICKET));
+    let t = ticket::mint(&lab.key, "lab", "c03ef0d9", server::unix_now(), ticket::TTL);
+    let mut req = format!("ws://{}/term?t={t}", lab.tunnel).into_client_request().unwrap();
+    req.headers_mut().insert("Origin", "https://evil.example".parse().unwrap());
+    let mut bad = tokio_tungstenite::connect_async(req).await.unwrap().0;
+    let (_, _, close) = viewer(&mut bad, |_, _| false).await;
+    assert_eq!(close, Some(sb_hub::proto::CLOSE_ORIGIN));
+}
+
+/// A port nothing listens on right now.
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// The hub program itself, started with `home` as the user's folder. Stopped when dropped.
+struct Program {
+    child: std::process::Child,
+    log: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl Drop for Program {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Program {
+    fn start(home: &std::path::Path, listen: &str, tunnel: u16) -> Program {
+        use std::io::BufRead;
+        let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_switchboard-hub"))
+            .env("HOME", home)
+            .env("USERPROFILE", home)
+            .env("SWITCHBOARD_HUB_LISTEN", listen)
+            .env("SWITCHBOARD_HUB_TUNNEL_LISTEN", format!("127.0.0.1:{tunnel}"))
+            .env_remove("SWITCHBOARD_CONFIG_DIR")
+            .env_remove("SWITCHBOARD_STATE_DIR")
+            .env_remove("SWITCHBOARD_SERVER_JSON")
+            .env_remove("SWITCHBOARD_TERM_KEY")
+            .env_remove("SWITCHBOARD_MACHINES")
+            .env_remove("SWITCHBOARD_NODES")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let log = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let (err, into) = (child.stderr.take().unwrap(), log.clone());
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(err).lines().map_while(Result::ok) {
+                into.lock().unwrap().push_str(&(line + "\n"));
+            }
+        });
+        Program { child, log }
+    }
+
+    fn said(&self) -> String {
+        self.log.lock().unwrap().clone()
+    }
+
+    /// Waits until the log has `text`. Panics with the log when it never does.
+    async fn wait_for(&self, text: &str) {
+        for _ in 0..100 {
+            if self.said().contains(text) {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        panic!("the hub never said {text:?}. It said:\n{}", self.said());
+    }
+}
+
+async fn listens(addr: std::net::SocketAddr) -> bool {
+    matches!(tokio::time::timeout(Duration::from_secs(2), tokio::net::TcpStream::connect(addr)).await, Ok(Ok(_)))
+}
+
+/// An address of this computer that another computer could use, when it has one. No packet is sent.
+fn lan_address() -> Option<std::net::IpAddr> {
+    let s = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
+    s.connect("192.0.2.1:9").ok()?;
+    let ip = s.local_addr().ok()?.ip();
+    (!ip.is_loopback() && !ip.is_unspecified()).then_some(ip)
+}
+
+fn home_with(server_json: Option<&str>) -> PathBuf {
+    static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let dir = std::env::temp_dir().join(format!(
+        "sbhub-home-{}-{}",
+        std::process::id(),
+        N.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join(".config/switchboard")).unwrap();
+    std::fs::create_dir_all(dir.join(".local/share/switchboard")).unwrap();
+    if let Some(text) = server_json {
+        std::fs::write(dir.join(".config/switchboard/server.json"), text).unwrap();
+    }
+    dir
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn with_keys_only_the_hub_program_listens_on_this_computer_alone() {
+    // asked for every address, as a service file from before keys does: `only` in server.json wins
+    let home = home_with(Some(r#"{"bind": ["0.0.0.0"], "hosts": [], "origins": [], "peers": [], "keys": "only"}"#));
+    let (port, tunnel) = (free_port(), free_port());
+    let hub = Program::start(&home, &format!("0.0.0.0:{port}"), tunnel);
+    hub.wait_for(&format!("tunnel connections on 127.0.0.1:{tunnel}")).await;
+    let said = hub.said();
+    assert!(said.contains(&format!(" on 127.0.0.1:{port}, keys only")), "{said}");
+    assert!(said.contains(&format!("listens on 127.0.0.1:{port} and not on 0.0.0.0:{port}")), "{said}");
+    let (main, tun): (std::net::SocketAddr, std::net::SocketAddr) =
+        (([127, 0, 0, 1], port).into(), ([127, 0, 0, 1], tunnel).into());
+    assert_eq!(http(main, "GET", "/internal/open", "").await.0, 200, "the server on this computer still asks");
+    assert_eq!(http(tun, "GET", "/internal/open", "").await.0, 404);
+    assert_eq!(http(tun, "GET", "/healthz", "").await.0, 200);
+    if let Some(ip) = lan_address() {
+        assert!(!listens((ip, port).into()).await, "the main port answers on {ip}");
+        assert!(!listens((ip, tunnel).into()).await, "the tunnel port answers on {ip}");
+    }
+    drop(hub);
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_damaged_server_json_keeps_the_hub_program_on_this_computer() {
+    let home = home_with(Some("\0\0\0\0\0\0\0\0"));
+    let (port, tunnel) = (free_port(), free_port());
+    let hub = Program::start(&home, &format!("0.0.0.0:{port}"), tunnel);
+    hub.wait_for(&format!(" on 127.0.0.1:{port}, keys only")).await;
+    let said = hub.said();
+    assert!(said.contains("server.json could not be read and has no good copy"), "{said}");
+    assert!(said.contains("answers this computer only"), "{said}");
+    if let Some(ip) = lan_address() {
+        assert!(!listens((ip, port).into()).await, "the main port answers on {ip}");
+    }
+    let untouched = std::fs::read(home.join(".config/switchboard/server.json")).unwrap();
+    assert_eq!(untouched, b"\0\0\0\0\0\0\0\0", "the server's file is only read");
+    drop(hub);
+    let _ = std::fs::remove_dir_all(home);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_a_keys_entry_the_hub_program_opens_no_tunnel_port() {
+    // an install from before keys: where it was told to listen, and nothing new
+    for server_json in [None, Some(r#"{"bind": ["0.0.0.0"], "hosts": ["studio"], "origins": [], "peers": []}"#)] {
+        let home = home_with(server_json);
+        let (port, tunnel) = (free_port(), free_port());
+        let hub = Program::start(&home, &format!("127.0.0.1:{port}"), tunnel);
+        hub.wait_for(&format!(" on 127.0.0.1:{port}, up to 16 terminals")).await;
+        let main: std::net::SocketAddr = ([127, 0, 0, 1], port).into();
+        assert_eq!(http(main, "GET", "/healthz", "").await.0, 200);
+        assert_eq!(http(main, "GET", "/internal/open", "").await.0, 200);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(!listens(([127, 0, 0, 1], tunnel).into()).await, "a tunnel port with keys off");
+        let said = hub.said();
+        assert!(!said.contains("tunnel") && !said.contains("keys"), "{said}");
+        drop(hub);
+        let _ = std::fs::remove_dir_all(home);
+    }
 }
 
 async fn open_with(lab: &Lab, t: &str) -> Ws {

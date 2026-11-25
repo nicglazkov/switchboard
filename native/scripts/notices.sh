@@ -25,7 +25,7 @@ NAME=${NAME:-Switchboard}
 
 # The workspace's own crates (sb-*) are this app, not third-party code.
 "$ABOUT" generate --locked --workspace --fail -c packaging/notices/about.toml packaging/notices/about.hbs |
-  grep -Ev '^  sb-(core|desktop|hub|node) [0-9]' >>"$TMP"
+  grep -Ev '^  sb-(core|desktop|hub|install|link|mobile|node) [0-9]' >>"$TMP"
 
 {
   echo

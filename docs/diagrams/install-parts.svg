@@ -1,0 +1,36 @@
+<svg viewBox="0 0 880 420" role="img" aria-labelledby="fig-install-parts-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-install-parts-t">The installer puts three services on the home computer. The app talks to the server on port 8130, a computer you add fetches the helper from the downloads on port 8131, and each computer's helper keeps a link to the hub on port 8132.</title>
+<text class="d-title" x="40" y="52">What runs on the home computer</text>
+<rect class="d-panel" x="40" y="84" width="260" height="276" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="94" y="120">Your devices</text>
+<rect class="d-chip" x="60" y="152" width="220" height="40" rx="20"/>
+<text class="d-small mid" x="170" y="177">The app</text>
+<rect class="d-chip" x="60" y="222" width="220" height="40" rx="20"/>
+<text class="d-small mid" x="170" y="247">A computer you add</text>
+<rect class="d-chip" x="60" y="292" width="220" height="40" rx="20"/>
+<text class="d-small mid" x="170" y="317">Each computer's helper</text>
+<rect class="d-chip-sel" x="480" y="84" width="360" height="276" rx="16"/>
+<g class="d-ico sel" transform="translate(500 102)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text class="t-sel" x="534" y="120">Home computer</text>
+<rect class="d-panel" x="500" y="144" width="320" height="56" rx="14"/>
+<text x="520" y="168">The server</text>
+<text class="d-sub" x="520" y="188">The board and everything you do on it</text>
+<rect class="d-panel" x="500" y="214" width="320" height="56" rx="14"/>
+<text x="520" y="238">The downloads</text>
+<text class="d-sub" x="520" y="258">What a new computer fetches</text>
+<rect class="d-panel" x="500" y="284" width="320" height="56" rx="14"/>
+<text x="520" y="308">The hub</text>
+<text class="d-sub" x="520" y="328">Terminals, and the links to your computers</text>
+<text class="d-mono mid" x="390" y="158">8130</text>
+<path class="d-line-sel" d="M304 172H476"/>
+<path class="d-line-sel" d="M467 164L476 172L467 180"/>
+<text class="d-mono mid" x="390" y="228">8131</text>
+<path class="d-line-sel" d="M304 242H476"/>
+<path class="d-line-sel" d="M467 234L476 242L467 250"/>
+<text class="d-mono mid" x="390" y="298">8132</text>
+<path class="d-line-sel" d="M304 312H476"/>
+<path class="d-line-sel" d="M467 304L476 312L467 320"/>
+<text class="d-sub mid" x="170" y="392">Reach it by its address.</text>
+<text class="d-sub mid" x="660" y="392">Three services that start when you log in.</text>
+</svg>

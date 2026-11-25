@@ -24,3 +24,6 @@ accepted = [
 # Every platform the app ships on, so platform-only crates (objc on macOS, windows-* on Windows) are covered.
 targets = ["x86_64-unknown-linux-gnu", "aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
 ignore-dev-dependencies = true
+# The workspace's own crates (publish = false, AGPL-3.0) are this app, not third-party code: they are not checked
+# against the list above and not listed. Without this the script stops on the app's own license.
+private = { ignore = true }

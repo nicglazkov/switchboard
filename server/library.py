@@ -191,25 +191,17 @@ class Library:
     # ---- the store
     def _load(self):
         """library.json. One that cannot be read is not an empty library: taken for one, every machine would be told
-        to drop every tool, and the next save would write over the file. It is put aside (library.json.bad), and
-        until a readable library.json is back and the server starts again, nothing is dropped from any machine."""
-        bad = self.file.with_name(self.file.name + '.bad')
-        try:
-            d = json.loads(self.file.read_text(encoding='utf-8'))
-        except FileNotFoundError:
-            d = {}
-            self.broken = bad.exists()  # put aside by an earlier start, and nobody has looked at it yet
-        except (OSError, ValueError):
-            d = None
-        else:
-            self.broken = False
-        if not isinstance(d, dict):
-            self.broken = True
-            try:
-                os.replace(self.file, bad)
-                log(f"library: library.json could not be read, so it is kept as {bad.name} and no machine's tools are touched")
-            except OSError as e:
-                log(f'library: library.json could not be read ({e})')
+        to drop every tool. It is put aside (library.json.bad-<time>) and its last good copy is used (durable.load).
+        With no good copy the library starts empty, and until a readable library.json is back and the server starts
+        again, nothing is dropped from any machine."""
+        d, status = durable.load(self.file, None, dict)
+        # (library.json.bad: where a server from before durable.load put it. Nobody has looked at it yet.)
+        self.broken = status == durable.BROKEN or (status == durable.ABSENT and self.file.with_name(self.file.name + '.bad').exists())
+        if status == durable.RECOVERED:
+            log('library: library.json could not be read, so its last good copy is in use')
+        elif status == durable.BROKEN:
+            log("library: library.json could not be read and has no good copy, so no machine's tools are touched")
+        if d is None:
             d = {}
         d['tools'] = d.get('tools') if isinstance(d.get('tools'), dict) else {}
         d['defaults'] = [t for t in d.get('defaults') or [] if t in d['tools']] if isinstance(d.get('defaults'), list) else []
@@ -223,7 +215,11 @@ class Library:
                 del self.d['chats'][k]
                 self.d['modes'].pop(k, None)
         try:
-            jsave(self.file, self.d)
+            # fresh: the copy beside it is of this save, so a tool that was deleted, or taken off a machine, never
+            # comes back from the copy. force: a library that was lost starts over with what is published next,
+            # and the lost file stays beside it; `broken` keeps every machine's tools until the next start.
+            durable.put(self.file, json.dumps(self.d, indent=1), fresh=True, force=True,
+                        tmp=self.file.with_name(f'{self.file.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
         except OSError:
             log('could not save library.json: ' + traceback.format_exc(limit=1))
 

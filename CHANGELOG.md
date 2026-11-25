@@ -4,11 +4,30 @@ What changed in each version of Switchboard, newest first. The app shows the sam
 About > What's new. Downloads are on the
 [releases page](https://github.com/nicglazkov/switchboard/releases).
 
+## 0.9.0 (2026-11-25)
+
+- Device keys: a computer can now reach your home computer by its own key in place of an address. You make a short code or a link on the home computer, enter it on the other one, and the two stay connected at home or away, encrypted between the two, with nothing to open on your router. Keys are off until you turn them on (`switchboard keys on`, or Settings > Devices).
+- Devices: Settings has a new Devices section on the home computer. It lists the paired computers and phones, makes pairing codes, and removes or blocks a device.
+- When the home computer is away: with keys on, each paired computer answers for its own chats while the home computer is off or out of reach. You still see those chats, open their terminals and reply. The board says what is missing and goes back by itself when the home computer answers again.
+- Move or replace the home computer: the home computer can be moved to another of your computers, backed up behind a recovery code and restored on a new computer, with nothing to pair again. Command line only for now.
+- Your own relay: two computers that cannot reach each other directly can meet through a relay you run. A script installs it on a small Linux server. The relay cannot read what passes through it.
+- Its own Python: the installers bring Python 3.13 for Switchboard's own use, so the home computer and the computers you add need no Python of their own.
+- The home computer adds itself: a first install links the home computer's own chats to the board with nothing to paste. `switchboard link` does it later.
+- One command to remove everything: `switchboard uninstall` takes Switchboard off a computer, and `--purge` takes its settings and history too.
+- A Windows home computer gets the hub: chat terminals and adding a computer with a code now work on a home computer that runs Windows.
+- A busy computer is no longer called offline: a computer that took longer than 15 seconds to list its chats was shown offline and came back seconds later, which closed and reopened its chats in the apps. It now takes three slow answers in a row, and listing chats on a computer with a very full temp folder is about twenty times faster.
+- After a restore from an old backup: a home computer brought back from a backup made before another one replaced it now hears of the newer one and stands down, so two computers never answer as home.
+- Home is noticed sooner: a paired computer notices the home computer coming back in about 10 seconds, not up to a minute, and no longer says that no other computer can be reached while it is still asking them.
+- Pairing on Linux with Docker: a pairing code no longer carries an address from a container or virtual machine network in place of the one that works.
+- The home computer's name: a paired computer shows what the home computer is called now, after a rename or a move, not the name from the day it was paired.
+
 ## 0.8.23 (2026-11-24)
 
 - Only your own networks: the server now looks at the address each request really comes from, and answers only this computer, home and office networks, link-local addresses and Tailscale. A request from anywhere else is refused, whatever name it asks for. Nothing changes on a home network or Tailscale. To let another network in, add it to "peers" in server.json.
 - Damaged files: a settings or state file that cannot be read after a power cut or a full disk is no longer taken for an empty one and written over. The server keeps a copy of each file from before its last change and goes back to it, and keeps the damaged file beside it. With no copy to go back to it picks the careful answer, not the open one: a lost settings file no longer turns the opt-in settings on, a lost computer list no longer gives every computer its whole home folder, a lost server.json answers this computer only, and chats do not stop by themselves while the list of kept chats or open tabs is lost. A terminal key that was cut short is replaced instead of failing every terminal.
 - Damaged files on each computer: the names you gave chats, the list of installed tools, and the secrets file on a Linux computer without a keychain are kept the same way. A damaged one goes back to its last good copy instead of being written over with the one entry that changed. A state file that holds the wrong kind of thing no longer breaks the list of chats.
+- Damaged files in the app and on a linked computer: the app's settings and a linked computer's link to the server are kept the same way. One that a power cut emptied goes back to its last good copy, so the app keeps your settings and the computer stays linked without pairing again. With no copy, the app uses its defaults and does not save them until you change a setting. On the server, the tool library goes back to its last good copy too, and a damaged list of launches is put aside and starts over.
+- Windows: the node on a linked PC is started again within seconds if it stops or is ended in Task Manager. After a restart or a power cut it returns when you sign in to Windows.
 - Budget: two devices changing the budget at the same moment both keep their change, and lifting the hard limit while it is being checked is not lost.
 - A request that got lost: a chat you started, resumed or moved always gets an answer. If the helper stopped right after taking the request, or could not read it, you are told to try again at once instead of waiting for the timeout.
 - Behind a proxy: the server's calls to its own hub and each computer's calls to your server no longer go through http_proxy, which made linked computers look offline.

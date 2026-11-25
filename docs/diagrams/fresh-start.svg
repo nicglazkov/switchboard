@@ -1,0 +1,32 @@
+<svg viewBox="0 0 880 400" role="img" aria-labelledby="fig-fresh-start-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-fresh-start-t">Start fresh writes a summary of the same cold chat, 500 to 900 words, and opens a new chat that reads only Claude Code's own start and the summary.</title>
+<text class="d-title" x="40" y="52">Start fresh: carry on from a summary</text>
+<rect class="d-panel" x="40" y="84" width="260" height="256" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></g>
+<text x="94" y="120">The cold chat</text>
+<rect class="d-chip" x="60" y="142" width="220" height="178" rx="12"/>
+<text x="80" y="176">180k tokens</text>
+<text class="d-sub" x="80" y="206">Your messages</text>
+<text class="d-sub" x="80" y="228">Claude's replies</text>
+<text class="d-sub" x="80" y="250">Tool output and files read</text>
+<text class="mid t-sel" x="440" y="164">Start fresh</text>
+<path class="d-line-sel" d="M320 212H350"/>
+<rect class="d-chip-sel" x="350" y="184" width="180" height="56" rx="12"/>
+<g class="d-ico sel" transform="translate(364 200)"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></g>
+<text class="t-sel" x="398" y="208">Summary</text>
+<text class="d-sub" x="398" y="227">500 to 900 words</text>
+<path class="d-line-sel" d="M530 212H560"/>
+<path class="d-line-sel" d="M551 204L560 212L551 220"/>
+<text class="d-sub mid" x="440" y="268">Written on the chat's computer</text>
+<rect class="d-panel" x="580" y="84" width="260" height="256" rx="14"/>
+<g class="d-ico" transform="translate(600 102)"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></g>
+<text x="634" y="120">A new chat</text>
+<rect class="d-chip" x="600" y="142" width="220" height="58" rx="12"/>
+<text class="d-small" x="620" y="167">Claude Code's own start</text>
+<text class="d-sub" x="620" y="187">58k, half of it cached</text>
+<rect class="d-chip-sel" x="600" y="208" width="220" height="36" rx="12"/>
+<text class="d-small" x="620" y="231">Your summary, 2.6k</text>
+<text class="d-sub" x="620" y="280">Nothing else from the</text>
+<text class="d-sub" x="620" y="300">old chat is read</text>
+<text x="40" y="376">Estimated cost of the next message: about 92k tokens (summary 24k, new chat 68k)</text>
+</svg>

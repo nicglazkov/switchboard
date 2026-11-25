@@ -105,7 +105,7 @@ impl TermWindow {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions {
                 title: Some(title.clone().into()),
-                appears_transparent: false,
+                appears_transparent: cfg!(target_os = "windows"),
                 traffic_light_position: None,
             }),
             window_min_size: Some(size(px(480.), px(320.))),

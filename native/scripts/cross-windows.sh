@@ -11,10 +11,11 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 T=x86_64-pc-windows-msvc
 export XWIN_ACCEPT_LICENSE=1
-cargo xwin build --locked --target $T -p sb-desktop
-ls -l target/$T/debug/Switchboard.exe
+cargo xwin build --locked --target $T -p sb-desktop -p sb-link -p sb-node -p sb-hub
+ls -l target/$T/debug/Switchboard.exe target/$T/debug/switchboard-node.exe target/$T/debug/switchboard-hub.exe
 if [ -z "${SB_NO_TEST:-}" ]; then
   # Wine runs each test binary; no display is needed, nothing here opens a window.
   export WINEDEBUG=-all WINEPREFIX="${WINEPREFIX:-$PWD/target/wine}"
-  cargo xwin test --locked --target $T -p sb-core -p sb-desktop
+  # (sb-hub and sb-node are built above and not tested here: the hub's tests start a shell script as ssh)
+  cargo xwin test --locked --target $T -p sb-core -p sb-desktop -p sb-link
 fi

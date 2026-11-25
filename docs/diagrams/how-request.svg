@@ -1,0 +1,44 @@
+<svg viewBox="0 0 880 340" role="img" aria-labelledby="fig-how-request-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-how-request-t">An answer typed in the app goes to the home computer, then to the helper on the closet PC, then into the chat. The chat's new state travels back the same way to the board.</title>
+<text class="d-title" x="40" y="52">One answer, there and back</text>
+<rect class="d-panel" x="480" y="84" width="360" height="216" rx="14"/>
+<g class="d-ico" transform="translate(500 102)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="534" y="120">Closet PC</text>
+<text class="d-sub mid" x="100" y="156">You answer</text>
+<rect class="d-panel" x="40" y="170" width="120" height="90" rx="14"/>
+<text class="mid" x="100" y="220">The app</text>
+<text class="d-sub mid" x="330" y="156">Finds the chat</text>
+<rect class="d-chip-sel" x="260" y="170" width="140" height="90" rx="14"/>
+<text class="mid t-sel" x="330" y="212">Home</text>
+<text class="mid t-sel" x="330" y="232">computer</text>
+<text class="d-sub mid" x="560" y="156">Types it in</text>
+<rect class="d-chip" x="500" y="170" width="120" height="90" rx="14"/>
+<text class="mid" x="560" y="220">Helper</text>
+<text class="d-sub mid" x="770" y="156">Carries on</text>
+<rect class="d-chip" x="720" y="170" width="100" height="90" rx="14"/>
+<text class="mid" x="770" y="220">Chat</text>
+<path class="d-req" d="M164 198H256"/>
+<path class="d-req" d="M247 190L256 198L247 206"/>
+<circle class="d-num-req" cx="210" cy="198" r="13"/>
+<text class="d-num" x="210" y="198" dy="4.5">1</text>
+<path class="d-req" d="M404 198H496"/>
+<path class="d-req" d="M487 190L496 198L487 206"/>
+<circle class="d-num-req" cx="450" cy="198" r="13"/>
+<text class="d-num" x="450" y="198" dy="4.5">2</text>
+<path class="d-req" d="M624 198H716"/>
+<path class="d-req" d="M707 190L716 198L707 206"/>
+<circle class="d-num-req" cx="670" cy="198" r="13"/>
+<text class="d-num" x="670" y="198" dy="4.5">3</text>
+<path class="d-ret" d="M716 234H624"/>
+<path class="d-ret" d="M633 226L624 234L633 242"/>
+<circle class="d-num-ret" cx="670" cy="234" r="13"/>
+<text class="d-num" x="670" y="234" dy="4.5">4</text>
+<path class="d-ret" d="M496 234H404"/>
+<path class="d-ret" d="M413 226L404 234L413 242"/>
+<circle class="d-num-ret" cx="450" cy="234" r="13"/>
+<text class="d-num" x="450" y="234" dy="4.5">5</text>
+<path class="d-ret" d="M256 234H164"/>
+<path class="d-ret" d="M173 226L164 234L173 242"/>
+<circle class="d-num-ret" cx="210" cy="234" r="13"/>
+<text class="d-num" x="210" y="234" dy="4.5">6</text>
+</svg>

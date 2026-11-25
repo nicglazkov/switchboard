@@ -1,6 +1,7 @@
 """Settings > Server (server/serverctl.py, selfupdate.py): the server's version and parts, its logs, a restart, and an
-update that installs a release's kit only when it matches the SHA-256 the app read from the signed list."""
-import hashlib, io, json, os, sys, tarfile, time, unittest
+update that installs a release's kit only when it matches the SHA-256 the app read from the signed list. And the
+`switchboard` command's uninstall, run for real in a throwaway home folder with stand-ins for everything it calls."""
+import hashlib, io, json, os, shutil, sys, tarfile, time, unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import mock
@@ -11,6 +12,7 @@ sys.path.insert(0, str(ROOT / 'native' / 'scripts'))
 import serverctl  # noqa: E402
 import selfupdate  # noqa: E402
 import publish_render  # noqa: E402
+from tests import test_install_server as scripts  # noqa: E402  (the home folder and the PATH of stand-ins)
 
 SHA = 'a' * 64
 
@@ -233,6 +235,140 @@ class SelfUpdateTest(unittest.TestCase):
             s = json.loads((d / 'state.json').read_text())
             self.assertEqual((s['step'], s['ok']), ('done', True))
             self.assertFalse((d / 'work').exists())
+
+
+# The helper as `switchboard uninstall` asks it to take itself out of Claude Code.
+HELPER = '''import os, sys
+open(os.environ['FAKE_LOG'], 'a').write('helper ' + ' '.join(sys.argv[1:]) + '\\n')
+sys.exit(int(os.environ.get('FAKE_HELPER_RC') or 0))
+'''
+NODE = '''#!/bin/sh
+echo "node $*" >> "$FAKE_LOG"
+[ -z "${FAKE_NODE_FAILS:-}" ] || { echo "its service would not stop" >&2; exit 1; }
+rm -f "$HOME/.config/switchboard/node.json"
+echo "Removed the link to the hub."
+'''
+SERVICES = '''#!/bin/sh
+echo "services $*" >> "$FAKE_LOG"
+exit 0
+'''
+
+
+class UninstallTest(scripts.Scripts):
+    """`switchboard uninstall [--purge]`: one command for the helper, the node, the server and Switchboard's own
+    Python, in that order. Settings, history and keys stay unless --purge is given."""
+
+    def setUp(self):
+        super().setUp()
+        self.shim('uname', scripts.UNAME % 'Darwin')
+        self.shim('launchctl', SERVICES)
+        self.cfg = self.home / '.config' / 'switchboard'
+        self.helper = self.home / '.claude' / 'switchboard'
+        self.agents = self.home / 'Library' / 'LaunchAgents'
+        self.logs = self.home / 'Library' / 'Logs' / 'Switchboard'
+        for d in (self.cfg, self.helper / 'queue', self.agents, self.logs, self.bin, self.share / 'app' / 'server',
+                  self.share / 'downloads' / 'node', self.share / 'python' / 'bin', self.share / 'logs', self.share / 'update'):
+            d.mkdir(parents=True)
+        for f in (self.cfg / 'server.json', self.cfg / 'fleet.json', self.cfg / 'node.json', self.cfg / 'term.key',
+                  self.share / 'history.jsonl', self.share / 'env', self.logs / 'server.log',
+                  self.agents / 'com.switchboard.server.plist', self.agents / 'com.switchboard.hub.plist',
+                  self.agents / 'com.other.thing.plist', self.bin / 'switchboard-hub', self.bin / 'other-program'):
+            f.write_text('x')
+        (self.helper / 'sb.py').write_text(HELPER)
+        (self.home / '.claude' / 'settings.json').write_text('{"model": "opus"}')
+        node = self.bin / 'switchboard-node'
+        node.write_text(NODE)
+        node.chmod(0o755)
+        self.ctl = self.bin / 'switchboard'
+        shutil.copy(scripts.INSTALL / 'switchboard', self.ctl)
+        self.ctl.chmod(0o755)
+
+    def uninstall(self, *args, **env):
+        return self.run_script(self.ctl, 'uninstall', *args, **env)
+
+    def calls(self):
+        log = Path(self.env['FAKE_LOG'])
+        return log.read_text().splitlines() if log.exists() else []
+
+    def gone(self, *paths):
+        return [str(p.relative_to(self.home)) for p in paths if p.exists()]
+
+    def program_paths(self):
+        return (self.share / 'app', self.share / 'downloads', self.share / 'python', self.share / 'update', self.share / 'env',
+                self.bin / 'switchboard', self.bin / 'switchboard-hub', self.bin / 'switchboard-node', self.helper / 'sb.py',
+                self.agents / 'com.switchboard.server.plist', self.agents / 'com.switchboard.hub.plist', self.cfg / 'node.json')
+
+    def test_everything_goes_in_order_and_your_data_stays(self):
+        code, out = self.uninstall('--yes')
+        self.assertEqual(code, 0, out)
+        calls = self.calls()
+        self.assertEqual(calls[:2], ['helper uninstall', 'node uninstall'], 'the helper first, then the node')
+        uid = os.getuid()
+        self.assertEqual([c for c in calls[2:] if 'bootout' in c][-3:],
+                         [f'services bootout gui/{uid}/com.switchboard.{p}' for p in ('server', 'hub', 'downloads')])
+        self.assertEqual(self.gone(*self.program_paths()), [])
+        # what is the user's own stays, and so does everything that is not Switchboard's
+        for p in (self.cfg / 'server.json', self.cfg / 'fleet.json', self.cfg / 'term.key', self.share / 'history.jsonl',
+                  self.logs / 'server.log', self.helper / 'queue', self.agents / 'com.other.thing.plist',
+                  self.bin / 'other-program', self.home / '.claude' / 'settings.json'):
+            self.assertTrue(p.exists(), p)
+        self.assertEqual(out, '''Switchboard is removed from this computer.
+Removed:
+  the helper: its hooks, status line and tools are out of Claude Code (~/.claude)
+  switchboard-node, which linked this computer to a server
+    Removed the link to the hub.
+  the server, its hub, its downloads and what started them
+  Switchboard's own Python
+  the switchboard command
+Left on this computer:
+  ~/.config/switchboard  settings and keys
+  ~/.local/share/switchboard  history and logs
+  ~/Library/Logs/Switchboard  logs
+  ~/.claude/switchboard  the helper's own files
+Settings, history and keys are kept in case you install it again. Delete those folders if you do not want them.
+Your other computers each have their own copy. Run this on them too.
+''')
+
+    def test_purge_takes_settings_history_and_keys_too(self):
+        code, out = self.uninstall('--purge', '--yes')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gone(self.cfg, self.share, self.logs, self.helper, *self.program_paths()), [])
+        for p in (self.home / '.claude' / 'settings.json', self.bin / 'other-program', self.agents / 'com.other.thing.plist'):
+            self.assertTrue(p.exists(), p)
+        for line in ('  ~/.config/switchboard  settings and keys', '  ~/.local/share/switchboard  history and logs',
+                     "  ~/.claude/switchboard  the helper's own files", 'Nothing of Switchboard is left on this computer.'):
+            self.assertIn(line + '\n', out)
+        self.assertNotIn('Left on this computer', out)
+
+    def test_a_part_that_will_not_go_is_said_and_the_rest_still_goes(self):
+        code, out = self.uninstall('--purge', '--yes', FAKE_NODE_FAILS='1', FAKE_HELPER_RC='1')
+        self.assertEqual(code, 0, out)
+        self.assertTrue((self.bin / 'switchboard-node').exists() and (self.helper / 'sb.py').exists())
+        self.assertIn('  ~/.claude/switchboard/sb.py  the helper, which could not take itself out of Claude Code\n', out)
+        self.assertIn('  ~/.local/bin/switchboard-node  it could not remove itself. Run: switchboard-node uninstall\n'
+                      '    its service would not stop\n', out)
+        # a helper that is still in Claude Code keeps the Python it runs with, even with --purge
+        self.assertTrue((self.share / 'python' / 'bin').is_dir())
+        self.assertIn("  ~/.local/share/switchboard/python  Switchboard's own Python, which the helper still uses\n", out)
+        self.assertEqual(self.gone(self.share / 'app', self.bin / 'switchboard-hub', self.bin / 'switchboard', self.cfg), [])
+
+    def test_only_a_server_here_and_nothing_else(self):
+        for p in (self.helper, self.share / 'python'):
+            shutil.rmtree(p)
+        (self.bin / 'switchboard-node').unlink()
+        code, out = self.uninstall('--yes')
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.calls()[0].split()[0], 'services', 'no helper and no node to ask')
+        self.assertNotIn('helper', out)
+        self.assertNotIn('switchboard-node', out)
+        self.assertNotIn('Python', out)
+
+    def test_an_option_it_does_not_know_removes_nothing(self):
+        code, out = self.uninstall('--everything')
+        self.assertEqual(code, 2, out)
+        self.assertIn('usage: switchboard uninstall [--purge] [--yes]', out)
+        self.assertEqual(self.calls(), [])
+        self.assertTrue(self.ctl.exists() and (self.share / 'app').exists())
 
 
 class ManifestTest(unittest.TestCase):

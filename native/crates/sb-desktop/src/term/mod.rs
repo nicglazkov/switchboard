@@ -300,7 +300,37 @@ pub enum Start {
 }
 
 /// What a local terminal's tab shows where a chat's shows its machine.
-pub const LOCAL_LABEL: &str = if MAC { "This Mac" } else { "This PC" };
+pub const LOCAL_LABEL: &str = local_label(MAC, cfg!(target_os = "windows"));
+
+/// "This PC" is what Windows calls it; a Linux computer is not one.
+const fn local_label(mac: bool, windows: bool) -> &'static str {
+    if mac {
+        "This Mac"
+    } else if windows {
+        "This PC"
+    } else {
+        "This computer"
+    }
+}
+
+/// A local shell's tab name from the title its terminal reports: the title, unless there is none or it is only
+/// the program's own path. A Windows console starts out titled with the path of the program it runs
+/// ("C:\Program Files\PowerShell\7\pwsh.exe", in whatever capitals Windows has it), which says less than the
+/// profile's name ("PowerShell") and does not fit a tab.
+fn local_title(reported: &str, name: &str, program: &str) -> String {
+    let s = reported.trim();
+    let bare = s.strip_prefix("Administrator: ").unwrap_or(s);
+    let file = |p: &str| p.rsplit(['/', '\\']).next().unwrap_or(p).to_ascii_lowercase();
+    let path = bare.contains(['/', '\\']);
+    if s.is_empty()
+        || bare.eq_ignore_ascii_case(program)
+        || (path && !program.is_empty() && file(bare) == file(program))
+    {
+        name.to_string()
+    } else {
+        s.to_string()
+    }
+}
 
 /// The message of a starred tab that came back on launch while its chat had stopped.
 pub const STOPPED_STAR: &str = "stopped-starred";
@@ -1495,9 +1525,10 @@ impl TermTab {
                 }
                 // A local shell names its tab (the folder, the program running); a chat's tab keeps the chat's name.
                 TermEv::Title(s) if self.local.is_some() => {
-                    let s = s.trim().to_string();
-                    let name = self.local.as_ref().map(|p| p.name.clone()).unwrap_or_default();
-                    let next = if s.is_empty() { name } else { s };
+                    let next = match &self.local {
+                        Some(p) => local_title(&s, &p.name, &p.program),
+                        None => s.trim().to_string(),
+                    };
                     if next != self.title {
                         self.title = next;
                         cx.emit(TermEvent::Changed);
@@ -3003,6 +3034,11 @@ impl Render for TermTab {
             .on_key_down(cx.listener(Self::on_key))
             .on_action(cx.listener(Self::on_copy))
             .on_action(cx.listener(Self::on_paste))
+            // The Mac's Edit menu sends the text fields' Copy and Paste: they mean the same here.
+            .on_action(cx.listener(|this, _: &gpui_base::input::Copy, _, cx| {
+                this.copy_selection(false, cx);
+            }))
+            .on_action(cx.listener(|this, _: &gpui_base::input::Paste, _, cx| this.paste(cx)))
             .on_action(cx.listener(|this, _: &TermPageUp, _, cx| this.page(true, cx)))
             .on_action(cx.listener(|this, _: &TermRedraw, _, cx| this.redraw(cx)))
             .on_action(cx.listener(|this, _: &TermPageDown, _, cx| this.page(false, cx)))
@@ -3417,5 +3453,44 @@ mod exit_tests {
         assert!(end_asked(true, None, t + Duration::from_secs(6)), "exit, then a slow link");
         assert!(!end_asked(false, None, t), "typed over: nothing was asked");
         assert!(!end_asked(false, Some(t), t + Duration::from_secs(10)));
+    }
+}
+
+#[cfg(test)]
+mod local_tests {
+    use super::{local_label, local_title};
+
+    #[test]
+    fn this_computer_is_named_as_its_system_names_it() {
+        assert_eq!(local_label(true, false), "This Mac");
+        assert_eq!(local_label(false, true), "This PC");
+        assert_eq!(local_label(false, false), "This computer");
+    }
+
+    #[test]
+    fn a_console_titled_with_its_own_program_keeps_the_profile_name() {
+        let pwsh = "C:\\Program Files\\PowerShell\\7\\pwsh.exe";
+        // What a Windows console reports first: the program's path, sometimes in other capitals.
+        assert_eq!(local_title(pwsh, "PowerShell", pwsh), "PowerShell");
+        assert_eq!(
+            local_title("C:\\WINDOWS\\system32\\cmd.exe", "Command Prompt", "C:\\WINDOWS\\System32\\cmd.exe"),
+            "Command Prompt"
+        );
+        assert_eq!(
+            local_title("Administrator: C:\\WINDOWS\\system32\\cmd.exe", "Command Prompt", "cmd.exe"),
+            "Command Prompt"
+        );
+        // The same program reached by another path (a link, a short name).
+        assert_eq!(local_title("C:\\PROGRA~1\\PowerShell\\7\\pwsh.exe", "PowerShell", pwsh), "PowerShell");
+        assert_eq!(local_title("", "zsh", "/bin/zsh"), "zsh");
+        assert_eq!(local_title("  ", "zsh", "/bin/zsh"), "zsh");
+        // A title the shell or a program set is shown as it is.
+        assert_eq!(local_title("~/src/app", "zsh", "/bin/zsh"), "~/src/app");
+        assert_eq!(local_title("you@studio: ~/code", "bash", "/bin/bash"), "you@studio: ~/code");
+        assert_eq!(local_title("vim notes.txt", "zsh", "/bin/zsh"), "vim notes.txt");
+        assert_eq!(local_title("C:\\Users\\you\\code", "PowerShell", pwsh), "C:\\Users\\you\\code");
+        assert_eq!(local_title(" npm run dev ", "PowerShell", pwsh), "npm run dev");
+        // Another program's path is a title like any other.
+        assert_eq!(local_title("C:\\Tools\\other.exe", "PowerShell", pwsh), "C:\\Tools\\other.exe");
     }
 }

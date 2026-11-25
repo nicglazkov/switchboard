@@ -1,145 +1,198 @@
 ---
-title: Switchboard
-description: One board for the Claude Code chats on all your computers. See which chats need you, answer them, open their terminals and start new ones, on whichever computer you pick.
+title: Switchboard docs
+description: One board for the Claude Code chats on all your computers. Learn how to install Switchboard, use the board, and understand what each chat costs.
 hide:
-  - navigation
   - toc
 ---
 
-<div class="sb-hero" markdown>
+# Switchboard docs
 
-<img class="sb-mark" src="assets/icon.png" alt="">
+<p class="sb-meta">Last validated: Nov 23, 2026</p>
 
-# Switchboard
+<p class="sb-home-lede">Switchboard puts the Claude Code chats from all your computers on one board. You can see
+which chats need you, answer them, open their terminals and start new ones, on whichever computer you pick.</p>
 
-<p class="sb-tagline">One board for the Claude Code chats on all your computers.</p>
+[Quickstart](quickstart.md){ .md-button .md-button--primary }
+[What is Switchboard?](concepts/what-is-switchboard.md){ .md-button }
 
-<p class="sb-sub">See which chats need you, answer them, open their terminals and start new ones, on whichever
-computer you pick. It runs on your own machines, with no account and no cloud service.</p>
-
-[Install Switchboard](install.md){ .md-button .md-button--primary }
-[Download the app](https://github.com/nicglazkov/switchboard/releases/latest){ .md-button }
-
-<div class="sb-pills">
-  <span class="sb-pill">macOS</span>
-  <span class="sb-pill">Windows</span>
-  <span class="sb-pill">Linux</span>
-</div>
-
-<div class="sb-board" markdown>
-![The Switchboard board: chats from three computers sorted into Needs you, Working, Warm now, Gone cold and Quiet](screenshots/board-light.png){ .shot }
-![The Switchboard board: chats from three computers sorted into Needs you, Working, Warm now, Gone cold and Quiet](screenshots/board-dark.png){ .shot }
-</div>
-
-</div>
-
-## Why it exists
-
-You run Claude Code on a desktop, a laptop and a box in the closet. Each chat lives in its own terminal on its own
-machine, and the one that is waiting for you is never the one in front of you. Switchboard gathers them all into
-one window, and tells you what each one would cost to go back to.
+## Start
 
 <div class="grid cards" markdown>
 
--   :material-view-dashboard-outline:{ .lg .middle } **Everything on one board**
+-   [Quickstart](quickstart.md)
 
-    ---
+    From nothing to answering a chat from another computer, in about ten minutes.
 
-    Each computer gets a row, each chat a column by what it needs:
-    <span class="sb-pill need">Needs you</span> <span class="sb-pill run">Working</span>
-    <span class="sb-pill warm">Warm now</span> <span class="sb-pill cold">Gone cold</span>.
-    Answer a question right from its card.
+-   [What is Switchboard?](concepts/what-is-switchboard.md)
 
-    [:octicons-arrow-right-24: The board](board.md)
+    What it does, how it is put together, and who it is for.
 
--   :material-cash-clock:{ .lg .middle } **Know the cost before you go back**
+-   [Install](install.md)
 
-    ---
+    Set up your home computer, check it, update it and remove it.
 
-    A cold chat reads its whole history again on the next message. Switchboard compares resuming it with starting
-    fresh from a summary, and suggests the cheaper one.
+-   [Add your computers](machines.md)
 
-    [:octicons-arrow-right-24: Chats and what they cost](chats.md)
+    Link each computer that runs Claude Code, so its chats show on the board.
 
--   :material-console:{ .lg .middle } **Terminals from anywhere**
+-   [The apps](apps.md)
 
-    ---
+    The desktop app for macOS, Windows and Linux, and the phone apps.
 
-    Open any chat's terminal in a tab, even when its computer is behind another router. Tabs, groups, names and
-    your own shells too.
+-   [Pair a computer](features/pair-a-computer.md)
 
-    [:octicons-arrow-right-24: Terminals](terminals.md)
+    Join a computer to your home computer with a short code or a link. Since version 0.9.0.
 
--   :material-rocket-launch-outline:{ .lg .middle } **Start a chat on any computer**
+-   [Pair a phone](features/pair-a-phone.md)
 
-    ---
+    Join an iPhone or an Android phone by scanning a code. Since version 0.9.0.
 
-    Pick the machine (or let Auto pick), the folder, the model and the effort. Switchboard starts the chat there
-    and opens its terminal.
+-   [Run your own relay](features/run-your-own-relay.md)
 
-    [:octicons-arrow-right-24: New chats](chats.md#start-a-new-chat)
-
--   :material-history:{ .lg .middle } **History and files**
-
-    ---
-
-    Every chat on every computer, searchable. Browse each computer's folders and start a chat right where you are.
-
-    [:octicons-arrow-right-24: History and files](history-files.md)
-
--   :material-gauge:{ .lg .middle } **Keep an eye on your plan**
-
-    ---
-
-    5-hour, weekly and 4-week usage at a glance, a daily budget that tells you when a day runs over, and a hard
-    limit if you want one.
-
-    [:octicons-arrow-right-24: Usage and budget](usage.md)
+    Let two computers meet when they can't reach each other directly. Since version 0.9.0.
 
 </div>
 
-## Set up in three steps
-
-<ol class="sb-steps" markdown>
-<li markdown>**Install the server** on a computer that stays on, with one line:
-
-```sh
-curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz
-```
-</li>
-<li markdown>**Add your computers.** Setup shows a one-time code and a line to paste on each Mac, Linux or Windows
-computer where you use Claude Code. [More](machines.md)</li>
-<li markdown>**Open the app** on the computers you look at the board from. On your home network it finds the server
-by itself. [Get the app](apps.md)</li>
-</ol>
-
-The apps are for Mac, Windows and Linux; there is no phone app to download today. The server is best on a Mac or
-Linux computer that stays on: a [Windows server](install.md#a-windows-server) does less, and a laptop's server is
-off while it sleeps. [Away from home](install.md#away-from-home) the app needs a VPN such as Tailscale.
-
-[Read the full install guide :octicons-arrow-right-24:](install.md){ .md-button }
-
-## Private by design
+## Work with chats
 
 <div class="grid cards" markdown>
 
--   :material-shield-home-outline:{ .lg .middle } **Runs on your own computers**
+-   [The board](board.md)
 
-    ---
+    Every chat on every computer, sorted by what it needs from you.
 
-    No account to make, nothing to sign up for, and no usage data sent anywhere. Your chats, files and history
-    stay on your network.
+-   [Start a chat](features/start-a-chat.md)
 
--   :material-check-decagram-outline:{ .lg .middle } **Signed updates**
+    Pick a computer, a folder and a model, or let Auto pick the computer.
 
-    ---
+-   [Answer from the board](features/answer-from-the-board.md)
 
-    The app installs only builds signed with the release key, and checks each file's SHA-256 before it installs
-    it. Updates wait until you say so.
+    Reply to a waiting chat from its card, without opening its terminal.
+
+-   [Resume or start fresh](features/resume-or-start-fresh.md)
+
+    What each choice does to a cold chat, and what each one costs.
+
+-   [Cold chat guard](features/cold-chat-guard.md)
+
+    Hold a message to a big cold chat until you decide how to send it.
+
+-   [Continue on another computer](features/continue-on-another-computer.md)
+
+    Carry a chat's work to a different computer.
+
+-   [Chats sent by Claude](features/chats-sent-by-claude.md)
+
+    Tasks that one chat hands to another computer, and where they show.
+
+-   [Tidy up](features/tidy-up.md)
+
+    Stop idle chats, dismiss what you are done with, and keep what matters running.
 
 </div>
 
-[Privacy and security :octicons-arrow-right-24:](privacy.md)
+## Tools
 
-<small>Switchboard is free software under the [GNU AGPL-3.0](https://github.com/nicglazkov/switchboard/blob/main/LICENSE).
-It is not made by or affiliated with Anthropic. Claude and Claude Code are trademarks of Anthropic.</small>
+<div class="grid cards" markdown>
+
+-   [Terminals](terminals.md)
+
+    A chat's terminal in a tab, from any of your computers.
+
+-   [History](features/history.md)
+
+    Every past chat on every computer, searchable.
+
+-   [Files](features/files.md)
+
+    Browse each computer's folders and start a chat where you are.
+
+-   [Library](features/library.md)
+
+    One set of skills and connectors shared across your computers.
+
+-   [Usage and budget](usage.md)
+
+    Where your plan stands, and a daily budget that holds you to it.
+
+-   [Notifications](features/notifications.md)
+
+    What Switchboard tells you about, and how to turn each kind off.
+
+</div>
+
+## Concepts
+
+<div class="grid cards" markdown>
+
+-   [How Switchboard works](concepts/how-switchboard-works.md)
+
+    The parts on each computer, and the path a question takes to you and back.
+
+-   [Chat states](concepts/chat-states.md)
+
+    Needs you, Working, Warm now, Gone cold and Quiet, and what moves a chat between them.
+
+-   [Warm and cold](concepts/warm-and-cold.md)
+
+    Why a reply is cheap for a short time, then expensive.
+
+-   [What a chat costs](concepts/what-a-chat-costs.md)
+
+    How Switchboard estimates the cost of the next message.
+
+-   [Places and folders](concepts/places-and-folders.md)
+
+    Which folders the apps can open, and which they never show.
+
+-   [Device keys and pairing](concepts/device-keys-and-pairing.md)
+
+    How a computer proves who it is, and how a code puts it on the list.
+
+-   [Connections](concepts/connections.md)
+
+    How two computers find each other: directly, or through a relay.
+
+</div>
+
+## Help and reference
+
+<div class="grid cards" markdown>
+
+-   [Troubleshooting](troubleshooting.md)
+
+    Find the fix for a problem by its symptom.
+
+-   [Questions](faq.md)
+
+    Short answers about cost, computers, privacy and updates.
+
+-   [Updates](updates.md)
+
+    How the app, the home computer and the helper each get a new version.
+
+-   [Privacy and security](privacy.md)
+
+    What stays on your computers, and who can reach the board.
+
+-   [Commands](commands.md)
+
+    Every command, with its common flags.
+
+-   [Keyboard shortcuts](shortcuts.md)
+
+    Every shortcut in the desktop app.
+
+-   [Terminology](reference/glossary.md)
+
+    The words Switchboard uses, each defined in a sentence or two.
+
+-   [Ports, files and settings](reference.md)
+
+    Every port, where each file lives, and the settings you can change by hand.
+
+-   [How the pieces fit](architecture.md)
+
+    For developers: the programs, the protocols between them, and the tunnel.
+
+</div>

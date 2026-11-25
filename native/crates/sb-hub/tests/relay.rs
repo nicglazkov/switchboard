@@ -61,6 +61,19 @@ async fn lab(tweak: impl FnOnce(&mut Config)) -> Lab {
     Lab { addr, key, dir }
 }
 
+/// `lab`, with the hub's tunnel listener (server.rs `public_router`) in place of the main one.
+async fn tunnel_lab() -> Lab {
+    let mut l = lab(|_| {}).await;
+    let mut cfg = Config::defaults_in(&l.dir);
+    cfg.machines_path = l.dir.join("machines.json");
+    cfg.key_path = l.dir.join("cfg/term.key");
+    cfg.ssh = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-ssh.sh").into();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    l.addr = listener.local_addr().unwrap();
+    tokio::spawn(server::serve_public(Hub::new(cfg).unwrap(), listener));
+    l
+}
+
 impl Lab {
     fn ticket(&self, bg: &str) -> String {
         ticket::mint(&self.key, "lab", bg, now(), ticket::TTL)
@@ -351,6 +364,32 @@ async fn internal_open_is_local_only_and_healthz_is_public() {
     let _ = CloseCode::Normal;
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_tunnel_listener_opens_terminals_and_has_no_internal_open() {
+    // What a tunnel forwards arrives from 127.0.0.1, which is all /internal/* asks of a caller on the main
+    // listener. So here it is not found at all, and the rest works as it does there.
+    let lab = tunnel_lab().await;
+    assert_eq!(lab.get("/healthz").await["ok"], true);
+    assert_eq!(lab.get("/internal/open").await, serde_json::json!({"ok": false, "error": "not found"}));
+    let t = lab.ticket("c03ef0d9");
+    let mut ws = lab.connect(&t, Some("http://10.0.0.5:8130"), "&cols=100&rows=30").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(10), |s| s.out.contains("TERM ")).await;
+    assert!(s.out.contains(" me@lab term c03ef0d9"), "{}", s.out);
+    ws.send(Message::Binary(b"exit\n".to_vec().into())).await.unwrap();
+    read_until(&mut ws, &mut s, Duration::from_secs(10), |s| s.close.is_some()).await;
+    assert_eq!(s.close, Some(1000));
+    // a used ticket and a stranger's page are refused there as on the main listener
+    let mut ws = lab.connect(&t, Some("http://10.0.0.5:8130"), "").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
+    assert_eq!(s.close, Some(sb_hub::proto::CLOSE_TICKET));
+    let mut ws = lab.connect(&lab.ticket("c03ef0d9"), Some("https://evil.example"), "").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
+    assert_eq!(s.close, Some(sb_hub::proto::CLOSE_ORIGIN));
+}
+
 fn pid_of(out: &str) -> String {
     out.split("PID ").nth(1).unwrap().split_whitespace().next().unwrap().to_string()
 }
@@ -525,4 +564,133 @@ async fn two_viewers_opening_a_chat_at_once_share_one_terminal() {
     assert!(sa.out.contains("GOT both") && sb.out.contains("GOT both"), "{:?} / {:?}", sa.out, sb.out);
     let pid = |s: &Seen| s.out.split("PID ").nth(1).map(|r| r.split_whitespace().next().unwrap_or("").to_string());
     assert_eq!(pid(&sa), pid(&sb));
+}
+
+// ---- a hub inside a helper: terminals on this computer, with no ssh and no link (phase 4) ----------------------
+
+struct LocalLab {
+    addr: std::net::SocketAddr,
+    hub: std::sync::Arc<Hub>,
+    key: Vec<u8>,
+}
+
+/// A local hub named "laptop" whose program for a chat is the fake ssh script, served at `/own/v1/term`.
+async fn local_lab() -> LocalLab {
+    let dir = std::env::temp_dir().join(format!("sbhub-local-{}", std::process::id()));
+    let mut cfg = Config::defaults_in(&dir);
+    cfg.max_terms = 2;
+    let key = vec![7u8; ticket::KEY_LEN];
+    let local = server::Local {
+        machine: "laptop".into(),
+        label: "Laptop".into(),
+        command: Box::new(|bg| server::LocalCommand {
+            argv: vec![concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fake-ssh.sh").into(), "term".into(), bg.into()],
+            env: vec![("TERM".into(), "xterm-256color".into())],
+            env_remove: vec![],
+            cwd: None,
+        }),
+    };
+    let hub = Hub::local(cfg, key.clone(), local);
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let app = server::local_router(hub.clone(), "/own/v1/term");
+    tokio::spawn(async move { axum::serve(listener, app).await });
+    assert!(!dir.exists(), "a local hub writes no key and no list");
+    LocalLab { addr, hub, key }
+}
+
+impl LocalLab {
+    async fn connect(&self, t: &str, size: &str) -> Ws {
+        let req = format!("ws://{}/own/v1/term?t={t}{size}", self.addr).into_client_request().unwrap();
+        tokio_tungstenite::connect_async(req).await.unwrap().0
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_terminal_runs_the_program_here_and_two_viewers_share_it() {
+    let lab = local_lab().await;
+    let t = lab.hub.local_ticket("c03ef0d9").unwrap();
+    let mut a = lab.connect(&t, "&cols=100&rows=30&proto=2").await;
+    let mut sa = Seen::default();
+    read_until(&mut a, &mut sa, Duration::from_secs(10), |s| s.out.contains("PID ") && s.out.contains("TERM ")).await;
+    assert_eq!(sa.texts[0], serde_json::json!({"type": "status", "state": "connecting"}));
+    assert!(sa.out.contains("ARGS term c03ef0d9"), "{}", sa.out);
+    assert!(sa.out.contains("SIZE 30 100"), "{}", sa.out);
+    let pid = pid_of(&sa.out);
+
+    let mut b = lab.connect(&lab.hub.local_ticket("c03ef0d9").unwrap(), "&cols=80&rows=24&proto=2").await;
+    let mut sb = Seen::default();
+    read_until(&mut b, &mut sb, Duration::from_secs(5), |s| has_type(s, "snapshot_end")).await;
+    assert_eq!(sb.texts[2], serde_json::json!({"type": "owner", "owner": false}));
+    assert!(sb.out.contains(&format!("PID {pid}")), "the same process: {}", sb.out);
+    assert_eq!(lab.hub.open_terms().len(), 2);
+    assert_eq!(lab.hub.open_terms()[0].machine, "laptop");
+
+    b.send(Message::Binary(b"hello\n".to_vec().into())).await.unwrap();
+    read_until(&mut a, &mut sa, Duration::from_secs(5), |s| s.out.contains("GOT hello")).await;
+    assert!(sa.out.contains("GOT hello"), "what one types the other sees");
+
+    a.send(Message::Binary(b"exit\n".to_vec().into())).await.unwrap();
+    read_until(&mut a, &mut sa, Duration::from_secs(5), |s| s.close.is_some()).await;
+    let exit = sa.texts.iter().find(|t| t["type"] == "exit").expect("exit frame");
+    assert_eq!(exit["note"], "Detached. The chat keeps running.");
+    let end = Instant::now() + Duration::from_secs(5);
+    while alive(&pid) && Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(!alive(&pid));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_ticket_works_once_and_only_for_this_computer() {
+    let lab = local_lab().await;
+    assert!(lab.hub.local_ticket("not a chat id; rm -rf").is_none(), "an id is checked before a ticket is made");
+    let t = lab.hub.local_ticket("c03ef0d9").unwrap();
+    let mut first = lab.connect(&t, "").await;
+    let mut s = Seen::default();
+    read_until(&mut first, &mut s, Duration::from_secs(10), |s| s.out.contains("PID ")).await;
+    assert!(s.out.contains("PID "));
+
+    for bad in [
+        t.clone(),
+        "nonsense".into(),
+        // signed with this hub's key, for another computer's name
+        ticket::mint(&lab.key, "tower", "c03ef0d9", now(), 60),
+        ticket::mint(&[1u8; 32], "laptop", "c03ef0d9", now(), 60),
+        ticket::mint(&lab.key, "laptop", "c03ef0d9", now() - 120, 60),
+    ] {
+        let mut ws = lab.connect(&bad, "").await;
+        let mut s = Seen::default();
+        read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
+        assert_eq!(s.close, Some(4401), "{bad}: {s:?}");
+        assert!(s.out.is_empty());
+    }
+    assert_eq!(lab.hub.open_terms().len(), 1, "none of them opened anything");
+    // a hub that is not local mints nothing this way
+    let other = super_lab_hub().await;
+    assert!(other.local_ticket("c03ef0d9").is_none());
+}
+
+async fn super_lab_hub() -> std::sync::Arc<Hub> {
+    let dir = std::env::temp_dir().join(format!("sbhub-notlocal-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let mut cfg = Config::defaults_in(&dir);
+    cfg.key_path = dir.join("term.key");
+    Hub::new(cfg).unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_local_hub_keeps_the_limit_on_terminals() {
+    let lab = local_lab().await;
+    let mut held = vec![];
+    for bg in ["aaaaaaa1", "aaaaaaa2"] {
+        let mut ws = lab.connect(&lab.hub.local_ticket(bg).unwrap(), "").await;
+        let mut s = Seen::default();
+        read_until(&mut ws, &mut s, Duration::from_secs(10), |s| s.out.contains("PID ")).await;
+        held.push(ws);
+    }
+    let mut ws = lab.connect(&lab.hub.local_ticket("aaaaaaa3").unwrap(), "").await;
+    let mut s = Seen::default();
+    read_until(&mut ws, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
+    assert_eq!(s.close, Some(4429));
 }

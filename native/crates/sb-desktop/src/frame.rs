@@ -1,6 +1,7 @@
 //! Linux window frames. When the compositor draws no frame of its own (GNOME on Wayland, for one), every window draws
 //! it: the board's header already holds the window buttons (chrome.rs), the other windows get a slim title bar here,
-//! and every window gets edges to resize it by. A Mac or Windows window never draws any of this.
+//! and every window gets edges to resize it by. A Mac window never draws any of this. On Windows the windows that
+//! are not the board get the board's own caption (`win_bar`): its color in light and dark, its three buttons.
 
 use gpui::{
     AnyElement, Decorations, FontWeight, InteractiveElement, IntoElement, MouseButton, ParentElement, ResizeEdge,
@@ -152,9 +153,55 @@ pub fn drag_area(d: gpui::Stateful<gpui::Div>) -> gpui::Stateful<gpui::Div> {
     .on_mouse_down(MouseButton::Right, |ev, window, _| window.show_window_menu(ev.position))
 }
 
-/// A window other than the board: as it is when the system draws the frame, else under a title bar with the
-/// window buttons and inside resize edges.
+/// The caption of a Windows window that is not the board: the board header's height, color and caption buttons,
+/// with the window's name where the board has its tabs. Windows itself moves the window by it and handles the
+/// buttons (Snap Layouts on maximize included), through the hit test areas.
+fn win_bar(t: &Theme, title: &str, maxed: bool) -> impl IntoElement {
+    use gpui::WindowControlArea as A;
+    div()
+        .id("frame-bar")
+        .flex_none()
+        .h(px(ui::header()))
+        .flex()
+        .items_center()
+        .bg(t.bg2)
+        .border_b_1()
+        .border_color(t.rule)
+        .child(
+            div()
+                .id("frame-drag")
+                .flex_1()
+                .min_w_0()
+                .h_full()
+                .pl(px(ui::EDGE))
+                .flex()
+                .items_center()
+                .gap(px(9.))
+                .window_control_area(A::Drag)
+                .child(ui::mark(t, 16.))
+                .child(
+                    ui::line(title.to_string()).text_size(px(13.)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink2),
+                ),
+        )
+        .child(ui::caption_btn(t, "w-min", "min", A::Min, false))
+        .child(ui::caption_btn(t, "w-max", if maxed { "restore" } else { "max" }, A::Max, false))
+        .child(ui::caption_btn(t, "w-close", "close", A::Close, true))
+}
+
+/// A window other than the board: as it is when the system draws the frame (a Mac, and Linux under a window
+/// manager's own title bar); on Windows under the board's caption; else (Linux with no frame from the compositor)
+/// under a title bar with the window buttons and inside resize edges.
 pub fn framed(window: &Window, t: &Theme, title: &str, body: impl IntoElement) -> AnyElement {
+    if ui::win() {
+        return div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .font_family(crate::theme::UI)
+            .child(win_bar(t, title, window.is_maximized()))
+            .child(div().flex_1().min_h_0().child(body))
+            .into_any_element();
+    }
     let Some(tiling) = client(window) else { return body.into_any_element() };
     let maxed = window.is_maximized();
     let bar = drag_area(

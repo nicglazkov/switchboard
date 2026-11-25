@@ -1,0 +1,10 @@
+{
+ "time": 1700000000,
+ "headers": {
+  "X-SB-Key": "dQc432QSKcUBmtOGqWgG9pLnz1Hs0RLKNNmH2S28dMU",
+  "X-SB-Time": "1700000000",
+  "X-SB-Nonce": "AAECAwQFBgcICQoLDA0ODw",
+  "X-SB-Signature": "ECOOrMNkNegD_ct7krIGMDHoV9dfkQKlE2xkGqUe37H2QpNv7zdwTAG1gyNz91yf3ZkxXOb_kgAHHEri3e2YCA"
+ },
+ "body": "{\"v\":1,\"platform\":\"apns\",\"kind\":\"alert\",\"token\":\"abababababababababababababababababababababababababababababababab\",\"env\":\"production\",\"ciphertext\":\"mdHw44Ee2iRA9mSJ4lTTboIgBFE7zTcr_SRm46JuNUQVm5pgLAtkcE15mI81FWRzODvt1iBn57yM-WE1j4ooRzvb-vuH1Tuxc9CJhZnX8yJuSIeyAbmql2FbOwJ_uVxLJDihx56NixH-vdvJWB8AomF1fuZeWkcx-v599PoiHvSVoR5PBGSlXPug-h-j-lOgF15V-XGQVP9SqWq-R8LBMeQEK3yiUN6l2zUa039NUVdy0J7SE4b6d_jl_X4xfyInmyPEvYKxxGGWK_Ek-VXKFkVvYn9yRQRLNmdscWi9\",\"collapse\":\"c2Vzc2lvbg\"}"
+}

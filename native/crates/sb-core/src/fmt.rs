@@ -104,6 +104,55 @@ pub fn last_seg(f: &str) -> String {
     f.split(['/', '\\']).rfind(|s| !s.is_empty()).unwrap_or(f).to_string()
 }
 
+/// A folder on a machine, written the way that machine's people write paths. A Windows computer reports its
+/// Claude folder with forward slashes ("C:/Users/you/Claude", agent/sb.py trust_key); shown, a path with a drive
+/// letter or a share's "//" gets backslashes. "~/Claude" and every other system's paths stay as they are.
+pub fn os_path(path: &str, windows: bool) -> String {
+    let b = path.as_bytes();
+    let drive = b.len() >= 3 && b[0].is_ascii_alphabetic() && b[1] == b':' && matches!(b[2], b'/' | b'\\');
+    if windows && (drive || path.starts_with("//")) { path.replace('/', "\\") } else { path.to_string() }
+}
+
+/// A path cut in the middle to at most `max` characters, for a row that cannot hold it all: the start (the drive
+/// or root, and the folders that fit) and the file's name stay, "…" stands for what is left out.
+/// "C:\WINDOWS\System32\WindowsPowerShell\v1.0\powershell.exe" at 40 -> "C:\WINDOWS\System32\…\powershell.exe".
+/// Takes either separator. A name longer than `max` on its own keeps its end ("…ershell.exe").
+pub fn mid_path(path: &str, max: usize) -> String {
+    let n = path.chars().count();
+    if n <= max {
+        return path.to_string();
+    }
+    if max == 0 {
+        return String::new();
+    }
+    let body = path.trim_end_matches(['/', '\\']);
+    // The last separator and the name after it: "\powershell.exe".
+    let cut = body.rfind(['/', '\\']).unwrap_or(0);
+    let tail = &path[cut..];
+    let tail_n = tail.chars().count();
+    if tail_n + 1 >= max {
+        // No room for any of the start: the end of the name.
+        let keep: String = path.chars().skip(n - (max - 1)).collect();
+        return format!("…{keep}");
+    }
+    let room = max - 1 - tail_n;
+    let head = &path[..cut];
+    // Whole folders from the start while they fit, each with its separator: "C:\", "C:\WINDOWS\".
+    let mut end = 0;
+    for (i, c) in head.char_indices() {
+        if (c == '/' || c == '\\') && head[..=i].chars().count() <= room {
+            end = i + 1;
+        }
+    }
+    if end == 0 {
+        // Not even the first folder fits: its first characters.
+        let keep: String = head.chars().take(room).collect();
+        return format!("{keep}…{tail}");
+    }
+    // The tail brings its own separator, so "C:\…\name" has one on each side of the mark.
+    format!("{}…{tail}", &head[..end])
+}
+
 fn ampm<T: Timelike>(t: &T, drop_zero: bool) -> String {
     let (pm, h) = t.hour12();
     let m = t.minute();
@@ -287,6 +336,46 @@ pub fn now_epoch() -> f64 {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn a_windows_folder_is_shown_with_backslashes() {
+        assert_eq!(os_path("C:/Users/you/Documents/code", true), r"C:\Users\you\Documents\code");
+        assert_eq!(os_path(r"D:\code/mixed", true), r"D:\code\mixed");
+        assert_eq!(os_path("//nas/share/code", true), r"\\nas\share\code");
+        // Under home it is "~/x" on every system, and nothing changes for a Mac or Linux machine.
+        assert_eq!(os_path("~/Documents/code", true), "~/Documents/code");
+        assert_eq!(os_path("/home/you/C:/odd", false), "/home/you/C:/odd");
+        assert_eq!(os_path("C:/Users/you", false), "C:/Users/you");
+        assert_eq!(os_path("Its home folder", true), "Its home folder");
+    }
+
+    #[test]
+    fn mid_path_keeps_the_start_and_the_name() {
+        use super::mid_path;
+        let ps = "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        assert_eq!(mid_path(ps, 80), ps, "a path that fits is left alone");
+        assert_eq!(mid_path(ps, 40), "C:\\WINDOWS\\System32\\…\\powershell.exe");
+        assert_eq!(mid_path(ps, 26), "C:\\…\\powershell.exe");
+        assert_eq!(mid_path("C:\\Program Files\\PowerShell\\7\\pwsh.exe", 26), "C:\\…\\pwsh.exe");
+        assert_eq!(mid_path("/opt/homebrew/Cellar/fish/4.0.2/bin/fish", 24), "/opt/homebrew/…/fish");
+        assert_eq!(mid_path("/bin/zsh", 24), "/bin/zsh");
+        // No folder fits whole: the first characters of the start.
+        assert_eq!(mid_path("averyveryverylongfolder/name.txt", 16), "averyv…/name.txt");
+        // The name alone is too long: its end, which says what kind of file it is.
+        assert_eq!(mid_path("C:\\x\\a-very-long-program-name.exe", 12), "…am-name.exe");
+        assert_eq!(mid_path("no-separators-at-all-here", 10), "…-all-here");
+        // Never longer than asked, whatever the path.
+        for max in 0..70 {
+            for p in [
+                ps,
+                "/a/b/c/d/e/f/g/h/i/j/k/l/m/n/o/p/q/r",
+                "C:\\Users\\you\\Documents\\code\\",
+                "日本語/フォルダ/ファイル名.txt",
+            ] {
+                assert!(mid_path(p, max).chars().count() <= max, "{p} at {max}: {}", mid_path(p, max));
+            }
+        }
+    }
 
     #[test]
     fn last_seg_takes_windows_paths_too() {

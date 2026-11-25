@@ -55,12 +55,17 @@ pub struct Setup {
     hub_shot: Option<bool>,
 }
 
-/// The kind of computer the words are for. Frames from the Linux shots host show the Mac's.
+/// The kind of computer the words are for: the one the app runs on. `shots` builds can ask for another's words on
+/// the find, join and setup screens with SB_AS_MAC=1 or SB_AS_WINDOWS=1 (the Mac's frames come from a Linux host).
 pub fn shown_os() -> Os {
-    if cfg!(feature = "shots")
-        && std::env::var("SB_SHOT").is_ok_and(|s| s.starts_with("find") || s.starts_with("setup"))
+    #[cfg(feature = "shots")]
     {
-        return Os::Mac;
+        if std::env::var_os("SB_AS_MAC").is_some() {
+            return Os::Mac;
+        }
+        if std::env::var_os("SB_AS_WINDOWS").is_some() {
+            return Os::Windows;
+        }
     }
     Os::this()
 }
@@ -143,11 +148,12 @@ impl BoardView {
             let looked = cx
                 .background_executor()
                 .spawn(async move {
+                    let kit = Kit::find();
                     (
                         hostsetup::detect_power(),
-                        hostsetup::find_python(os),
+                        hostsetup::python_for(os, kit.as_ref()),
                         hostsetup::busy_ports(hostsetup::ports(os)),
-                        Kit::find(),
+                        kit,
                         hostsetup::server_installed(os),
                     )
                 })
@@ -389,17 +395,17 @@ impl BoardView {
                     .gap(px(14.))
                     .child(point(
                         "remote",
-                        "It serves all your machines and phones",
+                        "It serves all your computers and phones",
                         format!(
-                            "{} keeps the list of your Claude Code chats and machines. The apps on your other \
-                             computers and your iPhone connect to it.",
+                            "{} keeps the list of your Claude Code chats and computers. The apps on your other \
+                             computers and your phone connect to it.",
                             capital(this)
                         ),
                     ))
                     .child(point(
                         "clock",
                         "It needs to stay on and awake, 24/7",
-                        "If it sleeps or shuts down, your phone and your other machines lose Switchboard until it's \
+                        "If it sleeps or shuts down, your phone and your other computers lose Switchboard until it's \
                          back."
                             .into(),
                     ))
@@ -643,7 +649,7 @@ impl BoardView {
                     } else {
                         item(
                             "info",
-                            "This build has no hub, so there are no terminals and machines are added over ssh \
+                            "This build has no hub, so there are no terminals and computers are added over ssh \
                              instead of with a code. Running the installer again from a full copy adds it."
                                 .into(),
                         )
@@ -837,7 +843,7 @@ impl BoardView {
                 "The app is connected to it at localhost:8130.".into(),
             ))
             .child(section("moon", "Keep it awake", awake, open))
-            .child(section("remote", "Your phone and other machines", hostsetup::find_tip(s.os), None))
+            .child(section("remote", "Your phone and other computers", hostsetup::find_tip(s.os), None))
             .child(footer(
                 &t,
                 Some(

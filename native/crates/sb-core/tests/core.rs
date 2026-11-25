@@ -960,3 +960,333 @@ fn start_fresh_is_suggested_near_the_chats_own_limit() {
     assert!(suggest(&one(270_000.0, 0.0, None), NOW).why.contains("close to the 300k point"));
     assert!(!suggest(&one(269_000.0, 0.0, None), NOW).why.contains("squeezes"));
 }
+
+// ---------- keys: the server's routes and the node's control API, over real sockets ----------
+
+fn json(body: &str) -> serde_json::Value {
+    serde_json::from_str(body).unwrap_or_default()
+}
+
+fn core_at(base: String, tag: &str) -> Core {
+    Core::new(CoreConfig {
+        servers: vec![base],
+        cache_dir: Some(temp_dir(tag).display().to_string()),
+        user_agent: None,
+    })
+}
+
+#[test]
+fn a_server_from_before_keys_has_no_keys() {
+    // Every keys route is a 404 there, and that is "off", not an error.
+    let (base, _) = switchboard();
+    let core = core_at(base, "keys-old");
+    assert_eq!(core.keys_readiness().unwrap(), None);
+    assert!(sb_core::keys::Keys { server: core.keys_readiness().unwrap(), node: None }.hidden());
+    assert!(matches!(core.keys_devices(), Err(CoreError::Server { status: 404, .. })));
+}
+
+#[test]
+fn the_keys_routes_decode_as_the_server_sends_them() {
+    use sb_core::keys::{Mode, Path};
+    let (base, seen) = serve(|method, path, body| {
+        match (method, path) {
+        ("GET", "/api/summary") => (200, SUMMARY.into()),
+        ("GET", "/api/keys/readiness") => (
+            200,
+            r#"{"ok":true,"keys":"both","ready":false,"days":7,"watching_since":1799000000.0,
+                "blockers":[{"kind":"machine","text":"Tower is not paired with this home computer. Pair it with a code first, or it loses its connection.","machine":"tower","label":"Tower","paired":false},
+                            {"kind":"direct","text":"The iPhone app connected by address 2 hours ago. It would stop working. Pair the phone with this home computer in the app first.","client":"iPhone","last":1799990000.0}],
+                "machines":[{"name":"studio","label":"Studio","home":true,"paired":false,"seen":null,"path":null},
+                            {"name":"laptop","label":"Netbook","home":false,"paired":true,"seen":1799999990.0,"path":"direct"}],
+                "direct":[{"client":"iPhone","last":1799990000.0}]}"#
+                .into(),
+        ),
+        ("GET", "/api/keys/devices") => (
+            200,
+            r#"{"ok":true,"devices":[{"id":"k1","name":"Netbook","kind":"computer","machine":"laptop","paired":1799000000.0,"via":"code","last_seen":1799999990.0,"path":"direct"},
+                                     {"id":"k2","name":"Phone","kind":"phone","paired":1799000100.0,"via":"link","last_seen":null,"path":null}]}"#
+                .into(),
+        ),
+        ("POST", "/api/keys/devices") if json(body)["remove"] == "k2" => (200, r#"{"ok":true}"#.into()),
+        ("POST", "/api/keys/devices") => (400, r#"{"ok":false,"error":"Say which device to remove."}"#.into()),
+        ("POST", "/api/pair_device") => (
+            200,
+            r#"{"ok":true,"code":"ABCD-EFGH","link":"switchboard://pair/1?h=00ff&s=0011","expires":1800000600.0}"#.into(),
+        ),
+        _ => (404, r#"{"ok":false,"error":"not found"}"#.into()),
+    }
+    });
+    let core = core_at(base, "keys-new");
+    let r = core.keys_readiness().unwrap().expect("the route is there");
+    assert_eq!(r.keys, Mode::Both);
+    assert!(!r.ready);
+    assert_eq!(r.blockers.len(), 2);
+    assert_eq!(r.machines.len(), 2);
+    assert_eq!(sb_core::keys::machine_line(&r, "laptop"), Some("Direct"));
+    let d = core.keys_devices().unwrap();
+    assert_eq!(d.len(), 2);
+    assert_eq!((d[0].id.as_str(), d[0].path), ("k1", Some(Path::Direct)));
+    assert_eq!(d[1].last_seen, None);
+    core.keys_remove_device("k2").unwrap();
+    let offer = core.pair_device().unwrap();
+    assert_eq!(offer.code, "ABCD-EFGH");
+    assert!(offer.link.starts_with("switchboard://pair/1?"));
+    assert_eq!(offer.expires, 1_800_000_600.0);
+    let seen = seen.lock().unwrap();
+    let post = seen.requests.iter().find(|r| r.0 == "POST" && r.1 == "/api/keys/devices").unwrap();
+    assert!(post.2.iter().any(|(k, v)| k == "x-switchboard" && v == "1"), "the header every POST carries");
+}
+
+#[test]
+fn the_mode_route_is_called_and_its_answers_kept() {
+    use sb_core::keys::ModeRefusal;
+    let (base, seen) = serve(|method, path, body| {
+        match (method, path) {
+        ("GET", "/api/summary") => (200, SUMMARY.into()),
+        ("GET", "/api/keys/readiness") => (200, r#"{"ok":true,"keys":"off","switch":true,"here":true}"#.into()),
+        ("POST", "/api/keys/mode") => match json(body)["keys"].as_str() {
+            Some("both") => (200, r#"{"ok":true,"keys":"both","restarting":true}"#.into()),
+            Some("off") => (200, r#"{"ok":true,"keys":"off","restarting":false}"#.into()),
+            Some("only") => (
+                409,
+                r#"{"ok":false,"error":"Not yet: switching to keys only now would cut something off. Tower is not paired.","blockers":[{"kind":"machine","text":"Tower is not paired."}]}"#.into(),
+            ),
+            Some("by-hand") => (
+                409,
+                r#"{"ok":false,"error":"This server cannot restart itself from here. To change this, run on the home computer: switchboard keys on","command":"switchboard keys on"}"#.into(),
+            ),
+            _ => (400, r#"{"ok":false,"error":"keys must be off, both or only"}"#.into()),
+        },
+        _ => (404, r#"{"ok":false,"error":"not found"}"#.into()),
+    }
+    });
+    let core = core_at(base, "keys-mode");
+    let k = sb_core::keys::Keys { server: core.keys_readiness().unwrap(), node: None };
+    assert!(k.can_turn_on() && k.devices_page() && !k.on());
+    assert_eq!(core.keys_set_mode("both").unwrap(), Ok(true));
+    assert_eq!(core.keys_set_mode("off").unwrap(), Ok(false));
+    assert_eq!(
+        core.keys_set_mode("only").unwrap(),
+        Err(ModeRefusal {
+            text: "Not yet: switching to keys only now would cut something off.".into(),
+            command: None,
+            blockers: vec!["Tower is not paired.".into()],
+        })
+    );
+    let by_hand = core.keys_set_mode("by-hand").unwrap().unwrap_err();
+    assert_eq!(by_hand.command.as_deref(), Some("switchboard keys on"));
+    assert!(!by_hand.text.contains("switchboard keys on"), "the command is shown once, apart");
+    let e = core.keys_set_mode("sideways").unwrap_err();
+    assert!(e.to_string().contains("keys must be off, both or only"), "{e}");
+    let seen = seen.lock().unwrap();
+    let first = seen.requests.iter().find(|r| r.0 == "POST" && r.1 == "/api/keys/mode").unwrap();
+    assert_eq!(json(&first.3), serde_json::json!({"keys": "both"}));
+    assert!(first.2.iter().any(|(k, v)| k == "x-switchboard" && v == "1"));
+}
+
+#[test]
+fn a_home_node_that_does_not_answer_is_said_in_the_servers_words() {
+    let (base, _) = serve(|method, path, _| match (method, path) {
+        ("GET", "/api/summary") => (200, SUMMARY.into()),
+        ("GET", "/api/keys/devices") | ("POST", "/api/pair_device") => {
+            (502, r#"{"ok":false,"error":"The node on this computer did not answer (connection refused)."}"#.into())
+        }
+        _ => (404, r#"{"ok":false,"error":"not found"}"#.into()),
+    });
+    let core = core_at(base, "keys-502");
+    for e in [core.keys_devices().err().unwrap(), core.pair_device().err().unwrap()] {
+        assert!(e.to_string().contains("The node on this computer did not answer"), "{e}");
+    }
+}
+
+#[test]
+fn the_node_control_client_speaks_the_assumed_shapes() {
+    use sb_core::keys::{HttpNode, JoinProblem, NodeControl, NodeError, Path, Role, join_problem};
+    let (base, seen) = serve(|method, path, body| {
+        match (method, path) {
+        ("GET", "/status") => (
+            200,
+            r#"{"ok":true,"keys":true,"role":"member","machine":"laptop","id":"k1","home":{"id":"h1","name":"Studio"},
+                "relay":"https://relay.example","peers":[{"id":"h1","name":"Studio","path":"direct","rtt_ms":3.5}],"problems":[]}"#
+                .into(),
+        ),
+        ("POST", "/pair/join") if body.contains("ABCD-EFGH") => {
+            (200, r#"{"ok":true,"home":{"id":"h1","name":"Studio"},"machine":"laptop"}"#.into())
+        }
+        ("POST", "/pair/join") => (403, r#"{"ok":false,"error":"That code is wrong. Check it and try again."}"#.into()),
+        ("GET", "/devices") => (200, r#"{"ok":true,"devices":[{"id":"k1","name":"Netbook","kind":"computer"}]}"#.into()),
+        ("POST", "/devices/remove") => (200, r#"{"ok":true}"#.into()),
+        ("POST", "/pair/new") => (200, r#"{"ok":true,"code":"WXYZ-2345","link":"switchboard://pair/1?h=1","expires":9}"#.into()),
+        ("POST", "/relay") => (200, r#"{"ok":true}"#.into()),
+        _ => (404, "Not Found".into()),
+    }
+    });
+    let node = HttpNode::at(&base).expect("the fake listens on loopback");
+    let s = node.status().unwrap();
+    assert!(s.keys);
+    assert_eq!(s.role, Role::Member);
+    assert_eq!(s.peers[0].path, Some(Path::Direct));
+    assert_eq!(sb_core::keys::home_line(&s).unwrap().text, "Direct");
+    assert_eq!(node.join("ABCD-EFGH", Some("Laptop"), &[], false).unwrap().home.as_deref(), Some("Studio"));
+    let no = node.join("WWWW-WWWW", None, &["192.0.2.20:41641".to_string()], false).unwrap_err();
+    assert!(matches!(no, NodeError::Said { status: 403, .. }));
+    assert_eq!(join_problem(&no), JoinProblem::WrongCode);
+    assert_eq!(node.devices().unwrap().len(), 1);
+    node.remove_device("k1").unwrap();
+    assert_eq!(node.pair_new().unwrap().code, "WXYZ-2345");
+    node.set_relay("https://relay.example").unwrap();
+    let seen = seen.lock().unwrap();
+    let body_of = |p: &str| seen.requests.iter().find(|r| r.0 == "POST" && r.1 == p).map(|r| json(&r.3)).unwrap();
+    assert_eq!(body_of("/pair/join"), serde_json::json!({"input": "ABCD-EFGH", "name": "Laptop"}));
+    let second = seen.requests.iter().filter(|r| r.0 == "POST" && r.1 == "/pair/join").nth(1).map(|r| json(&r.3));
+    assert_eq!(second, Some(serde_json::json!({"input": "WWWW-WWWW", "addrs": ["192.0.2.20:41641"]})));
+    assert_eq!(body_of("/devices/remove"), serde_json::json!({"id": "k1"}));
+    assert_eq!(body_of("/relay"), serde_json::json!({"url": "https://relay.example"}));
+}
+
+#[test]
+fn no_node_on_this_computer_is_absent_not_an_error_to_show() {
+    use sb_core::keys::{HttpNode, NodeControl, NodeError};
+    // A port nothing listens on.
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", l.local_addr().unwrap());
+    drop(l);
+    assert_eq!(HttpNode::at(&base).unwrap().status(), Err(NodeError::Absent));
+    // Something else holds the port and knows no such route.
+    let (other, _) = serve(|_, _, _| (404, "Not Found".into()));
+    assert_eq!(HttpNode::at(&other).unwrap().status(), Err(NodeError::Absent));
+}
+
+// ---- the home computer is away (keys phase 4a.10) ----
+
+fn away_reply(away: serde_json::Value) -> ApiSessions {
+    let mut v: serde_json::Value = serde_json::from_slice(&fixture("api_sessions.json")).unwrap();
+    v["away"] = away;
+    serde_json::from_value(v).unwrap()
+}
+
+#[test]
+fn a_board_says_when_the_home_computer_is_away_and_one_without_the_word_does_not() {
+    assert!(hand().away.is_none(), "a server's own answer has no away");
+    let raw = away_reply(serde_json::json!({
+        "since": 1795362330u64,
+        "home": {"id": "ab".repeat(32), "name": "Studio", "last_seen": 1795362329u64},
+        "showing": [{"machine": "laptop", "label": "Laptop"}, {"machine": "tower", "label": "Tower"}],
+        "missing": [{"machine": "mini", "label": "Mini", "why": "needs_update"},
+                    {"machine": "studio", "label": "Studio", "why": "is_home"}],
+        "roster": {"at": 1795362332u64, "expires": 1795967132u64},
+        "line": "Home is away. Showing chats from Laptop and Tower.",
+        "notes": ["Mini needs an update before it can answer while the home computer is away."],
+        "lacks": ["new_chat", "move", "history"],
+        "lacks_line": "Not available while the home computer is away: new chats, moving a chat, history.",
+    }));
+    let s = model::normalize(&raw, NOW);
+    let a = s.away.as_ref().expect("away is read");
+    assert_eq!(a.line(), "Home is away. Showing chats from Laptop and Tower.");
+    assert_eq!(a.reason(), "Not available while the home computer is away: new chats, moving a chat, history.");
+    assert_eq!(a.showing.iter().map(|c| c.label.as_str()).collect::<Vec<_>>(), ["Laptop", "Tower"]);
+    assert_eq!(a.missing[0].why.as_deref(), Some("needs_update"));
+    assert_eq!(
+        (a.missing[0].sentence().as_str(), a.missing[0].word()),
+        ("Mini needs an update before it can answer while the home computer is away.", "Needs an update")
+    );
+    let home = a.missing_of("studio").unwrap();
+    assert_eq!((home.sentence().as_str(), home.word()), ("The home computer is away.", "Away"));
+    assert!(a.missing_of("laptop").is_none());
+    assert_eq!(a.home.as_ref().and_then(|h| h.name.as_deref()), Some("Studio"));
+    assert_eq!(a.roster.as_ref().and_then(|r| r.at), Some(1795362332.0));
+    assert_eq!(a.notes.len(), 1);
+    // the board is drawn again when away begins, ends, or says something else
+    assert!(!s.same_board(&hand()));
+    let other = away_reply(serde_json::json!({"line": "Home is away. No other computer can be reached."}));
+    assert!(!s.same_board(&model::normalize(&other, NOW)));
+    assert!(s.same_board(&model::normalize(&raw, NOW)));
+
+    // every line the helper has is shown as it is; an answer with none still says the one thing known
+    for line in [
+        "Home is away. Showing chats from Laptop.",
+        "Home is away. Showing chats from Laptop, Tower and Mini.",
+        "Home is away. No other computer can be reached.",
+        "Home is away. Asking the other computers for their chats.",
+    ] {
+        let s = model::normalize(&away_reply(serde_json::json!({ "line": line })), NOW);
+        assert_eq!(s.away.unwrap().line(), line);
+    }
+    let bare = model::normalize(&away_reply(serde_json::json!({})), NOW).away.unwrap();
+    assert_eq!((bare.line(), bare.reason()), ("Home is away.", sb_core::api::AWAY_REASON));
+    // a shape this app does not know is no reason to lose the board
+    let odd = model::normalize(&away_reply(serde_json::json!("soon")), NOW);
+    assert!(odd.away.is_none() && odd.machines.len() == 3);
+}
+
+#[test]
+fn while_the_home_computer_is_away_only_what_a_chats_own_computer_does_is_on() {
+    let s = model::normalize(&away_reply(serde_json::json!({"line": "Home is away. Showing chats from Laptop."})), NOW);
+    let home = hand();
+    let mut seen = 0;
+    for chat in s.sessions() {
+        let a = actions::for_session(chat, &s, NOW);
+        let was = actions::for_session(home.session(&chat.key).unwrap(), &home, NOW);
+        assert_eq!(a.len(), was.len(), "nothing is hidden, so nothing moves: {}", chat.key);
+        for x in &a {
+            let before = was.iter().find(|w| w.id == x.id).unwrap();
+            if actions::works_away(x.id) {
+                assert_eq!((x.disabled, &x.note), (before.disabled, &before.note), "{:?} is as it was", x.id);
+            } else {
+                assert!(x.disabled && !x.primary && x.key.is_none(), "{:?} needs the home computer", x.id);
+                assert_eq!(x.note, sb_core::api::AWAY_REASON);
+                seen += 1;
+            }
+        }
+        assert!(a.iter().filter(|x| x.primary).all(|x| !x.disabled), "the primary one is one that works");
+    }
+    assert!(seen > 0);
+    for id in
+        [ActionId::Terminal, ActionId::ResumeOpen, ActionId::Stop, ActionId::Dismiss, ActionId::Pass, ActionId::Resume]
+    {
+        assert!(actions::works_away(id), "{id:?}");
+    }
+    for id in [ActionId::Fresh, ActionId::Continue, ActionId::Handoff, ActionId::Keep, ActionId::Rename, ActionId::Link]
+    {
+        assert!(!actions::works_away(id), "{id:?}");
+    }
+}
+
+#[test]
+fn a_computer_shows_the_list_it_holds_and_blocks_a_device_on_it() {
+    use sb_core::keys::{self, FakeNode, HeldList, NodeControl, NodeStatus};
+    let v = serde_json::json!({
+        "ok": true,
+        "roster": {"epoch": 1, "seq": 4, "at": NOW - 7200.0, "expires": NOW - 7200.0 + 7.0 * 86400.0},
+        "devices": [
+            {"id": "aa", "name": "Studio", "kind": "computer", "machine": "studio", "home": true, "this": false, "blocked": false},
+            {"id": "bb", "name": "Laptop", "kind": "computer", "machine": "laptop", "home": false, "this": true, "blocked": false},
+            {"id": "cc", "name": "Tower", "kind": "computer", "machine": "tower", "home": false, "this": false, "blocked": true},
+            {"id": "dd", "name": "Sam's iPhone", "kind": "phone", "home": false, "this": false, "blocked": false},
+            {"name": "no id"},
+        ],
+    });
+    let held = keys::read_held(&v);
+    assert_eq!(held.devices.len(), 4);
+    assert_eq!(held.devices.iter().map(|d| d.can_block()).collect::<Vec<_>>(), [false, false, true, true]);
+    assert!(held.devices[2].blocked && held.devices[3].phone && held.devices[0].home && held.devices[1].here);
+    assert_eq!(
+        keys::held_line(&held, NOW),
+        "This computer answers the devices on the home computer's list. Its copy was signed 2h ago."
+    );
+    assert_eq!(keys::held_line(&held, NOW + 8.0 * 86400.0), keys::HELD_STALE);
+    let none = keys::read_held(&serde_json::json!({"ok": true, "roster": null, "devices": []}));
+    assert_eq!((none.clone(), keys::held_line(&none, NOW)), (HeldList::default(), keys::HELD_NONE.to_string()));
+
+    let node = FakeNode::with(NodeStatus::default());
+    node.state.lock().unwrap().held = held;
+    node.block("dd", true).unwrap();
+    assert!(node.held().unwrap().devices[3].blocked);
+    node.block("dd", false).unwrap();
+    assert!(!node.held().unwrap().devices[3].blocked);
+    assert!(node.block("aa", true).is_err(), "the home computer cannot be blocked");
+    assert_eq!(node.state.lock().unwrap().calls, ["block dd", "held", "unblock dd", "held", "block aa"]);
+    for line in [keys::HELD_TITLE, keys::HELD_NONE, keys::HELD_STALE, keys::BLOCK_EXPLAINS] {
+        assert!(!line.contains('\u{2014}') && !line.contains('!'), "{line}");
+    }
+}

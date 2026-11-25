@@ -1,0 +1,57 @@
+<svg viewBox="0 0 880 440" role="img" aria-labelledby="fig-arch-tunnel-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-arch-tunnel-t">With keys on, the app and sb.py on another computer connect to sb-node on that same computer. It carries each connection through an encrypted tunnel, direct or through a relay, to sb-node on the home computer, which hands it to the server on port 8130 or to the hub's tunnel listener on port 8136. On both computers a control API on port 8137 answers that computer only.</title>
+<text class="d-title" x="40" y="52">The tunnel between two computers</text>
+<rect class="d-panel" x="40" y="84" width="320" height="296" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="94" y="120">Another computer</text>
+<rect class="d-chip" x="60" y="140" width="120" height="50" rx="14"/>
+<text class="d-small mid" x="120" y="170">The app</text>
+<rect class="d-chip" x="60" y="240" width="120" height="50" rx="14"/>
+<text class="d-mono mid" x="120" y="270">sb.py</text>
+<rect class="d-chip-sel" x="220" y="140" width="120" height="150" rx="14"/>
+<text class="d-mono mid t-sel" x="280" y="206">sb-node</text>
+<text class="d-sub mid" x="280" y="228">forwards</text>
+<path class="d-line" d="M184 165H216"/>
+<path class="d-line" d="M207 157L216 165L207 173"/>
+<path class="d-line" d="M184 265H216"/>
+<path class="d-line" d="M207 257L216 265L207 273"/>
+<rect class="d-chip" x="60" y="316" width="120" height="44" rx="22"/>
+<text class="d-small mid" x="120" y="343">pair</text>
+<rect class="d-chip" x="220" y="316" width="120" height="44" rx="22"/>
+<text class="d-mono mid" x="280" y="343">:8137</text>
+<path class="d-line" d="M184 338H216"/>
+<path class="d-line" d="M207 330L216 338L207 346"/>
+<rect class="d-chip-sel" x="520" y="84" width="320" height="296" rx="16"/>
+<g class="d-ico sel" transform="translate(540 102)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text class="t-sel" x="574" y="120">Home computer</text>
+<rect class="d-panel" x="540" y="140" width="120" height="150" rx="14"/>
+<text class="d-mono mid" x="600" y="206">sb-node</text>
+<text class="d-sub mid" x="600" y="228">checks the key</text>
+<rect class="d-panel" x="700" y="140" width="120" height="50" rx="14"/>
+<text class="d-small mid" x="760" y="162">Server</text>
+<text class="d-mono mid" x="760" y="180">:8130</text>
+<rect class="d-panel" x="700" y="240" width="120" height="50" rx="14"/>
+<text class="d-small mid" x="760" y="262">Hub</text>
+<text class="d-mono mid" x="760" y="280">:8136</text>
+<path class="d-line" d="M664 165H696"/>
+<path class="d-line" d="M687 157L696 165L687 173"/>
+<path class="d-line" d="M664 265H696"/>
+<path class="d-line" d="M687 257L696 265L687 273"/>
+<rect class="d-panel" x="540" y="316" width="120" height="44" rx="22"/>
+<text class="d-mono mid" x="600" y="343">:8137</text>
+<rect class="d-panel" x="700" y="316" width="120" height="44" rx="22"/>
+<text class="d-small mid" x="760" y="343">code, devices</text>
+<path class="d-line" d="M696 338H664"/>
+<path class="d-line" d="M673 330L664 338L673 346"/>
+<rect class="d-dash" x="400" y="100" width="80" height="40" rx="20"/>
+<text class="d-small mid" x="440" y="125">Relay</text>
+<path class="d-line d-dotted" d="M344 200H358a12 12 0 0 0 12-12V132a12 12 0 0 1 12-12H396"/>
+<path class="d-line d-dotted" d="M484 120H498a12 12 0 0 1 12 12V188a12 12 0 0 0 12 12H536"/>
+<path class="d-line-sel" d="M344 232H536"/>
+<path class="d-line-sel" d="M527 224L536 232L527 240"/>
+<text class="d-small mid t-sel" x="440" y="262">The tunnel</text>
+<text class="d-sub mid" x="440" y="284">one stream for</text>
+<text class="d-sub mid" x="440" y="302">each connection</text>
+<text class="d-sub mid" x="200" y="412">Programs here talk to this computer only.</text>
+<text class="d-sub mid" x="680" y="412">Only a paired key gets this far.</text>
+</svg>

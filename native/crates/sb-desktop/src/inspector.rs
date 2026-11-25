@@ -537,6 +537,7 @@ impl BoardView {
         };
         // One card per choice, stacked: at the sheet's 400 to 452 px two cards side by side squeeze their words, so
         // they never sit side by side here. Each card owns its badge, meter and button, all inside its own padding.
+        let away = c.app.away().is_some();
         let opt = |id: &'static str,
                    k: Pick,
                    ic: &'static str,
@@ -546,7 +547,9 @@ impl BoardView {
                    w: f32,
                    btn: &'static str,
                    act: ActionId| {
-            let sug = pick == k;
+            // (the home computer is away: Start fresh needs it, so that card is drawn off and is not the pick)
+            let off = away && !acts::works_away(act);
+            let sug = pick == k && !off;
             let key = key.clone();
             let bar_c = if k == Pick::Fresh { t.accent } else { t.run };
             div()
@@ -559,6 +562,7 @@ impl BoardView {
                 .flex_col()
                 .gap(px(8.))
                 .shadow(vec![Theme::ring(if sug { t.accent } else { t.line })])
+                .when(off, |d| d.opacity(ui::OFF))
                 .child(
                     div()
                         .flex()
@@ -607,6 +611,9 @@ impl BoardView {
                         .child(ui::icon(ic, 14., if sug { t.on_accent } else { t.dim }))
                         .child(btn)
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                            if off && this.app.update(cx, |s, cx| s.needs_home(cx)) {
+                                return;
+                            }
                             if act == ActionId::Fresh {
                                 // The choice already said what it does and costs: no second ask.
                                 let k = key.clone();
@@ -619,6 +626,14 @@ impl BoardView {
                 })
         };
         let head = format!("{} is the better pick now.", if pick == Pick::Fresh { "Start fresh" } else { "Resume" });
+        let (head, why) = if away && pick == Pick::Fresh {
+            (
+                "Start fresh needs the home computer.".to_string(),
+                "It is away, so resuming is what works now.".to_string(),
+            )
+        } else {
+            (head, g.why.clone())
+        };
         let how = g.how.clone();
         let how_open = self.how_open;
         div()
@@ -628,7 +643,7 @@ impl BoardView {
             .gap(px(10.))
             .child(div().min_w_0().text_size(px(13.)).line_height(relative(1.45)).text_color(t.ink2).child(
                 ui::runs_text(
-                    &[TextRun { text: head, bold: true }, TextRun { text: format!(" {}", g.why), bold: false }],
+                    &[TextRun { text: head, bold: true }, TextRun { text: format!(" {why}"), bold: false }],
                     t.ink,
                 ),
             ))
@@ -1610,7 +1625,7 @@ impl BoardView {
         };
         let ctx = x.ctx.filter(|v| *v > 0.0).map(|v| fmt::k(v as u64));
         let sub = [Some(label), ctx, Some(how)].into_iter().flatten().collect::<Vec<_>>().join(" · ");
-        let raw = crate::link::first_line(x.title.as_deref(), "Untitled session").to_string();
+        let raw = crate::link::first_line(x.title.as_deref(), "Untitled chat").to_string();
         let (topic, tag) = names::split(&raw);
         let kind = names::tag_kind(tag.as_deref());
         let when = fmt::md(x.started.or(x.ended).unwrap_or(0.0));

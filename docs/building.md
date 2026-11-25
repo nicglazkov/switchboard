@@ -1,6 +1,12 @@
+---
+description: For developers. Build Switchboard on your own computer, run the tests, cross-build for other systems, and make and publish a release.
+---
+
 # Building and releasing
 
-This page is for working on Switchboard. To install it, see [install.md](install.md).
+<p class="sb-meta">Last validated: Nov 23, 2026</p>
+
+This page is for working on Switchboard. To install it, refer to [Install Switchboard](install.md).
 
 ## On your own computer
 

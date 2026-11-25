@@ -2487,6 +2487,7 @@ impl Render for NewSheet {
             "nw-model",
             self.drop.is_open("nw-model"),
             self.drop.more,
+            &self.drop.scroll,
             &menu,
             &self.model,
             locked.then_some("opus"),

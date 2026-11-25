@@ -1,0 +1,49 @@
+[package]
+name = "sb-link"
+description = "Switchboard keys: a device's key, the paired list, pairing codes and links, the pairing exchange, the tunnel, and the endpoint that carries them between computers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[features]
+# standin.rs: what a device's two loopback ports answer while the home computer is away.
+standin = []
+
+[dependencies]
+# durable.rs: the key file and the paired list survive a power cut.
+sb-core = { path = "../sb-core" }
+tokio = { version = "=1.53.2", features = ["rt", "macros", "net", "sync", "time", "io-util"] }
+serde.workspace = true
+serde_json.workspace = true
+# The pairing exchange (pairing/pake.rs is the only file that names it, so it can be replaced).
+spake2 = "=0.4.0"
+# Key derivation: the rendezvous key from a short code, and the pairing transcript and session keys. `pure` builds
+# without a C compiler or assembler, which keeps the Windows cross build simple; nothing here hashes much.
+blake3 = { version = "=1.8.7", default-features = false, features = ["std", "pure"] }
+# Seals the two pairing messages (the token) under the session key.
+chacha20poly1305 = "=0.10.1"
+# A device's id is the Ed25519 public key of its 32-byte key, the same as iroh's EndpointId. Already in sb-core.
+ed25519-dalek = { version = "=2.2.0", default-features = false, features = ["std"] }
+# The rendezvous key from a short code is a slow hash on purpose (code.rs `rendezvous_key`).
+argon2 = { version = "=0.5.3", default-features = false, features = ["alloc"] }
+# The endpoint (endpoint.rs is the only file that names it). No default features: no metrics and no port mapper.
+# `presets::Minimal` and a custom relay only, so none of n0's relays, DNS or pkarr is ever used.
+# The same copy iroh watches the network with: which interface an address is on, so container and VM bridges are
+# not handed out as ways to reach this computer.
+netdev = "0.47"
+iroh = { version = "=1.5.0", default-features = false, features = ["tls-ring", "fast-apple-datapath"] }
+# iroh speaks through `tracing`; endpoint.rs listens for the relay's warning that this key is in use twice.
+tracing = { version = "0.1.44", default-features = false, features = ["std"] }
+# The roster's body and signature travel as base64url (roster.rs). Already in Cargo.lock for sb-hub.
+base64 = "=0.22.1"
+subtle = "=2.6.1"
+zeroize = "=1.9.1"
+getrandom = "=0.3.4"
+
+[dev-dependencies]
+tokio = { version = "=1.53.2", features = ["rt-multi-thread", "test-util"] }
+# A WebSocket through the tunnel (tunnel.rs tests). Already in Cargo.lock for sb-node.
+tokio-tungstenite = "=0.29.0"
+futures-util = "=0.3.34"

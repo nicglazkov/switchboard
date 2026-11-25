@@ -3,6 +3,8 @@
 # and that neither needs the Visual C++ runtime DLLs (the CRT is linked in, see native/.cargo/config.toml). Then:
 #   dist\Switchboard-Setup-<version>.exe   the installer with the app attached (switchboard-install --make-setup)
 #   dist\Switchboard-windows.zip           Switchboard.exe and THIRD-PARTY-NOTICES.txt, for the in-app updater
+#   dist\switchboard-node.exe              what links a PC to a server (Add a machine)
+#   dist\switchboard-hub.exe               the hub, for a home computer on Windows (install-server.ps1)
 #   dist\symbols\<version>-<build>\        the .pdb files with their exes, outside both downloads
 # Signs only when SB_WIN_SIGN_CERT is set (see the marked block). Never launches the app. Windows PowerShell 5.1
 # compatible.
@@ -128,10 +130,15 @@ if ($said -notmatch [regex]::Escape($ver)) { Fail "Setup --version said '$said'"
 $exeSize = (Get-Item $exe).Length
 $zipSize = (Get-Item $zip).Length
 $setupSize = (Get-Item $setup).Length
-# switchboard-node for Add a machine.
-cargo build --release --locked -q -p sb-node
-if ($LASTEXITCODE -ne 0) { Fail 'cargo build sb-node' }
-Copy-Item -LiteralPath (Join-Path $root 'target\release\switchboard-node.exe') -Destination (Join-Path $root 'dist\switchboard-node.exe') -Force
+# switchboard-node for Add a machine, and the hub for a home computer on Windows.
+cargo build --release --locked -q -p sb-node -p sb-hub
+if ($LASTEXITCODE -ne 0) { Fail 'cargo build sb-node sb-hub' }
+foreach ($b in 'switchboard-node', 'switchboard-hub') {
+    $built = Join-Path $root "target\release\$b.exe"
+    if (-not (Test-Path $built)) { Fail "missing $built" }
+    Sign $built
+    Copy-Item -LiteralPath $built -Destination (Join-Path $root "dist\$b.exe") -Force
+}
 
 # Symbols for reading crash backtraces (docs/building.md), with the exes they match. Only this build's are kept here;
 # build-windows.sh copies them. The linker names a .pdb after the crate's binary with dashes as underscores.
@@ -139,7 +146,7 @@ $symRoot = Join-Path $root 'dist\symbols'
 if (Test-Path $symRoot) { Remove-Item -LiteralPath $symRoot -Recurse -Force }
 $sym = Join-Path $symRoot "$ver-$env:SB_BUILD"
 New-Item -ItemType Directory -Force -Path $sym | Out-Null
-foreach ($b in 'Switchboard', 'switchboard-node', 'switchboard-install') {
+foreach ($b in 'Switchboard', 'switchboard-node', 'switchboard-hub', 'switchboard-install') {
     $pdb = Join-Path $root ("target\release\" + ($b -replace '-', '_') + '.pdb')
     if (-not (Test-Path $pdb)) { Fail "missing $pdb" }
     Copy-Item -LiteralPath $pdb -Destination $sym -Force
@@ -147,6 +154,7 @@ foreach ($b in 'Switchboard', 'switchboard-node', 'switchboard-install') {
 }
 Write-Output "symbols: dist\symbols\$ver-$env:SB_BUILD"
 Write-Output "node windows: $((Get-Item (Join-Path $root 'dist\switchboard-node.exe')).Length) bytes"
+Write-Output "hub windows: $((Get-Item (Join-Path $root 'dist\switchboard-hub.exe')).Length) bytes"
 Write-Output "app: $appCheck"
 Write-Output "installer: $instCheck"
 Write-Output "setup: $(Split-Path -Leaf $setup) $setupSize bytes ($($made.Trim()))"

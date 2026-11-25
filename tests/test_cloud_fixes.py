@@ -166,6 +166,50 @@ class OfflineAtOnceTest(unittest.TestCase):
         self.assertFalse(f.state['desk']['online'])
         self.assertEqual(told, ['desk'])
 
+    def test_a_machine_that_answers_too_slowly_is_not_called_offline_for_it(self):
+        # 2026-11-25: a busy Mac took 11 to 15 s to list its chats and the server waits 15, so every so often it
+        # was "offline" for one poll: its chats closed in the apps and opened again a few seconds later
+        chats = [{'sid': 's1', 'title': 'A chat'}]
+        f = tn.fleet.Fleet(tn.MACH, lambda t, r, to: {'ok': True, 'sessions': chats})
+        f.poll()
+        told = []
+        f.on_change = told.append
+        f.transport = lambda t, r, to: (_ for _ in ()).throw(tn.fleet.MaybeDelivered('timed out'))
+        for _ in range(tn.fleet.SLOW_POLLS - 1):
+            f.poll()
+            self.assertTrue(f.state['desk']['online'])
+            self.assertEqual(f.state['desk']['sessions'], chats, 'what it last said stands')
+        self.assertEqual(told, [])
+        f.poll()  # it has not answered for this many polls in a row: now it is offline
+        self.assertFalse(f.state['desk']['online'])
+        self.assertEqual(f.state['desk']['error'], 'timed out')
+        self.assertEqual(told, ['desk'])
+
+    def test_one_answer_starts_the_count_of_slow_polls_over(self):
+        ok = lambda t, r, to: {'ok': True, 'sessions': []}
+        slow = lambda t, r, to: (_ for _ in ()).throw(tn.fleet.MaybeDelivered('timed out'))
+        f = tn.fleet.Fleet(tn.MACH, ok)
+        f.poll()
+        for _ in range(3):
+            f.transport = slow
+            for _ in range(tn.fleet.SLOW_POLLS - 1):
+                f.poll()
+            f.transport = ok
+            f.poll()
+            self.assertTrue(f.state['desk']['online'])
+
+    def test_a_machine_that_is_not_linked_is_offline_at_the_first_poll(self):
+        f = tn.fleet.Fleet(tn.MACH, lambda t, r, to: {'ok': True, 'sessions': []})
+        f.poll()
+        f.transport = lambda t, r, to: (_ for _ in ()).throw(OSError('desk is not linked'))
+        f.poll()
+        self.assertFalse(f.state['desk']['online'])
+
+    def test_a_machine_never_heard_from_is_not_kept_online_by_a_slow_poll(self):
+        f = tn.fleet.Fleet(tn.MACH, lambda t, r, to: (_ for _ in ()).throw(tn.fleet.MaybeDelivered('timed out')))
+        f.poll()
+        self.assertFalse(f.state['desk']['online'])
+
 
 
 class PairDownloadsTest(unittest.TestCase):

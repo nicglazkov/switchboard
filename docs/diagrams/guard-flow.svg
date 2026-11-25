@@ -1,0 +1,42 @@
+<svg viewBox="0 0 880 380" role="img" aria-labelledby="fig-guard-flow-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-guard-flow-t">You send a message to a big cold chat. The guard holds it and answers with what it would cost. You then choose Send anyway, which sends it to the same chat, or Start fresh, which carries it into a new chat with a summary.</title>
+<text class="d-title" x="40" y="52">A message to a big cold chat</text>
+<circle class="d-node" cx="80" cy="220" r="26"/>
+<g class="d-ico on-node" transform="translate(68 208)"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></g>
+<text class="mid" x="80" y="276">You</text>
+<text class="d-small mid" x="226" y="172">You send a message</text>
+<path class="d-req" d="M120 200H328"/>
+<path class="d-req" d="M319 192L328 200L319 208"/>
+<circle class="d-num-req" cx="224" cy="200" r="13"/>
+<text class="d-num" x="224" y="200" dy="4.5">1</text>
+<path class="d-ret" d="M120 240H328"/>
+<path class="d-ret" d="M129 232L120 240L129 248"/>
+<circle class="d-num-ret" cx="224" cy="240" r="13"/>
+<text class="d-num" x="224" y="240" dy="4.5">2</text>
+<text class="d-small mid" x="226" y="276">Held, with what it costs</text>
+<rect class="d-chip-sel" x="340" y="170" width="220" height="100" rx="16"/>
+<g class="d-ico sel" transform="translate(360 186)"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></g>
+<text class="t-sel" x="394" y="204">The guard</text>
+<text class="d-sub" x="360" y="234">Chat of 150k or more,</text>
+<text class="d-sub" x="360" y="253">cache gone cold</text>
+<text class="d-small end t-bad" x="582" y="138">Send anyway</text>
+<path class="d-bad" d="M560 200H600V132H628"/>
+<path class="d-bad" d="M619 124L628 132L619 140"/>
+<circle class="d-num-bad" cx="600" cy="166" r="13"/>
+<text class="d-num" x="600" y="166" dy="4.5">3</text>
+<text class="d-small end t-sel" x="582" y="312">Start fresh</text>
+<path class="d-line-sel" d="M560 240H600V308H628"/>
+<path class="d-line-sel" d="M619 300L628 308L619 316"/>
+<circle class="d-num-sel" cx="600" cy="274" r="13"/>
+<text class="d-num" x="600" y="274" dy="4.5">4</text>
+<rect class="d-panel" x="640" y="84" width="200" height="96" rx="14"/>
+<g class="d-ico" transform="translate(660 100)"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></g>
+<text x="694" y="118">The same chat</text>
+<text class="d-sub" x="660" y="146">Reads all of it again,</text>
+<text class="d-sub" x="660" y="164">then carries on</text>
+<rect class="d-panel" x="640" y="260" width="200" height="96" rx="14"/>
+<g class="d-ico" transform="translate(660 276)"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></g>
+<text x="694" y="294">A new chat</text>
+<text class="d-sub" x="660" y="322">Starts from a summary</text>
+<text class="d-sub" x="660" y="340">and your message</text>
+</svg>

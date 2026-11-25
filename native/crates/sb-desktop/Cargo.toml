@@ -24,6 +24,8 @@ alacritty_terminal.workspace = true
 smol.workspace = true
 # Local terminal tabs (a shell on this computer); the same version the hub uses.
 portable-pty = "=0.9.0"
+# The pairing link as a QR code (Settings > Devices). Only the matrix: the app draws it itself (src/qr.rs).
+qrcode = { version = "=0.14.1", default-features = false }
 # Only for the `shots` build (scripts/mac-shots.sh): saves the real rendered frame as a PNG.
 image = { version = "=0.25.10", default-features = false, features = ["png"], optional = true }
 

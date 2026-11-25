@@ -31,9 +31,10 @@ pub const VIEWER_BACKLOG: usize = 256;
 /// Output waiting for a viewer is joined into messages of up to this much.
 const MERGE_MAX: usize = 64 * 1024;
 
-/// Where a terminal runs: ssh in a PTY here, or a PTY on the machine through its node link.
+/// Where a terminal runs: a PTY on this computer (running ssh to the machine, or the chat's own program when
+/// this computer is the machine), or a PTY on the machine through its node link.
 pub enum Backend {
-    Ssh(Term),
+    Pty(Term),
     Node(NodeTerm),
 }
 
@@ -42,14 +43,14 @@ impl Backend {
     /// False if the terminal ended or would not take it for a long time.
     async fn write_all(&self, b: &[u8]) -> bool {
         match self {
-            Backend::Ssh(t) => t.write_all(b).await,
+            Backend::Pty(t) => t.write_all(b).await,
             Backend::Node(t) => t.write_all(b).await,
         }
     }
 
     fn resize(&self, cols: u16, rows: u16) {
         match self {
-            Backend::Ssh(t) => t.resize(cols, rows),
+            Backend::Pty(t) => t.resize(cols, rows),
             Backend::Node(t) => t.resize(cols, rows),
         }
     }

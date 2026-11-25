@@ -20,7 +20,8 @@ serde_json.workspace = true
 dirs.workspace = true
 log.workspace = true
 # Reads Info.plist files and the Dock's settings (both may be binary plists).
-plist = "=1.7.4"
+# 1.10 because the endpoint's network watcher (iroh, through netdev) needs it on a Mac, and one copy is enough.
+plist = "=1.10.4"
 # The app's files attached to Setup.exe (src/pack.rs).
 flate2 = "=1.1.10"
 # Only for the `shots` build: saves the rendered frame as a PNG.

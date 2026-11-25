@@ -1,14 +1,15 @@
 //! The on-disk snapshot that paints the first frame before the network answers, plus the folder trees so the
-//! folder picker is instant. Writes are atomic (temp file, then rename), so a crash never leaves half a file.
+//! folder picker is instant. Writes are atomic and forced to disk (durable.rs), so a crash never leaves half a
+//! file and a power cut never leaves zeros.
 
 use std::collections::HashMap;
 use std::fs;
-use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::api::{ApiFolder, ApiFolders, ApiSessions};
+use crate::durable;
 
 /// A snapshot older than this is not shown (the web app uses the same limit).
 pub const MAX_AGE: f64 = 24.0 * 3600.0;
@@ -34,24 +35,11 @@ pub fn settings_dir() -> Option<PathBuf> {
     Some(if cfg!(target_os = "macos") { base.join(DESKTOP_ID) } else { base.join("Switchboard") })
 }
 
-/// Writes `bytes` to `path` atomically.
+/// Writes `bytes` to `path` whole or not at all: a temp file beside it, forced to disk, then renamed over it
+/// (durable.rs). A write that did not reach the disk is an error, not a file of zeros after the next power cut.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    if let Some(dir) = path.parent() {
-        fs::create_dir_all(dir)?;
-    }
-    let tmp = path.with_extension(format!("tmp-{}", std::process::id()));
-    {
-        let mut f = fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all().ok();
-    }
-    match fs::rename(&tmp, path) {
-        Ok(()) => Ok(()),
-        Err(e) => {
-            let _ = fs::remove_file(&tmp);
-            Err(e)
-        }
-    }
+    // (forced: what goes through here is gathered again, or was never read through `load_json`)
+    durable::Store::new(path).put(bytes, true)
 }
 
 #[derive(Deserialize)]
@@ -175,11 +163,39 @@ impl FolderCache {
     }
 }
 
-/// Loads a JSON settings file, or the default.
+/// Loads a JSON settings file, or the default. A file that is there and cannot be read is not taken for an empty
+/// one: it is put aside as <name>.bad-<time>, and `save_json` does not write the default over it (durable.rs).
 pub fn load_json<T: for<'de> Deserialize<'de> + Default>(path: &Path) -> T {
-    fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    durable::Store::new(path).load_json().0.unwrap_or_default()
 }
 
 pub fn save_json<T: Serialize>(path: &Path, value: &T) -> std::io::Result<()> {
-    write_atomic(path, &serde_json::to_vec_pretty(value).unwrap_or_default())
+    durable::Store::new(path).put_json(value, false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_settings_file_of_zeros_is_not_saved_over_with_the_default() {
+        let dir = std::env::temp_dir().join(format!("sb-cache-zeros-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        let p = dir.join("some.json");
+        save_json(&p, &vec![1, 2, 3]).unwrap();
+        assert_eq!(load_json::<Vec<u32>>(&p), [1, 2, 3]);
+        fs::write(&p, [0u8; 439]).unwrap();
+        assert_eq!(load_json::<Vec<u32>>(&p), Vec::<u32>::new());
+        let e = save_json(&p, &Vec::<u32>::new()).unwrap_err();
+        assert!(durable::is_refused(&e), "{e}");
+        assert!(!p.exists());
+        let kept = durable::bads(&p);
+        assert_eq!(fs::read(dir.join(&kept[0])).unwrap(), [0u8; 439], "the file as it was found");
+        // a cache is simply written again
+        write_atomic(&dir.join("sessions.json"), b"{}").unwrap();
+        fs::write(dir.join("sessions.json"), [0u8; 439]).unwrap();
+        assert!(load_sessions(&dir, 0.0).is_none());
+        write_atomic(&dir.join("sessions.json"), b"{}").unwrap();
+        let _ = fs::remove_dir_all(&dir);
+    }
 }

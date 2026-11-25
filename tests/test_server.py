@@ -312,6 +312,23 @@ class HttpTest(unittest.TestCase):
         finally:
             st['features'] = had
 
+    def test_a_chat_as_messages_needs_an_agent_that_reads_them(self):
+        sid = '11111111-2222-3333-4444-555555555555'
+        self.assertEqual(self.req(f'/api/transcript/desk/{sid}')[0], 409)
+        st = self.app.fleet.state['desk']
+        had = st.get('features')
+        st['features'] = ['transcript']
+        try:
+            echo = lambda q: json.loads(self.req(f'/api/transcript/desk/{sid}' + q)[1])['echo']
+            self.assertEqual(echo(''), {'verb': 'transcript', 'sid': sid})
+            self.assertEqual(echo('?before=4096'), {'verb': 'transcript', 'sid': sid, 'before': 4096})
+            self.assertEqual(echo('?after=0'), {'verb': 'transcript', 'sid': sid, 'after': 0})
+            for bad in ('?before=-1', '?after=abc', '?before=1e9', '?after=' + '9' * 16):
+                self.assertEqual(self.req(f'/api/transcript/desk/{sid}' + bad)[0], 400, bad)
+            self.assertEqual(self.req('/api/transcript/desk/not-a-chat')[0], 404)
+        finally:
+            st['features'] = had
+
     def test_places_and_the_trust_question_before_new(self):
         st = self.app.fleet.state['desk']
         had = st.get('features')
@@ -674,3 +691,56 @@ class OddBodiesTest(unittest.TestCase):
             app._push_guard({'machine': 'desk', 'session_id': 'S1', 'title': 7, 'ctx': ctx, 'idle': idle})
         self.assertEqual(len(sent), 4)
         self.assertTrue(all(body.startswith('7 has 0k of context') for _, body, *_ in sent), sent)
+
+
+class KeysOnlyHttpTest(unittest.TestCase):
+    """server.json's "keys": "only" (server/keys.py): the server answers this computer and nobody else."""
+
+    def serve(self, peer, **kw):
+        d = Path(mkdtemp())
+        (d / 'cfg').mkdir()
+        (d / 'cfg' / 'server.json').write_text(json.dumps(dict({'bind': ['0.0.0.0'], 'hosts': ['studio'], 'origins': ['http://10.0.0.5:8130'],
+                                                                'peers': ['any']}, **kw)))
+        cfg = server.ServerConfig(d / 'cfg', d / 'state')
+        app = server.App(fleet.Fleet(MACH, FakeTransport()), state_dir=d / 'state',
+                         web_dir=Path(__file__).resolve().parents[1] / 'server' / 'web', cfg_dir=d / 'cfg', server_cfg=cfg)
+
+        class From(server.make_handler(app)):
+            def setup(self):
+                super().setup()
+                self.client_address = (peer, 50000)
+        httpd = server.Server((cfg.bind[0] if cfg.bind != ['0.0.0.0'] else '127.0.0.1', 0), From)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        self.addCleanup(httpd.server_close)
+        self.addCleanup(httpd.shutdown)
+        self.cfg, self.app, self.port = cfg, app, httpd.server_address[1]
+
+    def get(self, path):
+        r = urllib.request.Request(f'http://127.0.0.1:{self.port}{path}', headers={'Host': 'localhost'})
+        try:
+            with urllib.request.urlopen(r, timeout=5) as resp:
+                return resp.status, json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            return e.code, json.loads(e.read())
+
+    def test_it_binds_this_computer_alone_and_lists_no_addresses(self):
+        self.serve('127.0.0.1', keys='only')
+        self.assertEqual(self.cfg.bind, ['127.0.0.1'])
+        st, sm = self.get('/api/summary')
+        self.assertEqual(st, 200)
+        self.assertNotIn('addresses', sm)
+        self.assertEqual(self.get('/api/keys/readiness')[1]['keys'], 'only')
+
+    def test_an_address_on_the_network_is_refused_even_when_peers_says_any(self):
+        import contextlib, io
+        for peer in ('10.0.0.7', '100.64.0.5', '203.0.113.9'):
+            self.serve(peer, keys='only')
+            with contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(self.get('/api/summary'), (403, {'ok': False, 'error': 'forbidden address'}), peer)
+                self.assertEqual(self.get('/api/keys/readiness')[0], 403, peer)
+
+    def test_with_no_keys_entry_the_same_addresses_are_served_as_before(self):
+        for peer in ('10.0.0.7', '100.64.0.5', '203.0.113.9'):
+            self.serve(peer)
+            self.assertEqual(self.cfg.bind, ['0.0.0.0'])
+            self.assertEqual(self.get('/api/summary')[0], 200, peer)

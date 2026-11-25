@@ -7,19 +7,29 @@
 # Options:
 #   --server ADDR     the Switchboard server (an address or name; its downloads are at http://ADDR:8131)
 #   --code CODE       link with this code from Add a machine (needs the hub; no ssh into this machine)
+#   --pair CODE       join a home computer that uses keys, with the code or the link "switchboard code" printed
+#                     there (no address to type; needs --node PATH, or --server ADDR to download the node)
+#   --relay URL       with --pair: the relay to find the home computer through, when a code needs one
 #   --ssh-key "KEY"   let the server in over ssh with this public key, limited to the agent (no shell)
 #   --name ID         this machine's id (lowercase letters and digits; default: from its name)
 #   --label NAME      this machine's name in Switchboard (default: its own name)
 #   --sb PATH         use this sb.py instead of downloading one
 #   --node PATH       use this switchboard-node instead of downloading one
 #   --update          replace an agent that is already here (by default it is kept)
+#
+# Python: the agent runs with Switchboard's own Python, in ~/.local/share/switchboard/python. When that is not here
+# yet, it is downloaded from the server (http://ADDR:8131/python/, checked against the SHA256SUMS there). This
+# computer's python3 (3.9 or newer) is used only when the server has none for this kind of computer, or when that
+# one does not run here.
 set -euo pipefail
 
-SERVER="" CODE="" SSHKEY="" NAME="" LABEL="" SB_SRC="" NODE_SRC="" UPDATE=0
+SERVER="" CODE="" SSHKEY="" NAME="" LABEL="" SB_SRC="" NODE_SRC="" UPDATE=0 PAIR="" RELAY=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --server) SERVER="$2"; shift ;;
     --code) CODE="$2"; shift ;;
+    --pair) PAIR="$2"; shift ;;
+    --relay) RELAY="$2"; shift ;;
     --ssh-key) SSHKEY="$2"; shift ;;
     --name) NAME="$2"; shift ;;
     --label) LABEL="$2"; shift ;;
@@ -43,10 +53,64 @@ esac
 [ -z "$SERVER" ] || printf '%s' "$SERVER" | grep -Eq '^[A-Za-z0-9][A-Za-z0-9.:_-]*$|^\[[0-9A-Fa-f:.]+\]$' || die "--server takes an address or a name, like 10.0.0.5 or studio.local"
 [ -z "$CODE" ] || printf '%s' "$CODE" | grep -Eq '^[A-Za-z0-9-]{4,20}$' || die "--code takes the code shown in Add a machine"
 [ -z "$CODE$SSHKEY" ] || [ -n "$SERVER" ] || [ -n "$NODE_SRC" ] || die "--code needs --server (where to link)"
+# --pair: a short code (letters, digits and dashes) or a switchboard://pair/ link. Checked before anything is changed.
+[ -z "$PAIR" ] || [ -z "$CODE" ] || die "--pair and --code are two ways to join: use one."
+[ -z "$PAIR" ] || { [ "${#PAIR}" -le 2000 ] && printf '%s' "$PAIR" | grep -Eq '^[A-Za-z0-9-]{4,40}$|^switchboard://pair/[A-Za-z0-9?&=%._~:/+-]+$'; } || die "--pair takes the code or the link that \"switchboard code\" printed on the home computer"
+[ -z "$RELAY" ] || [ -n "$PAIR" ] || die "--relay goes with --pair"
+[ -z "$RELAY" ] || printf '%s' "$RELAY" | grep -Eq '^https?://[][A-Za-z0-9.:_-]+(/[A-Za-z0-9._~:/%-]*)?$' || die "--relay takes a relay's address, like https://relay.example.com"
+[ -z "$PAIR" ] || [ -n "$NODE_SRC" ] || [ -n "$SERVER" ] || die "--pair needs switchboard-node: pass --node PATH, or --server ADDR to download it from a home computer that still answers by address."
 
-PY=$(command -v python3 || true)
+fetch() {  # $1 = url, $2 = file; curl, wget, or Python when neither is here
+  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
+  elif command -v wget >/dev/null; then wget -q "$1" -O "$2"
+  elif [ -n "${PY:-}" ]; then "$PY" -c 'import sys, urllib.request; open(sys.argv[2], "wb").write(urllib.request.urlopen(sys.argv[1], timeout=60).read())' "$1" "$2"
+  else return 127
+  fi
+}
+sha() {  # $1 = file
+  if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d ' ' -f 1
+  elif command -v shasum >/dev/null; then shasum -a 256 "$1" | cut -d ' ' -f 1
+  else "$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1"; fi
+}
+DL=""
+[ -n "$SERVER" ] && DL="http://$SERVER:8131/node"
+TMP=$(mktemp -d)
+trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------- Python: Switchboard's own, else this computer's
+case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; x86_64|amd64) ARCH=x86_64 ;; *) ARCH="" ;; esac
+[ "$OSN" = mac ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ] && ARCH=arm64
+PY_OWN="$HOME/.local/share/switchboard/python"
+py_runs() { "$1" -c 'import sys, ssl, hashlib; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; }
+PY=""
+own_python() {  # downloads and unpacks the server's Python for this kind of computer; 1 when there is none to use
+  local name="python-$OSN-$ARCH.tar.gz" base="http://$SERVER:8131/python" want
+  [ -n "$SERVER" ] && [ -n "$ARCH" ] || return 1
+  fetch "$base/SHA256SUMS" "$TMP/python.sums" 2>/dev/null || return 1
+  want=$(awk -v n="$name" '$2 == n || $2 == "*"n {print $1; exit}' "$TMP/python.sums")
+  [ -n "$want" ] || return 1  # the server has none for this kind of computer
+  fetch "$base/$name" "$TMP/$name" 2>/dev/null || return 1
+  [ "$(sha "$TMP/$name")" = "$want" ] || die "Python from $base did not match its checksum; nothing was changed."
+  rm -rf "$PY_OWN.new"
+  mkdir -p "$PY_OWN.new"
+  if tar -xzf "$TMP/$name" -C "$PY_OWN.new" --strip-components 1 2>/dev/null && py_runs "$PY_OWN.new/bin/python3"; then
+    printf '%s\n' "$want" > "$PY_OWN.new/.pin"
+    rm -rf "$PY_OWN"
+    mv "$PY_OWN.new" "$PY_OWN"
+    say "Python: Switchboard's own, in $PY_OWN"
+    return 0
+  fi
+  rm -rf "$PY_OWN.new"
+  say "(Switchboard's own Python does not run on this computer, so this computer's own is used.)"
+  return 1
+}
+if [ -x "$PY_OWN/bin/python3" ] && py_runs "$PY_OWN/bin/python3"; then PY="$PY_OWN/bin/python3"
+elif own_python; then PY="$PY_OWN/bin/python3"
+else PY=$(command -v python3 || true)
+fi
 if [ -z "$PY" ]; then
-  say "Python 3 is not installed. The agent is a Python program (3.9 or newer)."
+  say "Python 3 is not installed, and the server has none to give this kind of computer."
+  say "The agent is a Python program (3.9 or newer)."
   case "$OSN" in
     mac) say "Install it with:  xcode-select --install" ;;
     linux) if command -v apt-get >/dev/null; then say "Install it with:  sudo apt-get install -y python3"
@@ -57,22 +121,12 @@ if [ -z "$PY" ]; then
 fi
 "$PY" -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' || die "Python 3.9 or newer is needed."
 
-fetch() {  # $1 = url, $2 = file; curl, wget, or Python when neither is here
-  if command -v curl >/dev/null; then curl -fsSL "$1" -o "$2"
-  elif command -v wget >/dev/null; then wget -q "$1" -O "$2"
-  else "$PY" -c 'import sys, urllib.request; open(sys.argv[2], "wb").write(urllib.request.urlopen(sys.argv[1], timeout=60).read())' "$1" "$2"
-  fi
-}
-DL=""
-[ -n "$SERVER" ] && DL="http://$SERVER:8131/node"
-TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT
 sums_ok() {  # $1 = file, $2 = its name in SHA256SUMS
   [ -n "$DL" ] || return 0
   fetch "$DL/SHA256SUMS" "$TMP/SHA256SUMS" 2>/dev/null || { say "(no SHA256SUMS on the server; not checked)"; return 0; }
   local want got
   want=$(awk -v n="$2" '$2 == n || $2 == "*"n {print $1}' "$TMP/SHA256SUMS")
-  got=$("$PY" -c 'import hashlib, sys; print(hashlib.sha256(open(sys.argv[1], "rb").read()).hexdigest())' "$1")
+  got=$(sha "$1")
   # A list with no line for this file does not vouch for it: whoever can change the file can drop its line.
   [ -n "$want" ] || { say "(the server's SHA256SUMS has no line for $2)"; return 1; }
   [ "$want" = "$got" ]
@@ -103,9 +157,12 @@ else
   say "Agent installed: Claude Code's hooks, status line and the switchboard MCP server are set up in ~/.claude."
 fi
 
-# ---------------------------------------------------------------- link with a code
+# ---------------------------------------------------------------- link with a code, or pair with a key
+# --code is the hub's code and its address; --pair is a home computer's code or link, and the node finds the home
+# computer by its key (through the relay a code needs, or the one the link names). Either way the node is then set
+# to run when you log in.
 has_systemd() { [ "$OSN" = linux ] && command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; }
-if [ -n "$CODE" ]; then
+if [ -n "$CODE$PAIR" ]; then
   NODE="$TMP/switchboard-node"
   if [ -n "$NODE_SRC" ]; then cp "$NODE_SRC" "$NODE"
   else
@@ -114,10 +171,18 @@ if [ -n "$CODE" ]; then
   fi
   chmod +x "$NODE"
   [ "$OSN" = mac ] && xattr -d com.apple.quarantine "$NODE" 2>/dev/null || true
-  args=(pair "$SERVER:8132" "$CODE")
-  [ -n "$NAME" ] && args+=(--name "$NAME")
-  [ -n "$LABEL" ] && args+=(--label "$LABEL")
-  "$NODE" "${args[@]}" || die "linking failed (see above). Codes work once, for 10 minutes: get a new one with 'switchboard setup --code' on the server."
+  if [ -n "$PAIR" ]; then
+    if [ -n "$RELAY" ]; then "$NODE" relay "$RELAY" || die "the relay could not be set (see above); nothing was paired."; fi
+    args=(pair "$PAIR")
+    # (the name shown on the home computer; its id there is made from it)
+    if [ -n "$LABEL" ]; then args+=(--name "$LABEL"); elif [ -n "$NAME" ]; then args+=(--name "$NAME"); fi
+    "$NODE" "${args[@]}" || die "pairing failed (see above). A code or a link works once, for a few minutes: get a new one with 'switchboard code' on the home computer."
+  else
+    args=(pair "$SERVER:8132" "$CODE")
+    [ -n "$NAME" ] && args+=(--name "$NAME")
+    [ -n "$LABEL" ] && args+=(--label "$LABEL")
+    "$NODE" "${args[@]}" || die "linking failed (see above). Codes work once, for 10 minutes: get a new one with 'switchboard setup --code' on the server."
+  fi
   if [ "$OSN" = mac ] || has_systemd; then
     "$NODE" install || die "the link is saved, but the node could not be set to run at login (see above)."
   else

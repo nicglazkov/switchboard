@@ -30,6 +30,11 @@ SHARE = HOME / '.local' / 'share' / 'switchboard'
 APP = SHARE / 'app'
 BIN = HOME / '.local' / 'bin'
 HERE = Path(__file__).resolve().parent
+# This computer's own hub and downloads, for the two checks below. A run beside the installed one (a test, a second
+# copy) names its own: SWITCHBOARD_HUB_URL or SWITCHBOARD_HUB_PORT as nodes.py and term.py read them, and
+# SWITCHBOARD_DOWNLOADS_PORT.
+HUB_URL = (os.environ.get('SWITCHBOARD_HUB_URL') or f"http://127.0.0.1:{os.environ.get('SWITCHBOARD_HUB_PORT') or 8132}").rstrip('/')
+DOWNLOADS_URL = f"http://127.0.0.1:{os.environ.get('SWITCHBOARD_DOWNLOADS_PORT') or 8131}"
 
 
 def version():
@@ -71,16 +76,22 @@ def mode():
     return 'plain'
 
 
-def why_not(m=None):
-    """Why this server can't restart or update itself from the app, or None when it can."""
+def stuck(m=None):
+    """What keeps this server from restarting itself, as one word: "windows", "checkout", or "command" (the
+    switchboard command is not where the installer puts it). None when it can."""
     m = m or mode()
-    if m == 'windows':
-        return 'On Windows, run the server installer again to update it.'
-    if m == 'checkout':
-        return 'This server runs from a copy of the code, so update it there (git pull) and start it again.'
-    if not (BIN / 'switchboard').is_file():
-        return "The switchboard command isn't in ~/.local/bin, so run the install line on the server once."
-    return None
+    if m in ('windows', 'checkout'):
+        return m
+    return None if (BIN / 'switchboard').is_file() else 'command'
+
+
+def why_not(m=None):
+    """Why this server can't restart or update itself from the app, or None when it can. Said in Settings > Server,
+    so the words are about updating; keys.by_hand has the ones for a change of mode."""
+    return {'windows': 'On Windows, run the server installer again to update it.',
+            'checkout': 'This server runs from a copy of the code, so update it there (git pull) and start it again.',
+            'command': "The switchboard command isn't in ~/.local/bin, so run the install line on the server once.",
+            }.get(stuck(m))
 
 
 def _probe(url, timeout=1.5):
@@ -95,7 +106,7 @@ def _probe(url, timeout=1.5):
 def hub():
     """{installed, running, version, open, linked} from the hub's /healthz on this machine."""
     installed = (BIN / 'switchboard-hub').is_file() or mode() == 'checkout'
-    raw = _probe('http://127.0.0.1:8132/healthz')
+    raw = _probe(HUB_URL + '/healthz')
     try:
         h = json.loads(raw) if raw else {}
     except ValueError:
@@ -104,8 +115,13 @@ def hub():
             'open': h.get('open') or 0, 'linked': h.get('linked') or 0}
 
 
-def downloads():
-    return {'running': _probe('http://127.0.0.1:8131/node/SHA256SUMS') is not None}
+def downloads(keys=None):
+    """{running, served}: whether the downloads answer on this computer. With keys only (`keys` is server.json's
+    mode) they are not served on purpose (downloads.py), which is said instead of looking like a part that is down."""
+    if keys == 'only':
+        return {'running': False, 'served': False,
+                'note': 'Not served with keys only. A new computer pairs with a code or a link.'}
+    return {'running': _probe(DOWNLOADS_URL + '/node/SHA256SUMS') is not None, 'served': True}
 
 
 def disk(path):
@@ -134,7 +150,7 @@ def update_state(state, now=None):
     return s
 
 
-def info(state, latest=None, now=None):
+def info(state, latest=None, now=None, keys=None):
     """GET /api/server."""
     v, commit = version()
     m = mode()
@@ -142,7 +158,7 @@ def info(state, latest=None, now=None):
     out = {
         'ok': True, 'version': v, 'commit': commit, 'mode': m, 'started': STARTED,
         'host': socket.gethostname(), 'os': _os_name(), 'python': platform.python_version(),
-        'hub': hub(), 'downloads': downloads(), 'disk': disk(state),
+        'hub': hub(), 'downloads': downloads(keys), 'disk': disk(state),
         'can_manage': why_not(m) is None, 'why_not': why_not(m), 'update': up,
         'install_line': f'curl -fsSL https://github.com/{releases_mod.repo() or releases_mod.REPO}'
                         f'/releases/latest/download/get-server.sh | bash',

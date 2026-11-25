@@ -47,7 +47,7 @@ class OddTranscriptTest(RpcBase):
         sb.generate_handoff(str(p), SID_B, runner=lambda a, b: 'ok')
         waiting = [{'sessionId': SID_B, 'kind': 'background', 'status': 'waiting', 'state': 'blocked', 'id': 'abcd1234'}]
         self.assertEqual(self.sids(agents=waiting), [SID_B, SID_A])
-        for req in ({'verb': 'browse'}, {'verb': 'report', 'sid': SID_B}, {'verb': 'summary', 'sid': SID_B},
+        for req in ({'verb': 'browse'}, {'verb': 'report', 'sid': SID_B}, {'verb': 'summary', 'sid': SID_B}, {'verb': 'transcript', 'sid': SID_B},
                     {'verb': 'thread_cost', 'sids': [SID_B]}, {'verb': 'ask', 'sid': SID_B}):
             r = sb.rpc(req, NOW, agents=[])
             self.assertNotEqual(r.get('error'), 'Something went wrong. Check sb.log on that machine.', req)

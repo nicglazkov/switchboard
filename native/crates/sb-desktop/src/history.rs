@@ -21,6 +21,9 @@ impl Hist {
 impl BoardView {
     /// Shows History in the first tab (Cmd+B, the "+" menu, the footer).
     pub fn view_history(&mut self, cx: &mut Context<Self>) {
+        if self.app.update(cx, |s, cx| s.needs_home(cx)) {
+            return;
+        }
         self.main = Main::History;
         self.tab = 0;
         self.add_open = false;

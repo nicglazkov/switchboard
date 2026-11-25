@@ -1,0 +1,43 @@
+<svg viewBox="0 0 880 470" role="img" aria-labelledby="fig-with-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-with-t">The same three computers, each linked to one board. The board lists every chat by what it needs, with the waiting chat first.</title>
+<text class="d-title" x="40" y="52">With Switchboard</text>
+<rect class="d-panel" x="40" y="84" width="240" height="196" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text x="94" y="120">Desk Mac</text>
+<rect class="d-chip" x="60" y="142" width="200" height="36" rx="18"/>
+<text class="d-small" x="76" y="165">Fix login bug</text>
+<rect class="d-chip" x="60" y="188" width="200" height="36" rx="18"/>
+<text class="d-small" x="76" y="211">Write tests</text>
+<rect class="d-panel" x="320" y="84" width="240" height="196" rx="14"/>
+<g class="d-ico" transform="translate(340 102)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="374" y="120">Laptop</text>
+<rect class="d-chip" x="340" y="142" width="200" height="36" rx="18"/>
+<text class="d-small" x="356" y="165">Draft README</text>
+<rect class="d-panel" x="600" y="84" width="240" height="196" rx="14"/>
+<g class="d-ico" transform="translate(620 102)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="654" y="120">Closet PC</text>
+<rect class="d-chip" x="620" y="142" width="200" height="36" rx="18"/>
+<text class="d-small" x="636" y="165">Migrate database</text>
+<rect class="d-chip" x="620" y="188" width="200" height="36" rx="18"/>
+<text class="d-small" x="636" y="211">Nightly build</text>
+<path class="d-line-sel" d="M160 280V320"/>
+<path class="d-line-sel" d="M440 280V320"/>
+<path class="d-line-sel" d="M720 280V320"/>
+<rect class="d-chip-sel" x="40" y="320" width="800" height="126" rx="16"/>
+<g class="d-ico sel" transform="translate(60 336)"><rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16M15 4v16"/></g>
+<text class="t-sel" x="94" y="354">Your board</text>
+<text class="d-sub end" x="820" y="354">Open it on any computer</text>
+<text class="d-sub" x="60" y="386">Needs you</text>
+<rect class="d-node-sel" x="56" y="396" width="146" height="34" rx="17"/>
+<text class="d-small mid on-sel" x="129" y="418">Migrate database</text>
+<text class="d-sub" x="216" y="386">Working</text>
+<rect class="d-panel" x="212" y="396" width="146" height="34" rx="17"/>
+<text class="d-small mid" x="285" y="418">Fix login bug</text>
+<rect class="d-panel" x="368" y="396" width="146" height="34" rx="17"/>
+<text class="d-small mid" x="441" y="418">Draft README</text>
+<rect class="d-panel" x="524" y="396" width="146" height="34" rx="17"/>
+<text class="d-small mid" x="597" y="418">Nightly build</text>
+<text class="d-sub" x="684" y="386">Quiet</text>
+<rect class="d-panel" x="680" y="396" width="146" height="34" rx="17"/>
+<text class="d-small mid" x="753" y="418">Write tests</text>
+</svg>

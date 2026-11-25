@@ -1,6 +1,7 @@
 """Linked machines on the server side (nodes.py): RPCs through the hub, the fleet following the hub's paired list,
 and POST /api/pair. A small fake hub stands in for sb-hub's /internal routes."""
 import json, sys, threading, unittest
+from unittest import mock
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tempfile import mkdtemp
@@ -224,6 +225,23 @@ class NodesTest(unittest.TestCase):
         self.assertIn('switchboard-node-linux', r['install']['linux'])
         self.assertIn('iwr -UseBasicParsing http://100.64.0.5:8131/node/switchboard-node.exe', win)
         self.assertIn('if (-not (Test-Path $s))', win)
+        # this server's own downloads, with its install script beside them: the line runs that script, which
+        # also brings Switchboard's own Python to a computer that has none
+        kit = Path(mkdtemp()) / 'downloads'
+        (kit / 'node').mkdir(parents=True)
+        for f in nodes.KIT_FILES:
+            (kit / 'node' / f).write_text('x')
+        (app.cfg_dir / 'downloads.json').unlink()
+        r = nodes.pair('100.64.0.5:8130', hub=self.hub.url, cfg_dir=app.cfg_dir, kit_node=kit / 'node')
+        self.assertIn('n=$(mktemp)', r['install']['mac'], 'no install script there: the node is fetched by itself')
+        for f in ('install-agent.sh', 'install-agent.ps1'):
+            (kit / f).write_text('x')
+        r = nodes.pair('100.64.0.5:8130', hub=self.hub.url, cfg_dir=app.cfg_dir, kit_node=kit / 'node')
+        line = f'curl -fsSL http://100.64.0.5:8131/install-agent.sh | bash -s -- --server 100.64.0.5 --code {r["code"]}'
+        self.assertEqual((r['install']['mac'], r['install']['linux']), (line, line))
+        self.assertEqual(r['install']['windows'], '& ([scriptblock]::Create((iwr -UseBasicParsing http://100.64.0.5:8131/install-agent.ps1)'
+                                                  f'.Content)) -Server 100.64.0.5 -Code {r["code"]}')
+        self.assertEqual(r['pair'], f'switchboard-node pair 100.64.0.5:8132 {r["code"]}')
         nodes.HUB = 'http://127.0.0.1:9'
         with self.assertRaises(server.HttpError) as e:
             app.post('/api/pair', {}, host='10.0.0.5:8130')
@@ -255,6 +273,160 @@ class AgentNameTest(unittest.TestCase):
         self.assertEqual(sb.machine_name(), default)
         (cfg / 'node.json').write_text('{nope')
         self.assertEqual(sb.machine_name(), default)
+
+
+class ControlProxyTest(unittest.TestCase):
+    """GET and POST /api/keys/devices and POST /api/pair_device: a thin proxy to the node's control API on this computer
+    (plan section 3.5). The node has no control API yet, so a stand-in answers with the plan's shapes."""
+
+    def setUp(self):
+        from tests.test_keys import FakeControl
+        self.control = FakeControl()
+        self.addCleanup(self.control.close)
+        old = nodes.CONTROL
+        nodes.CONTROL = self.control.url
+        self.addCleanup(setattr, nodes, 'CONTROL', old)
+        self.app = server.App(fleet.Fleet(MACH, lambda *a: {'ok': True, 'sessions': []}), state_dir=Path(mkdtemp()),
+                              web_dir=Path(__file__).resolve().parents[1] / 'server' / 'web')
+
+    def test_the_paired_devices_with_the_fields_an_app_needs_and_no_other(self):
+        r = self.app.get('/api/keys/devices')
+        self.assertTrue(r['ok'])
+        self.assertEqual([d['machine'] for d in r['devices']], ['lab', 'tower'])
+        self.assertEqual(sorted(r['devices'][1]), ['id', 'kind', 'last_seen', 'machine', 'name', 'paired', 'path', 'via'])
+        method, path, body, headers = self.control.seen[-1]
+        self.assertEqual((method, path, body), ('GET', '/devices', None))
+        self.assertNotIn('origin', headers)
+        self.assertTrue(headers['host'].startswith('127.0.0.1:'))
+
+    def test_a_code_and_a_link_for_one_more_device(self):
+        r = self.app.post('/api/pair_device', {'anything': 'is ignored'})
+        self.assertEqual(r, {'ok': True, 'code': 'ABCD-EFGH', 'link': 'switchboard://pair/1?h=x&s=y', 'expires': 1234})
+        method, path, body, headers = self.control.seen[-1]
+        self.assertEqual((method, path, body), ('POST', '/pair/new', {}))
+        self.assertIn('application/json', headers['content-type'])
+        self.assertNotIn('origin', headers)
+
+    def test_remove_a_device(self):
+        gone = self.control.devices[1]['id']
+        self.assertEqual(self.app.post('/api/keys/devices', {'remove': gone}), {'ok': True})
+        self.assertEqual(self.control.seen[-1][:3], ('POST', '/devices/remove', {'id': gone}))
+        self.assertEqual(len(self.app.get('/api/keys/devices')['devices']), 1)
+        with self.assertRaises(server.HttpError) as e:
+            self.app.post('/api/keys/devices', {'remove': gone})
+        self.assertEqual(e.exception.code, 502)
+        self.assertIn('No paired device has that id.', str(e.exception), "the node's own words")
+        asked = len(self.control.seen)
+        for bad in (None, '', 5, 'x', '../status', 'a b c d e f g h', ['id-tower-0001'], 'x' * 200):
+            with self.assertRaises(server.HttpError) as e:
+                self.app.post('/api/keys/devices', {'remove': bad})
+            self.assertEqual(e.exception.code, 400, bad)
+        self.assertEqual(len(self.control.seen), asked, 'nothing was sent on')
+
+    def test_removing_a_computers_device_removes_the_computer_from_the_list(self):
+        f, hub = self.app.fleet, []
+        f.add_machine({'name': 'lab', 'label': 'Lab', 'target': 'node:lab', 'os': 'linux'}, by_user=False)
+        f.add_machine({'name': 'studio', 'label': 'Studio', 'target': 'node:studio', 'os': 'mac'}, by_user=False)
+        f.add_machine({'name': 'tower', 'label': 'Tower', 'target': 'me@y', 'os': 'windows'})
+        self.control.devices.append(dict(self.control.devices[0], id='id-studio-0001', machine='studio'))
+        self.control.devices.append(dict(self.control.devices[0], id='id-phone-00001', kind='phone', machine='lab'))
+        before = [n for n in f.order if n not in ('lab', 'studio')]
+        with mock.patch.object(nodes, 'hub_call', lambda method, path, body=None, **kw: hub.append((method, path)) or {'ok': True}):
+            # a phone paired under a computer's name is only a phone
+            self.assertEqual(self.app.post('/api/keys/devices', {'remove': 'id-phone-00001'}), {'ok': True})
+            self.assertIn('lab', f.order)
+            # this home computer's own entry stays
+            self.assertEqual(self.app.post('/api/keys/devices', {'remove': 'id-studio-0001'}), {'ok': True})
+            self.assertIn('studio', f.order)
+            # a computer reached over ssh keeps its row
+            self.assertEqual(self.app.post('/api/keys/devices', {'remove': 'id-tower-0001'}), {'ok': True})
+            self.assertIn('tower', f.order)
+            self.assertEqual(hub, [])
+            self.assertEqual(self.app.post('/api/keys/devices', {'remove': 'id-lab-0001'}), {'ok': True})
+        self.assertEqual(hub, [('POST', '/internal/unpair/lab')])
+        self.assertEqual([n for n in f.order if n != 'studio'], before, 'the computer left the list with its device')
+
+    def test_a_hub_that_does_not_answer_does_not_keep_the_row(self):
+        f = self.app.fleet
+        f.add_machine({'name': 'lab', 'label': 'Lab', 'target': 'node:lab', 'os': 'linux'}, by_user=False)
+
+        def down(*a, **kw):
+            raise OSError('the hub is not reachable')
+        with mock.patch.object(nodes, 'hub_call', down):
+            self.assertEqual(self.app.post('/api/keys/devices', {'remove': 'id-lab-0001'}), {'ok': True})
+        self.assertNotIn('lab', f.order)
+
+    def test_a_device_the_node_refuses_to_remove_keeps_its_computer(self):
+        f = self.app.fleet
+        f.add_machine({'name': 'lab', 'label': 'Lab', 'target': 'node:lab', 'os': 'linux'}, by_user=False)
+        real = nodes.control_call
+
+        def refuse(method, path, *a, **kw):
+            if path == '/devices/remove':
+                raise OSError('That device could not be removed.')
+            return real(method, path, *a, **kw)
+        with mock.patch.object(nodes, 'control_call', refuse), self.assertRaises(server.HttpError):
+            self.app.post('/api/keys/devices', {'remove': 'id-lab-0001'})
+        self.assertIn('lab', f.order)
+
+    def test_no_node_there_is_said_plainly(self):
+        nodes.CONTROL = 'http://127.0.0.1:9'
+        for call in (lambda: self.app.get('/api/keys/devices'), lambda: self.app.post('/api/pair_device', {}),
+                     lambda: self.app.post('/api/keys/devices', {'remove': 'id-tower-0001'})):
+            with self.assertRaises(server.HttpError) as e:
+                call()
+            self.assertEqual(e.exception.code, 502)
+            self.assertIn('The node on this computer', str(e.exception))
+
+    def test_an_answer_that_is_not_what_was_asked_for_is_not_passed_on(self):
+        for fail in ((200, ['devices']), (200, {'ok': True, 'devices': 'many'}), (200, {'ok': True}), (500, {'error': 'x' * 900})):
+            self.control.fail = fail
+            for call in (lambda: self.app.get('/api/keys/devices'), lambda: self.app.post('/api/pair_device', {})):
+                with self.assertRaises(server.HttpError) as e:
+                    call()
+                self.assertEqual(e.exception.code, 502, fail)
+                self.assertLess(len(str(e.exception)), 300)
+
+    def test_who_can_answer_while_this_home_computer_is_away(self):
+        """Keys phase 4a: the node says which version each computer runs and whether it took the list of devices,
+        and when it last signed that list. Both are passed on, and nothing else is."""
+        import keys
+        from tests.test_keys import NOW, dev
+        self.control.devices = [dev('lab', ver='0.8.23', answers_away=True), dev('tower', ver='0.8.22', answers_away=False),
+                                dev('mini'), dev('odd', answers_away='yes', ver=7)]
+        self.control.roster = {'epoch': 1, 'seq': 4, 'at': NOW - 3600, 'expires': NOW + 6 * 86400, 'secret': 'x'}
+        r = self.app.get('/api/keys/devices')
+        self.assertEqual([(d['machine'], d.get('ver'), d.get('answers_away')) for d in r['devices']],
+                         [('lab', '0.8.23', True), ('tower', '0.8.22', False), ('mini', None, None), ('odd', None, None)])
+        self.assertEqual(r['roster'], {'epoch': 1, 'seq': 4, 'at': NOW - 3600, 'expires': NOW + 6 * 86400})
+        machines = [{'name': n, 'label': n.capitalize()} for n in ('studio', 'lab', 'tower', 'mini', 'laptop')]
+        rep = keys.readiness('both', machines, r['devices'], {'since': NOW - 30 * 86400, 'seen': {}}, NOW, home='studio')
+        self.assertEqual([(m['name'], m['ver'], m['away']) for m in rep['machines']],
+                         [('studio', None, None), ('lab', '0.8.23', True), ('tower', '0.8.22', False),
+                          ('mini', None, None), ('laptop', None, None)])
+        self.assertEqual([keys._row(m, NOW) for m in rep['machines']], [
+            '  Studio  this home computer',
+            '  Lab  paired, last connected with its key 1 minute ago (directly); can answer for its own chats while '
+            'this home computer is away',
+            '  Tower  paired, last connected with its key 1 minute ago (directly); needs an update before it can answer '
+            'while this home computer is away',
+            '  Mini  paired, last connected with its key 1 minute ago (directly)',
+            '  Laptop  not paired'])
+        # an older node says nothing of the kind, and nothing is made up
+        self.control.roster = None
+        self.control.devices = [dev('lab')]
+        r = self.app.get('/api/keys/devices')
+        self.assertEqual((r['roster'], sorted(r['devices'][0])),
+                         (None, ['id', 'kind', 'last_seen', 'machine', 'name', 'paired', 'path', 'via']))
+        for odd in ('soon', {'at': 'x', 'expires': 1}, {'at': True, 'expires': 2, 'epoch': 1, 'seq': 1}):
+            self.control.roster = odd
+            self.assertIsNone(self.app.get('/api/keys/devices')['roster'], odd)
+
+    def test_the_control_api_is_only_ever_this_computer(self):
+        for elsewhere in ('http://10.0.0.5:8137', 'https://127.0.0.1:8137', 'http://example.com', 'http://localhost.example.com:8137'):
+            with self.assertRaises(OSError) as e:
+                nodes.control_call('GET', '/devices', control=elsewhere)
+            self.assertIn('not on this computer', str(e.exception), elsewhere)
 
 
 if __name__ == '__main__':

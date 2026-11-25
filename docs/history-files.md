@@ -1,69 +1,50 @@
 ---
-description: Search every Claude Code chat on every computer, and browse each computer's folders and files from the Switchboard app.
+description: Two ways to find old work in Switchboard: History searches every past chat on every computer, and Files browses each computer's folders.
 ---
 
 # History and files
 
+<p class="sb-meta">Last validated: Nov 22, 2026</p>
+
+History and Files are the two places you go to find work that is no longer on the board. History lists every
+chat on every computer. Files shows the folders and files on each computer.
+
+Both open from the footer of the board, and both read what is on your computers at that moment. Nothing is copied
+to another service.
+
+<div class="grid cards" markdown>
+
+-   [History](features/history.md)
+
+    Every past chat on every computer, with search, filters and a way back into each one.
+
+-   [Files](features/files.md)
+
+    Each computer's folders, a preview of its text files, and a new chat in the folder you're looking at.
+
+-   [Places and folders](concepts/places-and-folders.md)
+
+    Which folders Switchboard may open on a computer, and which it never shows.
+
+</div>
+
 ## History
 
-++cmd+b++ opens **History**: every chat on every computer, newest first, by day.
+History answers "where did I do that?". Search by a chat's name, its folder or the words of your messages, then
+resume the chat, start a fresh one from its summary or open its terminal.
 
-<figure markdown>
-![History: every chat from every computer, with the selected one's details on the right](screenshots/history-light.png){ .shot }
-![History: every chat from every computer, with the selected one's details on the right](screenshots/history-dark.png){ .shot }
-</figure>
-
-- **Search** names, folders and prompts. Every word you type has to match.
-- **Filter** by computer, by folder, and by state: Running, Quiet, Stopped, Archived or Replaced.
-- **One row per thread** folds a chat that was continued in newer ones (by Start fresh or Continue) into its
-  newest part.
-
-Select a chat to see where it ran, its state, model and size, its first and latest messages, Claude's last answer,
-its summary when one was written, and the earlier chats in its thread. From there:
-
-| Button | What it does |
-|---|---|
-| **Resume** | Go back to it (or **Open terminal** if it's running) |
-| **Start fresh** | A new chat from a summary of this one |
-| **Open terminal** | Resume it in a terminal |
-| **Open in Claude** | Its page on claude.ai, when it has one |
-| **Compact into one chat** | One summary of every chat in the thread, and a new chat from it. The old chats stay |
-
-Nothing in History is ever deleted.
+For more information, refer to [History](features/history.md).
 
 ## Files
 
-**Files** (in the command palette, or on a computer's row) browses the folders on any of your computers.
+Files answers "what is in that folder?". Pick a computer and a place, read a text file without opening a
+terminal, and start a chat in the folder you're in.
 
-<figure markdown>
-![The Files window: places on the left, a folder's files in the middle, and the chats in that folder on the right](screenshots/files-light.png){ .shot }
-![The Files window: places on the left, a folder's files in the middle, and the chats in that folder on the right](screenshots/files-dark.png){ .shot }
-</figure>
-
-- **Places** on the left, per computer: its Claude folder, then (when the computer allows anywhere in its home
-  folder) Home, Desktop, Documents, Downloads, common code folders like Developer, Projects and Code, iCloud Drive
-  on a Mac, and the places added with [`sb.py places add`](commands.md#sbpy-the-helper).
-- **A folder's files** in the middle, with a preview of a text file (its first 64 KB) and quick look
-  (++space++).
-- **The chats in that folder** on the right, with **Open terminal** or **Resume**, **New chat here**, and **Paste the
-  path** to put a file's path into a chat (in quotes when it has a space). Six chats are listed, and a line
-  under them says how many more there are.
-
-Each folder says whether Claude can work there, or will ask first.
+For more information, refer to [Files](features/files.md).
 
 ### What Files never shows or opens
 
-- **Hidden files and folders:** anything whose name starts with a dot (`.ssh`, `.config`, `.env`, `.claude`...).
-- **Private folders:** `~/Library` (except iCloud Drive), `AppData`, `Application Data`, `Local Settings`.
-- **Links:** symbolic links are never followed.
-- **Keys and secrets** are listed but never opened: names like `.env*`, `id_rsa` and `id_ed25519`, files ending
-  in `.key`, `.pem`, `.p8`, `.p12`, `.pfx`, `.jks`, `.keystore`, `.kdbx`, `.ovpn`, `.asc` or `.gpg`, any name
-  with `secret`, `credential`, `password` or `token` in it, and any file that starts like a private key, whatever
-  its name.
+Hidden files, private folders such as `~/Library` and `AppData`, and anything behind a link are never listed.
+Files that look like keys or secrets are listed but never opened.
 
-Folders outside the home folder are reachable only through a place added on that computer itself; the server and
-the app can never add one.
-
-!!! note "macOS: No permission"
-    macOS asks before an app reads Desktop, Documents or Downloads. A place that says **No permission** needs that
-    switch turned on, on that Mac, for the program running the helper. Files shows how.
+For more information, refer to [Places and folders](concepts/places-and-folders.md).

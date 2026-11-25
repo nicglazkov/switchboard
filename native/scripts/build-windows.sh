@@ -33,14 +33,15 @@ for v in SB_WIN_SIGN_CERT SB_WIN_SIGN_PASSWORD SB_WIN_SIGN_TIMESTAMP SB_WIN_SIGN
   if [ -n "${!v:-}" ]; then SIGN="$SIGN \$env:$v='${!v}';"; fi
 done
 # ---- end of signing ----
-ssh -q $H "\$env:SB_UPDATE_PUBKEY='$SB_UPDATE_PUBKEY'; \$env:SB_UPDATE_FEED='$SB_UPDATE_FEED';$SIGN powershell -NoProfile -ExecutionPolicy Bypass -File $D-build.ps1 -Root $D"
+ssh -q $H "\$env:SB_UPDATE_PUBKEY='$SB_UPDATE_PUBKEY'; \$env:SB_UPDATE_FEED='$SB_UPDATE_FEED'; \$env:SB_RELAY_DEFAULT='$SB_RELAY_DEFAULT';$SIGN powershell -NoProfile -ExecutionPolicy Bypass -File $D-build.ps1 -Root $D"
 mkdir -p dist
 rm -f dist/Switchboard-Setup-*.exe
 scp -q "$H:$D/dist/Switchboard-Setup-*.exe" dist/
 scp -q "$H:$D/dist/Switchboard-windows.zip" dist/Switchboard-windows.zip
 scp -q "$H:$D/dist/Switchboard-windows.zip.build" dist/Switchboard-windows.zip.build || true
 scp -q "$H:$D/dist/switchboard-node.exe" dist/switchboard-node.exe
+scp -q "$H:$D/dist/switchboard-hub.exe" dist/switchboard-hub.exe
 mkdir -p dist/symbols
 scp -rq "$H:$D/dist/symbols/*" dist/symbols/
-chmod 644 dist/Switchboard-windows.zip dist/switchboard-node.exe dist/Switchboard-Setup-*.exe
+chmod 644 dist/Switchboard-windows.zip dist/switchboard-node.exe dist/switchboard-hub.exe dist/Switchboard-Setup-*.exe
 ls -l dist/Switchboard-Setup-*.exe dist/Switchboard-windows.zip

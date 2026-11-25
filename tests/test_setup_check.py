@@ -21,14 +21,20 @@ class SetupCheckTest(unittest.TestCase):
             'web': {'type': 'http', 'url': 'https://example.com'},
             'gone': {'type': 'stdio', 'command': str(Path(self.tmp) / 'old' / 'npx')},
         }}))
-        self.sb._service_path = lambda roster=None: '/usr/bin:/bin'
-        self.sb._login_path = lambda now: f'{self.bin}:/usr/bin:/bin'
+        # The service's path is a folder of this test's own, holding only `sh`: the real /usr/bin has npx on some hosts.
+        self.svc = Path(self.tmp) / 'svc'
+        self.svc.mkdir()
+        f = self.svc / 'sh'
+        f.write_text('#!/bin/sh\n')
+        f.chmod(f.stat().st_mode | stat.S_IEXEC)
+        self.sb._service_path = lambda roster=None: str(self.svc)
+        self.sb._login_path = lambda now: f'{self.bin}:{self.svc}'
 
     def tearDown(self):
         os.environ.pop('SB_CLAUDE_JSON', None)
 
     def test_names_off_the_service_path_and_missing_full_paths(self):
-        self.assertEqual(sorted(self.sb._mcp_unreachable('/usr/bin:/bin')), ['gone', 'seq'])
+        self.assertEqual(sorted(self.sb._mcp_unreachable(str(self.svc))), ['gone', 'seq'])
 
     def test_issue_offers_the_fix_and_fix_points_at_full_paths(self):
         issues = self.sb.setup_issues([], time.time(), force=True)
@@ -40,7 +46,7 @@ class SetupCheckTest(unittest.TestCase):
         self.assertEqual(servers['seq']['command'], str(self.bin / 'npx'))
         self.assertTrue(servers['seq']['env']['PATH'].startswith(str(self.bin) + ':'))
         self.assertEqual(servers['py']['command'], 'sh')
-        self.assertEqual(self.sb._mcp_unreachable('/usr/bin:/bin'), {})
+        self.assertEqual(self.sb._mcp_unreachable(str(self.svc)), {})
 
     def test_chrome_issue_follows_the_newest_chrome_chat(self):
         old = {'kind': 'background', 'chrome_ok': True, 'started': 1, 'title': 'a'}

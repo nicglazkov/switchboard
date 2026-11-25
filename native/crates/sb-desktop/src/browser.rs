@@ -45,8 +45,8 @@ pub fn open(cx: &mut App) {
     let opts = WindowOptions {
         window_bounds: Some(WindowBounds::Windowed(bounds)),
         titlebar: Some(TitlebarOptions {
-            title: Some("History, Switchboard".into()),
-            appears_transparent: false,
+            title: Some(crate::files::window_title("History, Switchboard", crate::ui::MAC).into()),
+            appears_transparent: cfg!(target_os = "windows"),
             traffic_light_position: None,
         }),
         window_min_size: Some(size(px(760.), px(480.))),
@@ -272,10 +272,10 @@ impl BrowserView {
                             let n: usize = spec.split(',').next().and_then(|x| x.parse().ok()).unwrap_or(0);
                             if let Some(r) = s.rows.get(n).cloned() {
                                 s.pick(r.clone(), cx);
-                                if spec.contains("older") {
-                                    if let Some(o) = r.history.first().cloned() {
-                                        s.show(o, cx);
-                                    }
+                                if spec.contains("older")
+                                    && let Some(o) = r.history.first().cloned()
+                                {
+                                    s.show(o, cx);
                                 }
                                 if spec.contains("cost") {
                                     s.compact_cost(&r, cx);
@@ -405,6 +405,7 @@ impl BrowserView {
                 t,
                 id,
                 items,
+                None,
                 cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
                     this.drop.close_out();
                     cx.notify();

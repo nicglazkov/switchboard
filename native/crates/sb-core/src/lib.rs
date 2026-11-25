@@ -7,7 +7,9 @@
 //! - `links`: claude.ai session links as the Claude desktop app's own links.
 //! - `net`: HTTP with the fallback across saved addresses. `discover`: finding the server on the local network
 //!   when none is saved; `firstrun` is the empty board's search and `hostsetup` the guided setup that makes this
-//!   computer the server. `cache`: the on-disk snapshot and folder trees.
+//!   computer the server. `cache`: the on-disk snapshot and folder trees. `durable`: files that survive a power
+//!   cut, and what is done with one that cannot be read.
+//! - `keys`: paired devices, pairing codes, joining a home, and the node's control API on this computer.
 //! - `term`: terminals: the /api/term ticket, the WebSocket to the hub, and the bytes each key sends.
 //! - `Core`: a small facade over all of it with owned inputs and outputs, no generics and no callbacks, so
 //!   UniFFI can wrap it for SwiftUI and Compose later (see native/STACK.md).
@@ -20,12 +22,14 @@ pub mod brand;
 pub mod cache;
 pub mod compact;
 pub mod discover;
+pub mod durable;
 pub mod firstrun;
 pub mod flags;
 pub mod fmt;
 pub mod groups;
 pub mod hostsetup;
 pub mod jobs;
+pub mod keys;
 pub mod links;
 pub mod live;
 pub mod model;
@@ -200,6 +204,33 @@ impl Core {
     /// The user agent this app sends.
     pub fn user_agent(&self) -> String {
         self.ua.clone()
+    }
+
+    /// How devices connect to the server in use, and what is left before its network port can close. None from a
+    /// server from before keys.
+    pub fn keys_readiness(&self) -> Result<Option<keys::Readiness>, CoreError> {
+        self.client.keys_readiness()
+    }
+
+    /// The devices paired with the home computer.
+    pub fn keys_devices(&self) -> Result<Vec<keys::Device>, CoreError> {
+        self.client.keys_devices()
+    }
+
+    /// Turns one device's key off.
+    pub fn keys_remove_device(&self, id: &str) -> Result<(), CoreError> {
+        self.client.keys_remove_device(id)
+    }
+
+    /// Sets how devices connect to the server: "both" turns keys on, "only" closes the network port, "off" turns
+    /// keys off. The server's 409 comes back as the inner Err, in its own words.
+    pub fn keys_set_mode(&self, mode: &str) -> Result<Result<bool, keys::ModeRefusal>, CoreError> {
+        self.client.keys_set_mode(mode)
+    }
+
+    /// A code and a link that pair one device with the home computer.
+    pub fn pair_device(&self) -> Result<keys::PairOffer, CoreError> {
+        self.client.pair_device()
     }
 
     /// No address is saved and none was found on the local network: the app has to ask for one.

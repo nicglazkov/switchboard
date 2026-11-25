@@ -280,21 +280,42 @@ class GuardEventTest(unittest.TestCase):
         """Two addresses that never answer, a guard event and the ping after it: one allowance for all of it."""
         import threading, time
         self.sb.remember_identity({'verb': 'list', 'as': 'desk', 'servers': ['http://10.0.0.5:8130', 'http://100.64.0.5:8130']})
-        hang, tried = threading.Event(), []
+        hang, tried, before = threading.Event(), [], threading.active_count()
 
         def never(req, timeout):
-            tried.append(req.full_url)
-            hang.wait(10)
+            tried.append((json.loads(req.data)['event'], req.full_url, timeout))
+            hang.wait(30)
             raise OSError('timed out')
+
+        def let_go():  # the sends that still hang end before the stand-in goes, so none reaches a real address
+            hang.set()
+            end = time.time() + 30
+            while threading.active_count() > before and time.time() < end:
+                time.sleep(0.01)
+            patch.stop()
+        patch = mock.patch.object(self.sb, '_urlopen', never)
+        patch.start()
+        self.addCleanup(let_go)
         t0 = time.time()
-        with mock.patch.object(self.sb, '_urlopen', never):
-            self.assertFalse(self.sb.notify_server({'event': 'guard'}))
-            self.assertFalse(self.sb.notify_server({'event': 'guard_answer'}))
-            self.sb.hook_ping({'hook_event_name': 'UserPromptSubmit', 'session_id': 'S1'}, None, self.now)
+        self.assertFalse(self.sb.notify_server({'event': 'guard'}))
+        self.assertFalse(self.sb.notify_server({'event': 'guard_answer'}))
+        self.sb.hook_ping({'hook_event_name': 'UserPromptSubmit', 'session_id': 'S1'}, None, self.now)
         took = time.time() - t0
-        hang.set()
-        self.assertLess(took, 1.6)
-        self.assertEqual(len([u for u in tried if '10.0.0.5' in u]), 3, 'every send is still tried')
+        # A send is made on a thread of its own, which may not have got to it yet on a busy computer.
+        first = lambda: [(e, t) for e, u, t in list(tried) if '10.0.0.5' in u]
+        end = time.time() + 30
+        while len(first()) < 3 and time.time() < end:
+            time.sleep(0.01)
+        self.assertEqual([e for e, _ in first()], ['guard', 'guard_answer', 'ping'], 'every send is still tried, once')
+        # How long each send let itself wait is what the prompt pays, and it is the same on a slow computer: the
+        # whole allowance for the first, and after that the floor. The clock is only read to see that nothing sat
+        # out the silence itself (30 s here), since a busy computer adds to it what it likes.
+        allowed = [t for _, t in first()]
+        self.assertEqual(allowed, [self.sb.HOOK_NET, self.sb.NET_FLOOR, self.sb.NET_FLOOR])
+        self.assertLess(sum(allowed), 1.6)
+        self.assertLess(took, 10)
+        for event, url, timeout in list(tried):
+            self.assertLessEqual(timeout, dict(zip(('guard', 'guard_answer', 'ping'), allowed))[event], url)
 
     def test_an_event_reaches_the_second_address_when_the_first_is_silent(self):
         import threading

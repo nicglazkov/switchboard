@@ -1,0 +1,43 @@
+<svg viewBox="0 0 880 400" role="img" aria-labelledby="fig-pairing-flow-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-pairing-flow-t">The home computer makes a code. You carry it to the laptop. The laptop proves to the home computer that it holds the code, and the home computer proves the same back and adds the laptop to its list of paired devices.</title>
+<text class="d-title" x="40" y="52">Pairing a computer</text>
+<rect class="d-panel" x="40" y="84" width="280" height="276" rx="14"/>
+<g class="d-ico" transform="translate(60 100)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text x="94" y="118">Home computer</text>
+<rect class="d-chip" x="60" y="140" width="240" height="60" rx="14"/>
+<text class="d-sub" x="76" y="164">A code, good for 10 minutes</text>
+<text class="d-mono" x="76" y="186">K7PM-2XQ9</text>
+<rect class="d-chip-sel" x="60" y="230" width="240" height="110" rx="14"/>
+<g class="d-ico sel" transform="translate(74 242)"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></g>
+<text class="t-sel" x="106" y="260">Paired devices</text>
+<rect class="d-panel" x="72" y="288" width="104" height="34" rx="17"/>
+<text class="d-small mid" x="124" y="310">Closet PC</text>
+<rect class="d-node-sel" x="184" y="288" width="104" height="34" rx="17"/>
+<text class="d-small mid on-sel" x="236" y="310">Laptop</text>
+<rect class="d-panel" x="560" y="84" width="280" height="276" rx="14"/>
+<g class="d-ico" transform="translate(580 100)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="614" y="118">Laptop</text>
+<rect class="d-chip" x="580" y="140" width="240" height="60" rx="14"/>
+<text class="d-sub" x="596" y="164">You type the code here</text>
+<text class="d-mono" x="596" y="186">K7PM-2XQ9</text>
+<rect class="d-chip" x="580" y="230" width="240" height="110" rx="14"/>
+<g class="d-ico" transform="translate(594 242)"><circle cx="8" cy="14" r="4"/><path d="M11 11l8-8M16 6l2.5 2.5M14 8l2 2"/></g>
+<text x="626" y="260">Its device key</text>
+<text class="d-sub" x="596" y="296">Made on this computer.</text>
+<text class="d-sub" x="596" y="316">The secret half never leaves.</text>
+<text class="d-sub mid" x="440" y="136">You carry the code</text>
+<path class="d-req" d="M324 170H556"/>
+<path class="d-req" d="M547 162L556 170L547 178"/>
+<circle class="d-num-req" cx="440" cy="170" r="13"/>
+<text class="d-num" x="440" y="170" dy="4.5">1</text>
+<text class="d-sub mid" x="440" y="216">Proves it holds the code</text>
+<path class="d-req" d="M556 250H324"/>
+<path class="d-req" d="M333 242L324 250L333 258"/>
+<circle class="d-num-req" cx="440" cy="250" r="13"/>
+<text class="d-num" x="440" y="250" dy="4.5">2</text>
+<text class="d-sub mid" x="440" y="296">Proves the same, and adds it</text>
+<path class="d-ret" d="M324 330H556"/>
+<path class="d-ret" d="M547 322L556 330L547 338"/>
+<circle class="d-num-ret" cx="440" cy="330" r="13"/>
+<text class="d-num" x="440" y="330" dy="4.5">3</text>
+</svg>

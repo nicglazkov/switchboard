@@ -1,0 +1,30 @@
+<svg viewBox="0 0 880 400" role="img" aria-labelledby="fig-without-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-without-t">Three computers, each with its own Claude Code chats. You sit at the laptop and cannot see that a chat on the closet PC has been waiting for an answer.</title>
+<text class="d-title" x="40" y="52">Without Switchboard</text>
+<rect class="d-panel" x="40" y="84" width="240" height="196" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text x="94" y="120">Desk Mac</text>
+<rect class="d-chip" x="60" y="142" width="200" height="36" rx="18"/>
+<text class="d-small" x="76" y="165">Fix login bug</text>
+<rect class="d-chip" x="60" y="188" width="200" height="36" rx="18"/>
+<text class="d-small" x="76" y="211">Write tests</text>
+<rect class="d-panel" x="320" y="84" width="240" height="196" rx="14"/>
+<g class="d-ico" transform="translate(340 102)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="374" y="120">Laptop</text>
+<rect class="d-chip" x="340" y="142" width="200" height="36" rx="18"/>
+<text class="d-small" x="356" y="165">Draft README</text>
+<rect class="d-panel" x="600" y="84" width="240" height="196" rx="14"/>
+<g class="d-ico" transform="translate(620 102)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="654" y="120">Closet PC</text>
+<rect class="d-chip-bad" x="620" y="142" width="200" height="36" rx="18"/>
+<text class="d-small" x="636" y="165">Migrate database</text>
+<rect class="d-chip" x="620" y="188" width="200" height="36" rx="18"/>
+<text class="d-small" x="636" y="211">Nightly build</text>
+<path class="d-line" d="M440 280V318"/>
+<circle class="d-node" cx="440" cy="346" r="26"/>
+<g class="d-ico on-node" transform="translate(428 334)"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"/></g>
+<text x="480" y="343">You are here</text>
+<text class="d-sub" x="480" y="363">One terminal, one computer</text>
+<text class="d-small t-bad mid" x="720" y="312">Asked a question 40 minutes ago</text>
+<text class="d-sub mid" x="720" y="332">Nobody at this computer to see it</text>
+</svg>

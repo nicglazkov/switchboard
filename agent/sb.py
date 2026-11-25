@@ -34,6 +34,10 @@ def paths():
     return p
 
 
+# True while this process answers a request that must change nothing on disk (rpc_own): the writers below then leave
+# every file as it is. The log is still written.
+_READ_ONLY = False
+
 LOG_MAX = 5 * 1024 * 1024  # sb.log rolls over to sb.log.1 past this, so it never grows for ever
 
 
@@ -50,6 +54,8 @@ def log(msg):
 
 def log_once(key, msg, every=3600):
     """log(), at most once per `every` seconds for one key: for a fault met on every poll or every prompt."""
+    if _READ_ONLY:
+        return  # it could not note that it logged, so it would log on every ask
     try:
         p = paths()['state'] / 'logged.json'
         d = _jget(p)
@@ -501,6 +507,8 @@ def _to_disk(f):
 def _write_then_replace(p, raw, same_mode=False):
     """same_mode: the new file gets the permissions of the one it replaces. A temp file is made with the default
     ones, so a file the user had closed to others (600) came out readable by all (644)."""
+    if _READ_ONLY:
+        return
     tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
         with open(tmp, 'wb') as f:
@@ -677,6 +685,8 @@ class held:
 def locked_update(p, change, wait=UPDATE_LOCK_WAIT):
     """Read the JSON object in p, let change(d) return what to write (None: leave the file alone) and write it, all
     under the file's claim (see held). Returns what change returned."""
+    if _READ_ONLY:
+        return None
     with held(p, wait):
         d = _jsafe(p)  # a damaged file goes back to its last good copy, not to {}
         if _unopened(p):
@@ -1582,11 +1592,50 @@ def _task_dirs(sid, bg_id=None):
     """Where Claude Code keeps this session's background work: subagent transcripts (under the project folder the
     session was in when it started them, which can differ from the transcript's) and background command output. A
     background session keeps its command output under its job's id, not the session's."""
-    yield from (claude_dir() / 'projects').glob(f'*/{sid}/subagents')
-    ids = [sid] + ([f'{bg_id}-*'] if bg_id and re.fullmatch(r'[0-9a-f]{8}', bg_id) else [])
+    projects, temps = _task_roots()
+    for p in projects:
+        d = p / sid / 'subagents'
+        if d.is_dir():
+            yield d
+    prefix = f'{bg_id}-' if bg_id and re.fullmatch(r'[0-9a-f]{8}', bg_id) else None
+    for t, names in temps:
+        for n in names:
+            if n == sid or (prefix and n.startswith(prefix)):
+                d = t / n / 'tasks'
+                if d.is_dir():
+                    yield d
+
+
+TASK_ROOTS_KEEP = 5  # seconds
+_task_roots_at = None
+
+
+def _subdirs(path, prefix=''):
+    """The folders right under `path` whose names start with `prefix`, hidden ones left out; [] when it cannot be read."""
+    try:
+        with os.scandir(path) as it:
+            return [Path(e.path) for e in it if e.name.startswith(prefix) and not e.name.startswith('.') and e.is_dir()]
+    except OSError:
+        return []
+
+
+def _task_roots():
+    """The folders a session's background work can be under: each project folder, and each folder Claude Code keeps
+    under a temp folder with the names inside it. Listed once and kept for a few seconds, not once per session: a
+    temp folder can hold a hundred thousand entries, and a list of sixteen chats read it thirty times over, which
+    took longer than the server waits for the list."""
+    global _task_roots_at
+    now = time.monotonic()
+    if _task_roots_at and now - _task_roots_at[0] < TASK_ROOTS_KEEP:
+        return _task_roots_at[1]
+    temps = []
     for base in {Path('/private/tmp'), Path(tempfile.gettempdir())}:
-        for i in ids:
-            yield from base.glob(f'claude*/*/{i}/tasks')
+        for c in _subdirs(base, 'claude'):
+            for t in _subdirs(c):
+                temps.append((t, [d.name for d in _subdirs(t)]))
+    roots = (_subdirs(claude_dir() / 'projects'), temps)
+    _task_roots_at = (now, roots)
+    return roots
 
 
 def children_active_ts(sid, bg_id=None):
@@ -1852,6 +1901,8 @@ def _jdict(p):
 def _jput(p, obj, keep=False):
     """keep: the file as it is now stays beside it as <name>.bak, for _jsafe to go back to. OSError when _jsafe
     could not open the file: what the caller holds was made from "nothing", and is not written over it."""
+    if _READ_ONLY:
+        return
     if keep:
         if _unopened(p):
             raise OSError(f'{p.name} could not be opened, so it is not written over')
@@ -2286,7 +2337,9 @@ def _post_any(event, wait, bases, send=None, stagger=None):
             if i and stagger is not None:
                 step.wait(min(stagger, max(0, wait - (time.time() - t0))))
                 step.clear()
-            if done.is_set() or time.time() - t0 >= wait:
+            # The first address is always tried, however late this got here on a busy computer: a send that was
+            # given a tenth of a second is still a send. Only a further address waits on the time that is left.
+            if done.is_set() or (i and time.time() - t0 >= wait):
                 break
             with lock:
                 st['out'] += 1
@@ -5655,12 +5708,146 @@ def _agent_for(sid, agents):
     return next((a for a in agents if a.get('sessionId') == sid), None)
 
 
+# ---- this computer's own board (keys phase 4): what it tells the devices that reach it while the home computer is
+# away. The home computer's server decides a chat's live state with derive() (server/fleet.py). With that server away
+# this helper has to say it itself, so the rule is copied here, and tests/test_own_parity.py runs one table of cases
+# through both. Change one, change the other.
+OWN_STALE_CLOSED = 2 * 86400
+OWN_STALE_OPEN = 7 * 86400
+OWN_STALLED = 6 * 3600
+OWN_CHILD_WORK = 15 * 60
+OWN_PARKED = 24 * 3600
+OWN_PING_FOR = 5  # a hook ping stands over what Claude Code says for this long: its own list lags a prompt by a moment
+OWN_PING_WHY = ('prompt', 'stop', 'wait')
+
+
+def _own_num(x):
+    return float(x) if isinstance(x, (int, float)) and not isinstance(x, bool) and x > 0 else None
+
+
+def own_derive(s, now, skew=0.0, held=False, hook=None, updated=None):
+    """server/fleet.py derive(), copied: `activity`, `cache`, `cold_at` and `heavy` for one chat."""
+    t = lambda x: (_own_num(x) + skew) if _own_num(x) else None
+    status, state, kind, turn = s.get('status'), s.get('state'), s.get('kind'), s.get('turn_open')
+    active = t(s.get('active')) or t(s.get('mtime')) or now
+    said = max(t(s.get('active')) or 0, t(s.get('last_ts')) or 0) or t(s.get('mtime')) or 0
+    progress = max(said, t(s.get('child_ts')) or 0)
+    gone = status in ('stopped', 'done')
+    waiting = not gone and (status == 'waiting' or (state == 'blocked' and status not in (None, 'busy')))
+    working = not gone and (status == 'busy' or state == 'running' or turn is True)
+    if turn is False and kind == 'interactive':
+        working = False
+    elif turn is False and kind == 'background' and not (t(s.get('child_ts')) and now - t(s.get('child_ts')) < OWN_CHILD_WORK):
+        working = False
+    why = (hook or {}).get('why')
+    if why == 'prompt' and not gone:
+        waiting, working = False, True
+        progress = max(progress, hook.get('at') or 0)
+    elif why == 'stop':
+        waiting, working = False, False
+    elif why == 'wait' and not gone:
+        waiting = True
+    if held:
+        activity = 'held'
+    elif waiting:
+        activity = 'parked' if now - active > OWN_PARKED else 'needs'
+    elif working:
+        activity = 'stalled' if progress and now - progress > OWN_STALLED else 'working'
+    else:
+        activity = 'quiet'
+    if hook and _own_num(hook.get('cold_at')):
+        cold_at = hook['cold_at']
+    elif 'cache_expires_at' in s:
+        cold_at = t(s.get('cache_expires_at'))
+    elif _own_num(s.get('cache_left')) and _own_num(updated):
+        cold_at = updated + s['cache_left']
+    else:
+        cold_at = None
+    if cold_at:
+        cache = 'warm' if cold_at > now else 'cold'
+    elif 'cache_expires_at' not in s and s.get('cold'):
+        cache = 'cold'
+    else:
+        cache = 'unknown'
+    return {'activity': activity, 'cache': cache, 'cold_at': round(cold_at, 3) if cold_at else None,
+            'heavy': (s.get('ctx') or 0) >= GUARD_CTX}
+
+
+def own_mark_age(s, now):
+    """server/fleet.py mark_age(), copied: `stale` (it belongs under Older) and `stalled`."""
+    quiet = now - max(s.get('mtime') or 0, s.get('active') or 0)
+    stalled = s['activity'] == 'stalled' if 'activity' in s else s.get('status') == 'busy' and quiet > OWN_STALLED
+    is_open = bool(s.get('kind')) and s.get('status') not in (None, 'stopped') and not stalled
+    idle = now - (s.get('active') or s.get('mtime') or now)
+    return dict(s, stale=idle > (OWN_STALE_OPEN if is_open else OWN_STALE_CLOSED), stalled=stalled)
+
+
+def own_ping(p, now):
+    """One hook ping as the node passes it ({'why', 'status', 'ctx', 'cold_at', 'at'}, times on this computer's
+    clock), or None when it is not one, or is older than OWN_PING_FOR."""
+    if not isinstance(p, dict) or _own_num(p.get('at')) is None or not -2 <= now - p['at'] <= OWN_PING_FOR:
+        return None
+    o = {'at': float(p['at'])}
+    if p.get('why') in OWN_PING_WHY:
+        o['why'] = p['why']
+    if p.get('status') in ('idle', 'busy', 'waiting'):
+        o['status'] = p['status']
+    ctx = p.get('ctx')
+    if isinstance(ctx, int) and not isinstance(ctx, bool) and 0 < ctx < 10_000_000:
+        o['ctx'] = ctx
+    if _own_num(p.get('cold_at')):
+        o['cold_at'] = float(p['cold_at'])
+    return o
+
+
+def own_row(s, now, ping, known):
+    """A row of `list` as the apps get it from the home computer's server (server.py _apply_overlay): the ping, a
+    message held here, the live state, its age."""
+    s = dict(s)
+    o = own_ping(ping, now)
+    if o and 'ctx' in o:
+        s['ctx'] = o['ctx']
+    if o and 'status' in o and s.get('status') in ('idle', 'busy', 'waiting'):
+        s['status'] = o['status']
+    s['held'] = bool(held_get(s.get('sid'))) if isinstance(s.get('sid'), str) else False
+    hook = {'why': o.get('why'), 'at': o['at'], 'cold_at': o.get('cold_at')} if o else None
+    if hook and s.get('status') not in ('idle', 'busy', 'waiting') and known:
+        hook['why'] = None  # stopped, or closed: a late ping does not bring it back
+    s.update(own_derive(s, now, 0.0, s['held'], hook, now))
+    return own_mark_age(s, now)
+
+
+def rpc_own(req, now, get_agents):
+    """This computer's chats, each with its live state, for a device that reached this computer by itself. It reads
+    and changes nothing: no identity, budget, usage or spend is taken from the request, and no file here is written
+    (the index, the caches and the marks `list` keeps up are left as they are)."""
+    global _READ_ONLY
+    pings = req.get('pings') if isinstance(req.get('pings'), dict) else {}
+    was, _READ_ONLY = _READ_ONLY, True
+    try:
+        replaced, ags = [], get_agents()
+        known = agents_known(ags)
+        try:
+            procs = claude_procs()
+        except Exception:
+            procs = None
+        sessions = list_sessions(now, ags, replaced, procs)
+        rows = [own_row(s, now, pings.get(s.get('sid')), known) for s in sessions]
+        machine = {'name': machine_name(), 'os': os_name(), 'online': True, 'as_of': now, 'sessions': rows,
+                   'replaced': replaced, 'agents_ok': known, 'features': list(AGENT_FEATURES)}
+    finally:
+        _READ_ONLY = was
+    return {'ok': True, 'now': now, 'machine': machine}
+
+
 def rpc(req, now, agents=None):
     try:
         if not isinstance(req, dict) or not isinstance(req.get('verb'), str):
             raise ValueError('request must be a JSON object with a verb')
         verb = req['verb']
         get_agents = (lambda: norm_agents(agents)) if agents is not None else claude_agents
+        if verb == 'own':
+            return rpc_own(req, now, get_agents)
         if verb == 'list':
             t0 = time.time()
             remember_identity(req)
@@ -7912,6 +8099,318 @@ def find_any_session(sid):
     raise ValueError('session not found on this machine')
 
 
+# ---------------------------------------------------------------- a chat as its messages (the phones' chat page)
+# The phone apps draw a chat the way Claude Code's own apps do: messages, tool lines that open to their output or
+# their diff, to-dos. This reads a slice of the transcript and hands it over as plain items, so no app has to know
+# Claude Code's file format. It is read by position: `before` pages back from the end, `after` asks for what was
+# written since the last answer's `end`. Nothing here is kept or sent anywhere else, and nothing is summarized.
+CHAT_WINDOW = 512 * 1024     # bytes of transcript one answer reads
+CHAT_BUDGET = 300 * 1024     # about how big one answer's items get: a hub link takes 2 MB a request
+CHAT_TEXT = 24_000           # characters of one message
+CHAT_OUT = 6_000             # characters of one tool's output: its start and its end
+CHAT_THOUGHT = 4_000
+CHAT_PATCH_LINES, CHAT_LINE = 240, 400
+CHAT_TODOS = 60
+_REMINDER_RE = re.compile(r'<system-reminder>.*?</system-reminder>', re.S)
+_COMMAND_RE = re.compile(r'<command-name>\s*(/?[^<\s]+)\s*</command-name>(?:.*?<command-args>(.*?)</command-args>)?', re.S)
+_TOOL_WORDS = {'Bash': 'Ran', 'Read': 'Read', 'Edit': 'Edited', 'MultiEdit': 'Edited', 'NotebookEdit': 'Edited', 'Write': 'Wrote',
+               'Grep': 'Searched for', 'Glob': 'Looked for files', 'WebSearch': 'Searched the web for', 'WebFetch': 'Fetched',
+               'Agent': 'Agent', 'Task': 'Agent', 'Skill': 'Used the skill', 'ToolSearch': 'Looked for tools',
+               'BashOutput': 'Read the output of a command', 'KillShell': 'Stopped a command', 'TaskStop': 'Stopped a task'}
+
+
+def _chat_clip(s, n):
+    """At most n characters: the start and the end, with the middle left out and said so."""
+    if not isinstance(s, str):
+        return '', False
+    if len(s) <= n:
+        return s, False
+    head = n * 2 // 3
+    return s[:head] + '\n[...]\n' + s[-(n - head):], True
+
+
+def _chat_line(v, n=300):
+    return ' '.join(v.split())[:n] if isinstance(v, str) else ''
+
+
+def _chat_tool(b):
+    """One tool call as a line: the word the apps show, what it was pointed at, and what only some tools have."""
+    name = b.get('name') if isinstance(b.get('name'), str) else ''
+    inp = b.get('input') if isinstance(b.get('input'), dict) else {}
+    it = {'k': 'tool', 'id': str(b.get('id') or ''), 'name': name[:120], 'verb': _TOOL_WORDS.get(name, '')}
+    path = inp.get('file_path') or inp.get('notebook_path') or inp.get('path')
+    if isinstance(path, str) and path.strip():
+        it['path'] = path.strip()[:1024]
+    if name == 'Bash':
+        it['cmd'] = _chat_clip(inp.get('command'), 4000)[0]
+        it['arg'] = _chat_line(inp.get('command'))
+        if _chat_line(inp.get('description')):
+            it['note'] = _chat_line(inp.get('description'))
+        if inp.get('run_in_background') is True:
+            it['bg'] = True
+    elif name in ('Grep', 'Glob'):
+        it['arg'] = _chat_line(inp.get('pattern'))
+    elif name == 'WebSearch':
+        it['arg'] = _chat_line(inp.get('query'))
+    elif name == 'WebFetch':
+        it['arg'] = _chat_line(inp.get('url'), 1024)
+    elif name in ('Agent', 'Task'):
+        it['arg'] = _chat_line(inp.get('description'))
+        kind = _chat_line(inp.get('subagent_type'), 60)
+        it['verb'] = f'{kind} agent' if kind and kind not in ('general-purpose', 'claude') else 'Agent'
+        it['note'] = _chat_clip(inp.get('prompt'), 1200)[0]
+    elif name == 'Skill':
+        it['arg'] = _chat_line(inp.get('skill'), 120)
+    elif name == 'ToolSearch':
+        it['arg'] = _chat_line(inp.get('query'))
+    elif name == 'TodoWrite':
+        todos = inp.get('todos') if isinstance(inp.get('todos'), list) else []
+        it['todos'] = [{'t': _chat_line(t.get('content')), 's': t.get('status') if t.get('status') in ('pending', 'in_progress', 'completed') else 'pending'}
+                       for t in todos[:CHAT_TODOS] if isinstance(t, dict)]
+    elif name == 'TaskCreate':
+        it['todo'] = {'t': _chat_line(inp.get('subject'))}
+    elif name == 'TaskUpdate':
+        it['todo'] = {'n': str(inp.get('taskId') or '')[:40], 's': inp.get('status') if isinstance(inp.get('status'), str) else None,
+                      't': _chat_line(inp.get('subject')) or None}
+    elif name == 'AskUserQuestion':
+        qs = inp.get('questions') if isinstance(inp.get('questions'), list) else []
+        it['questions'] = [{'q': _chat_line(q.get('question'), 600),
+                            'options': [_chat_line(o.get('label') if isinstance(o, dict) else o, 200) for o in (q.get('options') if isinstance(q.get('options'), list) else [])[:8]]}
+                           for q in qs[:6] if isinstance(q, dict)]
+    elif name == 'ExitPlanMode':
+        it['plan'] = _chat_clip(inp.get('plan'), CHAT_TEXT)[0]
+    elif name.startswith('mcp__'):
+        parts = name.split('__')
+        it['verb'] = 'Used'
+        it['arg'] = (parts[1].replace('_', ' ') + ': ' + ' '.join(parts[2:]).replace('_', ' ')) if len(parts) > 2 else name
+    elif not it['verb']:
+        for k in ('command', 'pattern', 'url', 'description', 'query', 'prompt'):
+            if _chat_line(inp.get(k)):
+                it['arg'] = _chat_line(inp.get(k))
+                break
+    if not it['verb']:
+        it['verb'] = 'Used'
+        it.setdefault('arg', name)
+    return it
+
+
+def _chat_patch(hunks):
+    """An edit's changes: (kind, old line number, new line number, text) rows, the first CHAT_PATCH_LINES of them."""
+    rows, add, cut, left = [], 0, 0, 0
+    for h in hunks if isinstance(hunks, list) else []:
+        if not isinstance(h, dict) or not isinstance(h.get('lines'), list):
+            continue
+        old, new = h.get('oldStart'), h.get('newStart')
+        old, new = (old if isinstance(old, int) else 0), (new if isinstance(new, int) else 0)
+        if rows and len(rows) < CHAT_PATCH_LINES:
+            rows.append(['gap', 0, 0, ''])
+        for line in h['lines']:
+            if not isinstance(line, str):
+                continue
+            kind = 'a' if line[:1] == '+' else 'd' if line[:1] == '-' else 'c'
+            add, cut = add + (kind == 'a'), cut + (kind == 'd')
+            if len(rows) < CHAT_PATCH_LINES:
+                rows.append([kind, 0 if kind == 'a' else old, 0 if kind == 'd' else new, line[1:CHAT_LINE + 1]])
+            else:
+                left += 1
+            old, new = old + (kind != 'a'), new + (kind != 'd')
+    return rows, add, cut, left
+
+
+def _chat_result(b, d):
+    """What a tool gave back, as the apps show it under the tool's line."""
+    it = {'k': 'result', 'id': str(b.get('tool_use_id') or '')}
+    if b.get('is_error') is True:
+        it['err'] = True
+    c = b.get('content')
+    text = c if isinstance(c, str) else '\n'.join(x.get('text') for x in c if isinstance(x, dict) and isinstance(x.get('text'), str)) if isinstance(c, list) else ''
+    if isinstance(c, list) and any(isinstance(x, dict) and x.get('type') == 'image' for x in c):
+        it['image'] = True
+    r = d.get('toolUseResult')
+    r = r if isinstance(r, dict) else {}
+    if isinstance(r.get('stdout'), str) or isinstance(r.get('stderr'), str):
+        text = '\n'.join(x for x in (r.get('stdout'), r.get('stderr')) if isinstance(x, str) and x.strip()) or text
+        if r.get('interrupted') is True:
+            it['stopped'] = True
+        if isinstance(r.get('backgroundTaskId'), str):
+            it['bg'] = True
+    if isinstance(r.get('structuredPatch'), list):
+        rows, add, cut, left = _chat_patch(r['structuredPatch'])
+        if rows:
+            it.update(patch=rows, add=add, cut=cut)
+            if left:
+                it['patch_left'] = left
+        elif r.get('type') == 'create' and isinstance(r.get('content'), str):
+            it['add'] = r['content'].count('\n') + 1
+        text = '' if not it.get('err') else text
+    f = r.get('file')
+    if isinstance(f, dict) and isinstance(f.get('numLines'), int):
+        it['lines'] = f['numLines']
+        text = '' if not it.get('err') else text  # a file that was read is opened from its path, not shown again here
+    for src, dst in (('numFiles', 'files'), ('numMatches', 'matches'), ('totalToolUseCount', 'steps'), ('totalTokens', 'tokens')):
+        if isinstance(r.get(src), int):
+            it[dst] = r[src]
+    for src in ('totalDurationMs', 'durationMs'):
+        if isinstance(r.get(src), (int, float)):
+            it['ms'] = int(r[src])
+            break
+    task = r.get('task')
+    if isinstance(task, dict) and task.get('id') is not None:
+        it['todo_n'] = str(task['id'])[:40]
+    out, clipped = _chat_clip(text.strip('\n'), CHAT_OUT)
+    if out.strip():
+        it['out'] = out
+        if clipped:
+            it['clipped'] = True
+    return it
+
+
+def _chat_user(d, c):
+    """The person's own message, a paste counted apart from what they typed; or the line Claude Code wrote there."""
+    raw = _REMINDER_RE.sub('', _text_of(c)).strip()
+    if d.get('isCompactSummary') or raw.startswith('This session is being continued'):
+        return {'k': 'note', 'what': 'compacted'}
+    if raw.startswith('[Request interrupted'):
+        return {'k': 'note', 'what': 'stopped'}
+    m = _COMMAND_RE.search(raw) if raw.startswith('<') else None
+    if m:
+        return {'k': 'note', 'what': 'command', 'text': (m.group(1) + ' ' + (m.group(2) or '').strip()).strip()[:300]}
+    if not _is_real_user(d):
+        return None
+    typed, pasted, inside = [], [], False
+    if raw.startswith('<') and not PASTE_START_RE.match(raw):
+        return None  # task notifications, command output, another agent's message
+    for piece in PASTE_TAG_RE.split(raw):
+        if PASTE_TAG_RE.fullmatch(piece):
+            inside = not piece.startswith('</')
+            continue
+        if piece.strip():
+            (pasted if inside else typed).append(piece.strip())
+    images = sum(1 for x in c if isinstance(x, dict) and x.get('type') == 'image') if isinstance(c, list) else 0
+    if not typed and not pasted and not images:
+        return None
+    it = {'k': 'user', 'text': _chat_clip('\n\n'.join(typed), CHAT_TEXT)[0]}
+    if pasted:
+        body = '\n\n'.join(pasted)
+        it['pasted'] = body.count('\n') + 1
+        it['paste'] = _chat_clip(body, CHAT_OUT)[0]
+    if images:
+        it['images'] = images
+    return it
+
+
+def chat_items(lines, base=0):
+    """Transcript lines as the items a chat page draws. Each carries `o`, where its record starts in the file."""
+    items, off = [], base
+    for raw in lines:
+        at, off = off, off + len(raw) + 1
+        if not raw.strip() or b'"type"' not in raw:
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            continue
+        if not isinstance(d, dict) or d.get('isSidechain') or not isinstance(d.get('message') or {}, dict):
+            continue
+        kind, ts, uid = d.get('type'), _ts(d.get('timestamp')) if isinstance(d.get('timestamp'), str) else None, str(d.get('uuid') or at)
+        got = []
+        if kind == 'system':
+            if d.get('subtype') == 'compact_boundary':
+                got.append({'k': 'note', 'what': 'compacted'})
+            elif d.get('subtype') == 'turn_duration' and isinstance(d.get('durationMs'), (int, float)):
+                got.append({'k': 'note', 'what': 'turn', 'ms': int(d['durationMs'])})
+        elif kind == 'user':
+            c = _msg(d).get('content')
+            results = [b for b in c if isinstance(b, dict) and b.get('type') == 'tool_result'] if isinstance(c, list) else []
+            if results:
+                got += [_chat_result(b, d) for b in results]
+            elif not d.get('isMeta'):
+                it = _chat_user(d, c)
+                if it:
+                    got.append(it)
+        elif kind == 'assistant':
+            m = _msg(d)
+            c = m.get('content')
+            if d.get('isApiErrorMessage'):
+                got.append({'k': 'note', 'what': 'error', 'text': _chat_clip(_text_of(c).strip(), 600)[0]})
+                c = []
+            for b in c if isinstance(c, list) else []:
+                if not isinstance(b, dict):
+                    continue
+                if b.get('type') == 'text' and isinstance(b.get('text'), str) and b['text'].strip():
+                    got.append({'k': 'text', 'text': _chat_clip(b['text'].strip(), CHAT_TEXT)[0]})
+                elif b.get('type') == 'thinking':
+                    it = {'k': 'think', 'text': _chat_clip((b.get('thinking') or '').strip() if isinstance(b.get('thinking'), str) else '', CHAT_THOUGHT)[0]}
+                    if isinstance(d.get('thinkingDurationMs'), (int, float)):
+                        it['ms'] = int(d['thinkingDurationMs'])
+                    got.append(it)
+                elif b.get('type') == 'tool_use':
+                    got.append(_chat_tool(b))
+        for i, it in enumerate(got):
+            it.setdefault('id', f'{uid}.{i}')
+            it['o'] = at
+            if ts:
+                it['ts'] = ts
+            items.append(it)
+    return items
+
+
+def rpc_transcript(req):
+    """One slice of a chat for the apps' chat page. {sid, before?} reads back from `before` (the end when it is
+    missing); {sid, after} reads what was written since. The answer's `start` and `end` are the next `before` and
+    `after`; `more` says there is older text; `reset` that the file is not the one `after` came from."""
+    sid = _need_sid(req)
+    before, after = req.get('before'), req.get('after')
+    for v in (before, after):
+        if v is not None and not (isinstance(v, int) and not isinstance(v, bool) and v >= 0):
+            raise ValueError('bad position')
+    tp, _ = find_any_session(sid)
+    with open(tp, 'rb') as fh:
+        fh.seek(0, 2)
+        size = fh.tell()
+        reset = after is not None and (after > size or size - after > CHAT_WINDOW)
+        if after is not None and not reset:
+            lo, hi = after, size
+        else:
+            hi = size if before is None or reset else min(before, size)
+            lo = max(0, hi - CHAT_WINDOW)
+        fh.seek(lo)
+        data = fh.read(hi - lo)
+    start = lo
+    if lo > 0 and not (after is not None and not reset):
+        cut = data.find(b'\n')  # the first line of a window from the middle of the file is a piece of one
+        if cut < 0 or cut == len(data) - 1:
+            data = b''  # all of it is the middle of one line longer than a window: stepped over, a window at a time
+        else:
+            start, data = lo + cut + 1, data[cut + 1:]
+    end = hi
+    if hi == size:
+        whole = data.rfind(b'\n') + 1  # a last line still being written waits for the next answer
+        end, data = hi - (len(data) - whole), data[:whole]
+    lines = data.split(b'\n')
+    if lines and lines[-1] == b'':
+        lines.pop()
+    items = chat_items(lines, start)
+    spent, keep = 0, len(items)
+    for i in range(len(items) - 1, -1, -1):  # the newest win when a window holds more than one answer carries
+        spent += len(json.dumps(items[i], ensure_ascii=False))
+        if spent > CHAT_BUDGET and i < len(items) - 1:
+            break
+        keep = i
+    while 0 < keep < len(items) and items[keep]['o'] == items[keep - 1]['o']:
+        keep += 1  # never half a record: the next page back reads it whole
+    if items and keep == len(items):  # one record bigger than an answer: all of it, alone
+        keep = next(i for i, it in enumerate(items) if it['o'] == items[-1]['o'])
+    if keep > 0:
+        items, start = items[keep:], items[keep]['o']
+    out = {'ok': True, 'sid': sid, 'items': items, 'start': start, 'end': end, 'size': size, 'more': start > 0}
+    if reset:
+        out['reset'] = True
+    if hi == size:
+        out['working'] = _turn_open(lines)
+    return out
+
+
 # ---------------------------------------------------------------- names given in Switchboard
 # names.json {sid: name} is what the user called a chat; it wins over Claude Code's titles everywhere Switchboard
 # shows the chat, and follows it through /clear, Start fresh and copies. Claude Code's own /resume list reads the
@@ -8150,7 +8649,7 @@ def rpc_upload(req, now=None):
 
 
 # ---------------------------------------------------------------- v2 verbs (reaper, threads, caps, ask, dispatch)
-FEAT_VERBS = ('reap_orphans', 'caps', 'ask', 'report', 'browse', 'summary', 'rename', 'computer_use')
+FEAT_VERBS = ('reap_orphans', 'caps', 'ask', 'report', 'browse', 'summary', 'transcript', 'rename', 'computer_use')
 # ---------------------------------------------------------------- The Claude folder, one per machine
 # Every session starts in the machine's Claude folder or a folder under it (machine_root). Clients only ever name a
 # folder relative to it (safe_path: no '..', no absolute paths, no symlinks out); the folder itself is picked in
@@ -8550,7 +9049,7 @@ def mcp_servers():
 
 AGENT_FEATURES = ('places', 'setup', 'flags', 'ping', 'cleanup', 'browse', 'rename', 'summary', 'files', 'upload', 'busy', 'relaunch', 'tail', 'compact', 'mcp', 'root_dirs',
                   'library', 'budget_stop', 'tools_auto', 'computer_use', 'stop_if_idle',
-                  'account_usage', 'compact_at', 'spend')  # the server checks before it uses one
+                  'account_usage', 'compact_at', 'spend', 'transcript')  # the server checks before it uses one
 
 
 def rpc_feat(verb, req, now, get_agents):
@@ -8570,6 +9069,8 @@ def rpc_feat(verb, req, now, get_agents):
         return rpc_browse(req, now)
     if verb == 'summary':
         return rpc_summary(req)
+    if verb == 'transcript':  # a chat as its messages, for the phones' chat page
+        return rpc_transcript(req)
     if verb == 'rename':
         return rpc_rename(req, get_agents)
     if verb == 'computer_use':  # on or off for a chat's folder, now; a running chat gets it when it next starts
@@ -10183,9 +10684,30 @@ def _prune_tool(tool, keep):
     return sorted(kept)
 
 
+def own_python(home=None):
+    """Switchboard's own Python when an installer put one on this computer (install-server and install-agent do,
+    from the kit), else None. Claude Code's hooks, the status line and the MCP server are written with it, so they
+    work on a computer that has no Python of its own, and keep working when that one is updated or removed."""
+    home = Path(home) if home else Path.home()
+    if IS_WIN:
+        base = os.environ.get('LOCALAPPDATA')
+        p = (Path(base) if base else home / 'AppData' / 'Local') / 'Switchboard' / 'python' / 'python.exe'
+    else:
+        p = home / '.local' / 'share' / 'switchboard' / 'python' / 'bin' / 'python3'
+    try:
+        return str(p).replace('\\', '/') if p.is_file() and os.access(p, os.X_OK) else None
+    except OSError:
+        return None
+
+
+def hook_python(home=None):
+    """The interpreter Claude Code's settings name: Switchboard's own, else the one on PATH."""
+    return own_python(home) or ('python' if IS_WIN else 'python3')
+
+
 def sb_command():
     """How an MCP server config runs this agent: the way the switchboard MCP itself is registered (install)."""
-    return 'python' if IS_WIN else 'python3', str(Path(__file__).resolve()).replace('\\', '/')
+    return hook_python(), str(Path(__file__).resolve()).replace('\\', '/')
 
 
 def wrap_mcp(folder, tool, secrets):
@@ -10944,7 +11466,7 @@ def install(dry_run=False, home=None):
     cdir = home / '.claude'
     sbdir = cdir / 'switchboard'
     sb_path = str(sbdir / 'sb.py')
-    python = 'python' if os.name == 'nt' else 'python3'
+    python = hook_python(home)
     sp = cdir / 'settings.json'
     cur = cfg_read(sp)
     new = merge_settings(cur, sb_path, python)

@@ -5,6 +5,7 @@
 #
 # What it puts in place:
 #   ~/.local/share/switchboard/app/        the server (server/, agent/sb.py, install/setup.py)
+#   ~/.local/share/switchboard/python/     Switchboard's own Python, when the kit carries one for this computer
 #   ~/.local/bin/switchboard-hub           the hub: terminals and linked machines (built here, or --hub-binary)
 #   ~/.local/share/switchboard/downloads/  what Add a machine hands out (switchboard-node for each OS, sb.py)
 #   ~/.local/bin/switchboard               start, stop, status, logs, setup
@@ -17,10 +18,32 @@
 #   --no-hub            skip the hub (no terminals, no linked machines; machines are reached over ssh)
 #   --no-service        don't register services; start plain background processes
 #   --no-start          install only
+#   --standby           install the parts a home computer needs and start nothing, now or when the computer
+#                       starts: this computer can then take over as the home computer (on the home computer:
+#                       switchboard-node home move <this computer>), or be made one from a backup
+#                       (switchboard-node home restore <file>). The same as --no-start --no-service --no-link
+#                       --no-setup. Once it is the home computer, run the installer again without --standby so
+#                       that it also starts with the computer.
 #   --no-setup          don't run first-run setup at the end
+#   --no-link           don't link this computer to its own server (see below)
+#   --keys              turn keys on, and print a code and a link for the next computer (see below)
 #   --yes               don't ask anything (setup is skipped unless it was given its own answers)
 #   --uninstall         stop and remove everything this put in place (settings and history are kept)
 #   --plain             plain output, the same as when it goes to a file or another program
+#
+# Python: a kit carries Switchboard's own (python/, see fetch-python.sh), and the server, the switchboard command and
+# the helper run with it, so the computer needs none. This computer's python3 (3.9 or newer) is used only when the
+# kit has none for it, or when the kit's does not run here. With neither, the installer downloads the same pinned
+# build itself (fetch-python.sh, checked against python-pins.txt) before it gives up.
+#
+# The first computer links itself: after the server has started, when the hub is here, this computer has no link
+# yet (no ~/.config/switchboard/node.json) and the server has no computers, it takes a code from its own hub and
+# sets up the helper and switchboard-node here, so its chats show on the board with nothing to paste. When that
+# does not work the install still succeeds, and says the one line to run (switchboard link).
+#
+# With --keys this computer becomes a home computer that others join with a key: after the link, it runs
+# `switchboard keys on` and `switchboard code`, and prints the code and the link. On the next computer that is
+# `install-agent.sh --pair <code or link>`, with no address to type. Without --keys nothing about keys changes.
 #
 # On a terminal it checks the machine first, shows each step with a spinner and its time, keeps command output in
 # ~/.local/share/switchboard/logs/install.log, and ends with the addresses to use. Piped, with --plain, with
@@ -36,7 +59,8 @@ CFG="$HOME/.config/switchboard"
 DL="$SHARE/downloads/node"
 LOGF="$SHARE/logs/install.log"
 
-HUB_BIN="" NODE_DIR="" NO_HUB=0 NO_SERVICE=0 NO_START=0 NO_SETUP=0 YES=0 UNINSTALL=0 PLAIN=0
+HUB_BIN="" NODE_DIR="" NO_HUB=0 NO_SERVICE=0 NO_START=0 NO_SETUP=0 NO_LINK=0 YES=0 UNINSTALL=0 PLAIN=0 KEYS=0
+STANDBY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --hub-binary) HUB_BIN="$2"; shift ;;
@@ -44,7 +68,10 @@ while [ $# -gt 0 ]; do
     --no-hub) NO_HUB=1 ;;
     --no-service) NO_SERVICE=1 ;;
     --no-start) NO_START=1 ;;
+    --standby) STANDBY=1 NO_START=1 NO_SERVICE=1 NO_LINK=1 NO_SETUP=1 ;;
     --no-setup) NO_SETUP=1 ;;
+    --no-link) NO_LINK=1 ;;
+    --keys) KEYS=1 ;;
     --yes|-y) YES=1 ;;
     --uninstall) UNINSTALL=1 ;;
     --plain) PLAIN=1 ;;
@@ -171,7 +198,7 @@ CUR="" DIE_MSG="" STEP_N=0 STEP_TOTAL=0 T0=0 LOG_MARK=0
 # An update keeps the server and hub it replaces (app.old, switchboard-hub.old) until the new server has answered.
 # If anything after the swap fails, they are put back, and started again if this run had stopped them: a failed
 # update leaves the server that was working, not the new files with nothing running.
-SWAPPED=0 STOPPED=0 PUT_BACK=0 SAID_BACK=0
+SWAPPED=0 STOPPED=0 PUT_BACK=0 SAID_BACK=0 PY_NEW=0
 BACK_NOTE="The server that was here before was put back."
 put_back() {
   [ "$SWAPPED" = 1 ] || return 0
@@ -184,13 +211,19 @@ put_back() {
       mv "$SHARE/app.old" "$APP" && rm -rf "$SHARE/app.bad"
     fi
     [ -f "$BIN/switchboard-hub.old" ] && mv -f "$BIN/switchboard-hub.old" "$BIN/switchboard-hub"
+    # The Python the old server ran with goes back too. With none kept, the new one stays: the services name it.
+    if [ -d "$SHARE/python.old" ]; then
+      rm -rf "$SHARE/python.bad"
+      [ -d "$SHARE/python" ] && mv "$SHARE/python" "$SHARE/python.bad"
+      mv "$SHARE/python.old" "$SHARE/python" && rm -rf "$SHARE/python.bad"
+    fi
     [ "$STOPPED" = 1 ] && [ "$NO_START" = 0 ] && "$BIN/switchboard" start
   } >/dev/null 2>&1 || true
   PUT_BACK=1
 }
 keep_new() {
   SWAPPED=0
-  rm -rf "$SHARE/app.old" "$BIN/switchboard-hub.old"
+  rm -rf "$SHARE/app.old" "$BIN/switchboard-hub.old" "$SHARE/python.old"
 }
 
 die() {
@@ -224,6 +257,8 @@ run_step() {  # $1 = plain title, $2 = title on a terminal, $3 = what the spinne
 on_exit() {
   local rc=$?
   if [ "$rc" = 0 ]; then keep_new; else put_back; fi
+  [ "$PY_NEW" = 0 ] || rm -rf "$SHARE/python.new"
+  [ -z "${PY_TMP:-}" ] || rm -rf "$PY_TMP"
   if [ "$FANCY" = 0 ]; then
     # (a step that stopped by itself, not through die, which says this in its own line)
     if [ "$PUT_BACK" = 1 ] && [ "$SAID_BACK" = 0 ]; then printf 'install-server.sh: stopped before it finished. %s\n' "$BACK_NOTE" >&2; fi
@@ -338,6 +373,8 @@ uninstall() {
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
   node_part
+  # Switchboard's own Python goes too, unless the helper for Claude Code is still here and runs with it.
+  [ -f "$HOME/.claude/switchboard/sb.py" ] || rm -rf "$SHARE/python" "$SHARE/python.old"
   rm -rf "$APP" "$SHARE/app.old" "$SHARE/downloads" "$SHARE/run" "$BIN/switchboard-hub" "$BIN/switchboard-hub.old" "$BIN/switchboard"
 }
 if [ "$UNINSTALL" = 1 ]; then
@@ -363,8 +400,71 @@ fi
 [ -f "$REPO/server/server.py" ] && [ -f "$REPO/agent/sb.py" ] || die "run this from a full copy of the Switchboard repository (no server/ or agent/ next to it)."
 
 # ---------------------------------------------------------------- what this machine has
-PY=$(command -v python3 || true)
+# Switchboard's own Python first: the one the kit carries for this kind of computer, as an archive (python/
+# python-<kind>.tar.gz with its line in python/SHA256SUMS) or laid out already (python/<kind>/, what the Mac app
+# carries so its programs can be signed). It is unpacked beside the place it will have (python.new), tried, and
+# moved into place with the server (s_server). One that is here already and is the same build is kept as it is.
+case "$(uname -m)" in arm64|aarch64) ARCH=arm64 ;; x86_64|amd64) ARCH=x86_64 ;; *) ARCH="" ;; esac
+# (a shell started under Rosetta says x86_64 on an Apple silicon Mac)
+[ "$OSN" = mac ] && [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ] && ARCH=arm64
+KIND="$OSN-$ARCH"
+PY_OWN="$SHARE/python"
+PY_FROM=""   # own: Switchboard's own Python; system: this computer's
+PY_NOTE=""   # why the kit's Python is not used, when it has one
+sha() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d ' ' -f 1; else shasum -a 256 "$1" | cut -d ' ' -f 1; fi; }
+py_runs() { "$1" -c 'import sys, ssl, hashlib, http.server; sys.exit(0 if sys.version_info >= (3, 9) else 1)' >/dev/null 2>&1; }
+own_python() {  # $1 = the folder it is in (the kit's python/)
+  local arc="$1/python-$KIND.tar.gz" tree="$1/$KIND" pin="" got
+  [ -n "$ARCH" ] || return 1
+  if [ -f "$arc" ]; then
+    pin=$(awk -v n="python-$KIND.tar.gz" '$2 == n || $2 == "*"n { print $1; exit }' "$1/SHA256SUMS" 2>/dev/null || true)
+    [ -n "$pin" ] || { PY_NOTE="the kit's Python has no line in its SHA256SUMS"; return 1; }
+  elif [ -x "$tree/bin/python3" ]; then
+    pin=$(cat "$tree/.pin" 2>/dev/null || true)
+    [ -n "$pin" ] || pin="tree"
+  else
+    return 1
+  fi
+  if [ -x "$PY_OWN/bin/python3" ] && [ "$(cat "$PY_OWN/.pin" 2>/dev/null || true)" = "$pin" ] && py_runs "$PY_OWN/bin/python3"; then
+    PY="$PY_OWN/bin/python3"; return 0
+  fi
+  rm -rf "$PY_OWN.new"
+  mkdir -p "$PY_OWN.new"
+  PY_NEW=1
+  if [ -f "$arc" ]; then
+    got=$(sha "$arc")
+    [ "$got" = "$pin" ] || { rm -rf "$PY_OWN.new"; PY_NEW=0; die "the kit's Python (python-$KIND.tar.gz) does not match its SHA-256. Nothing was installed."; }
+    tar -xzf "$arc" -C "$PY_OWN.new" --strip-components 1 2>/dev/null || { rm -rf "$PY_OWN.new"; PY_NEW=0; PY_NOTE="the kit's Python did not unpack"; return 1; }
+  else
+    cp -R "$tree/." "$PY_OWN.new/"
+  fi
+  printf '%s\n' "$pin" > "$PY_OWN.new/.pin"
+  if ! py_runs "$PY_OWN.new/bin/python3"; then
+    rm -rf "$PY_OWN.new"; PY_NEW=0
+    PY_NOTE="Switchboard's own Python does not run on this computer"
+    return 1
+  fi
+  PY="$PY_OWN.new/bin/python3"
+}
+PY=""
+if own_python "$REPO/python"; then PY_FROM=own
+else
+  # None in the kit (a copy of the repository): one an earlier install put here is still the one to use.
+  if [ -z "$PY_NOTE" ] && [ -x "$PY_OWN/bin/python3" ] && py_runs "$PY_OWN/bin/python3"; then PY="$PY_OWN/bin/python3"; PY_FROM=own
+  else PY=$(command -v python3 || true); PY_FROM=system; fi
+fi
+# No Python that can run the server anywhere on this computer: download the pinned build now, rather than send the
+# person off to install one. (Not when the kit's own did not run here: the same build would not either.)
+PY_TMP=""
+if [ "$PY_FROM" = system ] && [ -z "$PY_NOTE" ] && [ -n "$ARCH" ] && [ -f "$HERE/fetch-python.sh" ] && [ -f "$HERE/python-pins.txt" ] \
+   && { [ -z "$PY" ] || ! py_runs "$PY"; }; then
+  PY_TMP=$(mktemp -d "${TMPDIR:-/tmp}/switchboard-python.XXXXXX")
+  if bash "$HERE/fetch-python.sh" "$PY_TMP" "$KIND" >/dev/null 2>&1 && own_python "$PY_TMP"; then PY_FROM=own
+  else PY_NOTE="Switchboard's own Python could not be downloaded"; fi
+  # (the archive stays until the downloads are made: the computers added to this server get it from there)
+fi
 py_missing() {
+  [ -z "$PY_NOTE" ] || say "(${PY_NOTE}, so this computer's own Python is needed.)"
   say "Python 3 is not installed. Switchboard's server is a Python program (3.9 or newer, nothing else to add)."
   case "$OSN" in
     mac) say "Install it with:  xcode-select --install   (or from https://www.python.org/downloads/)" ;;
@@ -400,7 +500,11 @@ if [ "$FANCY" = 0 ]; then
   step "Checking this machine"
   if [ -z "$PY" ]; then py_missing; exit 1; fi
   py_ok || die "Python $(py_ver) is too old. Switchboard needs 3.9 or newer."
-  say "Python $(py_ver) at $PY"
+  if [ "$PY_FROM" = own ]; then say "Python $(py_ver), Switchboard's own"
+  else
+    [ -z "$PY_NOTE" ] || say "(${PY_NOTE}, so this computer's own is used.)"
+    say "Python $(py_ver) at $PY"
+  fi
   if command -v ssh >/dev/null; then say "ssh is here (for machines added over ssh)"; else say "No ssh client: machines can still link with a code, but not be added over ssh."; fi
   say "Time zone $TZNAME"
 else
@@ -436,7 +540,12 @@ else
     exit 1
   fi
   if ! py_ok; then row bad "Python" "$(py_ver) is too old"; die "Python $(py_ver) is too old. Switchboard needs 3.9 or newer."; fi
-  row ok "Python" "$(py_ver)"
+  if [ "$PY_FROM" = own ]; then row ok "Python" "$(py_ver), Switchboard's own"
+  elif [ -n "$PY_NOTE" ]; then
+    row warn "Python" "$(py_ver), this computer's own"
+    note "${YEL}${G_WARN}${R}  ${PY_NOTE}, so this computer's"
+    note "   own Python is used instead."
+  else row ok "Python" "$(py_ver)"; fi
 
   # Ports
   busy=$("$PY" - <<'PY'
@@ -555,6 +664,16 @@ s_server() {
   # The old server stays as app.old until the new one has answered (see put_back).
   if [ -d "$APP" ]; then mv "$APP" "$SHARE/app.old"; SWAPPED=1; fi
   mv "$NEW" "$APP"
+  # Switchboard's own Python goes in with the server. The one it replaces stays as python.old until the new server
+  # has answered (see put_back).
+  if [ "$PY_NEW" = 1 ]; then
+    rm -rf "$PY_OWN.old"
+    [ -d "$PY_OWN" ] && mv "$PY_OWN" "$PY_OWN.old"
+    mv "$PY_OWN.new" "$PY_OWN"
+    PY_NEW=0
+    PY="$PY_OWN/bin/python3"
+    say "Python in $PY_OWN"
+  fi
   install -m 755 "$HERE/switchboard" "$BIN/switchboard"
   printf 'export SWITCHBOARD_TZ=%s\n' "$TZNAME" > "$SHARE/env"
   say "Server in $APP"
@@ -603,6 +722,28 @@ s_downloads() {
     b=$(build sb-node switchboard-node) && cp "$b" "$DL.new/$own"
   fi
   chmod 644 "$DL.new"/*
+  # Switchboard's own Python for the computers that link to this server (install-agent.sh downloads the one for its
+  # kind, and checks it against the SHA256SUMS beside it). A kit that carries it laid out makes the archive here.
+  rm -rf "$SHARE/downloads/python.new"
+  mkdir -p "$SHARE/downloads/python.new"
+  for f in "$REPO"/python/python-*.tar.gz ${PY_TMP:+"$PY_TMP"/python-*.tar.gz}; do [ -f "$f" ] && cp "$f" "$SHARE/downloads/python.new/"; done
+  for d in "$REPO"/python/*/; do
+    k=$(basename "$d")
+    [ -x "${d}bin/python3" ] && [ ! -f "$SHARE/downloads/python.new/python-$k.tar.gz" ] || continue
+    rm -rf "$SHARE/downloads/python.tmp"; mkdir -p "$SHARE/downloads/python.tmp"
+    cp -R "${d%/}" "$SHARE/downloads/python.tmp/python" && tar -czf "$SHARE/downloads/python.new/python-$k.tar.gz" -C "$SHARE/downloads/python.tmp" python
+    rm -rf "$SHARE/downloads/python.tmp"
+  done
+  pys=$(cd "$SHARE/downloads/python.new" && ls python-*.tar.gz 2>/dev/null | tr '\n' ' ' || true)
+  # (a kit with none leaves what an earlier install put there: it is the Python this server still runs with)
+  if [ -n "$pys" ]; then
+    rm -rf "$SHARE/downloads/python"
+    ( cd "$SHARE/downloads/python.new" && chmod 644 ./python-*.tar.gz && if command -v sha256sum >/dev/null; then sha256sum python-*.tar.gz > SHA256SUMS; else shasum -a 256 python-*.tar.gz > SHA256SUMS; fi )
+    mv "$SHARE/downloads/python.new" "$SHARE/downloads/python"
+    say "  ready: Python for $(printf '%s' "$pys" | sed 's/python-//g; s/\.tar\.gz//g; s/ $//; s/ /, /g')"
+  else
+    rm -rf "$SHARE/downloads/python.new"
+  fi
   ( cd "$DL.new" && if command -v sha256sum >/dev/null; then sha256sum -- * > SHA256SUMS; else shasum -a 256 -- * > SHA256SUMS; fi )
   rm -rf "$DL.old"; [ -d "$DL" ] && mv "$DL" "$DL.old"; mv "$DL.new" "$DL"; rm -rf "$DL.old"
   for f in install-agent.sh install-agent.ps1; do [ -f "$HERE/$f" ] && install -m 644 "$HERE/$f" "$SHARE/downloads/$f"; done
@@ -621,7 +762,7 @@ exec_of() {
   case "$1" in
     server) echo "$PY|-u|$APP/server/server.py" ;;
     hub) echo "$BIN/switchboard-hub" ;;
-    downloads) echo "$PY|-m|http.server|8131|--directory|$SHARE/downloads" ;;
+    downloads) echo "$PY|$APP/server/downloads.py|--port|8131|--directory|$SHARE/downloads" ;;
   esac
 }
 desc_of() {
@@ -720,9 +861,69 @@ s_start() {
   detail "$("$BIN/switchboard" status | sed -n 's/^  \([a-z]*\) .* running$/\1/p' | tr '\n' ' ' | sed 's/ $//; s/ /, /g') answering"
 }
 
+# ---------------------------------------------------------------- this computer links itself
+# Asked only when this computer has no link yet; `switchboard link --first` then links it only if the server has no
+# computers either (3: it has, so nothing is done). It never fails the install.
+link_maybe() { [ "$NO_LINK" = 0 ] && [ "$NO_HUB" = 0 ] && [ "$NO_START" = 0 ] && [ ! -f "${SWITCHBOARD_NODE_CONFIG:-$CFG/node.json}" ]; }
+s_link() {
+  local said rc=0
+  said=$("$BIN/switchboard" link --first 2>&1) || rc=$?
+  case "$rc" in
+    0) say "This computer is linked to its own server, so its chats show on the board."
+       detail "Linked to its own server, so its chats show on the board" ;;
+    3) say "This server has other computers already, so this one was not linked. To link it too, run: switchboard link"
+       detail "Not linked: this server has other computers already"
+       detail "To link this one too, run: switchboard link" ;;
+    *) say "This computer could not be linked to its own server:"
+       printf '%s\n' "$said" | sed 's/^/  /'
+       say "The server is installed and running. To link this computer, run: switchboard link"
+       warn "Not linked: $(printf '%s\n' "$said" | tail -n 1)"
+       warn "The server runs. To link this computer: switchboard link" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- keys (--keys)
+# Turns keys on (`switchboard keys on`: the mode in server.json, a restart, and a wait for the node here), then
+# takes a code and a link for the next computer from the node. It never fails the install: the server runs either
+# way, and what did not work is said with the line to run.
+keys_maybe() { [ "$KEYS" = 1 ] && [ "$NO_START" = 0 ]; }
+KEYS_CODE=""
+s_keys() {
+  local said rc=0
+  said=$("$BIN/switchboard" keys on 2>&1) || rc=$?
+  if [ "$rc" != 0 ]; then
+    say "Keys could not be turned on:"
+    printf '%s\n' "$said" | sed 's/^/  /'
+    say "The server is installed and running. To turn keys on, run: switchboard keys on"
+    warn "Keys are not on: $(printf '%s\n' "$said" | head -n 1)"
+    warn "To turn them on: switchboard keys on"
+    return 0
+  fi
+  say "Keys are on: other computers can join this home computer with a code or a link."
+  detail "Keys are on: computers join with a code or a link"
+  rc=0
+  KEYS_CODE=$("$BIN/switchboard" code 2>&1) || rc=$?
+  if [ "$rc" != 0 ]; then
+    say "A code for the next computer could not be made:"
+    printf '%s\n' "$KEYS_CODE" | sed 's/^/  /'
+    say "To get one, run: switchboard code"
+    warn "No code yet. To get one: switchboard code"
+    KEYS_CODE=""
+    return 0
+  fi
+  [ "$FANCY" = 1 ] || keys_next
+}
+keys_next() {  # what to do on the next computer, with the code and the link (each works once, for one computer)
+  say "For the next computer (this works once, for a few minutes; 'switchboard code' gives another):"
+  printf '%s\n' "$KEYS_CODE" | sed 's/^/  /'
+  say "On that computer, run install-agent.sh (or install-agent.ps1 on Windows) with: --pair <the code or the link>"
+}
+
 # ---------------------------------------------------------------- the steps
 if [ "$FANCY" = 1 ]; then
   STEP_TOTAL=3; [ "$NO_HUB" = 0 ] && STEP_TOTAL=4; [ "$NO_START" = 0 ] && STEP_TOTAL=$((STEP_TOTAL + 1))
+  link_maybe && STEP_TOTAL=$((STEP_TOTAL + 1))
+  keys_maybe && STEP_TOTAL=$((STEP_TOTAL + 1))
   section "Installing"
   case "$HUB_SRC" in build) hub_says="Building the hub with Rust (a few minutes the first time)" ;; *) hub_says="Putting the hub in place" ;; esac
   case "$MODE" in systemd) svc="systemd user services" ;; launchd) svc="LaunchAgents" ;; *) svc="background processes" ;; esac
@@ -736,14 +937,23 @@ run_step "Downloads for Add a machine" "Downloads for Add a machine" "Getting th
 if [ "$FANCY" = 0 ]; then
   step "Running it ($MODE)"
   s_services
+  if [ "$STANDBY" = 1 ]; then
+    say "Installed as a standby: nothing runs. This computer can take over as the home computer."
+    say "On the home computer, run: switchboard-node home move <this computer>"
+    exit 0
+  fi
   if [ "$NO_START" = 1 ]; then
     say "Installed. Start it with: switchboard start"
     exit 0
   fi
   s_start
+  if link_maybe; then step "This computer"; s_link; fi
+  if keys_maybe; then step "Keys"; s_keys; fi
 else
   run_step "Running it ($MODE)" "Set up as $svc" "Setting up $svc" s_services
   [ "$NO_START" = 1 ] || run_step "Starting" "Started" "Starting Switchboard and waiting for it to answer" s_start
+  if link_maybe; then run_step "This computer" "This computer" "Linking this computer to its own server" s_link; fi
+  if keys_maybe; then run_step "Keys" "Keys" "Turning keys on" s_keys; fi
 fi
 
 # ---------------------------------------------------------------- first-run setup
@@ -813,7 +1023,12 @@ card() {
   printf '  %s%s%s%s\n' "$D" "$BX_BL" "$(rep "$BX_H" $((inner + 2)))" "$([ "$open" = 0 ] && printf '%s' "$BX_BR")$R" >&3
 }
 
-if [ "$NO_START" = 1 ]; then
+if [ "$STANDBY" = 1 ]; then
+  cl "$B$GRN$G_OK$R  ${B}Switchboard is installed as a standby$R"
+  cl ""
+  cl "   Nothing runs. This computer can take over as the home computer."
+  cl "   On the home computer, run ${ACC}switchboard-node home move <this computer>$R"
+elif [ "$NO_START" = 1 ]; then
   cl "$B$GRN$G_OK$R  ${B}Switchboard is installed$R"
   cl ""
   cl "   Start it with ${ACC}switchboard start$R"
@@ -857,6 +1072,7 @@ case ":$PATH:" in *":$BIN:"*) ;; *)
   cl "$YEL$G_WARN$R  Add $(tilde "$BIN") to your PATH to use the switchboard command."
 esac
 card
+if [ -n "$KEYS_CODE" ]; then printf '\n' >&3; keys_next | sed 's/^/  /' >&3; fi
 
 # A QR code of the first address, to open the board on a phone. Only when qrencode is already here.
 first=$(printf '%s\n' "$ADDRS" | head -n 1 | cut -f 1)

@@ -2,14 +2,14 @@
 
 Each test damages a file the way a power cut does (zeros, or cut short) and checks that the safe choice is made:
 nothing the user turned off comes back on, nothing the user restricted opens up, and the file is not written over."""
-import contextlib, io, json, os, sys, unittest
+import contextlib, io, json, os, sys, time, unittest
 from pathlib import Path
 from tempfile import mkdtemp
 from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'server'))
-import budget, durable, features, fleet, options, selfupdate, server, serverctl, term  # noqa: E402
-from tests import test_reaper, test_safe_load  # noqa: E402
+import budget, durable, features, fleet, library, options, selfupdate, server, serverctl, term  # noqa: E402
+from tests import test_library, test_reaper, test_safe_load, test_server_jobs  # noqa: E402
 from tests.test_reaper import NOW, cold, sid  # noqa: E402
 
 ZEROS = b'\x00' * 439
@@ -533,6 +533,145 @@ class UpdateStateTest(unittest.TestCase):
         (state / 'update' / 'state.json').write_bytes(ZEROS)
         self.assertIsNone(serverctl.update_state(state))
         self.assertEqual(selfupdate.State(state / 'update').s, {})
+
+
+class LibraryStoreTest(unittest.TestCase):
+    """library.json: the tools, and which machine has which. Read as empty, every machine would drop every tool."""
+    setUp, publish, install_of = (test_library.ServerLibraryTest.setUp, test_library.ServerLibraryTest.publish,
+                                  test_library.ServerLibraryTest.install_of)
+
+    def tool(self, name, machine=None):
+        self.made = getattr(self, 'made', 0) + 1  # a folder of its own each time: one tool may be published twice
+        self.publish(test_library.make_plugin(self.tmp / f'{name}-{self.made}', name), name)
+        if machine:
+            self.app.post('/api/library/connect', {'tool': name, 'machine': machine, 'on': True})
+
+    def start(self):
+        """The library as the next start of the server reads it, and what it logged."""
+        lib, said = quiet(library.Library, self.app, server.HttpError)
+        lib.background = lambda fn: fn()
+        return lib, said
+
+    def drops(self, lib, machine):
+        self.f.calls.clear()
+        quiet(lib.reconcile, machine)
+        return self.f.verbs(machine, 'library_drop')
+
+    def test_a_damaged_library_comes_back_from_its_last_good_copy(self):
+        self.tool('alpha', 'lap')
+        p = self.state / 'library.json'
+        p.write_bytes(ZEROS)
+        lib, said = self.start()
+        self.assertFalse(lib.broken)
+        self.assertEqual((list(lib.d['tools']), lib.d['machines']['lap']), (['alpha'], ['alpha']))
+        self.assertEqual((self.state / kept(p)[0]).read_bytes(), ZEROS, 'the file as it was found is kept')
+        self.assertEqual(json.loads(p.read_text())['machines']['lap'], ['alpha'], 'and the copy is written back')
+        self.assertIn('last good copy', said)
+        self.assertEqual(self.drops(lib, 'lap'), [])
+        self.assertEqual(self.install_of('lap', 'alpha'), 1)
+
+    def test_a_tool_that_was_deleted_does_not_come_back_from_the_copy(self):
+        self.tool('alpha', 'lap')
+        self.tool('beta', 'lap')
+        quiet(self.app.post, '/api/library/delete', {'tool': 'beta'})
+        self.app.post('/api/library/connect', {'tool': 'alpha', 'machine': 'lap', 'on': False})
+        (self.state / 'library.json').write_text('{"tools": {"alpha": {"latest": 1, "vers')
+        lib, _ = self.start()
+        self.assertFalse(lib.broken)
+        self.assertEqual(list(lib.d['tools']), ['alpha'], 'its files are gone: it must not be offered again')
+        self.assertEqual(lib.d['machines'].get('lap') or [], [], 'nor a tool put back on a machine it was taken off')
+
+    def test_with_no_copy_no_machine_is_emptied(self):
+        self.tool('alpha', 'lap')
+        p = self.state / 'library.json'
+        for text in ('{"tools": {"alpha": {"latest": 1, "vers', '[]', ZEROS.decode()):
+            p.write_text(text)
+            p.with_name('library.json.bak').unlink()
+            lib, said = self.start()
+            self.assertTrue(lib.broken, text)
+            self.assertEqual(lib.d['tools'], {})
+            self.assertFalse(p.exists())
+            self.assertEqual((self.state / kept(p)[-1]).read_text(), text, 'kept for whoever repairs it')
+            self.assertIn("no machine's tools are touched", said)
+            self.assertEqual(self.drops(lib, 'lap'), [])
+            self.assertEqual(self.install_of('lap', 'alpha'), 1)
+            # over a restart too, with the file gone and the one put aside still there
+            with mock.patch.dict(durable._marks, clear=True), mock.patch.object(durable, '_looked', set()):
+                later, _ = self.start()
+                self.assertTrue(later.broken)
+                self.assertEqual(self.drops(later, 'lap'), [])
+            # a tool published now is saved: the library starts over from here
+            self.app.feat.library = lib
+            self.tool('alpha')
+            self.assertEqual(list(json.loads(p.read_text())['tools']), ['alpha'])
+            self.assertTrue(lib.broken, 'and still nothing is dropped until the server starts again')
+            self.assertEqual(told(self.app.stores(), p), [('library.json', 'broken', True)], 'said once, not twice')
+
+    def test_a_library_an_earlier_server_put_aside_still_counts(self):
+        # before durable.load it was moved to library.json.bad, and the next start found no library.json
+        (self.state / 'library.json').unlink(missing_ok=True)
+        (self.state / 'library.json.bad').write_text('{"tools": {"alpha"')
+        with mock.patch.dict(durable._marks, clear=True), mock.patch.object(durable, '_looked', set()):
+            lib, _ = self.start()
+        self.assertTrue(lib.broken)
+        self.assertEqual((self.state / 'library.json.bad').read_text(), '{"tools": {"alpha"')
+
+    def test_a_first_start_has_an_empty_library_and_that_is_fine(self):
+        self.assertFalse(self.lib.broken)
+        self.assertNotIn(str(self.state / 'library.json'), durable._marks)
+
+
+class JobsStoreTest(unittest.TestCase):
+    """jobs.json: launches the server has taken and is still watching."""
+    make, wait = test_server_jobs.ServerJobTest.make, test_server_jobs.ServerJobTest.wait
+    SID = test_server_jobs.SID
+
+    def running(self, now):
+        return {'kind': 'fresh', 'machine': 'desk', 'plan': {'req': {'verb': 'fresh', 'sid': self.SID}}, 'title': 'Lights',
+                'state': 'running', 'step': 'running', 'created': now - 30, 'watched': 0, 'inner': '0123456789ab'}
+
+    def test_a_jobs_file_of_zeros_starts_the_list_over_and_the_next_job_is_saved(self):
+        st = Path(mkdtemp())
+        app = self.make(state=st)
+        r = app.post('/api/action', {'machine': 'desk', 'verb': 'resume', 'sid': self.SID})
+        self.wait(app, r['job'])
+        # no copy is kept to go back to: one would be a step behind what the machines were really sent
+        self.assertEqual([n for n in os.listdir(st) if n.startswith('jobs.')], ['jobs.json'])
+        (st / 'jobs.json').write_bytes(ZEROS)
+        app, said = quiet(self.make, state=st)
+        self.assertEqual(app.jobs, {})
+        self.assertEqual((st / kept(st / 'jobs.json')[0]).read_bytes(), ZEROS)
+        self.assertIn('jobs.json could not be read: the file is kept beside it', said)
+        r = app.post('/api/action', {'machine': 'desk', 'verb': 'resume', 'sid': self.SID})
+        self.assertEqual(self.wait(app, r['job'])['state'], 'done')
+        self.assertIn(r['job'], json.loads((st / 'jobs.json').read_text()))
+
+    def test_a_file_that_reads_in_part_keeps_what_reads(self):
+        st, now = Path(mkdtemp()), time.time()
+        text = json.dumps({'s-aaaaaaaaaaaa': self.running(now), 's-bbbbbbbbbbbb': None})
+        (st / 'jobs.json').write_text(text)
+        app, said = quiet(self.make, state=st)
+        self.assertEqual(self.wait(app, 's-aaaaaaaaaaaa')['state'], 'done')
+        self.assertNotIn('s-bbbbbbbbbbbb', app.jobs)
+        self.assertEqual((st / kept(st / 'jobs.json')[0]).read_text(), text, 'the file as it was is kept')
+
+
+class LeftAloneTest(unittest.TestCase):
+    """Raw reads that are not stores the server reads and then writes, so durable.load is not for them."""
+
+    def test_reaper_json_is_only_read_and_a_damaged_one_turns_suggestions_off(self):
+        cfg = Path(mkdtemp()) / 'reaper.json'
+        cfg.write_bytes(ZEROS)
+        got = features.Reaper(mock.Mock(state_dir=cfg.parent), cfg).config()
+        self.assertEqual((got['enabled'], 'unreadable' in got['error']), (False, True))
+        self.assertEqual(cfg.read_bytes(), ZEROS, 'it is the user\'s file: left as it is, with nothing put beside it')
+        self.assertEqual(os.listdir(cfg.parent), ['reaper.json'])
+
+    def test_the_seed_for_the_machine_list_is_only_read(self):
+        d = Path(mkdtemp())
+        (d / 'machines.json').write_bytes(ZEROS)
+        self.assertIsNone(fleet.FleetConfig._read(d / 'machines.json'))
+        self.assertEqual(os.listdir(d), ['machines.json'])
 
 
 if __name__ == '__main__':

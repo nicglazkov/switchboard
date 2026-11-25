@@ -79,6 +79,9 @@ for d in kit ..; do [ -f "$d/server/server.py" ] && [ -f "$d/scripts/install/ins
 [ -n "$KIT_SRC" ] || { echo "mac-build: no server/ and scripts/install/ to put in the server kit (see build-mac.sh)" >&2; exit 1; }
 bash scripts/server-kit.sh "$KIT_SRC" dist/Switchboard.app/Contents/Resources/server-kit dist/switchboard-hub-mac dist/switchboard-node-mac
 
+# The kit's Python, when it has one: each of its programs and libraries is signed on its own (--deep leaves files
+# in Resources alone).
+bash scripts/sign-python.sh dist/Switchboard.app/Contents/Resources/server-kit/python -
 codesign --force --deep -s - dist/Switchboard.app 2>/dev/null
 codesign --verify --deep --strict dist/Switchboard.app
 ditto -c -k --keepParent dist/Switchboard.app dist/Switchboard-mac.zip

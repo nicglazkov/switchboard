@@ -630,6 +630,7 @@ impl BoardView {
             "fl-model",
             self.drop.is_open("fl-model"),
             self.drop.more,
+            &self.drop.scroll,
             &menu,
             w.model.as_deref().unwrap_or(""),
             None,

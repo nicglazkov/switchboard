@@ -55,7 +55,17 @@ impl Render for DetachedView {
             Some(b) => b.update(cx, |b, cx| b.detached_panel(window, cx)),
             None => div().into_any_element(),
         };
-        div().size_full().flex().flex_col().bg(t.panel).text_color(t.ink).font_family(UI).text_size(px(13.)).child(body)
+        let body = div()
+            .size_full()
+            .flex()
+            .flex_col()
+            .bg(t.panel)
+            .text_color(t.ink)
+            .font_family(UI)
+            .text_size(px(13.))
+            .child(body);
+        // Its own caption on Windows (no title bar from the system there), a frame where Linux draws none.
+        crate::frame::framed(window, &t, "Details", body)
     }
 }
 

@@ -688,6 +688,240 @@ def root_dirs(path):
             'current': '~/Desktop/Claude', 'set': True, 'suggest': '~/Desktop/Claude'}
 
 
+# Keys (devices that pair with the home computer): SB_FIXTURE_KEYS=both|ready|norelay|only|off answers the server's keys
+# routes; unset, they are 404 as on a server from before keys. SB_FIXTURE_PAIR_AFTER=<seconds>: a new device joins
+# that long after Add a device. SB_FIXTURE_PAIR_TTL=<seconds>: how long a code lasts (600).
+# SB_FIXTURE_NODE=home|alone|member|relay|localnet|refused also answers the node's control API on this port (point the app at
+# it with SWITCHBOARD_NODE_CONTROL=http://127.0.0.1:<port>); SB_FIXTURE_JOIN=ok|wrong_code|expired|unreachable|local_network|
+# no_relay|link_no_relay is what POST /pair/join says (link_no_relay: until the join carries "addrs").
+# SB_FIXTURE_SWITCH=ok|byhand|blocked|none is what POST /api/keys/mode says: it changes the mode ("restarting"), or the
+# server cannot restart itself (409 with "command"), or keys only would cut something off (409 with "blockers"); none is
+# a server from before the route (404, and no "switch" in the report). With SB_FIXTURE_KEYS=off the report says the app
+# is on the home computer ("here"), so Devices shows Turn keys on.
+KEYS_MODE = os.environ.get('SB_FIXTURE_KEYS') or ''
+SWITCH = os.environ.get('SB_FIXTURE_SWITCH') or 'ok'
+NODE_MODE = os.environ.get('SB_FIXTURE_NODE') or ''
+JOIN_SAYS = os.environ.get('SB_FIXTURE_JOIN') or 'ok'
+PAIR_AFTER = float(os.environ.get('SB_FIXTURE_PAIR_AFTER') or 0)
+PAIR_TTL = float(os.environ.get('SB_FIXTURE_PAIR_TTL') or 600)
+HOME_ID = '3f9a1c0e5b7d2a4c6e8f0a1b3c5d7e9f1a2b3c4d5e6f708192a3b4c5d6e7f809'
+KEYS = {'removed': set(), 'offer_at': None, 'joined': False, 'mode': None, 'relay': None}
+
+
+def keys_mode():
+    """The mode in force: what SB_FIXTURE_KEYS said, until POST /api/keys/mode changed it."""
+    return KEYS['mode'] or KEYS_MODE
+
+
+def keys_devices():
+    now = time.time()
+    day = 86400
+    out = [
+        {'id': 'd-laptop', 'name': 'Laptop', 'kind': 'computer', 'machine': 'laptop', 'paired': now - 3 * day,
+         'via': 'code', 'last_seen': now - 4, 'path': 'direct'},
+        {'id': 'd-tower', 'name': 'Tower', 'kind': 'computer', 'machine': 'tower', 'paired': now - 12 * day,
+         'via': 'upgrade', 'last_seen': now - 9, 'path': 'relay'},
+        {'id': 'd-cabin', 'name': 'Cabin Mac mini', 'kind': 'computer', 'machine': None, 'paired': now - 40 * day,
+         'via': 'link', 'last_seen': now - 2 * 3600, 'path': None},
+        {'id': 'd-phone', 'name': 'iPhone', 'kind': 'phone', 'machine': None, 'paired': now - 600, 'via': 'code',
+         'last_seen': None, 'path': None},
+    ]
+    if KEYS['offer_at'] and PAIR_AFTER and now - KEYS['offer_at'] >= PAIR_AFTER:
+        out.append({'id': 'd-new', 'name': 'Workshop PC', 'kind': 'computer', 'machine': 'workshop',
+                    'paired': KEYS['offer_at'] + PAIR_AFTER, 'via': 'code', 'last_seen': now - 1, 'path': 'direct'})
+    return {'ok': True, 'devices': [d for d in out if d['id'] not in KEYS['removed']]}
+
+
+def keys_readiness():
+    now = time.time()
+    was = keys_mode()
+    mode = 'both' if was in ('ready', 'norelay') else was
+    blockers = []
+    if mode == 'off':
+        blockers = [{'kind': 'mode', 'text': 'Keys are off.'}]
+    if was == 'both' and KEYS['mode'] is None:
+        blockers = [
+            {'kind': 'machine', 'text': 'Tower has not paired yet.', 'machine': 'tower', 'label': 'Tower', 'paired': False},
+            {'kind': 'direct', 'text': 'An iPhone connected by address.', 'client': 'iPhone', 'last': now - 1800},
+            {'kind': 'direct', 'text': 'A browser connected by address.', 'client': 'web', 'last': now - 2 * 86400},
+        ]
+    machines = [
+        {'name': 'studio', 'label': 'Studio', 'home': True, 'paired': True, 'seen': now - 2, 'path': None},
+        {'name': 'laptop', 'label': 'Laptop', 'home': False, 'paired': True, 'seen': now - 4, 'path': 'direct'},
+        {'name': 'tower', 'label': 'Tower', 'home': False, 'paired': KEYS_MODE != 'both', 'seen': now - 9,
+         'path': None if KEYS_MODE == 'both' else 'relay'},
+    ]
+    out = {'ok': True, 'keys': mode, 'ready': mode == 'both' and not blockers, 'days': 7, 'blockers': blockers,
+           'machines': machines, 'here': True}
+    if SWITCH != 'none':
+        out['switch'] = True
+    return out
+
+
+def keys_set_mode(body):
+    """POST /api/keys/mode (server.py keys_mode): the answer and its status."""
+    want = body.get('keys')
+    if want not in ('off', 'both', 'only'):
+        return {'ok': False, 'error': 'keys must be off, both or only'}, 400
+    word = 'on' if want == 'both' else want
+    if SWITCH == 'byhand':
+        aim = {'both': 'To turn keys on', 'off': 'To turn keys off', 'only': 'To switch to keys only'}[want]
+        command = f'python3 /srv/switchboard/server/keys.py {word}'  # server/keys.py by_hand, for a copy of the code
+        return {'ok': False, 'command': command,
+                'error': 'Nothing was changed. This server was started by hand from a copy of the code, so it cannot '
+                         f'restart itself. {aim}, run this on the home computer, then start the server again: {command}'}, 409
+    if SWITCH == 'blocked' and want == 'only':
+        blockers = [{'kind': 'machine', 'text': 'Tower has not paired yet.', 'machine': 'tower', 'label': 'Tower'},
+                    {'kind': 'direct', 'text': 'An iPhone connected by address 30 minutes ago.', 'client': 'iPhone'}]
+        return {'ok': False, 'blockers': blockers,
+                'error': 'Not yet: switching to keys only now would cut something off. ' + blockers[0]['text']}, 409
+    same = keys_readiness()['keys'] == want
+    KEYS['mode'] = want
+    return {'ok': True, 'keys': want, 'restarting': not same}, 200
+
+
+def keys_pair():
+    KEYS['offer_at'] = time.time()
+    if KEYS_MODE == 'norelay':
+        return {'ok': True, 'code': None, 'expires': int(KEYS['offer_at'] + PAIR_TTL),
+                'link': f'switchboard://pair/1?h={HOME_ID}&s=5d0c1b2a39485766&n=Studio'}
+    return {'ok': True, 'code': 'K7PM-2XQ9', 'expires': int(KEYS['offer_at'] + PAIR_TTL),
+            'link': f'switchboard://pair/1?h={HOME_ID}&r=https%3A%2F%2Frelay.example&s=5d0c1b2a39485766&n=Studio'}
+
+
+def node_status():
+    """The node's GET /status (sb-link control.rs `Status`). None: keys are not running here (503)."""
+    relay = {'url': 'https://relay.example', 'source': 'home', 'connected': True, 'same_id': False}
+    base = {'ok': True, 'version': '0.8.23', 'id': 'd-laptop', 'name': 'Laptop', 'machine': 'laptop', 'relay': relay,
+            'forwarders': [], 'devices': 0, 'updates': [], 'problems': []}
+    if NODE_MODE == 'home':
+        if keys_mode() == 'off':
+            return None
+        mine = {'url': 'https://relay.example', 'source': 'built in', 'connected': True, 'same_id': False}
+        if KEYS_MODE == 'norelay':
+            mine = {'url': None, 'source': 'none', 'connected': False, 'same_id': False}
+        if KEYS['relay'] is not None:
+            mine = {'url': KEYS['relay'] or None, 'source': 'settings' if KEYS['relay'] else 'none',
+                    'connected': bool(KEYS['relay']), 'same_id': False}
+        return dict(base, role='home', id=HOME_ID, name='Studio', machine='studio', devices=4, relay=mine,
+                    addrs=['192.0.2.20:41641', '[fe80::1c2d:3e4f]:41641'])
+    if not (NODE_MODE in ('member', 'relay', 'localnet', 'refused') or KEYS['joined']):
+        return None
+    home = {'id': HOME_ID, 'name': 'Studio', 'connected': True, 'path': 'relay' if NODE_MODE == 'relay' else 'direct',
+            'rtt_ms': 18, 'refused': False}
+    # The port that leads to the home computer's server is this fixture's own, so a join made here ends on this
+    # fixture's board and never on whatever answers on 8130.
+    out = dict(base, role='member', home=home,
+               forwarders=[{'target': 'api', 'addr': f"127.0.0.1:{KEYS.get('port') or 8139}", 'ok': True},
+                           {'target': 'hub', 'addr': '127.0.0.1:8132', 'ok': True}])
+    if NODE_MODE == 'localnet':
+        words = ('This Mac is not letting switchboard-node use the local network. Turn it on in System Settings, '
+                 'Privacy & Security, Local Network.')
+        home.update(connected=False, path=None, rtt_ms=None, error='No route to host (os error 65)')
+        out['relay'] = dict(relay, connected=False, error='No route to host (os error 65)')
+        out['problems'] = [words]
+    if NODE_MODE == 'refused':
+        home.update(connected=False, path=None, rtt_ms=None, refused=True)
+        out['problems'] = ['The home computer no longer lists this computer. Pair it again: switchboard-node pair <code or link>']
+    return out
+
+
+# The home computer is away (keys phase 4a): SB_FIXTURE_AWAY=two|one|three|none|asking|update|stale makes this
+# fixture answer the way the helper's stand-in does in its place (sb-link standin.rs): /api/sessions and
+# /api/summary carry "away", the home computer's row is empty with a reason, and everything that needs the home
+# computer is 503 with kind home_away. With SB_FIXTURE_NODE=member the node's GET /roster and POST
+# /devices/block and /devices/unblock answer too (SB_FIXTURE_ROSTER=none|stale: no list, or one past its 7 days).
+AWAY = os.environ.get('SB_FIXTURE_AWAY') or ''
+ROSTER_MODE = os.environ.get('SB_FIXTURE_ROSTER') or ''
+HOME_AWAY = 'The home computer is away. This needs the home computer.'
+LACKS = ['new_chat', 'move', 'history', 'files', 'usage', 'library', 'settings', 'notifications']
+LACKS_LINE = ('Not available while the home computer is away: new chats, moving a chat, history, files, usage, '
+              'library, settings, notifications.')
+BLOCKED = {'d-cabin'}
+
+
+def listed(names):
+    return names[0] if len(names) == 1 else ', '.join(names[:-1]) + ' and ' + names[-1]
+
+
+def away_board(d):
+    """The board as the stand-in gives it: the computers that answered, the others empty with why."""
+    now = d['now']
+    mini = {'name': 'mini', 'label': 'Mini', 'os': 'macos', 'online': True, 'sessions': [], 'replaced': []}
+    rows = {m['name']: m for m in d['machines']}
+    rows['mini'] = mini
+    showing = {'two': ['laptop', 'tower'], 'one': ['laptop'], 'three': ['laptop', 'tower', 'mini'],
+               'update': ['laptop']}.get(AWAY, [])
+    order = ['studio', 'laptop', 'tower'] + (['mini'] if AWAY in ('three', 'update') else [])
+    why = {'studio': 'is_home'}
+    for name in order[1:]:
+        if name not in showing:
+            why[name] = 'needs_update' if (AWAY == 'update' and name == 'mini') else (
+                'refused' if AWAY == 'stale' else 'unreachable')
+    says = {'is_home': 'The home computer is away.', 'unreachable': '{} cannot be reached just now.',
+            'needs_update': '{} needs an update before it can answer while the home computer is away.',
+            'refused': '{} does not answer this device.'}
+    machines, missing = [], []
+    for name in order:
+        m = rows[name]
+        if name in why:
+            missing.append({'machine': name, 'label': m['label'], 'why': why[name]})
+            machines.append({'name': name, 'label': m['label'], 'os': m.get('os'), 'online': False, 'sessions': [],
+                             'replaced': [], 'error': says[why[name]].format(m['label']), 'why': why[name]})
+        else:
+            machines.append(dict(m, online=True))
+    labels = [rows[n]['label'] for n in showing]
+    line = 'Home is away. Showing chats from %s.' % listed(labels) if labels else (
+        'Home is away. No other computer can be reached.')
+    if AWAY == 'asking':
+        line = 'Home is away. Asking the other computers for their chats.'
+    if AWAY == 'stale':
+        line = ('What this device knows about your computers is 7 days old, so they no longer answer it. Start the '
+                'home computer, or replace it.')
+    at = now - (8 * 86400 if AWAY == 'stale' else 2 * 3600)
+    away = {'since': now - 300, 'home': {'id': HOME_ID, 'name': 'Studio', 'last_seen': now - 320},
+            'showing': [{'machine': n, 'label': rows[n]['label']} for n in showing], 'missing': missing,
+            'roster': {'at': at, 'expires': at + 7 * 86400}, 'line': line,
+            'notes': [says['needs_update'].format(m['label']) for m in missing if m['why'] == 'needs_update'],
+            'lacks': LACKS, 'lacks_line': LACKS_LINE}
+    chats = [s for m in machines for s in m['sessions'] if not s.get('stale')]
+    summary = {'five_hour': None, 'seven_day': None, 'five_hour_reset': None, 'seven_day_reset': None,
+               'limits_updated': None, 'week_projected': None, 'sessions': len(chats),
+               'running': sum(1 for s in chats if s.get('activity') == 'working'), 'cold': 0,
+               'online': len(showing), 'machines': len(machines), 'away': away}
+    return {'machines': machines, 'now': now, 'summary': summary, 'v': int(now) // 5, 'prefs': {}, 'away': away}
+
+
+def node_roster():
+    """The node's GET /roster on a computer that joined a home."""
+    if ROSTER_MODE == 'none':
+        return {'ok': True, 'roster': None, 'devices': []}
+    now = time.time()
+    at = now - (8 * 86400 if ROSTER_MODE == 'stale' else 2 * 3600)
+    row = lambda i, name, kind, machine, **k: dict(  # noqa: E731
+        {'id': i, 'name': name, 'kind': kind, 'machine': machine, 'ver': '0.8.23', 'home': False, 'this': False,
+         'blocked': i in BLOCKED}, **k)
+    devices = [row(HOME_ID, 'Studio', 'computer', 'studio', home=True),
+               row('d-laptop', 'Laptop', 'computer', 'laptop', this=True),
+               row('d-tower', 'Tower', 'computer', 'tower'),
+               row('d-cabin', 'Cabin Mac mini', 'computer', None),
+               row('d-phone', 'iPhone', 'phone', None, ver=None)]
+    return {'ok': True, 'roster': {'epoch': 1, 'seq': 7, 'at': at, 'expires': at + 7 * 86400}, 'devices': devices}
+
+
+JOIN_ERRORS = {  # the node's own sentences (sb-link pairing.rs, sb-node keys.rs), all 409
+    'wrong_code': 'That code is wrong. Check it and try again.',
+    'expired': 'That code has expired or was already used. Make a new one.',
+    'unreachable': 'Cannot reach the home computer (timed out).',
+    'local_network': 'This Mac is not letting switchboard-node use the local network. Turn it on in System Settings, '
+                     'Privacy & Security, Local Network.',
+    'no_relay': 'A short code finds the home computer through a relay, and none is set here. Use the link instead, or '
+                'set the relay first: switchboard-node relay <url>',
+    'link_no_relay': "That link names no relay, so this computer needs the home computer's address: add --addr <ip:port> "
+                     "(the home computer's status shows it).",
+}
+
+
 class H(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass
@@ -697,12 +931,22 @@ class H(BaseHTTPRequestHandler):
         self.send_response(code)
         self.send_header('Content-Type', 'application/json')
         self.send_header('Content-Length', str(len(raw)))
+        # Each answer ends its connection (HTTP/1.0), and says so: a client that kept it for the next request would
+        # lose a POST sent right after a GET.
+        self.send_header('Connection', 'close')
         self.end_headers()
         self.wfile.write(raw)
 
     def do_GET(self):
         u = urlsplit(self.path)
         p, q = u.path, parse_qs(u.query)
+        if AWAY and p in ('/api/sessions', '/api/summary'):
+            d = away_board(shifted())
+            return self._json(d if p == '/api/sessions' else d['summary'])
+        if NODE_MODE and p == '/roster':
+            return self._json(node_roster())
+        if AWAY and p.startswith('/api/'):
+            return self._json({'ok': False, 'kind': 'home_away', 'error': HOME_AWAY}, 503)
         if p == '/api/sessions':
             d = shifted()
             GROUPS.decorate(d)
@@ -781,6 +1025,17 @@ class H(BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if KEYS_MODE and p == '/api/keys/readiness':
+            return self._json(keys_readiness())
+        if KEYS_MODE and p == '/api/keys/devices':
+            return self._json(keys_devices())
+        if NODE_MODE and p == '/status':
+            st = node_status()
+            if st is None:
+                return self._json({'ok': False, 'error': 'Keys are off on this computer.', 'kind': 'off'}, 503)
+            return self._json(st)
+        if NODE_MODE and p == '/devices':
+            return self._json(keys_devices())
         return self._json({'ok': False, 'error': 'not in the fixture'}, 404)
 
     def do_POST(self):
@@ -854,6 +1109,43 @@ class H(BaseHTTPRequestHandler):
                                    'folder_shown': shown_of(f), 'declined': trust_of(f) == 'no'}, 409)
         if p == '/api/flags':
             return self._json(flags_plan(body))
+        if p.startswith('/api/keys/') or p == '/api/pair_device':
+            if not KEYS_MODE:
+                return self._json({'ok': False, 'error': 'not in the fixture'}, 404)
+            if p == '/api/pair_device':
+                return self._json(keys_pair())
+            if p == '/api/keys/devices' and body.get('remove'):
+                time.sleep(0.4)
+                KEYS['removed'].add(body['remove'])
+                return self._json({'ok': True})
+            if p == '/api/keys/mode' and SWITCH != 'none':
+                time.sleep(0.4)
+                out, code = keys_set_mode(body)
+                return self._json(out, code)
+            return self._json({'ok': False, 'error': 'not in the fixture'}, 404)
+        if NODE_MODE and p in ('/devices/block', '/devices/unblock'):
+            (BLOCKED.add if p.endswith('/block') else BLOCKED.discard)(body.get('id'))
+            return self._json({'ok': True})
+        if AWAY and p.startswith('/api/') and p not in ('/api/refresh', '/api/event'):
+            return self._json({'ok': False, 'kind': 'home_away', 'error': HOME_AWAY}, 503)
+        if AWAY and p == '/api/refresh':
+            return self._json(away_board(shifted()))
+        if p in ('/pair/join', '/pair/new', '/devices/remove', '/relay'):
+            if not NODE_MODE:
+                return self._json({'ok': False, 'error': 'not in the fixture'}, 404)
+            if p == '/pair/new':
+                return self._json(keys_pair())
+            if p == '/devices/remove':
+                KEYS['removed'].add(body.get('id'))
+                return self._json({'ok': True})
+            if p == '/relay':
+                KEYS['relay'] = str(body.get('url') or '')
+                return self._json({'ok': True})
+            time.sleep(1.5)
+            if JOIN_SAYS in JOIN_ERRORS and not (JOIN_SAYS == 'link_no_relay' and body.get('addrs')):
+                return self._json({'ok': False, 'error': JOIN_ERRORS[JOIN_SAYS], 'kind': JOIN_SAYS}, 409)
+            KEYS['joined'] = True
+            return self._json({'ok': True, 'home': {'id': HOME_ID, 'name': 'Studio'}, 'machine': 'laptop'})
         if p == '/api/compact':
             if body.get('confirm'):
                 return self._json({'ok': True, 'job': 's-0123456789ab', 'machine': 'server'})
@@ -865,4 +1157,5 @@ class H(BaseHTTPRequestHandler):
 
 if __name__ == '__main__':
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8139
+    KEYS['port'] = port
     ThreadingHTTPServer(('127.0.0.1', port), H).serve_forever()

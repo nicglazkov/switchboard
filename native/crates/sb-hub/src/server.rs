@@ -1,5 +1,8 @@
 //! The hub's HTTP side: `/term` (WebSocket), `/healthz`, and `/internal/open` for the server's reaper. The node
 //! routes (`/node`, `/pair`, `/internal/rpc`, ...) are in nodeapi.rs.
+//!
+//! Two listeners share one hub. The main one (`router`) has every route. The tunnel one (`public_router`, on
+//! 127.0.0.1:8136 when keys are on) has only what another computer may ask.
 
 use crate::config::Config;
 use crate::link::{Link, Links};
@@ -34,6 +37,25 @@ pub struct Hub {
     next: AtomicU64,
     /// One terminal per chat, shared by everyone looking at it (shared.rs).
     sessions: tokio::sync::Mutex<HashMap<(String, String), Arc<Shared>>>,
+    /// Set in a hub that a helper runs inside itself: terminals on this computer and nowhere else.
+    local: Option<Local>,
+}
+
+/// What a hub inside a helper (switchboard-node) knows: the one computer it opens terminals on, and the program
+/// for a chat there. Such a hub reads no machine list, has no linked computers and starts no ssh.
+pub struct Local {
+    /// The hub's name for this computer. A ticket for any other name is refused.
+    pub machine: String,
+    pub label: String,
+    /// The program that attaches to the chat with this background id.
+    pub command: Box<dyn Fn(&str) -> LocalCommand + Send + Sync>,
+}
+
+pub struct LocalCommand {
+    pub argv: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub env_remove: Vec<String>,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -76,7 +98,31 @@ impl Hub {
             open: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
             sessions: tokio::sync::Mutex::new(HashMap::new()),
+            local: None,
         }))
+    }
+
+    /// A hub for terminals on this computer only (`Local`). `key` signs its tickets; it is kept in memory and
+    /// written nowhere, so a ticket dies with the program that made it. Nothing is read from `cfg`'s files.
+    pub fn local(cfg: Config, key: Vec<u8>, local: Local) -> Arc<Hub> {
+        Arc::new(Hub {
+            nodes: Nodes::load(std::path::Path::new("")),
+            cfg,
+            links: Links::default(),
+            key,
+            nonces: Nonces::default(),
+            open: Mutex::new(HashMap::new()),
+            next: AtomicU64::new(1),
+            sessions: tokio::sync::Mutex::new(HashMap::new()),
+            local: Some(local),
+        })
+    }
+
+    /// A ticket for one chat on this computer, good once and for `ticket::TTL` seconds. None in a hub that is
+    /// not `local`: there the server mints tickets, from the key file.
+    pub fn local_ticket(&self, bg: &str) -> Option<String> {
+        let local = self.local.as_ref()?;
+        ticket::valid_bg(bg).then(|| ticket::mint(&self.key, &local.machine, bg, unix_now(), ticket::TTL))
     }
 
     pub fn open_terms(&self) -> Vec<OpenTerm> {
@@ -168,6 +214,42 @@ pub fn router(hub: Arc<Hub>) -> Router {
         .merge(crate::nodeapi::routes())
         .layer(axum::middleware::from_fn(internal_guard))
         .with_state(hub)
+}
+
+/// The one route of a hub inside a helper (`Hub::local`): the terminal WebSocket, at `path`.
+pub fn local_router(hub: Arc<Hub>, path: &str) -> Router {
+    Router::new().route(path, get(term)).with_state(hub)
+}
+
+/// Everything the tunnel listener answers. Nothing else exists there.
+pub const PUBLIC_PATHS: [&str; 4] = ["/term", "/node", "/pair", "/healthz"];
+
+/// The routes for connections a tunnel forwarded (plan section 3.3, "Home targets"): what another computer may
+/// ask the hub, and nothing more.
+///
+/// Such a connection arrives from 127.0.0.1, whoever sent it. On the main listener that would pass `not_local`,
+/// which is all that keeps `/internal/*` (run a command on any linked computer, make a pairing code, unpair) to
+/// the server on this computer. So this router is built without those routes, and `public_guard` answers 404 for
+/// every path that is not on the list before any route is looked at: a route added to `router` later is not
+/// reachable here until it is added to the list on purpose.
+pub fn public_router(hub: Arc<Hub>) -> Router {
+    Router::new()
+        .route("/term", get(term))
+        .route("/healthz", get(healthz))
+        .merge(crate::nodeapi::public_routes())
+        .layer(axum::middleware::from_fn(public_guard))
+        .with_state(hub)
+}
+
+fn public_path(path: &str) -> bool {
+    PUBLIC_PATHS.contains(&path)
+}
+
+async fn public_guard(req: axum::extract::Request, next: axum::middleware::Next) -> Response {
+    if !public_path(req.uri().path()) {
+        return (StatusCode::NOT_FOUND, Json(json!({"ok": false, "error": "not found"}))).into_response();
+    }
+    next.run(req).await
 }
 
 /// `/internal/*` is for the server on this machine, never a page in a browser here: a page could POST text/plain
@@ -280,6 +362,8 @@ fn size_from(q: &TermQuery) -> (u16, u16) {
 }
 
 enum Route {
+    /// The chat's program in a PTY on this computer (`Hub::local`).
+    Local,
     Ssh(Machine),
     Node(Arc<Link>, String),
 }
@@ -291,7 +375,10 @@ enum End {
 }
 
 async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: TermQuery) {
-    let file = machines::load(&hub.cfg.machines_path);
+    let file = match &hub.local {
+        Some(_) => Ok(machines::MachineFile::default()),
+        None => machines::load(&hub.cfg.machines_path),
+    };
     let file_origins = file.as_ref().map(|f| f.origins.clone()).unwrap_or_default();
     if !origin::allowed(origin.as_deref(), &hub.origins(&file_origins)) {
         log(format!("term refused: origin {:?}", origin.unwrap_or_default()));
@@ -312,6 +399,14 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
     }
     let paired = hub.nodes.get(&claims.m);
     let route = match (hub.links.get(&claims.m), &paired, &file) {
+        _ if hub.local.is_some() => {
+            // (the key is this program's own, so only a ticket it minted gets here; the name is checked all the same)
+            if hub.local.as_ref().is_some_and(|l| l.machine != claims.m) {
+                log("term refused: a ticket for another computer");
+                return refuse(&mut ws, proto::CLOSE_TICKET, "This terminal ticket is for another computer.").await;
+            }
+            Route::Local
+        }
         (Some(link), _, _) => {
             Route::Node(link, paired.as_ref().map(|n| n.label().to_string()).unwrap_or_else(|| claims.m.clone()))
         }
@@ -378,7 +473,24 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
                 let (t, io) = link.open_term(&claims.b, cols, rows);
                 (Backend::Node(t), io, label.clone(), "node")
             }
-            (Route::Ssh(machine), Some((t, io))) => (Backend::Ssh(t), io, machine.label().to_string(), "ssh"),
+            (Route::Ssh(machine), Some((t, io))) => (Backend::Pty(t), io, machine.label().to_string(), "ssh"),
+            (Route::Local, Some((t, io))) => {
+                let label = hub.local.as_ref().map(|l| l.label.clone()).unwrap_or_default();
+                (Backend::Pty(t), io, label, "local")
+            }
+            (Route::Local, None) => {
+                // (as for ssh below: started outside the lock, then looked at again)
+                drop(map);
+                match spawn_local(&hub, &claims.b, cols, rows).await {
+                    Ok(x) => started = Some(x),
+                    Err(e) => {
+                        log(format!("term failed: spawn: {e}"));
+                        return refuse(&mut ws, proto::CLOSE_INTERNAL, "This computer could not start the terminal.")
+                            .await;
+                    }
+                }
+                continue;
+            }
             (Route::Ssh(machine), None) => {
                 // Starting ssh can take a moment. Not under the lock, which every terminal opening or closing
                 // needs; then look again, in case another viewer opened this chat meanwhile.
@@ -494,6 +606,25 @@ async fn spawn_ssh(
     let rate = hub.cfg.rate;
     tokio::task::spawn_blocking(move || {
         pty::spawn(pty::Spawn { argv: &argv, env: &env, env_remove: &remove, cwd: home.as_deref(), cols, rows, rate })
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn spawn_local(hub: &Hub, bg: &str, cols: u16, rows: u16) -> std::io::Result<(Term, pty::TermIo)> {
+    let Some(local) = &hub.local else { return Err(std::io::Error::other("not a local hub")) };
+    let c = (local.command)(bg);
+    let rate = hub.cfg.rate;
+    tokio::task::spawn_blocking(move || {
+        pty::spawn(pty::Spawn {
+            argv: &c.argv,
+            env: &c.env,
+            env_remove: &c.env_remove,
+            cwd: c.cwd.as_deref(),
+            cols,
+            rows,
+            rate,
+        })
     })
     .await
     .map_err(std::io::Error::other)?
@@ -662,9 +793,42 @@ pub async fn serve(hub: Arc<Hub>, listener: tokio::net::TcpListener) -> std::io:
     axum::serve(listener, router(hub).into_make_service_with_connect_info::<SocketAddr>()).await
 }
 
+/// Serves `public_router` on the tunnel listener. The same hub as `serve`: one list of terminals, links and
+/// pairing codes, reached two ways.
+pub async fn serve_public(hub: Arc<Hub>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
+    axum::serve(listener, public_router(hub).into_make_service_with_connect_info::<SocketAddr>()).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_tunnel_listener_knows_four_paths_and_no_other() {
+        for p in ["/term", "/node", "/pair", "/healthz"] {
+            assert!(public_path(p), "{p}");
+        }
+        for p in [
+            "/internal/open",
+            "/internal/pair",
+            "/internal/nodes",
+            "/internal/rpc/lab",
+            "/internal/unpair/lab",
+            "/internal",
+            "/internal/",
+            "//internal/open",
+            "/term/../internal/open",
+            "/pair/../internal/pair",
+            "/%69nternal/open",
+            "/INTERNAL/open",
+            "/term/",
+            "/pair/x",
+            "/",
+            "",
+        ] {
+            assert!(!public_path(p), "{p}");
+        }
+    }
 
     #[test]
     fn the_terminal_limit_counts_chats_and_the_viewer_limit_counts_views() {

@@ -1,0 +1,53 @@
+<svg viewBox="0 0 880 464" role="img" aria-labelledby="fig-library-three-computers-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-library-three-computers-t">One library with three tools, and three computers below it. The desk Mac has all three, the laptop has two and one of them is missing a key, and the closet PC has one.</title>
+<text class="d-title" x="40" y="52">One library, three computers</text>
+<rect class="d-chip-sel" x="40" y="84" width="800" height="110" rx="16"/>
+<g class="d-ico sel" transform="translate(60 100)"><rect x="5" y="3" width="14" height="18" rx="2"/><path d="M9 8h6M9 12h6M9 16h3"/></g>
+<text class="t-sel" x="94" y="118">The library</text>
+<text class="d-sub end" x="820" y="118">Kept on your home computer, every version</text>
+<rect class="d-panel" x="60" y="140" width="180" height="34" rx="17"/>
+<text class="d-mono mid" x="150" y="162">pdf-tools v3</text>
+<rect class="d-panel" x="250" y="140" width="180" height="34" rx="17"/>
+<text class="d-mono mid" x="340" y="162">web-fetch v2</text>
+<rect class="d-panel" x="440" y="140" width="180" height="34" rx="17"/>
+<text class="d-mono mid" x="530" y="162">notes v1</text>
+<path class="d-line-sel" d="M160 194V234"/>
+<path class="d-line-sel" d="M440 194V234"/>
+<path class="d-line-sel" d="M720 194V234"/>
+<rect class="d-panel" x="40" y="234" width="240" height="190" rx="14"/>
+<g class="d-ico" transform="translate(60 252)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text x="94" y="270">Desk Mac</text>
+<rect class="d-chip" x="60" y="290" width="200" height="34" rx="17"/>
+<text class="d-mono" x="76" y="312">pdf-tools</text>
+<text class="d-sub end" x="244" y="312">v3</text>
+<rect class="d-chip" x="60" y="332" width="200" height="34" rx="17"/>
+<text class="d-mono" x="76" y="354">web-fetch</text>
+<text class="d-sub end" x="244" y="354">v2</text>
+<rect class="d-chip" x="60" y="374" width="200" height="34" rx="17"/>
+<text class="d-mono" x="76" y="396">notes</text>
+<text class="d-sub end" x="244" y="396">v1</text>
+<rect class="d-panel" x="320" y="234" width="240" height="190" rx="14"/>
+<g class="d-ico" transform="translate(340 252)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="374" y="270">Laptop</text>
+<rect class="d-chip" x="340" y="290" width="200" height="34" rx="17"/>
+<text class="d-mono" x="356" y="312">pdf-tools</text>
+<text class="d-sub end" x="524" y="312">v3</text>
+<rect class="d-chip-bad" x="340" y="332" width="200" height="34" rx="17"/>
+<text class="d-mono" x="356" y="354">web-fetch</text>
+<text class="d-small t-bad end" x="524" y="354">needs a key</text>
+<rect class="d-dash" x="340" y="374" width="200" height="34" rx="17"/>
+<text class="d-mono" x="356" y="396">notes</text>
+<text class="d-sub end" x="524" y="396">not here</text>
+<rect class="d-panel" x="600" y="234" width="240" height="190" rx="14"/>
+<g class="d-ico" transform="translate(620 252)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="654" y="270">Closet PC</text>
+<rect class="d-chip" x="620" y="290" width="200" height="34" rx="17"/>
+<text class="d-mono" x="636" y="312">pdf-tools</text>
+<text class="d-sub end" x="804" y="312">v3</text>
+<rect class="d-dash" x="620" y="332" width="200" height="34" rx="17"/>
+<text class="d-mono" x="636" y="354">web-fetch</text>
+<text class="d-sub end" x="804" y="354">not here</text>
+<rect class="d-dash" x="620" y="374" width="200" height="34" rx="17"/>
+<text class="d-mono" x="636" y="396">notes</text>
+<text class="d-sub end" x="804" y="396">not here</text>
+</svg>

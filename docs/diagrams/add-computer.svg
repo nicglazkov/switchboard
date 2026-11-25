@@ -1,0 +1,29 @@
+<svg viewBox="0 0 880 400" role="img" aria-labelledby="fig-add-computer-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-add-computer-t">Two ways to add a computer. A laptop linked with a code runs a helper that connects out to the home computer on port 8132. A closet PC added over ssh is reached the other way: the home computer logs in to it.</title>
+<text class="d-title" x="40" y="52">Two ways to add a computer</text>
+<rect class="d-chip-sel" x="40" y="84" width="240" height="276" rx="16"/>
+<g class="d-ico sel" transform="translate(60 102)"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M8 20h8M12 16v4"/></g>
+<text class="t-sel" x="94" y="120">Home computer</text>
+<rect class="d-panel" x="60" y="150" width="200" height="40" rx="20"/>
+<text class="d-small mid" x="160" y="175">The hub</text>
+<rect class="d-panel" x="60" y="296" width="200" height="40" rx="20"/>
+<text class="d-small mid" x="160" y="321">The server</text>
+<rect class="d-panel" x="560" y="84" width="280" height="128" rx="14"/>
+<g class="d-ico" transform="translate(580 102)"><rect x="4" y="5" width="16" height="11" rx="2"/><path d="M2 19h20"/></g>
+<text x="614" y="120">Laptop</text>
+<rect class="d-chip" x="580" y="150" width="240" height="40" rx="20"/>
+<text class="d-small mid" x="700" y="175">Helper, linked with a code</text>
+<rect class="d-panel" x="560" y="232" width="280" height="128" rx="14"/>
+<g class="d-ico" transform="translate(580 250)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="614" y="268">Closet PC</text>
+<rect class="d-chip" x="580" y="296" width="240" height="40" rx="20"/>
+<text class="d-small mid" x="700" y="321">Helper, reached over ssh</text>
+<text class="d-sub mid" x="420" y="134">The laptop connects out</text>
+<path class="d-line-sel" d="M556 170H284"/>
+<path class="d-line-sel" d="M293 162L284 170L293 178"/>
+<text class="d-mono mid" x="420" y="198">port 8132</text>
+<text class="d-sub mid" x="420" y="280">The home computer logs in</text>
+<path class="d-line-sel" d="M284 316H556"/>
+<path class="d-line-sel" d="M547 308L556 316L547 324"/>
+<text class="d-mono mid" x="420" y="344">ssh</text>
+</svg>

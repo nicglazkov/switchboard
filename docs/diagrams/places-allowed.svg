@@ -1,0 +1,32 @@
+<svg viewBox="0 0 880 424" role="img" aria-labelledby="fig-places-allowed-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-places-allowed-t">One computer's folders in four groups: the Claude folder, always open to the app; the rest of the home folder, open while Anywhere in home is on; private folders, never shown; and folders outside home, open only as a place added at the computer.</title>
+<text class="d-title" x="40" y="52">Which folders an app may open on a computer</text>
+<rect class="d-panel" x="40" y="84" width="540" height="300" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></g>
+<text x="94" y="120">The home folder</text>
+<rect class="d-chip-sel" x="60" y="144" width="500" height="64" rx="16"/>
+<g class="d-ico sel" transform="translate(80 164)"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></g>
+<text class="t-sel" x="120" y="171">The Claude folder</text>
+<text class="d-sub" x="120" y="192">Always open. Chats start here without a question.</text>
+<rect class="d-chip" x="60" y="224" width="500" height="64" rx="16"/>
+<g class="d-ico" transform="translate(80 244)"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></g>
+<text x="120" y="251">Desktop, Documents, Downloads, the rest of home</text>
+<text class="d-sub" x="120" y="272">Open while Anywhere in home is on. Claude asks first.</text>
+<rect class="d-dash" x="60" y="304" width="500" height="64" rx="16"/>
+<g class="d-ico" transform="translate(80 324)"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></g>
+<text x="120" y="331">Dot folders, Library, AppData</text>
+<text class="d-sub" x="120" y="352">Never listed and never opened.</text>
+<rect class="d-panel" x="620" y="84" width="220" height="300" rx="14"/>
+<g class="d-ico" transform="translate(640 102)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/><path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="674" y="120">Outside home</text>
+<rect class="d-chip" x="640" y="144" width="180" height="104" rx="16"/>
+<g class="d-ico" transform="translate(656 160)"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></g>
+<text x="690" y="178">An added place</text>
+<text class="d-sub" x="656" y="208">Open once someone</text>
+<text class="d-sub" x="656" y="228">adds it at the computer.</text>
+<rect class="d-dash" x="640" y="264" width="180" height="104" rx="16"/>
+<g class="d-ico" transform="translate(656 280)"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/></g>
+<text x="690" y="298">Everything else</text>
+<text class="d-sub" x="656" y="328">Never reachable from</text>
+<text class="d-sub" x="656" y="348">an app.</text>
+</svg>

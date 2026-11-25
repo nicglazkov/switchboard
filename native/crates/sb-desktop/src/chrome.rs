@@ -217,8 +217,8 @@ impl BoardView {
                 .text_color(t.ink)
                 .cursor_pointer()
                 .hover(move |st| st.bg(hover))
-                .child(ui::icon(ic, 15., t.faint))
-                .child(div().flex_1().child(title))
+                .child(ui::icon(ic, 15., t.faint).flex_none())
+                .child(ui::line(title).flex_1())
                 .when(!keys.is_empty(), |d| d.child(ui::kbd(&t, &keys)))
                 .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
                     this.app_menu_open = false;
@@ -234,7 +234,7 @@ impl BoardView {
             .absolute()
             .top(px(ui::header() + 4.))
             .right(px(app_menu_right(decorations)))
-            .w(px(280.))
+            .w(px(APP_MENU_W))
             .p(px(6.))
             .rounded(px(10.))
             .border_1()
@@ -340,6 +340,7 @@ impl BoardView {
                 tab(&t, "tab-history", hist_on)
                     .flex_none()
                     .pr(px(10.))
+                    .when_some(c.app.away_reason(), |d, why| d.opacity(ui::OFF).tooltip(ui::tip_text(why)))
                     .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.view_history(cx)))
                     .child(ui::icon("history", 14., if hist_on { t.ink2 } else { t.faint }))
                     .child("History"),
@@ -1029,14 +1030,20 @@ impl BoardView {
             .rounded(px(ui::R_ITEM))
             .overflow_hidden()
             .shadow(vec![Theme::ring(t.line2)])
-            .child(half("tab-add", "plus", 28., 14., self.add_open && !self.add_terms).on_click(cx.listener(
-                |this, _: &ClickEvent, _, cx| {
-                    this.add_open = !(this.add_open && !this.add_terms);
-                    this.add_terms = false;
-                    this.plan_open = false;
-                    cx.notify();
-                },
-            )))
+            .child(
+                half("tab-add", "plus", 28., 14., self.add_open && !self.add_terms)
+                    .when_some(c.app.away_reason(), |d, why| d.opacity(ui::OFF).tooltip(ui::tip_text(why)))
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                        // (the chevron beside it still opens a terminal on this computer)
+                        if this.app.update(cx, |s, cx| s.needs_home(cx)) {
+                            return;
+                        }
+                        this.add_open = !(this.add_open && !this.add_terms);
+                        this.add_terms = false;
+                        this.plan_open = false;
+                        cx.notify();
+                    })),
+            )
             .child(div().flex_none().w(px(1.)).h(px(16.)).bg(t.line2))
             .child(half("tab-add-more", "down", 20., 11., self.add_open && self.add_terms).on_click(cx.listener(
                 |this, _: &ClickEvent, _, cx| {
@@ -1198,6 +1205,7 @@ impl BoardView {
             .cursor_pointer()
             .when(self.plan_open, |d| d.bg(t.press))
             .hover(move |s| s.bg(t.hover))
+            .when_some(c.app.away_reason(), |d, why| d.opacity(ui::OFF).tooltip(ui::tip_text(why)))
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(c.cx.listener(|this, _: &ClickEvent, _, cx| {
                 if this.plan_open {
@@ -1254,17 +1262,18 @@ impl BoardView {
                 .rounded(px(ui::R_CTRL))
                 .cursor_pointer()
                 .hover(move |s| s.bg(hover))
-                .child(ui::icon(ic, 16., t.dim))
+                .child(ui::icon(ic, 16., t.dim).flex_none())
+                // The text gives way, never the key cap: a line too long for the row ends in an ellipsis, so
+                // nothing is ever drawn past the menu's edge (a Windows shell's path, "Ctrl Shift N").
                 .child(
                     div()
                         .flex_1()
+                        .min_w_0()
                         .flex()
                         .flex_col()
                         .gap(px(1.))
-                        .child(
-                            div().text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink).child(title),
-                        )
-                        .child(div().text_size(px(12.)).text_color(t.dim).child(sub)),
+                        .child(ui::line(title).text_size(px(13.5)).font_weight(FontWeight::SEMIBOLD).text_color(t.ink))
+                        .child(ui::line(sub).text_size(px(12.)).text_color(t.dim)),
                 )
                 .when_some(keys, |d, k| d.child(ui::kbd(&t, &k)))
         };
@@ -1288,7 +1297,7 @@ impl BoardView {
                 .enumerate()
                 .map(|(n, p)| {
                     let first = def.as_deref() == Some(p.id.as_str());
-                    let sub = if first { format!("{}, the default", p.program) } else { p.program.clone() };
+                    let sub = shell_sub(&p.program, first);
                     let id = p.id.clone();
                     row(("add-term", n).into(), "term", p.name.clone(), sub, first.then(|| ui::term_cap("T")))
                         .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.open_local(Some(&id), cx)))
@@ -1300,7 +1309,8 @@ impl BoardView {
         };
         let grouped = self.add_terms;
         // Kept inside the window when many tabs push "+" toward the right edge.
-        let x = (lead() + self.tab_strip_width() - 16.).min(win_w - 348.).max(8.);
+        let w = add_menu_width(win_w);
+        let x = (lead() + self.tab_strip_width() - 16.).min(win_w - w - 8.).max(8.);
         Some(
             div()
                 .absolute()
@@ -1319,7 +1329,7 @@ impl BoardView {
                         .absolute()
                         .top(px(ui::header() + 4.))
                         .left(px(x))
-                        .w(px(340.))
+                        .w(px(w))
                         .p(px(6.))
                         .rounded(px(ui::R_POP))
                         .border_1()
@@ -1678,12 +1688,13 @@ pub fn tab_fit(room: f32, n: usize) -> (f32, bool) {
 
 /// The most a tab's machine label may take. `narrow` is its share on a tab this wide when the title is long (the
 /// title wins the room). When the title and the label both fit whole, by a rough count of their letters, the label
-/// gets its full 72 px, so a shell's "zsh" tab says "This Mac" and not "Thi…".
+/// gets its full 72 px, so a shell's "zsh" tab says "This Mac" and not "Thi…"; a longer label that still fits
+/// ("This computer" beside "bash") gets the room its letters need.
 pub fn tab_label_w(tab_w: f32, narrow: f32, title_chars: usize, label_chars: usize) -> f32 {
     // Everything in a tab that is not text: its padding, the dot, the gaps, the star and the close button.
     const FIXED: f32 = 96.;
     let words = title_chars as f32 * 7.5 + label_chars as f32 * 7.;
-    if words <= tab_w - FIXED { 72. } else { narrow }
+    if words <= tab_w - FIXED { (label_chars as f32 * 7.5).max(72.) } else { narrow }
 }
 
 /// How far "+" is from where the header's content starts (`lead`): the tab row ended at `row_right` in the window,
@@ -1735,6 +1746,28 @@ pub fn app_menu_room() -> f32 {
     if cfg!(target_os = "macos") { 0. } else { 8. + 28. }
 }
 
+/// How wide the "+" menu is: as it always was on a Mac, wider elsewhere, where a key cap reads "Ctrl Shift N" and
+/// a shell is a long path. Never wider than the window leaves room for.
+fn add_menu_width(win_w: f32) -> f32 {
+    let w: f32 = if ui::MAC { 340. } else { 400. };
+    w.min(win_w - 16.).max(240.)
+}
+
+/// The app menu's width (Windows and Linux only): its longest row, "Open a chat in a terminal" with
+/// "Ctrl Shift O", fits with room to spare.
+const APP_MENU_W: f32 = 324.;
+
+/// The line under a shell's name in the "+" menu: where the program is, cut in the middle when the row cannot hold
+/// it ("C:\WINDOWS\System32\…\powershell.exe"), and which one Ctrl+T opens. The default's row also holds a key cap,
+/// so its path gets less room.
+fn shell_sub(program: &str, default: bool) -> String {
+    if default {
+        format!("{}, the default", fmt::mid_path(program, 22))
+    } else {
+        fmt::mid_path(program, if ui::MAC { 40 } else { 46 })
+    }
+}
+
 /// The gear at the end of the header: Settings. Light and dark live in Settings > Appearance, the View menu and
 /// Shift Cmd L.
 fn settings_btn(c: &Ctx) -> impl IntoElement {
@@ -1782,7 +1815,30 @@ fn next_tab_in(
 
 #[cfg(test)]
 mod tests {
-    use super::{TAB_MIN_W, TAB_W, plus_offset, tab_fit, tab_label_w};
+    use super::{TAB_MIN_W, TAB_W, add_menu_width, plus_offset, shell_sub, tab_fit, tab_label_w};
+
+    #[test]
+    fn a_shell_row_says_where_the_program_is_in_a_line_that_fits() {
+        // Short paths (every Mac and Linux shell) are shown whole.
+        assert_eq!(shell_sub("/bin/zsh", false), "/bin/zsh");
+        assert_eq!(shell_sub("/bin/zsh", true), "/bin/zsh, the default");
+        assert_eq!(shell_sub("C:\\WINDOWS\\System32\\cmd.exe", false), "C:\\WINDOWS\\System32\\cmd.exe");
+        // A long one keeps its drive and its name. The default's row is shorter by its key cap.
+        let ps = "C:\\WINDOWS\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+        let cut = shell_sub(ps, false);
+        assert!(cut.starts_with("C:\\WINDOWS\\") && cut.ends_with("…\\powershell.exe"), "{cut}");
+        assert!(cut.chars().count() <= 46, "{cut}");
+        assert_eq!(shell_sub(ps, true), "C:\\…\\powershell.exe, the default");
+        assert_eq!(shell_sub("C:\\Program Files\\PowerShell\\7\\pwsh.exe", true), "C:\\…\\pwsh.exe, the default");
+    }
+
+    #[test]
+    fn the_plus_menu_never_asks_for_more_than_the_window_has() {
+        let full = add_menu_width(1280.);
+        assert!((340. ..=400.).contains(&full));
+        assert_eq!(add_menu_width(300.), 284., "8 px of margin each side on a narrow lane window");
+        assert_eq!(add_menu_width(100.), 240.);
+    }
 
     #[test]
     fn a_short_title_leaves_the_machine_label_whole() {
@@ -1791,6 +1847,9 @@ mod tests {
         // a long title keeps the room: the label stays at its narrow share
         assert_eq!(tab_label_w(186., 36., 28, 8), 36.);
         assert_eq!(tab_label_w(240., 72., 28, 8), 72.);
+        // "bash" and "This computer" on Linux: the label is longer than 72 px and there is room for it whole.
+        assert!(tab_label_w(240., 72., 4, 13) >= 95.);
+        assert_eq!(tab_label_w(186., 36., 28, 13), 36.);
     }
 
     #[test]

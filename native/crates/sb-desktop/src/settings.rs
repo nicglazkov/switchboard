@@ -15,6 +15,8 @@ use gpui_base::input::{InputEvent, InputState, TextareaState};
 use sb_core::api::{ApiCapsView, ApiMachineRow, ApiMachines, ApiMcp, ApiRootDirs};
 use std::collections::{HashMap, HashSet};
 
+#[path = "settings_devices.rs"]
+mod devices_ui;
 #[path = "settings_library.rs"]
 mod library_ui;
 #[path = "settings_server.rs"]
@@ -34,6 +36,9 @@ pub enum Section {
     /// Compact long chats at: its own page (settings_context.rs).
     Context,
     Machines,
+    /// The devices paired with the home computer (settings_devices.rs). In the sidebar only when the server
+    /// connects devices with keys.
+    Devices,
     Library,
     Notifications,
     Chrome,
@@ -52,6 +57,7 @@ impl Section {
             Section::NewSessions => ("Chats", "send"),
             Section::Context => ("Context window", "mem"),
             Section::Machines => ("Machines", "mac"),
+            Section::Devices => ("Devices", "key"),
             Section::Library => ("Library", "cube"),
             Section::Notifications => ("Notifications", "bolt"),
             Section::Chrome => ("Chrome", "globe"),
@@ -63,13 +69,47 @@ impl Section {
     }
 }
 
-/// The sidebar, top to bottom: what belongs together sits under one label.
-const NAV: [(&str, &[Section]); 4] = [
+/// The sidebar, top to bottom: what belongs together sits under one label. Machines is last because a line per
+/// machine follows it: the list that grows is the one that scrolls, and no fixed page sits below it, where a
+/// short window would hide it under the pinned foot.
+const NAV: [(&str, &[Section]); 5] = [
     ("General", &[Section::Appearance, Section::Notifications]),
     ("Chats", &[Section::NewSessions, Section::Context, Section::Terminal, Section::Budget]),
     ("Claude", &[Section::Library, Section::Chrome, Section::Privacy]),
-    ("Machines", &[Section::Machines, Section::Server]),
+    ("Home computer", &[Section::Devices, Section::Server]),
+    ("Machines", &[Section::Machines]),
 ];
+
+/// The sidebar's width: its longest line, "AI and your Claude setup", fits in the bold it takes when selected.
+const NAV_W: f32 = 236.;
+/// A settings page's text column is never wider than this, however wide the window: lines stay readable.
+const PAGE_W: f32 = 760.;
+/// The room kept between the selected line and the sidebar's edge when it is scrolled into sight, so it clears
+/// the fade there and the line next to it shows.
+const NAV_MARGIN: f32 = 26.;
+
+/// Where a scrolled list must sit (its offset: zero at the top, negative further down) for the row from `top` to
+/// `bottom` to show with `margin` to spare on both sides. `view` is the height that shows, `max` how far the list
+/// can scroll. None when the row already shows that way, or cannot be brought closer.
+pub(crate) fn reveal_offset(top: f32, bottom: f32, view: f32, offset: f32, max: f32, margin: f32) -> Option<f32> {
+    let max = max.max(0.);
+    let want = if top - margin < -offset {
+        -(top - margin)
+    } else if bottom + margin > view - offset {
+        -(bottom + margin - view)
+    } else {
+        return None;
+    };
+    let want = want.clamp(-max, 0.);
+    ((want - offset).abs() >= 0.5).then_some(want)
+}
+
+/// Whether a section has a line in the sidebar. Devices is there when the server in use connects devices with keys,
+/// and on the home computer of a server that can turn them on from the app (`Keys::can_turn_on`). With a server
+/// from before that, or from another computer while keys are off, Settings is exactly what it was.
+fn in_sidebar(s: Section, keys: &sb_core::keys::Keys) -> bool {
+    s != Section::Devices || keys.devices_page()
+}
 /// Pinned to the sidebar's bottom edge, about the app itself. About comes after these: it is its own window
 /// (about.rs), also at Switchboard > About Switchboard.
 const NAV_FOOT: [Section; 1] = [Section::Updates];
@@ -103,6 +143,15 @@ pub(crate) fn arm_click(armed_at: Option<f64>, now: f64) -> ArmClick {
     }
 }
 
+/// The quiet line under a machine in the list: whether it is online, how it is connected when the server connects
+/// devices with keys ("Direct", "Through the relay"), and its versions. With keys off it reads as it always has.
+fn machine_note(status: String, path: Option<&str>, versions: Option<String>) -> String {
+    let mut parts = vec![status];
+    parts.extend(path.map(str::to_string));
+    parts.extend(versions);
+    parts.join(". ")
+}
+
 /// A budget stepper's next values down and up from `x`: the nearest multiples of `step` on either side, so a
 /// default like 14.3 goes to 14 or 15 and round numbers can be reached. Never under 1 (or under `x`, when that is
 /// already smaller) nor over 100.
@@ -132,6 +181,26 @@ pub fn open_at(section: Section, cx: &mut App) {
 /// Opens Settings at one machine's page (a machine whose Claude folder nobody has picked yet, or one just added).
 pub fn open_machine(name: String, cx: &mut App) {
     open_with(Section::Machines, Some(name), None, cx)
+}
+
+/// A machine that just showed up and has no Claude folder yet: Settings opens at its page and asks. False when the
+/// question waits instead, because Devices is showing the pairing that brought the machine (the code, then "is
+/// paired"): it is asked when that card goes (settings_devices.rs `FolderWait`).
+pub fn ask_root(name: String, cx: &mut App) -> bool {
+    let app = crate::state::app(cx);
+    if let Some(h) = app.read(cx).settings_win {
+        let mut held = false;
+        let _ = h.update(cx, |v, _, cx| {
+            if let Ok(v) = v.downcast::<SettingsView>() {
+                held = v.update(cx, |s, _| s.devices_hold_folder(&name));
+            }
+        });
+        if held {
+            return false;
+        }
+    }
+    open_machine(name, cx);
+    true
 }
 
 /// Screenshots: a machine's page, with its folder picker open at `pick` (home-relative).
@@ -228,6 +297,9 @@ pub struct SettingsView {
     error: Option<String>,
     scroll: ScrollHandle,
     nav_scroll: ScrollHandle,
+    /// The sidebar line last brought into sight (its place in the list, and how long the list was), and how many
+    /// more frames to try for it: the list must be laid out once before it can be scrolled to a line.
+    nav_reveal: (Option<(usize, usize)>, u8),
     /// The Claude-folder picker's list of folders.
     dir_scroll: ScrollHandle,
     /// Library: Import and New tool (one open at a time), their fields, open version lists, the Set key command
@@ -245,6 +317,8 @@ pub struct SettingsView {
     /// Server addresses: the field for typing one, why what was typed can't be one, and the first click on the X
     /// of the address in use (it asks twice).
     addr: Entity<InputState>,
+    /// Devices: the field Change opens for the home computer's relay.
+    dev_relay: Entity<InputState>,
     addr_err: Option<String>,
     addr_removing: Option<(String, f64)>,
     /// A saved setup's Remove asks twice too: (its place in the list, when).
@@ -253,6 +327,8 @@ pub struct SettingsView {
     drop: ui::Drop,
     /// Settings > Server (settings_server.rs).
     srv: server_ui::Pane,
+    /// Settings > Devices (settings_devices.rs).
+    dev: devices_ui::Pane,
     _subs: Vec<Subscription>,
 }
 
@@ -272,6 +348,7 @@ impl SettingsView {
         });
         let lib_secret = cx.new(|cx| InputState::new(window, cx).masked(true).placeholder("Paste the value"));
         let addr = cx.new(|cx| InputState::new(window, cx).placeholder("192.0.2.10:8130 or studio.local"));
+        let dev_relay = cx.new(|cx| InputState::new(window, cx).placeholder(sb_core::keys::RELAY_PLACEHOLDER));
         let subs = vec![
             cx.subscribe_in(&addr, window, |this, _, ev: &InputEvent, window, cx| match ev {
                 InputEvent::PressEnter { .. } => this.add_address(window, cx),
@@ -279,6 +356,11 @@ impl SettingsView {
                     this.addr_err = None;
                     cx.notify();
                 }
+                _ => {}
+            }),
+            cx.subscribe_in(&dev_relay, window, |this, _, ev: &InputEvent, _, cx| match ev {
+                InputEvent::PressEnter { .. } => this.devices_relay_save(cx),
+                InputEvent::Change => this.devices_relay_edited(cx),
                 _ => {}
             }),
             cx.observe(&app, |_, _, cx| cx.notify()),
@@ -319,6 +401,7 @@ impl SettingsView {
             edit: None,
             removing: None,
             addr,
+            dev_relay,
             addr_err: None,
             addr_removing: None,
             preset_removing: None,
@@ -331,6 +414,7 @@ impl SettingsView {
             error: None,
             scroll: ScrollHandle::new(),
             nav_scroll: ScrollHandle::new(),
+            nav_reveal: (None, 0),
             dir_scroll: ScrollHandle::new(),
             lib_import: None,
             lib_new: None,
@@ -343,12 +427,18 @@ impl SettingsView {
             lib_deleting: None,
             drop: Default::default(),
             srv: Default::default(),
+            dev: Default::default(),
             _subs: subs,
         };
         v.load(cx);
         if section == Section::Server {
             v.server_open(cx);
         }
+        if section == Section::Devices {
+            v.devices_open(cx);
+        }
+        // How each computer is connected, for the Machines list, and whether Devices belongs in the sidebar.
+        v.app.update(cx, |s, cx| s.load_keys(cx));
         v.app.update(cx, |s, cx| s.load_library(cx));
         v
     }
@@ -359,6 +449,12 @@ impl SettingsView {
         }
         if s == Section::Server && self.section != Section::Server {
             self.server_open(cx);
+        }
+        if self.section == Section::Devices && s != Section::Devices {
+            self.devices_close();
+        }
+        if s == Section::Devices && self.section != Section::Devices {
+            self.devices_open(cx);
         }
         self.section = s;
         self.machine = None;
@@ -372,6 +468,9 @@ impl SettingsView {
     }
 
     pub fn open_machine(&mut self, name: String, cx: &mut Context<Self>) {
+        if self.section == Section::Devices {
+            self.devices_close();
+        }
         self.section = Section::Machines;
         self.edit = None;
         self.error = None;
@@ -655,9 +754,9 @@ impl SettingsView {
                 t,
                 "Appearance",
                 if ui::MAC {
-                    "How Switchboard looks. Synced, so your other Macs and the iPhone app match."
+                    "How Switchboard looks. Synced, so your other Macs and the phone app match."
                 } else {
-                    "How Switchboard looks. Synced, so your other computers and the iPhone app match."
+                    "How Switchboard looks. Synced, so your other computers and the phone app match."
                 },
             ))
             .child(Self::row(
@@ -777,6 +876,7 @@ impl SettingsView {
                 t,
                 "st-shell",
                 items,
+                None,
                 cx.listener(|this, _: &gpui::MouseDownEvent, _, cx| {
                     this.drop.close_out();
                     cx.notify();
@@ -982,6 +1082,8 @@ impl SettingsView {
         };
         let n = list.len();
         let hover = t.hover;
+        // How each computer reaches home, from the server's keys report (nothing with keys off).
+        let keys = self.app.read(cx).keys.server.clone().unwrap_or_default();
         let mut card = div().rounded(px(ui::R_CARD)).border_1().border_color(t.line).bg(t.bg).flex().flex_col();
         for (i, m) in list.into_iter().enumerate() {
             let os = Self::os_name(m.os.as_deref());
@@ -1056,10 +1158,11 @@ impl SettingsView {
                                     .child(ui::wrap(folder).font_family(NUM)),
                             )
                             .child(
-                                ui::wrap(match Self::versions_line(&m) {
-                                    Some(v) => format!("{}. {v}", Self::status_line(&m)),
-                                    None => Self::status_line(&m),
-                                })
+                                ui::wrap(machine_note(
+                                    Self::status_line(&m),
+                                    sb_core::keys::machine_line(&keys, &m.name),
+                                    Self::versions_line(&m),
+                                ))
                                 .text_size(px(12.))
                                 .text_color(t.faint),
                             ),
@@ -1527,7 +1630,10 @@ impl SettingsView {
 
     fn folder_group(&self, t: &Theme, m: &ApiMachineRow, focused: bool, cx: &Context<Self>) -> AnyElement {
         let name = m.name.clone();
-        let shown = m.root_shown.clone().unwrap_or_else(|| "Its home folder".into());
+        let shown = match &m.root_shown {
+            Some(r) => sb_core::fmt::os_path(r, m.os.as_deref() == Some("windows")),
+            None => "Its home folder".into(),
+        };
         let mut rows = vec![];
         if m.needs_root {
             let sug = m.root_suggest.clone().unwrap_or_else(|| "~".into());
@@ -1590,7 +1696,7 @@ impl SettingsView {
             rows.push(Self::crow(
                 t,
                 shown.clone(),
-                Some("New sessions start here or in a folder under it, and stay in it. Files opens here too.".into()),
+                Some("New chats start here or in a folder under it, and stay in it. Files opens here too.".into()),
                 Some(
                     div()
                         .flex()
@@ -2770,7 +2876,13 @@ impl SettingsView {
             .flex()
             .flex_col()
             .gap(px(2.));
+        // Which of the list's lines is the page shown, counted as the list is built (`rows` lines so far).
+        let (mut rows, mut shown) = (0usize, None);
         for (i, (group, sections)) in NAV.into_iter().enumerate() {
+            if !sections.iter().any(|s| in_sidebar(*s, &self.app.read(cx).keys)) {
+                continue;
+            }
+            rows += 1;
             nav = nav.child(
                 div()
                     .flex_none()
@@ -2785,6 +2897,13 @@ impl SettingsView {
                     .child(group),
             );
             for &s in sections {
+                if !in_sidebar(s, &self.app.read(cx).keys) {
+                    continue;
+                }
+                if self.section == s && (s != Section::Machines || self.machine.is_none()) {
+                    shown = Some(rows);
+                }
+                rows += 1;
                 nav = nav.child(self.nav_row(&t, s, cx));
                 // Under Machines, each machine: its own page.
                 if s == Section::Machines
@@ -2793,6 +2912,10 @@ impl SettingsView {
                     for m in &ms.machines {
                         let mon = self.section == Section::Machines && self.machine.as_deref() == Some(m.name.as_str());
                         let name = m.name.clone();
+                        if mon {
+                            shown = Some(rows);
+                        }
+                        rows += 1;
                         nav = nav.child(
                             ui::focusable(div().id(SharedString::from(format!("st-nav-m-{}", m.name))), &t)
                                 .flex_none()
@@ -2833,16 +2956,79 @@ impl SettingsView {
             Self::nav_item(&t, "st-nav-about", "About", "info", false)
                 .on_click(|_: &ClickEvent, _, cx| cx.defer(crate::about::open)),
         );
+        // The page shown is brought into sight in the list when it changes (or the list does: the machines come a
+        // moment after the window), never while the list is only being scrolled. It can be placed once the list
+        // has been laid out with these lines, so until then another frame is asked for.
+        let view = self.nav_scroll.bounds();
+        if let Some(ix) = shown {
+            let key = Some((ix, rows));
+            if self.nav_reveal.0 != key {
+                self.nav_reveal = (key, 8);
+            }
+            if self.nav_reveal.1 > 0 {
+                let row = self
+                    .nav_scroll
+                    .bounds_for_item(ix)
+                    .filter(|_| view.size.height > px(0.) && self.nav_scroll.children_count() == rows);
+                match row {
+                    Some(b) => {
+                        let off = self.nav_scroll.offset();
+                        if let Some(y) = reveal_offset(
+                            f32::from(b.top() - view.top()),
+                            f32::from(b.bottom() - view.top()),
+                            f32::from(view.size.height),
+                            f32::from(off.y),
+                            f32::from(self.nav_scroll.max_offset().y),
+                            NAV_MARGIN,
+                        ) {
+                            self.nav_scroll.set_offset(gpui::point(off.x, px(y)));
+                        }
+                        self.nav_reveal.1 = 0;
+                    }
+                    None => {
+                        self.nav_reveal.1 -= 1;
+                        window.request_animation_frame();
+                    }
+                }
+            }
+        }
+        // More lines above or below than show: the list fades out at that edge, so a cut line reads as "scroll"
+        // and never as the end of the list. Known from the frame before, so the first frame asks for a second.
+        if view.size.height <= px(0.) {
+            window.request_animation_frame();
+        }
+        let off = f32::from(self.nav_scroll.offset().y);
+        let max = f32::from(self.nav_scroll.max_offset().y);
+        let fade = |top: bool| {
+            let (from, to) = if top { (t.bg, t.bg.opacity(0.)) } else { (t.bg.opacity(0.), t.bg) };
+            div()
+                .absolute()
+                .left_0()
+                .right_0()
+                .h(px(22.))
+                .when(top, |d| d.top_0())
+                .when(!top, |d| d.bottom_0())
+                .bg(gpui::linear_gradient(180., gpui::linear_color_stop(from, 0.), gpui::linear_color_stop(to, 1.)))
+        };
         let nav = div()
             .flex_none()
-            .w(px(220.))
+            .w(px(NAV_W))
             .h_full()
             .flex()
             .flex_col()
             .bg(t.bg)
             .border_r_1()
             .border_color(t.line)
-            .child(div().relative().flex_1().min_h_0().child(nav).child(ui::scrollbar(&self.nav_scroll)))
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(nav)
+                    .when(off < -1., |d| d.child(fade(true)))
+                    .when(max > 1. && off > -max + 1., |d| d.child(fade(false)))
+                    .child(ui::scrollbar(&self.nav_scroll)),
+            )
             .child(foot);
         let body = match self.section {
             Section::Appearance => self.appearance(&t, cx),
@@ -2854,6 +3040,7 @@ impl SettingsView {
                 page.into_any_element()
             }
             Section::Machines => self.machines(&t, window, cx),
+            Section::Devices => self.devices(&t, cx),
             Section::Library => self.library(&t, window, cx),
             Section::Notifications => self.notifications(&t, cx),
             Section::Chrome => self.chrome(&t, cx),
@@ -2892,7 +3079,7 @@ impl SettingsView {
                             .track_scroll(&self.scroll)
                             .px(px(32.))
                             .py(px(26.))
-                            .child(body),
+                            .child(div().max_w(px(PAGE_W)).child(body)),
                     )
                     .child(ui::scrollbar(&self.scroll)),
             )
@@ -2916,6 +3103,7 @@ mod tests {
             Section::NewSessions,
             Section::Context,
             Section::Machines,
+            Section::Devices,
             Section::Library,
             Section::Notifications,
             Section::Chrome,
@@ -2931,6 +3119,71 @@ mod tests {
         }
         assert_eq!(shown.len(), all.len());
         assert!(NAV.iter().all(|(name, s)| !name.is_empty() && !s.is_empty()));
+    }
+
+    #[test]
+    fn the_machines_come_last_so_no_page_sits_under_a_list_that_grows() {
+        let (name, last) = NAV[NAV.len() - 1];
+        assert_eq!((name, last), ("Machines", &[Section::Machines][..]));
+    }
+
+    #[test]
+    fn the_selected_line_is_scrolled_into_sight_with_room_to_spare() {
+        // A list 700 tall in a view of 500: it can scroll 200.
+        let (view, max, m) = (500., 200., 26.);
+        // In plain sight: left alone, wherever the list is.
+        assert_eq!(reveal_offset(100., 132., view, 0., max, m), None);
+        assert_eq!(reveal_offset(300., 332., view, -150., max, m), None);
+        // Under the bottom edge (the audit's Server line under the pinned foot): up until it clears it by the margin.
+        assert_eq!(reveal_offset(480., 512., view, 0., max, m), Some(-38.));
+        // Showing, but closer to the edge than the margin: nudged.
+        assert_eq!(reveal_offset(460., 492., view, 0., max, m), Some(-18.));
+        // The last line: as far as the list goes, no further.
+        assert_eq!(reveal_offset(658., 690., view, 0., max, m), Some(-200.));
+        assert_eq!(reveal_offset(658., 690., view, -200., max, m), None, "already at the end");
+        // Above the top edge after scrolling down: back down to it. The first line: to the very top.
+        assert_eq!(reveal_offset(100., 132., view, -200., max, m), Some(-74.));
+        assert_eq!(reveal_offset(14., 46., view, -200., max, m), Some(0.));
+        // A list that fits never moves.
+        assert_eq!(reveal_offset(480., 512., 600., 0., 0., m), None);
+        assert_eq!(reveal_offset(580., 612., 600., 0., -3., m), None);
+    }
+
+    #[test]
+    fn devices_is_in_the_sidebar_only_when_the_server_connects_with_keys() {
+        use sb_core::keys::{Keys, Mode, Readiness};
+        let shown = |k: &Keys| -> Vec<Section> {
+            NAV.iter().flat_map(|(_, s)| s.iter().copied()).chain(NAV_FOOT).filter(|s| in_sidebar(*s, k)).collect()
+        };
+        // A server from before keys, and one with keys off: the sidebar as it always was.
+        let before = shown(&Keys::default());
+        assert!(!before.contains(&Section::Devices));
+        assert_eq!(before.len(), 12);
+        let off = Keys { server: Some(Readiness { keys: Mode::Off, ..Default::default() }), node: None };
+        assert_eq!(shown(&off), before);
+        // Keys off on a server that can turn them on: only the app on the home computer itself gets the page.
+        let off_at = |here| Keys {
+            server: Some(Readiness { keys: Mode::Off, switch: true, here, ..Default::default() }),
+            node: None,
+        };
+        assert_eq!(shown(&off_at(false)), before);
+        assert!(shown(&off_at(true)).contains(&Section::Devices));
+        for mode in [Mode::Both, Mode::Only] {
+            let on = Keys { server: Some(Readiness { keys: mode, ..Default::default() }), node: None };
+            let with = shown(&on);
+            assert_eq!(with.len(), 13);
+            let at = with.iter().position(|s| *s == Section::Devices).unwrap();
+            assert_eq!(with[at + 1], Section::Server, "with Server, under Home computer");
+        }
+    }
+
+    #[test]
+    fn a_machines_line_says_how_it_is_connected_only_with_keys() {
+        let v = Some("Node 0.8.22".to_string());
+        assert_eq!(machine_note("Online".into(), None, v.clone()), "Online. Node 0.8.22", "as it always read");
+        assert_eq!(machine_note("Online".into(), None, None), "Online");
+        assert_eq!(machine_note("Online".into(), Some("Direct"), v), "Online. Direct. Node 0.8.22");
+        assert_eq!(machine_note("Online".into(), Some("Through the relay"), None), "Online. Through the relay");
     }
 
     #[test]

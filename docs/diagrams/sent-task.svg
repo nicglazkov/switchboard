@@ -1,0 +1,28 @@
+<svg viewBox="0 0 880 340" role="img" aria-labelledby="fig-sent-task-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-sent-task-t">A chat on the laptop sends a task to the closet PC, where a new chat does it under the line Sent by Claude and sends its report back to the chat that asked.</title>
+<text class="d-title" x="40" y="52">A chat sent by Claude</text>
+<rect class="d-panel" x="40" y="84" width="300" height="216" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><rect x="4" y="5" width="16" height="11" rx="2"/>
+<path d="M2 19h20"/></g>
+<text x="94" y="120">Laptop</text>
+<text class="d-sub" x="60" y="166">Your chat</text>
+<rect class="d-chip" x="60" y="180" width="260" height="44" rx="22"/>
+<text class="d-small" x="80" y="207">Ship the widget</text>
+<text class="d-sub" x="60" y="256">1 task out: 1 working</text>
+<rect class="d-panel" x="540" y="84" width="300" height="216" rx="14"/>
+<g class="d-ico" transform="translate(560 102)"><rect x="4" y="4" width="16" height="7" rx="2"/><rect x="4" y="13" width="16" height="7" rx="2"/>
+<path d="M8 7.5h.01M8 16.5h.01"/></g>
+<text x="594" y="120">Closet PC</text>
+<text class="d-sub" x="560" y="166">Sent by Claude 1</text>
+<rect class="d-chip-sel" x="560" y="180" width="260" height="44" rx="22"/>
+<text class="d-small t-sel" x="580" y="207">Build the Windows app</text>
+<text class="d-sub" x="560" y="256">from Ship the widget on Laptop</text>
+<path class="d-req" d="M324 190H556"/>
+<path class="d-req" d="M547 182L556 190L547 198"/>
+<circle class="d-num-req" cx="400" cy="190" r="13"/>
+<text class="d-num" x="400" y="190" dy="4.5">1</text>
+<path class="d-ret" d="M556 214H324"/>
+<path class="d-ret" d="M333 206L324 214L333 222"/>
+<circle class="d-num-ret" cx="480" cy="214" r="13"/>
+<text class="d-num" x="480" y="214" dy="4.5">2</text>
+</svg>

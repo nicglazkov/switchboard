@@ -1,0 +1,23 @@
+<svg viewBox="0 0 880 440" role="img" aria-labelledby="fig-cost-break-even-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-cost-break-even-t">A chart of the estimated cost of the next message against the size of a cold chat. Resume rises steeply with size. Start fresh stays nearly flat at about 85k to 95k. The two cross near 70k, and Switchboard suggests Start fresh from 80k.</title>
+<text class="d-title" x="40" y="52">Resume or Start fresh, by the size of a cold chat</text>
+<text class="d-sub" x="100" y="92">Estimated cost of the next message</text>
+<path class="d-line" d="M100 108V360H820"/>
+<text class="d-sub end" x="88" y="365">0</text>
+<text class="d-sub end" x="88" y="300">100k</text>
+<text class="d-sub end" x="88" y="235">200k</text>
+<text class="d-sub end" x="88" y="170">300k</text>
+<text class="d-sub mid" x="280" y="386">50k</text>
+<text class="d-sub mid" x="460" y="386">100k</text>
+<text class="d-sub mid" x="640" y="386">150k</text>
+<text class="d-sub mid" x="820" y="386">200k</text>
+<text class="d-sub end" x="820" y="414">Size of the cold chat, in tokens</text>
+<path class="d-line d-dotted" d="M388 132V360"/>
+<text class="mid" x="388" y="118">80k</text>
+<path class="d-bad" d="M100 360L204 358L820 136"/>
+<path class="d-line-sel" d="M100 308L820 299"/>
+<text class="end t-bad" x="760" y="140">Resume, cold</text>
+<text class="end t-sel" x="820" y="282">Start fresh</text>
+<text class="d-sub" x="120" y="288">Resume is cheaper</text>
+<text class="d-sub" x="408" y="340">Start fresh is cheaper</text>
+</svg>

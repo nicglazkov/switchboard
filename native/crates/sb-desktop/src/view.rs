@@ -373,6 +373,18 @@ pub struct BoardView {
     /// The empty board's address field (firstrun.rs), and why the last address typed there was not taken.
     pub server_field: Entity<InputState>,
     pub server_err: Option<String>,
+    /// Joining a home with a code (firstrun.rs `join_screen`): where it is, its field, whether it was asked for from
+    /// "Can't reach Switchboard", and whether Advanced is open.
+    pub join: sb_core::keys::Join,
+    pub join_field: Entity<InputState>,
+    /// The home computer's address, asked for when a link names no relay.
+    pub join_addr: Entity<InputState>,
+    pub join_view: bool,
+    pub adv_open: bool,
+    /// Screenshots: the join screen shows whatever the node says, and Join sends nothing.
+    pub join_shot: bool,
+    /// The join screen showed on the last frame, so its field takes the keyboard once, when it arrives.
+    pub join_seen: bool,
     /// The empty board's search for a server (firstrun.rs): what it found, whether the unreachable screen shows it
     /// instead of the saved address, whether the address field is open under "Type an address", and the server being
     /// connected to.
@@ -427,6 +439,8 @@ pub struct BoardView {
     pub pal_idx: usize,
     pub pal_scroll: gpui::UniformListScrollHandle,
     pub board_scroll: ScrollHandle,
+    /// The board's sideways scroll, in a window too narrow for its five columns (lanes.rs).
+    pub lanes_x: ScrollHandle,
     /// The details panel, the flags drawer, the notices tray and the stopped list: each wears the shared scrollbar.
     pub ins_scroll: ScrollHandle,
     pub flags_scroll: ScrollHandle,
@@ -487,10 +501,12 @@ impl BoardView {
     pub fn new(solo: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> BoardView {
         let app = crate::state::app(cx);
         let focus = cx.focus_handle();
-        let pal = cx.new(|cx| InputState::new(window, cx).placeholder("Search chats and commands"));
+        let pal = cx.new(|cx| InputState::new(window, cx).placeholder(crate::palette::HINT));
         let group_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name this group"));
         let chat_name = cx.new(|cx| InputState::new(window, cx).placeholder("Name this chat"));
         let server_field = cx.new(|cx| InputState::new(window, cx).placeholder("192.0.2.10:8130"));
+        let join_field = cx.new(|cx| InputState::new(window, cx).placeholder("ABCD-EFGH, or the link"));
+        let join_addr = cx.new(|cx| InputState::new(window, cx).placeholder("192.0.2.20:41641"));
         let mut subs = vec![
             cx.observe(&app, |this, app, cx| {
                 this.watch_frames();
@@ -627,6 +643,31 @@ impl BoardView {
                     this.server_err = None;
                     cx.notify();
                 }
+                _ => {}
+            }),
+            cx.subscribe_in(&join_field, window, |this, field, ev: &InputEvent, window, cx| match ev {
+                InputEvent::PressEnter { .. } => this.join_now(cx),
+                InputEvent::Change => {
+                    // A code takes its shape as it is typed or pasted (7JBE-42SU); a link is left alone. Only with
+                    // the caret at the end, so a correction in the middle keeps its place.
+                    let shaped = {
+                        let f = field.read(cx);
+                        let text = f.value();
+                        (f.cursor() == text.len()).then(|| sb_core::keys::code_as_typed(&text)).flatten()
+                    };
+                    if let Some(code) = shaped {
+                        field.update(cx, |f, cx| f.set_value(code, window, cx));
+                    }
+                    // What was said about the last try no longer applies to what is in the field now.
+                    if !this.join_shot && this.join.edited() {
+                        cx.notify();
+                    }
+                }
+                _ => {}
+            }),
+            cx.subscribe_in(&join_addr, window, |this, _, ev: &InputEvent, _, cx| match ev {
+                InputEvent::PressEnter { .. } => this.join_now(cx),
+                InputEvent::Change if !this.join_shot && this.join.address_edited() => cx.notify(),
                 _ => {}
             }),
             cx.subscribe_in(&chat_name, window, |this, _, ev: &InputEvent, _, cx| match ev {
@@ -766,6 +807,13 @@ impl BoardView {
             chat_name,
             server_field,
             server_err: None,
+            join: Default::default(),
+            join_field,
+            join_addr,
+            join_view: false,
+            adv_open: false,
+            join_shot: false,
+            join_seen: false,
             find: sb_core::firstrun::Search::default(),
             find_view: false,
             type_open: false,
@@ -798,6 +846,7 @@ impl BoardView {
             pal_idx: 0,
             pal_scroll: gpui::UniformListScrollHandle::new(),
             board_scroll: ScrollHandle::new(),
+            lanes_x: ScrollHandle::new(),
             ins_scroll: ScrollHandle::new(),
             flags_scroll: ScrollHandle::new(),
             tray_scroll: ScrollHandle::new(),
@@ -879,6 +928,7 @@ impl BoardView {
     /// Follows the system unless a theme was picked.
     pub fn apply_theme(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let mode = Mode::parse(self.app.read(cx).settings.theme.as_deref());
+        crate::theme::sync_native(mode, cx);
         let dark = match mode {
             Mode::Dark => true,
             Mode::Light => false,
@@ -1506,6 +1556,9 @@ impl BoardView {
 
     /// Opens the Week chip's usage panel and reads the latest numbers for it.
     pub fn open_plan(&mut self, cx: &mut Context<Self>) {
+        if self.app.update(cx, |s, cx| s.needs_home(cx)) {
+            return;
+        }
         self.plan_open = true;
         self.add_open = false;
         self.usage_hover = None;
@@ -1766,7 +1819,7 @@ impl BoardView {
         self.pal_chats = false;
         self.pal_idx = 0;
         self.pal.update(cx, |p, cx| {
-            p.set_placeholder("Search chats and commands", window, cx);
+            p.set_placeholder(crate::palette::HINT, window, cx);
             p.set_value("", window, cx);
             p.focus(window, cx);
         });
@@ -1782,7 +1835,7 @@ impl BoardView {
         self.pal_idx = 0;
         self.pal_scroll.scroll_to_item(0, gpui::ScrollStrategy::Top);
         self.pal.update(cx, |p, cx| {
-            p.set_placeholder("Open a chat in a terminal", window, cx);
+            p.set_placeholder(crate::palette::HINT_CHATS, window, cx);
             p.set_value("", window, cx);
             p.focus(window, cx);
         });
@@ -1790,6 +1843,11 @@ impl BoardView {
     }
 
     pub fn open_new(&mut self, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.app.update(cx, |s, cx| s.needs_home(cx)) {
+            self.add_open = false;
+            cx.notify();
+            return;
+        }
         self.plan_open = false;
         let machine = machine
             .or_else(|| self.solo.clone())
@@ -1852,6 +1910,10 @@ impl BoardView {
 
     /// What an inspector button does.
     pub fn run_action(&mut self, id: ActionId, key: String, cx: &mut Context<Self>) {
+        // (a key or a menu can ask for what the inspector shows greyed out)
+        if !acts::works_away(id) && self.app.update(cx, |s, cx| s.needs_home(cx)) {
+            return;
+        }
         let app = self.app.read(cx);
         match id {
             ActionId::Fresh => {
@@ -2150,6 +2212,7 @@ impl BoardView {
                         "context" => crate::settings::Section::Context,
                         "terminal" => crate::settings::Section::Terminal,
                         "machines" => crate::settings::Section::Machines,
+                        "devices" => crate::settings::Section::Devices,
                         "notifications" => crate::settings::Section::Notifications,
                         "chrome" => crate::settings::Section::Chrome,
                         "library" => crate::settings::Section::Library,
@@ -2246,6 +2309,11 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
         let start = Instant::now();
         loop {
             cx.background_executor().timer(Duration::from_millis(200)).await;
+            // A Mac window that is behind others or on a sleeping display draws no frames on its own, and the
+            // SB_SHOT state is applied while drawing: draw, so the state does not wait out the whole 20 s.
+            if cfg!(target_os = "macos") {
+                let _ = cx.update(|window, cx| window.draw(cx).clear(cx));
+            }
             let ready =
                 this.update(cx, |v, cx| v.shot.is_none() && (v.find_shot || v.app.read(cx).live)).unwrap_or(true);
             if ready || start.elapsed() > Duration::from_secs(20) {
@@ -2601,12 +2669,13 @@ fn capture_when_ready(out: std::path::PathBuf, window: &mut Window, cx: &mut Con
 impl Render for BoardView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.frame_drawn(window.is_window_active());
+        ui::set_full_screen(window.is_fullscreen());
         if let Some(shot) = self.shot.clone()
             && let Some((what, arg)) = shot.split_once('=').filter(|(w, _)| *w == "find" || *w == "setup")
         {
             self.shot = None;
             if what == "find" {
-                self.shot_find(arg, cx);
+                self.shot_find(arg, window, cx);
             } else {
                 self.shot_setup(arg, cx);
             }
@@ -2617,6 +2686,12 @@ impl Render for BoardView {
         if !self.find_shot {
             self.search_if_first(cx);
         }
+        // The join screen has just come up: its code field takes the keyboard.
+        let join_showing = self.join_showing(self.app.read(cx));
+        if crate::firstrun::focus_join(join_showing, self.join_seen, self.join.step()) {
+            self.join_field.update(cx, |f, cx| f.focus(window, cx));
+        }
+        self.join_seen = join_showing;
         if let Some(k) = self.pending_link.take() {
             self.open_link(k, window, cx);
         }

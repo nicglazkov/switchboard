@@ -417,7 +417,7 @@ class RecoverTest(unittest.TestCase):
             (st / 'jobs.json').write_text(text)
             app = self.make(state=st)
             self.assertEqual(app.jobs, {}, text)
-            self.assertEqual((st / 'jobs.json.bad').read_text(), text)
+            self.assertEqual([p.read_text() for p in st.glob('jobs.json.bad-*')], [text])
             r = app.post('/api/action', {'machine': 'desk', 'verb': 'resume', 'sid': SID})  # and it works from there
             self.assertEqual(self.wait(app, r['job'])['state'], 'done')
 

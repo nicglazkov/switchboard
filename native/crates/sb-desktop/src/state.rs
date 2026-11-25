@@ -7,9 +7,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SystemNotification};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Global, SharedString, SystemNotification};
 use sb_core::actions::{self, ActionId};
 use sb_core::api::{ApiCleanItem, ApiJob, ApiPrefs, ApiThreadChat};
+use sb_core::durable;
 use sb_core::{
     BusyInfo, ContinueRequest, Core, CoreConfig, CoreError, Job, JobKind, JobState, Lamp, NewRequest, Snapshot, cache,
     fmt, names,
@@ -17,6 +18,9 @@ use sb_core::{
 use serde::{Deserialize, Serialize};
 
 const REFRESH: Duration = Duration::from_secs(10);
+/// While the home computer is away there is no live stream (the helper answers in its place, and a stream is
+/// one of the things it cannot give), so the board is asked for this often instead.
+const REFRESH_AWAY: Duration = Duration::from_secs(5);
 const TOAST_SECS: f64 = 3.8;
 /// While the usage panel is open its numbers are read again this often (seconds).
 const USAGE_EVERY: f64 = 120.0;
@@ -53,28 +57,94 @@ fn tabs_due(sent: Option<&(Vec<String>, f64)>, tabs: &[String], now: f64) -> boo
     sent.is_none_or(|(keys, at)| keys != tabs || now - at >= TABS_RESEND)
 }
 
-/// Reads the settings file. One that no longer parses keeps every setting that still reads, and the file as it was
-/// is copied to settings.json.bad first, so the next save cannot lose what was in it. True when that happened.
-fn load_settings(path: &std::path::Path) -> (Settings, bool) {
-    let Ok(bytes) = std::fs::read(path) else { return (Settings::default(), false) };
-    if let Ok(s) = serde_json::from_slice(&bytes) {
-        return (s, false);
+/// Why the settings in use are not simply what settings.json held. Each carries the name the file as it was
+/// found has now, beside settings.json (None when it could not even be opened, and was left alone).
+#[derive(Debug, Clone, PartialEq)]
+enum SettingsTrouble {
+    /// Some settings did not read (a newer or older app wrote them another way): the rest are in use.
+    Partial(Option<String>),
+    /// The file was damaged (emptied or cut short, as a power cut leaves it): its last good copy is in use.
+    Recovered(Option<String>),
+    /// Damaged, with no good copy: the defaults are in use, and are not written down until a setting is changed.
+    Lost(Option<String>),
+}
+
+impl SettingsTrouble {
+    /// The toast's two lines.
+    fn words(&self) -> (&'static str, String) {
+        let kept = |k: &Option<String>| match k {
+            Some(name) => format!(" The old file is saved next to it as {name}."),
+            None => String::new(),
+        };
+        match self {
+            SettingsTrouble::Partial(k) => {
+                ("Some settings couldn't be read", format!("The rest were kept.{}", kept(k)))
+            }
+            SettingsTrouble::Recovered(k) => {
+                ("The settings file was damaged", format!("Your settings are back from the last good copy.{}", kept(k)))
+            }
+            SettingsTrouble::Lost(k) => {
+                ("The settings couldn't be read", format!("Switchboard is using its defaults.{}", kept(k)))
+            }
+        }
     }
-    let mut kept = serde_json::Map::new();
-    if let Ok(serde_json::Value::Object(all)) = serde_json::from_slice::<serde_json::Value>(&bytes) {
+}
+
+/// settings.json as a store (sb-core durable.rs). Its copy always matches the last save, so a server or a tab
+/// that was removed never comes back from the copy.
+fn settings_store(path: &std::path::Path) -> durable::Store {
+    durable::Store::new(path).bak(durable::Bak::Fresh)
+}
+
+/// Reads the settings file.
+///
+/// - One that is damaged (zeros, cut short, not an object) is put aside as settings.json.bad-<time> and the last
+///   good copy is used. With no copy the defaults are used, and `save_settings_quietly` does not write them down.
+/// - One that is whole but has settings that no longer read keeps every setting that does, and the file as it
+///   was is copied to settings.json.bad-<time> first, so the next save cannot lose what was in it.
+fn load_settings(path: &std::path::Path) -> (Settings, Option<SettingsTrouble>) {
+    let partial = std::cell::Cell::new(false);
+    let store = settings_store(path);
+    let (settings, status) = store.load(|raw| {
+        partial.set(false);
+        if let Ok(s) = serde_json::from_slice::<Settings>(raw) {
+            return Some(s);
+        }
+        let Ok(serde_json::Value::Object(all)) = serde_json::from_slice::<serde_json::Value>(raw) else { return None };
+        let mut kept = serde_json::Map::new();
         for (k, v) in all {
             let one = serde_json::Value::Object([(k.clone(), v.clone())].into_iter().collect());
             if serde_json::from_value::<Settings>(one).is_ok() {
                 kept.insert(k, v);
             }
         }
+        partial.set(true);
+        Some(serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default())
+    });
+    let trouble = match status {
+        durable::Status::Recovered => Some(SettingsTrouble::Recovered(store.kept())),
+        durable::Status::Broken => Some(SettingsTrouble::Lost(store.kept())),
+        durable::Status::Ok if partial.get() => {
+            let copy = durable::keep_copy(path);
+            if copy.is_none() {
+                log::warn!("could not keep a copy of the settings that did not read");
+            }
+            Some(SettingsTrouble::Partial(copy))
+        }
+        _ => None,
+    };
+    (settings.unwrap_or_default(), trouble)
+}
+
+/// Writes the settings. `asked`: the user changed something, which also starts a settings file that was lost
+/// over again; without it, a save the app makes by itself is refused while the file is lost (durable.rs), so
+/// the defaults are not written down as if they had been chosen.
+fn write_settings(path: &std::path::Path, settings: &Settings, asked: bool) {
+    match settings_store(path).put_json(settings, asked) {
+        Err(e) if durable::is_refused(&e) => log::debug!("settings not saved: {e}"),
+        Err(e) => log::warn!("could not save settings: {e}"),
+        Ok(()) => {}
     }
-    let mut bad = path.as_os_str().to_owned();
-    bad.push(".bad");
-    if let Err(e) = std::fs::copy(path, &bad) {
-        log::warn!("could not keep a copy of the settings that did not read: {e}");
-    }
-    (serde_json::from_value(serde_json::Value::Object(kept)).unwrap_or_default(), true)
 }
 
 /// The chat a notification's tag stands for: a needs-you one is the chat's key, a job's ("job:<id>") the chat the
@@ -582,6 +652,34 @@ pub struct AppState {
     pub lib_busy: HashSet<String>,
     /// Keys saved on this Mac from Settings ("tool/NAME", names only), shown as set until the server's next look agrees.
     pub lib_keys_here: HashSet<String>,
+    /// How devices connect (sb_core::keys): the server's report and the node on this computer. Empty with a server
+    /// and a node from before keys, and then nothing of keys shows anywhere in the app.
+    pub keys: sb_core::keys::Keys,
+    /// The node's control API on this computer.
+    pub node: Arc<dyn sb_core::keys::NodeControl>,
+    /// When the node was last asked, when the server's report was, and whether an ask is out.
+    keys_at: f64,
+    keys_server_at: f64,
+    keys_loading: bool,
+}
+
+/// The server's keys report is read again this often while connected (seconds), and the node on this computer this
+/// often while the board has no server to show (that is when its answer changes what the screen offers).
+const KEYS_EVERY: f64 = 60.0;
+const NODE_EVERY: f64 = 5.0;
+
+/// What a look at keys leaves in place: the node's answer always replaces the old one (no answer is "no node"); the
+/// server's report replaces the old one only when the server was asked and answered, so a hiccup hides nothing.
+fn keys_after(
+    was: &sb_core::keys::Keys,
+    server: Option<Result<Option<sb_core::keys::Readiness>, CoreError>>,
+    node: Option<sb_core::keys::NodeStatus>,
+) -> sb_core::keys::Keys {
+    let server = match server {
+        Some(Ok(r)) => r,
+        Some(Err(_)) | None => was.server.clone(),
+    };
+    sb_core::keys::Keys { server, node }
 }
 
 impl EventEmitter<AppEvent> for AppState {}
@@ -612,7 +710,7 @@ impl AppState {
             Some(p) => Some(std::path::PathBuf::from(p)),
             None => cache::settings_dir().map(|d| d.join("settings.json")),
         };
-        let (mut settings, settings_bad) = settings_path.as_deref().map(load_settings).unwrap_or_default();
+        let (mut settings, settings_trouble) = settings_path.as_deref().map(load_settings).unwrap_or_default();
         let cache_dir = std::env::var("SWITCHBOARD_CACHE").ok().filter(|s| !s.is_empty());
         // Where the server is: SWITCHBOARD_URL, else the saved addresses (the last one that worked first), else
         // nothing (Core looks on the local network, and the board asks for an address if that finds none).
@@ -629,9 +727,8 @@ impl AppState {
             if let Some(dir) = dir
                 && settings.saved.migrate_from_cache(&dir, Self::now())
                 && let Some(p) = &settings_path
-                && let Err(e) = cache::save_json(p, &settings)
             {
-                log::warn!("could not save settings: {e}");
+                write_settings(p, &settings, false);
             }
             servers = settings.saved.connect_order();
         }
@@ -715,26 +812,33 @@ impl AppState {
                 lib_shown: 0,
                 lib_busy: HashSet::new(),
                 lib_keys_here: HashSet::new(),
+                keys: Default::default(),
+                node: Arc::new(sb_core::keys::HttpNode::local()),
+                keys_at: 0.0,
+                keys_server_at: 0.0,
+                keys_loading: false,
             };
-            if settings_bad {
-                s.toast(
-                    "Some settings couldn't be read",
-                    Some("The rest were kept. The old file is saved next to it as settings.json.bad.".into()),
-                    true,
-                    cx,
-                );
+            if let Some(trouble) = settings_trouble {
+                let (title, sub) = trouble.words();
+                s.toast(title, Some(sub), true, cx);
             }
             s.refresh(cx);
             s.listen(cx);
             s.load_prefs(|_, _| {}, cx);
             s.load_library(cx);
+            s.load_keys(cx);
             s.update_hooks(cx);
             cx.spawn(async move |this, cx| {
+                let mut away = false;
                 loop {
-                    cx.background_executor().timer(REFRESH).await;
-                    if this.update(cx, |s, cx| s.refresh(cx)).is_err() {
+                    cx.background_executor().timer(if away { REFRESH_AWAY } else { REFRESH }).await;
+                    let Ok(now) = this.update(cx, |s, cx| {
+                        s.refresh(cx);
+                        s.away().is_some()
+                    }) else {
                         break;
-                    }
+                    };
+                    away = now;
                 }
             })
             .detach();
@@ -760,6 +864,26 @@ impl AppState {
     /// The link to the server is up: live data came in this run and the last refresh worked.
     pub fn link_up(&self) -> bool {
         self.live && self.error.is_none()
+    }
+
+    /// The home computer is away and the board is what the other computers say about their own chats: what
+    /// the helper on this computer said about it (sb-link standin.rs).
+    pub fn away(&self) -> Option<&sb_core::api::ApiAway> {
+        self.snap.away.as_ref()
+    }
+
+    /// The one sentence for everything that is greyed out while the home computer is away.
+    pub fn away_reason(&self) -> Option<SharedString> {
+        self.away().map(|a| SharedString::from(a.reason().to_string()))
+    }
+
+    /// For something that needs the home computer: true, with the reason said, while it is away.
+    pub fn needs_home(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.away().is_none() {
+            return false;
+        }
+        self.toast(sb_core::api::AWAY_REASON, None, false, cx);
+        true
     }
 
     /// A chat's live state as every view shows it (sb_core::live). `last_out`: a terminal's own last output.
@@ -882,6 +1006,9 @@ impl AppState {
                 self.check_update(cx);
                 self.synced = now;
                 self.error = None;
+                if now - self.keys_server_at > KEYS_EVERY {
+                    self.load_keys(cx);
+                }
                 self.keep_server();
                 let snap = &self.snap;
                 let hidden = self.hidden.len();
@@ -921,7 +1048,7 @@ impl AppState {
         }
         changed |= saved.prune(now);
         if changed {
-            self.save_settings();
+            self.save_settings_quietly();
             self.use_saved_order();
         }
     }
@@ -961,6 +1088,37 @@ impl AppState {
         Ok(())
     }
 
+    /// Asks how devices connect: the node on this computer, and the server's report once the server answers. A
+    /// server or a node from before keys answers neither, `keys` stays empty, and nothing of keys shows.
+    pub fn load_keys(&mut self, cx: &mut Context<Self>) {
+        if self.keys_loading {
+            return;
+        }
+        self.keys_loading = true;
+        let now = Self::now();
+        self.keys_at = now;
+        let ask_server = self.link_up() || self.live;
+        if ask_server {
+            self.keys_server_at = now;
+        }
+        let (core, node) = (self.core.clone(), self.node.clone());
+        cx.spawn(async move |this, cx| {
+            let (server, node) = cx
+                .background_executor()
+                .spawn(async move { (ask_server.then(|| core.keys_readiness()), node.status().ok()) })
+                .await;
+            let _ = this.update(cx, |s, cx| {
+                s.keys_loading = false;
+                let keys = keys_after(&s.keys, server, node);
+                if keys != s.keys {
+                    s.keys = keys;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
     /// The first run, or a machine just added: when a machine's Claude folder was never picked, Settings opens at it
     /// and asks (once per machine).
     fn ask_roots(&mut self, cx: &mut Context<Self>) {
@@ -975,13 +1133,25 @@ impl AppState {
                 else {
                     return;
                 };
-                s.settings.root_asked.push(m.name.clone());
-                s.save_settings();
                 let name = m.name.clone();
-                cx.defer(move |cx| crate::settings::open_machine(name, cx));
+                // Asked once per machine: marked when Settings really opens at it. While Devices shows the pairing
+                // that brought the machine, the question waits for that card and is marked then.
+                cx.defer(move |cx| {
+                    if crate::settings::ask_root(name.clone(), cx) {
+                        app(cx).update(cx, |s, _| s.root_was_asked(&name));
+                    }
+                });
             });
         })
         .detach();
+    }
+
+    /// A machine's Claude folder was asked for: it is not asked again.
+    pub fn root_was_asked(&mut self, machine: &str) {
+        if !self.settings.root_asked.iter().any(|m| m == machine) {
+            self.settings.root_asked.push(machine.to_string());
+            self.save_settings();
+        }
     }
 
     /// Once a second: drops expired toasts and jobs, and redraws only when something on screen counts in seconds
@@ -1012,7 +1182,7 @@ impl AppState {
             for j in &done {
                 self.park_job(j);
             }
-            self.save_settings();
+            self.save_settings_quietly();
         }
         let minute = (now / 60.0).floor() as i64;
         let since = now - self.synced;
@@ -1022,6 +1192,11 @@ impl AppState {
         if seconds || minute != self.minute || nt != self.toasts.len() || nj != self.jobs.len() {
             self.minute = minute;
             cx.notify();
+        }
+        // No server to show: whether this computer's node can join a home, or why it can't reach it, is what the
+        // empty board offers, so its answer is kept fresh.
+        if self.snap.machines.is_empty() && now - self.keys_at >= NODE_EVERY {
+            self.load_keys(cx);
         }
         // The usage panel is open (it was drawn within the last minute and a half): keep its numbers current.
         if now - self.usage_shown.get() < 90.0 && now - self.usage_loaded >= USAGE_EVERY {
@@ -1058,11 +1233,18 @@ impl AppState {
         self.settings_path.as_deref().and_then(|p| p.parent()).map(|d| d.join("new-draft.json"))
     }
 
+    /// Saves the settings after something the user did.
     pub fn save_settings(&self) {
-        if let Some(p) = &self.settings_path
-            && let Err(e) = cache::save_json(p, &self.settings)
-        {
-            log::warn!("could not save settings: {e}");
+        if let Some(p) = &self.settings_path {
+            write_settings(p, &self.settings, true);
+        }
+    }
+
+    /// Saves the settings after something the app noted by itself (the server that answered, a notice that
+    /// timed out). While a damaged settings file has no good copy this writes nothing: see `write_settings`.
+    fn save_settings_quietly(&self) {
+        if let Some(p) = &self.settings_path {
+            write_settings(p, &self.settings, false);
         }
     }
 
@@ -1129,7 +1311,7 @@ impl AppState {
             for t in gone {
                 self.park_toast(t);
             }
-            self.save_settings();
+            self.save_settings_quietly();
         }
         cx.notify();
     }
@@ -3016,6 +3198,25 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn a_look_at_keys_keeps_the_servers_report_through_a_hiccup() {
+        use sb_core::keys::{Keys, Mode, NodeStatus, Readiness};
+        let both = Readiness { keys: Mode::Both, ..Default::default() };
+        let node = NodeStatus { keys: true, ..Default::default() };
+        let was = Keys { server: Some(both.clone()), node: Some(node.clone()) };
+        // A server and a node from before keys: nothing, and so nothing of keys anywhere.
+        let none = super::keys_after(&Keys::default(), Some(Ok(None)), None);
+        assert!(none.hidden() && none == Keys::default());
+        // The server was not asked (not connected yet), or did not answer: its last report stays.
+        assert_eq!(super::keys_after(&was, None, Some(node.clone())).server, Some(both.clone()));
+        let err = sb_core::CoreError::Bad("no answer".into());
+        assert_eq!(super::keys_after(&was, Some(Err(err)), Some(node.clone())).server, Some(both));
+        // It answered that it has no keys (an older server was put back): the report goes.
+        assert_eq!(super::keys_after(&was, Some(Ok(None)), Some(node)).server, None);
+        // The node's answer is always the latest one: a node that stopped answering is no node.
+        assert_eq!(super::keys_after(&was, None, None).node, None);
+    }
+
+    #[test]
     fn a_finished_jobs_new_chat_is_found_when_its_snapshot_is_late() {
         let s = Duration::from_secs_f32;
         assert_eq!(job_ready_at(Some(s(0.9))), Some(s(1.5)), "there at the first look, as before");
@@ -3101,22 +3302,67 @@ mod tests {
 
     #[test]
     fn settings_that_do_not_parse_are_kept_aside() {
+        use super::SettingsTrouble;
         let dir = std::env::temp_dir().join(format!("sb-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("settings.json");
         let text = r#"{"theme": "dark", "tabs": "not a list", "servers": ["http://192.0.2.10:8130"]}"#;
         std::fs::write(&p, text).unwrap();
         let (s, bad) = super::load_settings(&p);
-        assert!(bad);
+        let Some(SettingsTrouble::Partial(Some(copy))) = bad else { panic!("{bad:?}") };
         assert_eq!(s.theme.as_deref(), Some("dark"), "what still reads is kept");
         assert!(s.tabs.is_empty());
         assert_eq!(s.saved.servers, vec!["http://192.0.2.10:8130".to_string()]);
-        assert_eq!(std::fs::read_to_string(dir.join("settings.json.bad")).unwrap(), text, "the file as it was");
+        assert!(copy.starts_with("settings.json.bad-"), "{copy}");
+        assert_eq!(std::fs::read_to_string(dir.join(&copy)).unwrap(), text, "the file as it was");
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), text, "and it stays where it is until the next save");
+        let (title, sub) = SettingsTrouble::Partial(Some(copy.clone())).words();
+        assert_eq!(title, "Some settings couldn't be read");
+        assert_eq!(sub, format!("The rest were kept. The old file is saved next to it as {copy}."));
         std::fs::write(&p, r#"{"theme": "light"}"#).unwrap();
         let (s, bad) = super::load_settings(&p);
-        assert!(!bad);
+        assert_eq!(bad, None);
         assert_eq!(s.theme.as_deref(), Some("light"));
-        assert!(!super::load_settings(&dir.join("missing.json")).1, "no file yet is not a problem");
+        assert_eq!(super::load_settings(&dir.join("missing.json")).1, None, "no file yet is not a problem");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_settings_file_of_zeros_goes_back_to_the_last_save() {
+        use super::{Settings, SettingsTrouble, load_settings, write_settings};
+        let dir = std::env::temp_dir().join(format!("sb-settings-zeros-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let p = dir.join("settings.json");
+        let mut s = Settings { theme: Some("dark".into()), ..Settings::default() };
+        s.shut = vec!["studio".into(), "tower".into()];
+        write_settings(&p, &s, true);
+        s.shut = vec!["studio".into()];
+        write_settings(&p, &s, false);
+        // as a power cut leaves it
+        std::fs::write(&p, [0u8; 439]).unwrap();
+        let (got, trouble) = load_settings(&p);
+        let Some(SettingsTrouble::Recovered(Some(kept))) = trouble else { panic!("{trouble:?}") };
+        assert_eq!(std::fs::read(dir.join(&kept)).unwrap(), [0u8; 439]);
+        assert_eq!(got.theme.as_deref(), Some("dark"));
+        assert_eq!(got.shut, ["studio"], "what was taken out before the last save does not come back");
+        assert_eq!(load_settings(&p).1, None, "the file is whole again");
+
+        // with no copy: the defaults, which nothing the app does by itself writes down
+        std::fs::write(&p, r#"{"theme": "da"#).unwrap();
+        std::fs::remove_file(dir.join("settings.json.bak")).unwrap();
+        let (got, trouble) = load_settings(&p);
+        assert!(matches!(trouble, Some(SettingsTrouble::Lost(Some(_)))), "{trouble:?}");
+        assert_eq!(got.theme, None);
+        write_settings(&p, &got, false);
+        assert!(!p.exists(), "the defaults are not saved as if they had been chosen");
+        assert!(matches!(load_settings(&p).1, Some(SettingsTrouble::Lost(_))), "and it is still known to be lost");
+        // until the user changes a setting
+        write_settings(&p, &Settings { theme: Some("light".into()), ..Settings::default() }, true);
+        let (got, trouble) = load_settings(&p);
+        assert_eq!((got.theme.as_deref(), trouble), (Some("light"), None));
+        write_settings(&p, &got, false);
+        assert!(p.exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

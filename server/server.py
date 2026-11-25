@@ -17,11 +17,15 @@ import models as models_mod  # noqa: E402
 import notes as notes_mod  # noqa: E402
 import options as options_mod  # noqa: E402
 import addresses as addresses_mod  # noqa: E402
+import keys as keys_mod  # noqa: E402
+import homestate  # noqa: E402
 import releases as releases_mod  # noqa: E402
 import serverctl  # noqa: E402
 from guard import GuardTimer  # noqa: E402
 
-PORT = 8130
+# 8130, unless a run beside the installed one (a test, a second copy) names its own. The same run names its folders
+# with SWITCHBOARD_CONFIG_DIR and SWITCHBOARD_STATE_DIR (folders, below).
+PORT = int(os.environ.get('SWITCHBOARD_PORT') or 8130)
 LOCAL_HOSTS = ('localhost', '127.0.0.1')
 ACTION_VERBS = {'resume', 'fresh', 'handoff', 'stop', 'dismiss', 'pass'}
 MODES = {'normal', 'max', 'ultracode'}
@@ -220,13 +224,29 @@ class ServerConfig:
     Left out, all three are on; [] turns them off.
 
     "peers" is about where a request really comes from (peer_ok). This computer, home and office networks and
-    Tailscale are always let in. "peers" names more, each an address or a CIDR; ["any"] lets every address in."""
+    Tailscale are always let in. "peers" names more, each an address or a CIDR; ["any"] lets every address in.
+
+    "keys" is how the other computers reach this one (keys.py): "off", "both" or "only". Left out, it is "off" and
+    nothing here changes. In "only" the server listens on 127.0.0.1 alone and answers this computer only, whatever
+    "bind" and "peers" say: paired computers come in through the node's tunnel, which arrives from 127.0.0.1. It
+    is then not announced on the network (`announce`), lists no addresses for the apps, and its downloads on 8131
+    are not served (downloads.py). A value this server does not know counts as "only"."""
 
     def __init__(self, cfg_dir, state_dir, port=PORT, local=_local_addresses):
         self.path = Path(cfg_dir) / 'server.json'
         # keep: this file is written once and read at every start, so a good start is when its copy is made
         d, self.status = durable.load(self.path, None, dict, keep=True)
+        # Settings that came from another computer (homestate.py: a moved or restored home) name no addresses at
+        # all. This computer's own are worked out as at a first start, and the settings that came are kept.
+        arrived = d is not None and self.status != durable.BROKEN and not any(k in d for k in ('bind', 'hosts', 'origins'))
         d = self._clean(d) if d is not None else None
+        if arrived:
+            seeded = self._seed(Path(state_dir) / 'machines.json', port, local)
+            d.update({k: seeded[k] for k in ('bind', 'hosts', 'origins')})
+            try:
+                durable.put(self.path, json.dumps({k: v for k, v in d.items() if v is not None}, indent=1))
+            except OSError:
+                pass
         if self.status == durable.BROKEN:
             # Not the defaults: they listen on every address and take every home name, and this server may have
             # been told to do neither. Nothing is written, so it stays this way until the file is put right.
@@ -244,7 +264,15 @@ class ServerConfig:
             log('server.json could not be opened: its last good copy is in use, and the file is left as it is')
         elif self.status == durable.RECOVERED:
             log('server.json could not be read: its last good copy is in use, and the damaged file is kept beside it')
-        self.bind = d['bind'] or ['0.0.0.0']
+        self.keys, known = keys_mod.mode_of(d)
+        if not known:
+            log('server.json has a "keys" setting this server does not know, so it answers this computer only. '
+                'Use "off", "both" or "only", then restart.')
+        # Whether another computer can reach this server by address at all. Not in "only", and not when server.json
+        # was lost (bind is 127.0.0.1 then, see above).
+        self.local_only = self.keys == keys_mod.ONLY or self.status == durable.BROKEN
+        self.announce = not self.local_only  # Bonjour (main): nothing to find when nothing answers by address
+        self.bind = ['127.0.0.1'] if self.keys == keys_mod.ONLY else d['bind'] or ['0.0.0.0']
         self.origins = d['origins']
         self.hosts = set(h.lower() for h in d['hosts']) | set(LOCAL_HOSTS)
         self.allow = set(ALLOW_DEFAULT if d.get('allow') is None else d['allow']) & ALLOW_KINDS
@@ -256,9 +284,12 @@ class ServerConfig:
     @staticmethod
     def _clean(d):
         lst = lambda k: [x for x in d.get(k) or [] if isinstance(x, str) and x.strip()]
-        return {'bind': lst('bind'), 'hosts': lst('hosts'), 'origins': lst('origins'),
-                'allow': lst('allow') if isinstance(d.get('allow'), list) else None,
-                'peers': lst('peers') if isinstance(d.get('peers'), list) else []}
+        out = {'bind': lst('bind'), 'hosts': lst('hosts'), 'origins': lst('origins'),
+               'allow': lst('allow') if isinstance(d.get('allow'), list) else None,
+               'peers': lst('peers') if isinstance(d.get('peers'), list) else []}
+        if 'keys' in d:  # as written, for keys.mode_of: an entry that is there and unknown is not "off"
+            out['keys'] = d['keys']
+        return out
 
     @staticmethod
     def _seed(old_file, port, local):
@@ -275,7 +306,7 @@ class ServerConfig:
         return {'bind': ['0.0.0.0'], 'hosts': hosts, 'origins': [f'http://{h}:{port}' for h in hosts], 'peers': []}
 
     def peer_ok(self, addr):
-        if self.status == durable.BROKEN:  # server.json was lost: this computer only, whatever it used to let in
+        if self.local_only:  # keys only, or server.json was lost: this computer only, whatever "peers" lets in
             return peer_ok(addr, nets=[n for n in PEER_NETS if n.is_loopback])
         return self.any_peer or peer_ok(addr, self.peers)
 
@@ -316,6 +347,9 @@ class App:
                  poll_every=3, retry_waits=(5, 15, 30), cfg_dir=None, server_cfg=None):
         self.fleet, self.state_dir, self.web_dir = fleet, Path(state_dir), Path(web_dir)
         self.cfg_dir = Path(cfg_dir) if cfg_dir else self.state_dir / 'config'
+        # the key the hub shares (term.py): in the config folder this server was given, as the hub is told with
+        # SWITCHBOARD_TERM_KEY; where none was given, where it always was
+        self.term_key = self.cfg_dir / 'term.key' if cfg_dir else None
         had_state = self._had_state()  # before anything below writes a file
         self.state_dir.mkdir(parents=True, exist_ok=True)
         for d in (self.state_dir, self.cfg_dir):  # temp files of a run that died before its rename
@@ -324,6 +358,10 @@ class App:
         self._peer_lock, self._peer_said, self._peer_more = threading.Lock(), float('-inf'), 0  # refused addresses, for the log
         # the addresses the apps are told to remember (only for a real server: tests have no network of their own)
         self.addresses = addresses_mod.Addresses(PORT, allowed=server_cfg.host_ok, bind=server_cfg.bind) if server_cfg else None
+        if server_cfg and server_cfg.keys == keys_mod.ONLY:
+            self.addresses = None  # keys only: no address reaches this server, so the summary lists none
+        # when each kind of client last asked by address, for the readiness report (keys.py)
+        self.direct = keys_mod.Direct(self.state_dir / 'direct_seen.json', clock=clock)
         self.live_pusher = None  # Live Activity pushes (main wires it to APNs)
         self.push_ready = False  # main sets it when <config>/apns.json and its key load
         self.fleet_cfg = fleet_mod.FleetConfig(self.cfg_dir / 'fleet.json')
@@ -331,6 +369,7 @@ class App:
         if hasattr(fleet, 'on_save'):
             fleet.on_save = self._fleet_saved
             fleet.servers = list(server_cfg.origins) if server_cfg else []
+            fleet.keys, fleet.port = (server_cfg.keys if server_cfg else keys_mod.OFF), PORT
             fleet.closed = durable.broken(self.fleet_cfg.path)  # fleet.json was lost: see FleetConfig.load
         self._migrate_options(had_state)
         fleet.summary_model = self.prefs()['summary_model']  # the agents hear it on every poll
@@ -367,12 +406,20 @@ class App:
     def devices(self):
         return self._load_json('devices.json')
 
-    def _token_add(self, file, tok, name, keep):
+    def push_key(self, tok):
+        """The key a phone gave for sealing its notifications (base64url X25519 public key), or None. Only a
+        gateway sender uses it: what goes straight to Apple is not sealed."""
+        d = self.devices().get(tok)
+        return d.get('seal') if isinstance(d, dict) and isinstance(d.get('seal'), str) else None
+
+    def _token_add(self, file, tok, name, keep, seal=None):
         """A phone's push token joins devices.json or widget_tokens.json; the oldest beyond `keep` go."""
         with self.devices_lock:
             d = self.devices() if file == 'devices.json' else self.widget_tokens()
             d = {k: v for k, v in d.items() if isinstance(v, dict)}
             d[tok] = {'name': str(name or 'iPhone')[:40], 'added': time.time()}
+            if seal:
+                d[tok]['seal'] = seal
             added = lambda k: d[k].get('added') if isinstance(d[k].get('added'), (int, float)) else 0
             for old in sorted(d, key=added)[:-keep]:  # a reinstall makes a new token: never grows without limit
                 d.pop(old, None)
@@ -1034,6 +1081,125 @@ class App:
         except Exception:
             log('widget push failed: ' + traceback.format_exc(limit=1))
 
+    # ---- keys (keys.py): who still connects by address, and whether keys only is safe yet
+    def seen_from(self, addr, ua):
+        """Called for every request that is answered: remembers the ones that came by address."""
+        try:
+            self.direct.note(addr, ua)
+        except Exception:
+            pass  # never in the way of the request itself
+
+    def ready_days(self):
+        """The days of quiet "only" waits for: server.json's "keys_ready_days" as it is now (no restart), else 7."""
+        cfg = self.server_cfg
+        try:
+            return keys_mod.read_days(cfg.path) if cfg else keys_mod.READY_DAYS
+        except Exception:
+            return keys_mod.READY_DAYS
+
+    def asked_here(self, peer):
+        """Whether a request's source address is this computer itself: 127.0.0.1, or one of the server's own
+        addresses (the app on the home computer may have been given its network address). With keys on this is
+        also true of everything through the tunnel, so it says something only while keys are off."""
+        a = str(peer or '').split('%')[0].lower()
+        a = a[7:] if a.startswith('::ffff:') else a
+        cfg = self.server_cfg
+        return keys_mod.is_loopback(a) or bool(cfg and _is_ip(a) and a in cfg.hosts)
+
+    def keys_readiness(self, days='', peer=None):
+        """GET /api/keys/readiness[?days=N]: keys.readiness, from the machine list, the paired devices the node on
+        this computer lists, and the requests seen by address. Two more entries are for the apps: "switch" (this
+        server takes POST /api/keys/mode) and "here" (the question came from this computer itself, see asked_here)."""
+        days = min(keys_mod.DAYS_MAX, max(keys_mod.DAYS_MIN, int(days))) if str(days).isdigit() else self.ready_days()
+        cfg = self.server_cfg
+        devices, home, err = None, None, None
+        try:
+            devices = nodes_mod.devices()['devices']
+            home = nodes_mod.node_status().get('machine')
+        except OSError as e:
+            err = str(e) if devices is None else None  # the list is enough; which computer is home is a refinement
+        gone = set(self.fleet.unlinked)  # linked computers the hub no longer lists (nodes.sync): removed, or forgotten
+        machines = [{'name': n, 'label': m.get('label') or n,
+                     'gone': n in gone and str(m.get('target') or '').startswith(nodes_mod.PREFIX)}
+                    for n in list(self.fleet.order) for m in [self.fleet.machines.get(n) or {}]]
+        r = keys_mod.readiness(cfg.keys if cfg else keys_mod.OFF, machines, devices, self.direct.view(), self.clock(),
+                               days=days, home=home, node_error=err,
+                               settings_lost=bool(cfg and cfg.status == durable.BROKEN))
+        return dict(r, switch=cfg is not None, here=self.asked_here(peer))
+
+    def keys_device_remove(self, dev):
+        """POST /api/keys/devices {"remove": id}: that device's key stops working. When the device is a computer,
+        that computer leaves the list as well, the way Settings removes one: the person removed the computer, and
+        a row left behind would say "not paired" for good and keep keys only from ever being ready. A computer
+        reached over ssh keeps its row (its key was one more way in, and ssh still reaches it), and so does this
+        home computer."""
+        machine = None
+        try:
+            row = next((d for d in nodes_mod.devices()['devices'] if d.get('id') == dev), None)
+            if row and row.get('kind') == 'computer' and isinstance(row.get('machine'), str):
+                machine = row['machine']
+            home = nodes_mod.node_status().get('machine') if machine else None
+        except OSError:
+            home = machine  # which computer is home is not known: nothing is dropped
+        r = nodes_mod.device_remove(dev)
+        m = self.fleet.machines.get(machine) if machine and machine != home else None
+        if m and str(m.get('target') or '').startswith(nodes_mod.PREFIX):
+            try:  # the node unlinks it from the hub itself; again here in case that did not go through
+                nodes_mod.hub_call('POST', f'/internal/unpair/{machine}', {})
+            except OSError:
+                pass
+            self.fleet.drop_machine(machine)
+        return r
+
+    def keys_mode(self, body):
+        """POST /api/keys/mode {"keys": "off"|"both"|"only", "force": false}: writes the mode into server.json and
+        restarts every part, the way Settings > Server restarts (serverctl.restart). The node on this computer sees
+        the change by itself within seconds. "only" is refused until the readiness report says ready, unless
+        "force" is true. Nothing is written when this server cannot restart itself: the answer then names the
+        command to run on the home computer."""
+        want, cfg = body.get('keys'), self.server_cfg
+        if not isinstance(want, str) or want not in keys_mod.MODES or cfg is None:
+            raise HttpError(400, 'Say how computers connect: "off", "both" or "only".')
+        if want == cfg.keys and keys_mod.read_mode(cfg.path) == want:
+            return {'ok': True, 'keys': want, 'restarting': False}
+        stuck = serverctl.stuck()
+        if stuck:  # one message: nothing changed, why, and what to run instead (serverctl.why_not is about updating)
+            said, command = keys_mod.by_hand(stuck, want, cfg.path, Path(__file__).resolve().parent)
+            raise HttpError(409, said, {'command': command} if command else None)
+        if want == keys_mod.ONLY and body.get('force') is not True:
+            r = self.keys_readiness()
+            if not r['ready']:
+                raise HttpError(409, 'Not yet: switching to keys only now would cut something off. '
+                                + r['blockers'][0]['text'], {'blockers': r['blockers']})
+        if want != keys_mod.OFF and cfg.keys == keys_mod.OFF:
+            try:  # with keys off the node says so (that is an answer); nothing listening is no node at all
+                nodes_mod.node_status()
+            except OSError as e:
+                if 'not reachable' in str(e):
+                    raise HttpError(409, 'Keys need switchboard-node on this home computer, and it is not running here. '
+                                         'Link this computer to its own server first: switchboard link',
+                                    {'command': 'switchboard link'})
+        try:
+            keys_mod.set_mode(cfg.path, want)
+            log(f'keys: set to "{want}" (it was "{cfg.keys}"); restarting')
+            if want == keys_mod.ONLY:
+                unannounce()  # nothing on the network should still say this server is here while it restarts
+            serverctl.restart()
+        except (RuntimeError, PermissionError) as e:
+            raise HttpError(409, str(e))
+        except OSError as e:
+            raise HttpError(500, f"The server couldn't change that ({e}).")
+        return {'ok': True, 'keys': want, 'restarting': True}
+
+    def shutdown(self):
+        """The server is stopping (main): what is only in memory is written. Today that is when each kind of client
+        last asked by address, which is otherwise written every ten minutes at most."""
+        try:
+            self.direct.flush()
+        except Exception:
+            pass
+        unannounce()
+
     # ---- machines (Settings): one list in fleet.json, the same one Add a machine writes to
     def host_ok(self, host):
         h = (host or '').strip().lower()
@@ -1061,7 +1227,8 @@ class App:
         when that was lost: what GET /api/server tells the apps."""
         out = durable.status()
         lib = getattr(getattr(self, 'feat', None), 'library', None)
-        if getattr(lib, 'broken', False):
+        if getattr(lib, 'broken', False) and not any(r['file'] == 'library.json' for r in out):
+            # put aside by an earlier start of the server, so this start found no file to mark
             out.append({'file': 'library.json', 'status': durable.BROKEN, 'at': None, 'kept': 'library.json.bad', 'replaced': False})
         return out
 
@@ -1363,8 +1530,11 @@ class App:
         for jid in [k for k, j in self.jobs.items() if j.get('finished') and now - j['finished'] > JOB_KEEP]:
             del self.jobs[jid]
         try:
+            # force: the list is the server's own record, and one that was lost starts over (_recover_jobs). No
+            # copy is kept beside it: a copy is a step behind, and a launch that has since reached its machine
+            # would be reported as one that never did.
             durable.put(self.state_dir / 'jobs.json', json.dumps(self.jobs, indent=1),
-                        tmp=self.state_dir / f'jobs.{os.getpid()}.tmp')
+                        tmp=self.state_dir / f'jobs.{os.getpid()}.tmp', force=True)
         except OSError:
             log('could not save jobs: ' + traceback.format_exc())
 
@@ -1447,23 +1617,19 @@ class App:
     def _recover_jobs(self):
         """After a restart: keep watching launches already handed to a machine; anything earlier cannot be known."""
         path = self.state_dir / 'jobs.json'
-        try:
-            jobs = json.loads(path.read_text(encoding='utf-8'))
-        except FileNotFoundError:
-            jobs = {}
-        except (OSError, ValueError):
-            jobs = None
+        # A file that is empty or cut short is put aside and the list starts over (durable.load; _jobs_save keeps no
+        # copy to go back to). One that is there and will not open is left as it is.
+        jobs, status = durable.load(path, {}, dict)
+        if status in (durable.RECOVERED, durable.BROKEN):
+            log('jobs.json could not be read: the file is kept beside it, and the list of jobs starts over'
+                if status == durable.BROKEN else 'jobs.json could not be read: a copy beside it is in use')
         ok = lambda j: (isinstance(j, dict) and j.get('kind') in DONE_TITLES and isinstance(j.get('machine'), str)
                         and isinstance(j.get('plan') or {}, dict))
-        if not isinstance(jobs, dict) or not all(isinstance(k, str) and ok(j) for k, j in jobs.items()):
-            # A file cut short or edited by hand never stops the server from starting: what can be read is kept, and
-            # the file as it was is put aside.
-            log('jobs.json could not be read in full: kept as jobs.json.bad')
-            try:
-                os.replace(path, path.with_name('jobs.json.bad'))
-            except OSError:
-                pass
-            jobs = {k: j for k, j in jobs.items() if isinstance(k, str) and ok(j)} if isinstance(jobs, dict) else {}
+        if not all(isinstance(k, str) and ok(j) for k, j in jobs.items()):
+            # A file edited by hand never stops the server from starting: what can be read is kept, and the file as
+            # it was is put aside.
+            log(f'jobs.json could not be read in full: kept as {durable.aside(path) or "it was"}')
+            jobs = {k: j for k, j in jobs.items() if isinstance(k, str) and ok(j)}
         now, watch = self.clock(), []
         with self.jobs_lock:  # the watchers change these jobs too: they start once all of it is put right and saved
             self.jobs = jobs
@@ -1799,7 +1965,8 @@ class App:
 
     # ---- terminals (term.py): tickets for the hub, and the machine list it reads
     def _terms_setup(self, clock):
-        self.terms = term_mod.Terms(self.fleet, self.state_dir, clock=clock, origins=self.server_cfg.origins if self.server_cfg else ())
+        self.terms = term_mod.Terms(self.fleet, self.state_dir, key_path=self.term_key, clock=clock,
+                                    origins=self.server_cfg.origins if self.server_cfg else ())
         try:
             self.terms.write_machines()
         except OSError as e:
@@ -1817,7 +1984,7 @@ class App:
             raise HttpError(500, "Switchboard couldn't read its terminal key.")
 
     # ---- routes
-    def get(self, path, query=None, host=''):
+    def get(self, path, query=None, host='', peer=None):
         r = self.feat.get(path, query)
         if r is not None:
             return r
@@ -1839,7 +2006,14 @@ class App:
         if path == '/api/models':  # the New sheet's and flags drawer's model picker (models.py)
             return models_mod.view(self.fleet.snapshot()['machines'])
         if path == '/api/server':  # Settings > Server (serverctl.py)
-            return dict(serverctl.info(self.state_dir), stores=self.stores())
+            return dict(serverctl.info(self.state_dir, keys=self.server_cfg.keys if self.server_cfg else None), stores=self.stores())
+        if path == '/api/keys/readiness':  # would switching to keys only cut anything off (keys.py)
+            return self.keys_readiness((query or {}).get('days', [''])[0], peer)
+        if path == '/api/keys/devices':  # the paired devices, from the node on this computer (nodes.py)
+            try:
+                return nodes_mod.devices()
+            except OSError as e:
+                raise HttpError(502, f'The node on this computer did not answer ({e}).')
         if path == '/api/server/logs':
             q = query or {}
             try:
@@ -1883,6 +2057,19 @@ class App:
             if query and 'name' in query:
                 req['name'] = query['name'][0]
             return self._call(name, req)
+        m = re.fullmatch(r'/api/transcript/([a-z0-9]+)/([0-9a-f-]{36})', path)
+        if m:  # a chat as its messages, a slice at a time: ?before=<start> pages back, ?after=<end> asks for what is new
+            name = self._machine(m.group(1))
+            if 'transcript' not in (self.fleet.state.get(name, {}).get('features') or []):
+                raise HttpError(409, f'Update Switchboard on {self._label(name)} to read its chats here.')
+            req = {'verb': 'transcript', 'sid': m.group(2)}
+            for k in ('before', 'after'):
+                v = (query or {}).get(k, [''])[0]
+                if v:
+                    if not v.isdigit() or len(v) > 15:
+                        raise HttpError(400, 'bad position')
+                    req[k] = int(v)
+            return self._call(name, req, timeout=20)
         raise HttpError(404, 'not found')
 
     def post(self, path, body, ua='', host=''):
@@ -1896,6 +2083,23 @@ class App:
                 return nodes_mod.pair(host, cfg_dir=self.cfg_dir, origins=self.server_cfg.origins if self.server_cfg else ())
             except OSError as e:
                 raise HttpError(502, f"The hub couldn't make a code ({e}).")
+        if path == '/api/pair_device':  # a code and a link that pair one more device with this home computer
+            try:
+                return nodes_mod.pair_device()
+            except OSError as e:
+                raise HttpError(502, f'The node on this computer could not make a code ({e}).')
+        if path == '/api/keys/mode':  # keys off, on beside the addresses, or only
+            return self.keys_mode(body)
+        # {"remove": "<device id>"}: that device's key stops working. Not /api/devices, which is where a phone
+        # registers for notifications.
+        if path == '/api/keys/devices':
+            dev = body.get('remove')
+            if not isinstance(dev, str) or not nodes_mod.DEVICE_ID_RE.fullmatch(dev):
+                raise HttpError(400, 'Say which device to remove.')
+            try:
+                return self.keys_device_remove(dev)
+            except OSError as e:
+                raise HttpError(502, f'The node on this computer could not remove it ({e}).')
         if path == '/api/machines':
             return self.machines_post(body)
         if path == '/api/relaunch':
@@ -2098,7 +2302,9 @@ class App:
             tok = body.get('token')
             if not isinstance(tok, str) or not TOKEN_RE.fullmatch(tok):
                 raise HttpError(400, 'bad device token')
-            self._token_add('devices.json', tok, body.get('name'), DEVICES_MAX)
+            seal = body.get('seal')  # optional: the phone's key for sealed notifications (32 bytes, base64url)
+            seal = seal if isinstance(seal, str) and re.fullmatch(r'[A-Za-z0-9_-]{43}', seal) else None
+            self._token_add('devices.json', tok, body.get('name'), DEVICES_MAX, seal)
             if not self.push_ready:  # the phone is kept, so pushes start once the server is set up
                 return {'ok': True, 'push': False, 'note': "Notifications aren't set up on this server yet. "
                         'They need an APNs key and ~/.config/switchboard/apns.json.'}
@@ -2195,6 +2401,7 @@ def make_handler(app):
             elif not app.host_ok(self.headers.get('Host')):
                 self._send(403, {'ok': False, 'error': 'forbidden host'})
             else:
+                app.seen_from(self.client_address[0] if self.client_address else '', self.headers.get('User-Agent'))
                 return False
             return True
 
@@ -2295,7 +2502,8 @@ def make_handler(app):
                 return self._app_file(path[len('/api/app/files/'):])
             if path.startswith('/api/'):
                 return self._guarded(lambda: app.get(path, parse_qs(u.query, keep_blank_values=True),
-                                                     self.headers.get('Host') or ''))
+                                                     self.headers.get('Host') or '',
+                                                     self.client_address[0] if self.client_address else ''))
             if self._refused():
                 return
             if path == '/':
@@ -2421,28 +2629,87 @@ class Pushers:
         return True if got == self.m.GONE else 'retry' if got == self.m.RETRY else False
 
 
+def announce(server_cfg, how=None):
+    """Announces the server on the local network (bonjour.py), unless nothing there could reach it: keys only, or
+    a server.json that was lost. How it was announced, or None."""
+    if not server_cfg.announce:
+        log('bonjour: not announced, because this server answers this computer only'
+            + (' (keys only)' if server_cfg.keys == keys_mod.ONLY else ''))
+        return None
+    if how is None:
+        import bonjour  # noqa: E402  the iPhone app finds the server on the network
+        how = bonjour.announce
+    return how(PORT, server_cfg, log)
+
+
+def unannounce(stop=None):
+    """Stops announcing (bonjour.stop): the program that announces is a child of this one and would otherwise go
+    on saying the server is here after it stopped, or after it went to keys only. Never raises."""
+    try:
+        if stop is None:
+            bonjour = sys.modules.get('bonjour')  # never loaded: nothing was announced
+            stop = bonjour.stop if bonjour else None
+        if stop:
+            stop(log)
+    except Exception:
+        pass
+
+
+def push_sender(cfg, conf, recipient=None):
+    """What apns.json asks for: pushes straight to Apple with the key in <config>/apns (the default, "mode":
+    "direct"), or through a push gateway that holds the key ("mode": "gateway", "gateway": "https://...").
+    `recipient(token)` gives the gateway sender a phone's sealing key."""
+    import apns as apns_mod
+    mode = conf.get('mode', 'direct')
+    if mode == 'gateway':
+        return apns_mod.Gateway.from_config(conf, cfg, recipient)
+    if mode != 'direct':
+        raise ValueError(f'apns.json: mode is "direct" or "gateway", not {mode!r}')
+    return apns_mod.Apns(apns_key_path(cfg, conf), conf['key_id'], conf['team'], conf['topic'], sandbox=conf.get('sandbox', True))
+
+
+def folders(env=None):
+    """(config, state): ~/.config/switchboard and ~/.local/share/switchboard, unless SWITCHBOARD_CONFIG_DIR and
+    SWITCHBOARD_STATE_DIR name others (a run beside the installed one, with SWITCHBOARD_PORT)."""
+    env, home = os.environ if env is None else env, Path.home()
+    return (Path(env.get('SWITCHBOARD_CONFIG_DIR') or home / '.config' / 'switchboard'),
+            Path(env.get('SWITCHBOARD_STATE_DIR') or home / '.local' / 'share' / 'switchboard'))
+
+
 def main():
-    from apns import Apns
-    home = Path.home()
-    state = home / '.local' / 'share' / 'switchboard'
-    cfg = home / '.config' / 'switchboard'
+    cfg, state = folders()
+    # A computer that was the home computer and is not any more keeps a note (switchboard-node writes it before the
+    # new home computer takes over). Two servers answering as the same home would each keep their own chats, so
+    # this one stays down, whatever starts it, until the note is gone.
+    if homestate.stepped_down(cfg) is not None:
+        log(homestate.STEPPED_DOWN)
+        while homestate.stepped_down(cfg) is not None:
+            time.sleep(5)
+        log('this computer is the home computer again')
+    # Held for as long as this server runs: nothing unpacks another home's state over a folder a server is using.
+    held = homestate.hold(state)
+    if held is None:
+        log('another Switchboard server is running on this state folder, so this one stops')
+        raise SystemExit(1)
     apns = None
+    holder = []  # the Pushers, once made: a gateway sender asks its app for a phone's sealing key
     try:
         conf = json.loads((cfg / 'apns.json').read_text(encoding='utf-8'))
-        apns = Apns(apns_key_path(cfg, conf), conf['key_id'], conf['team'], conf['topic'], sandbox=conf.get('sandbox', True))
+        apns = push_sender(cfg, conf, lambda tok: holder[0].app.push_key(tok) if holder and holder[0].app else None)
     except Exception as e:
         log(f'push disabled: {e}')
 
     push = Pushers(apns)
+    holder.append(push)
 
     server_cfg = ServerConfig(cfg, state)
     fleet_cfg = fleet_mod.FleetConfig(cfg / 'fleet.json', seed=state / 'machines.json')
     app = App(fleet_mod.Fleet(fleet_cfg.load(), transport=nodes_mod.transport), state, Path(__file__).resolve().parent / 'web',
               pusher=push.alert, cfg_dir=cfg, server_cfg=server_cfg)
     push.attach(app)
-    import bonjour  # noqa: E402  the iPhone app finds the server on the network
-    bonjour.announce(PORT, server_cfg, log)
-    app.addresses.get()  # start working out the addresses, so the first app to connect gets them
+    announce(server_cfg)
+    if app.addresses:
+        app.addresses.get()  # start working out the addresses, so the first app to connect gets them
 
     def poller():
         while True:
@@ -2474,7 +2741,20 @@ def main():
                 time.sleep(15)
     for host in server_cfg.bind[1:]:
         threading.Thread(target=bind, args=(host,), daemon=True).start()
-    bind(server_cfg.bind[0])
+
+    def stopping(*_):  # a service manager's stop, or `switchboard stop`: out through the finally below
+        raise SystemExit(0)
+    import signal
+    try:
+        signal.signal(signal.SIGTERM, stopping)
+    except (ValueError, OSError, AttributeError):
+        pass  # not the main thread, or a system with no such signal
+    try:
+        bind(server_cfg.bind[0])
+    except KeyboardInterrupt:
+        pass
+    finally:
+        app.shutdown()
 
 
 if __name__ == '__main__':

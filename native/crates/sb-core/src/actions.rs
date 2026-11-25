@@ -261,6 +261,9 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
             "unlink",
         ));
     }
+    if snap.away.is_some() {
+        away(&mut items);
+    }
     if let Some(pi) = items.iter().position(|x| x.primary)
         && pi > 0
     {
@@ -268,6 +271,29 @@ pub fn for_session(s: &Session, snap: &Snapshot, now: f64) -> Vec<Action> {
         items.insert(0, p);
     }
     items
+}
+
+/// What a chat's own computer does without the home computer: its terminal, and stop, dismiss, send anyway and
+/// resume (sb-link standin.rs). Opening a link and copying a command need nobody.
+pub fn works_away(id: ActionId) -> bool {
+    use ActionId::*;
+    matches!(id, Open | Terminal | ResumeOpen | Attach | Pass | Resume | Stop | Dismiss | Newer | ArchiveInClaude)
+}
+
+/// While the home computer is away: everything that needs it is off, with the one reason, and the first thing
+/// that still works is the primary one.
+fn away(items: &mut [Action]) {
+    for x in items.iter_mut().filter(|x| !works_away(x.id)) {
+        x.disabled = true;
+        x.primary = false;
+        x.key = None;
+        x.note = crate::api::AWAY_REASON.into();
+    }
+    if !items.iter().any(|x| x.primary)
+        && let Some(x) = items.iter_mut().find(|x| !x.disabled)
+    {
+        x.primary = true;
+    }
 }
 
 pub fn for_replaced(r: &Replaced, snap: &Snapshot) -> Vec<Action> {
@@ -304,6 +330,9 @@ pub fn for_replaced(r: &Replaced, snap: &Snapshot) -> Vec<Action> {
     ));
     if r.can_split() {
         out.push(a(ActionId::Split, "Not the same topic", "Puts it back on the list as a chat of its own", "unlink"));
+    }
+    if snap.away.is_some() {
+        away(&mut out);
     }
     out
 }

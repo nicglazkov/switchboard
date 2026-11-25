@@ -20,7 +20,17 @@ rsync -a --delete --exclude __pycache__ ../server $H:$REMOTE/kit/
 rsync -a ../agent/sb.py $H:$REMOTE/kit/agent/
 rsync -a crates/sb-core/src/term/schemes.json $H:$REMOTE/kit/native/crates/sb-core/src/term/
 rsync -a --delete --exclude __pycache__ ../scripts/install $H:$REMOTE/kit/scripts/
-ssh -q $H "SHADERS=${SHADERS:-auto} SB_UPDATE_PUBKEY='$SB_UPDATE_PUBKEY' SB_UPDATE_FEED='$SB_UPDATE_FEED' bash $REMOTE/scripts/remote/mac-build.sh"
+# Switchboard's own Python in the kit, when asked for (SB_KIT_PYTHON=1): fetch-python.sh checks each download against
+# its pinned SHA-256. Without it the installer uses the computer's own Python, or downloads the pinned build itself.
+if [ "${SB_KIT_PYTHON:-0}" = 1 ]; then
+  PYTMP=$(mktemp -d)
+  bash ../scripts/install/fetch-python.sh "$PYTMP" mac-arm64 mac-x86_64
+  rsync -a --delete "$PYTMP/" $H:$REMOTE/kit/python/
+  rm -rf "$PYTMP"
+else
+  ssh -q $H "rm -rf $REMOTE/kit/python"
+fi
+ssh -q $H "SHADERS=${SHADERS:-auto} SB_UPDATE_PUBKEY='$SB_UPDATE_PUBKEY' SB_UPDATE_FEED='$SB_UPDATE_FEED' SB_RELAY_DEFAULT='$SB_RELAY_DEFAULT' bash $REMOTE/scripts/remote/mac-build.sh"
 mkdir -p dist
 scp -q $H:$REMOTE/dist/Switchboard-mac.zip $H:$REMOTE/dist/Switchboard-mac.zip.build dist/
 scp -q $H:$REMOTE/dist/switchboard-node-mac dist/switchboard-node-mac

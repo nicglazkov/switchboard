@@ -66,7 +66,7 @@ fn strip_stamp(t: &str) -> &str {
 
 /// First non-empty line, stamp removed, capped at a word near 90 characters.
 pub fn plain(title: &str) -> String {
-    let first = title.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Untitled session");
+    let first = title.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or("Untitled chat");
     let t = strip_stamp(first);
     if t.chars().count() > 90 {
         let cut: String = t.chars().take(90).collect();
@@ -326,7 +326,7 @@ mod tests {
         assert_eq!(split("Oct 1 9:05a x"), ("x".into(), None));
         assert_eq!(plain("Oct 1 9:05a "), "Oct 1 9:05a");
         assert_eq!(plain("\n\n  first line\nsecond"), "first line");
-        assert_eq!(plain(""), "Untitled session");
+        assert_eq!(plain(""), "Untitled chat");
         assert_eq!(split("Kitchen remodel (from Laptop)").1.as_deref(), Some("from Laptop"));
         assert_eq!(tag_kind(Some("from Laptop")), Some(TagKind::Move));
         assert_eq!(tag_kind(Some("UltraCode, web")), Some(TagKind::Ultra));

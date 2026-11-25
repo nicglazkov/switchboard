@@ -3,7 +3,8 @@
 loading, the service files it writes for odd folder names, and the checksum checks of install-agent.sh and
 get-server.sh. Nothing outside the temporary folder is touched: launchctl, systemctl, uname and curl are stand-ins
 first on PATH, and the stand-in server listens on a free port of its own."""
-import hashlib, os, plistlib, shutil, signal, socket, subprocess, sys, tempfile, time, unittest, urllib.request
+import hashlib, http.server, json, os, plistlib, shutil, signal, socket, subprocess, sys, tempfile, threading, time
+import unittest, urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -23,10 +24,10 @@ http.server.HTTPServer(('127.0.0.1', int(os.environ['SB_TEST_PORT'])), H).serve_
 '''
 BAD_SERVER = 'import sys\nsys.exit(3)\n'
 
-# python3 as the scripts find it. The downloads part (python3 -m http.server 8131) only waits here, so no test opens
-# that port.
+# python3 as the scripts find it. The downloads part (server/downloads.py, or python3 -m http.server 8131 before
+# it) only waits here, so no test opens that port.
 PYTHON = '''#!/bin/bash
-case " $* " in *" -m http.server "*) while :; do sleep 1; done ;; esac
+case " $* " in *" -m http.server "*|*"/server/downloads.py "*) while :; do sleep 1; done ;; esac
 exec "%s" "$@"
 '''
 HUB = '''#!/bin/sh
@@ -80,8 +81,10 @@ class Scripts(unittest.TestCase):
         self.share = self.home / '.local' / 'share' / 'switchboard'
         self.bin = self.home / '.local' / 'bin'
         self.env = dict(HOME=str(self.home), PATH=f'{self.fake}:/usr/bin:/bin:/usr/sbin:/sbin', TZ='UTC', NO_COLOR='1',
-                        LANG='C', SB_TEST_PORT=str(self.port), SWITCHBOARD_INSTALL_CHECK_URL=self.url,
-                        SWITCHBOARD_RETRY_SLEEP='0.01', FAKE_LOG=str(self.tmp / 'calls.log'))
+                        LANG='C', SWITCHBOARD_APPLICATIONS=str(self.tmp / 'Applications'), SB_TEST_PORT=str(self.port), SWITCHBOARD_INSTALL_CHECK_URL=self.url,
+                        SWITCHBOARD_RETRY_SLEEP='0.01', FAKE_LOG=str(self.tmp / 'calls.log'),
+                        # no test reaches a hub that really runs on this computer: nothing listens on this port
+                        SWITCHBOARD_HUB_URL=f'http://127.0.0.1:{free_port()}', SWITCHBOARD_HUB_WAIT='1')
         self.addCleanup(self.cleanup)
 
     def cleanup(self):
@@ -134,7 +137,13 @@ class Scripts(unittest.TestCase):
         return (self.share / 'app' / 'VERSION').read_text().split()[0]
 
 
-class ServerUpdate(Scripts):
+class Installs(Scripts):
+    def started(self, calls):
+        """The calls, with how the node was started read as one word. A Linux computer whose user has no systemd
+        of their own (a test run over ssh, a container) starts it as a background process, `run`, where a Mac
+        and a Linux desktop register it, `install`. Both are a start; which one is the computer's, not the test's."""
+        return ['install' if c == 'run' and sys.platform.startswith('linux') else c for c in calls]
+
     def install(self, version, *args, server=GOOD_SERVER, wait=20):
         return self.run_script(self.kit(version, server), '--yes', '--no-setup', '--plain', '--no-service', *args,
                                SWITCHBOARD_INSTALL_WAIT=str(wait))
@@ -149,6 +158,8 @@ class ServerUpdate(Scripts):
         return sorted(p.name for p in list(self.share.iterdir()) + list(self.bin.iterdir())
                       if p.name.endswith(('.old', '.new', '.bad')))
 
+
+class ServerUpdate(Installs):
     def test_an_update_that_does_not_start_puts_the_old_server_back(self):
         code, out = self.install('1.0.0', '--hub-binary', self.hub('A'))
         self.assertEqual(code, 0, out)
@@ -197,6 +208,21 @@ class ServerUpdate(Scripts):
                          'install-server.sh: the server did not start. See: switchboard logs')
         self.assertEqual(self.installed_version(), '1.0.0')
 
+    def test_a_standby_has_the_parts_of_a_home_computer_and_nothing_running(self):
+        code, out = self.run_script(self.kit('1.0.0'), '--yes', '--plain', '--standby', '--hub-binary', self.hub('A'))
+        self.assertEqual(code, 0, out)
+        lines = [l for l in out.splitlines() if l.strip()]
+        self.assertEqual(lines[-2:], [
+            'Installed as a standby: nothing runs. This computer can take over as the home computer.',
+            'On the home computer, run: switchboard-node home move <this computer>'], out)
+        # what switchboard-node looks for before it says this computer can take over (sb-node home.rs)
+        self.assertTrue((self.share / 'app' / 'server' / 'server.py').is_file())
+        self.assertTrue((self.bin / 'switchboard').is_file())
+        self.assertIsNone(self.answer(within=1.0), 'nothing was started')
+        self.assertFalse((self.home / '.config/switchboard/node.json').exists(), 'and it is linked to nothing')
+        for d in ('Library/LaunchAgents', '.config/systemd/user'):
+            self.assertFalse(any((self.home / d).glob('*switchboard*')), 'nothing starts with the computer')
+
     def test_a_server_left_moved_aside_by_a_killed_run_is_put_back_first(self):
         old = self.share / 'app.old'
         (old / 'server').mkdir(parents=True)
@@ -206,6 +232,179 @@ class ServerUpdate(Scripts):
         self.assertEqual(code, 1, out)
         self.assertEqual(self.installed_version(), '0.9.0')
         self.assertFalse(old.exists())
+
+
+# switchboard-node as the installer uses it: pair writes node.json, install puts the program in ~/.local/bin.
+LINK_NODE = '''#!/bin/sh
+echo "node $*" >> "$FAKE_LOG"
+case "$1" in
+  pair) [ -z "${FAKE_PAIR_FAILS:-}" ] || { echo "That code is not known." >&2; exit 1; }
+        mkdir -p "$HOME/.config/switchboard"
+        printf '{"hub": "%s", "machine": "box", "token": "t"}\\n' "$2" > "$HOME/.config/switchboard/node.json"
+        echo "Linked as box to the hub at $2." ;;
+  install) [ -z "${FAKE_INSTALL_FAILS:-}" ] || { echo "launchd said no." >&2; exit 1; }
+           mkdir -p "$HOME/.local/bin"; cp "$0" "$HOME/.local/bin/switchboard-node"; chmod 755 "$HOME/.local/bin/switchboard-node" ;;
+  run) exit 0 ;;
+  *) exit 2 ;;
+esac
+'''
+
+
+class FakeHub:
+    """The hub's two routes for the server on its own computer, with what it was asked."""
+
+    def __init__(self):
+        hub = self
+        self.nodes, self.asked, self.codes, self.refuse = [], [], 0, False
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def answer(self, code, body):
+                data = json.dumps(body).encode()
+                self.send_response(code)
+                self.send_header('Content-Length', str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+            def do_GET(self):
+                hub.asked.append(('GET', self.path, dict(self.headers)))
+                self.answer(200, {'ok': True, 'nodes': hub.nodes}) if self.path == '/internal/nodes' else self.answer(404, {})
+
+            def do_POST(self):
+                self.rfile.read(int(self.headers.get('Content-Length') or 0))
+                hub.asked.append(('POST', self.path, dict(self.headers)))
+                if self.path != '/internal/pair' or hub.refuse:
+                    return self.answer(500, {'ok': False, 'error': 'no'})
+                hub.codes += 1
+                self.answer(200, {'ok': True, 'code': f'CODE{hub.codes}', 'expires': 600})
+
+            def log_message(self, *a):
+                pass
+        self.httpd = http.server.ThreadingHTTPServer(('127.0.0.1', 0), H)
+        self.addr = f'127.0.0.1:{self.httpd.server_address[1]}'
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+class SelfLink(Installs):
+    """The first computer links itself: after a start, with no node.json here and no computers on the server."""
+
+    def setUp(self):
+        super().setUp()
+        self.fakehub = FakeHub()
+        self.addCleanup(self.fakehub.close)
+        self.env['SWITCHBOARD_HUB_URL'] = f'http://{self.fakehub.addr}'
+        self.node_json = self.home / '.config' / 'switchboard' / 'node.json'
+        self.helper = self.home / '.claude' / 'switchboard' / 'sb.py'
+
+    def kit(self, version, server=GOOD_SERVER, node=True):
+        shutil.rmtree(self.tmp / f'kit-{version}', ignore_errors=True)
+        script = super().kit(version, server)
+        if node:
+            dist = script.parents[2] / 'native' / 'dist'
+            dist.mkdir(parents=True)
+            for n in ('switchboard-node-mac', 'switchboard-node-linux'):
+                (dist / n).write_text(LINK_NODE)
+        return script
+
+    def go(self, version='1.0.0', *args, **env):
+        self.env.update(env)
+        code, out = self.install(version, '--hub-binary', self.hub('A'), *args)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.answer(), version, 'the server runs whatever became of the link')
+        return out
+
+    def node_calls(self):
+        log = Path(self.env['FAKE_LOG'])
+        return [l[5:] for l in log.read_text().splitlines() if l.startswith('node ')] if log.exists() else []
+
+    def test_a_first_install_links_this_computer_and_an_update_does_not_link_it_again(self):
+        out = self.go()
+        self.assertIn('== This computer\nThis computer is linked to its own server, so its chats show on the board.', out)
+        self.assertEqual(self.started(self.node_calls())[:2], [f'pair {self.fakehub.addr} CODE1', 'install'])
+        self.assertEqual(json.loads(self.node_json.read_text())['hub'], self.fakehub.addr)
+        self.assertTrue(self.helper.is_file(), 'the helper for Claude Code is put in place too')
+        self.assertTrue((self.bin / 'switchboard-node').is_file())
+        # the hub answers only this computer's own programs: JSON, a loopback Host, nothing a browser would add
+        method, path, headers = [a for a in self.fakehub.asked if a[0] == 'POST'][0]
+        self.assertEqual((path, headers.get('Content-Type'), headers.get('Host')), ('/internal/pair', 'application/json', self.fakehub.addr))
+        self.assertNotIn('Origin', headers)
+
+        asked = len(self.fakehub.asked)
+        out = self.go('2.0.0')
+        self.assertNotIn('This computer', out)
+        self.assertEqual((self.fakehub.codes, len(self.fakehub.asked)), (1, asked), 'the hub is not even asked')
+        self.assertEqual(len([c for c in self.node_calls() if c.startswith('pair')]), 1)
+
+    def test_a_server_that_has_computers_already_is_left_as_it_is(self):
+        self.fakehub.nodes = [{'name': 'studio'}]
+        out = self.go()
+        self.assertIn('This server has other computers already, so this one was not linked. To link it too, run: switchboard link', out)
+        self.fakehub.nodes = []
+        cfg = self.home / '.config' / 'switchboard'
+        for text in ('{"machines": [{"name": "lab", "target": "you@lab"}]}', 'not json'):
+            (cfg / 'fleet.json').write_text(text)
+            out = self.go('2.0.0')
+            self.assertIn('was not linked', out)
+        self.assertEqual((self.fakehub.codes, self.node_calls(), self.node_json.exists(), self.helper.exists()), (0, [], False, False))
+        # asked for by name, it links whatever the server has
+        (cfg / 'fleet.json').write_text('{"machines": []}')
+        self.fakehub.nodes = [{'name': 'studio'}]
+        code, out = self.run_script(self.bin / 'switchboard', 'link')
+        self.assertEqual((code, out), (0, 'This computer is linked to its own server.\n'))
+
+    def test_a_link_that_fails_leaves_a_working_server_and_the_line_to_run(self):
+        for why, env, said in (('the hub gives no code', {}, 'The hub on this computer gave no code.'),
+                               ('the code is turned down', {'FAKE_PAIR_FAILS': '1'}, 'That code is not known.'),
+                               ('the hub does not answer', {'SWITCHBOARD_HUB_URL': f'http://127.0.0.1:{free_port()}'},
+                                'The hub on this computer did not answer.')):
+            with self.subTest(why=why):
+                self.fakehub.refuse = why == 'the hub gives no code'
+                out = self.go(**env)
+                self.assertIn(f'This computer could not be linked to its own server:\n  {said}\n'
+                              'The server is installed and running. To link this computer, run: switchboard link\n', out)
+                self.assertFalse(self.node_json.exists())
+        # that line then links it, once
+        self.fakehub.refuse = False
+        self.env.update(FAKE_PAIR_FAILS='', SWITCHBOARD_HUB_URL=f'http://{self.fakehub.addr}')
+        code, out = self.run_script(self.bin / 'switchboard', 'link')
+        self.assertEqual((code, out), (0, 'This computer is linked to its own server.\n'))
+        codes = self.fakehub.codes
+        code, out = self.run_script(self.bin / 'switchboard', 'link')
+        self.assertEqual(code, 3, out)
+        self.assertIn('This computer is linked already.', out)
+        self.assertEqual(self.fakehub.codes, codes)
+
+    def test_a_link_saved_but_not_set_to_run_is_finished_by_the_line_without_a_second_code(self):
+        self.shim('uname', UNAME % 'Darwin')  # (where the node sets itself up as a service)
+        self.shim('launchctl', LOGGED)
+        out = self.go('1.0.0', FAKE_INSTALL_FAILS='1')
+        self.assertIn('The link is saved, but switchboard-node could not be set to run when you log in.', out)
+        self.assertIn('To link this computer, run: switchboard link', out)
+        self.assertTrue(self.node_json.exists())
+        out = self.go('2.0.0')  # an update does not try again by itself
+        self.assertNotIn('This computer', out)
+        self.env['FAKE_INSTALL_FAILS'] = ''
+        code, out = self.run_script(self.bin / 'switchboard', 'link')
+        self.assertEqual((code, out), (0, 'This computer is linked to its own server.\n'))
+        self.assertEqual(self.fakehub.codes, 1)
+        self.assertEqual([c for c in self.node_calls() if c != 'run'], [f'pair {self.fakehub.addr} CODE1', 'install', 'install'])
+
+    def test_nothing_is_linked_when_asked_not_to_or_without_a_hub_or_a_node_for_this_computer(self):
+        out = self.go('1.0.0', '--no-link')
+        self.assertNotIn('This computer', out)
+        code, out = self.install('2.0.0', '--no-hub')
+        self.assertEqual(code, 0, out)
+        self.assertNotIn('This computer', out)
+        self.assertEqual((self.fakehub.asked, self.node_calls()), ([], []))
+        # a kit with no switchboard-node for this kind of computer says so, and the install still succeeds
+        script = self.kit('3.0.0', node=False)
+        code, out = self.run_script(script, '--yes', '--no-setup', '--plain', '--no-service', '--hub-binary', self.hub('A'))
+        self.assertEqual(code, 0, out)
+        self.assertIn('  This server has no switchboard-node for this kind of computer.\n', out)
+        self.assertEqual(self.fakehub.codes, 0)
 
 
 NODE = '''#!/bin/sh

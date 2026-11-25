@@ -11,6 +11,9 @@
 #                                          and the Rust sources, so a machine with Rust can build the hub itself
 #   switchboard-server-kit.tar.gz.sha256   its SHA-256, which get-server.sh checks
 #   get-server.sh                          the one-line installer; with --base it knows where the kit is
+# The kit also carries Switchboard's own Python for every kind of computer (python/python-<kind>.tar.gz, downloaded
+# by fetch-python.sh and checked against the SHA-256 pinned in python-pins.txt), so a computer with no Python can
+# run the server and the helper. That adds about 135 MB; --python picks fewer kinds, --no-python leaves it out.
 # The kit also carries python-zeroconf and what it needs (pure Python wheels, licenses included) in server/vendor, so
 # a Linux server without avahi-utils still announces itself; the server uses it only when the machine has none.
 # Put all three in one folder on a web server. Then, on the new server machine:
@@ -23,12 +26,14 @@
 #   --no-binaries     leave out the ready-made hub and node builds
 #   --no-sources      leave out the Rust sources (native/, as git has it)
 #   --no-vendor       leave out server/vendor (python-zeroconf); pip downloads it otherwise
+#   --python "KINDS"  carry Python for these kinds only (mac-arm64 mac-x86_64 linux-x86_64 linux-arm64 windows-x86_64)
+#   --no-python       carry no Python: every computer then needs its own Python 3.9 or newer
 set -euo pipefail
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 REPO="$(cd "$HERE/../.." && pwd)"
 OUT="$REPO/dist/server-kit"
-BASE="" BINARIES=1 SOURCES=1 VENDOR=1
+BASE="" BINARIES=1 SOURCES=1 VENDOR=1 PYTHON=1 PYTHON_KINDS=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --base) BASE="${2:?--base needs a URL}"; shift ;;
@@ -36,6 +41,8 @@ while [ $# -gt 0 ]; do
     --no-binaries) BINARIES=0 ;;
     --no-sources) SOURCES=0 ;;
     --no-vendor) VENDOR=0 ;;
+    --python) PYTHON_KINDS="${2:?--python needs the kinds, in quotes}"; shift ;;
+    --no-python) PYTHON=0 ;;
     -h|--help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//'; exit 0 ;;
     *) echo "pack-server-kit.sh: unknown option $1 (see --help)" >&2; exit 2 ;;
   esac
@@ -70,10 +77,21 @@ mkdir -p "$OUT"
 KIT="$OUT/switchboard-server-kit.tar.gz"
 
 # python-zeroconf 0.39.4 is the last release with a pure Python wheel; it runs on Python 3.7 and later.
-WHEELS=""
+WHEELS="" PYDIR=""
+cleanup() { [ -z "$WHEELS" ] || rm -rf "$WHEELS"; [ -z "$PYDIR" ] || rm -rf "$PYDIR"; }
+trap cleanup EXIT
+# Switchboard's own Python. A download that fails or does not match its pin stops the pack: a kit that silently
+# lacks it would install only where Python already is.
+if [ "$PYTHON" = 1 ]; then
+  PYDIR=$(mktemp -d)
+  # shellcheck disable=SC2086  # the kinds are separate words
+  bash "$HERE/fetch-python.sh" "$PYDIR" $PYTHON_KINDS >&2 || {
+    echo "pack-server-kit.sh: Python was not added, so no kit was made. Fix the download, or pass --no-python for a kit that uses each computer's own Python." >&2
+    exit 1
+  }
+fi
 if [ "$VENDOR" = 1 ]; then
   WHEELS=$(mktemp -d)
-  trap 'rm -rf "$WHEELS"' EXIT
   if ! python3 -m pip download -q --no-deps --only-binary=:all: --platform any --python-version 3.9 -d "$WHEELS" \
       zeroconf==0.39.4 ifaddr==0.2.0 async-timeout==5.0.1 >/dev/null 2>&1; then
     echo "pack-server-kit.sh: could not download python-zeroconf (offline?); the kit is made without server/vendor" >&2
@@ -82,10 +100,10 @@ if [ "$VENDOR" = 1 ]; then
 fi
 
 # Python's tarfile makes the same archive on macOS and Linux: sorted names, one time stamp, no owners.
-python3 - "$REPO" "$KIT" "${VERSION:-unknown}${COMMIT:+ ($COMMIT)}" "$STAMP" "$BINARIES" "$SOURCES" "$WHEELS" <<'PY'
+python3 - "$REPO" "$KIT" "${VERSION:-unknown}${COMMIT:+ ($COMMIT)}" "$STAMP" "$BINARIES" "$SOURCES" "$WHEELS" "$PYDIR" <<'PY'
 import glob, gzip, io, os, subprocess, sys, tarfile, zipfile
 repo, out, version, stamp = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4])
-binaries, sources, wheels = sys.argv[5] == '1', sys.argv[6] == '1', sys.argv[7]
+binaries, sources, wheels, pydir = sys.argv[5] == '1', sys.argv[6] == '1', sys.argv[7], sys.argv[8]
 top = 'switchboard-server-kit'
 skip_dirs = {'__pycache__', '.pytest_cache'}
 files = []
@@ -97,7 +115,8 @@ files += [os.path.join(repo, 'agent', 'sb.py'), os.path.join(repo, 'LICENSE'),
           os.path.join(repo, 'native', 'crates', 'sb-core', 'src', 'term', 'schemes.json')]
 kept = []
 if binaries:
-    for n in ('switchboard-hub-linux', 'switchboard-hub-mac', 'switchboard-node-linux', 'switchboard-node-mac', 'switchboard-node.exe'):
+    for n in ('switchboard-hub-linux', 'switchboard-hub-mac', 'switchboard-hub.exe', 'switchboard-node-linux',
+              'switchboard-node-mac', 'switchboard-node.exe'):
         p = os.path.join(repo, 'native', 'dist', n)
         if os.path.isfile(p) and os.path.getsize(p):
             files.append(p); kept.append(n)
@@ -126,6 +145,12 @@ with tarfile.open(fileobj=raw, mode='w', format=tarfile.PAX_FORMAT) as tar:
             data = fh.read()
         mode = 0o755 if os.access(f, os.X_OK) or rel.startswith('native/dist/') and not rel.endswith('.exe') else 0o644
         add(tar, rel, data, mode)
+    pythons = []
+    for n in sorted(os.listdir(pydir)) if pydir else []:  # as fetch-python.sh left them: archives, SHA256SUMS, VERSION
+        with open(os.path.join(pydir, n), 'rb') as fh:
+            add(tar, f'python/{n}', fh.read(), 0o644)
+        if n.endswith('.tar.gz'):
+            pythons.append(n[len('python-'):-len('.tar.gz')])
     vendored = []
     for whl in sorted(glob.glob(os.path.join(wheels, '*.whl'))) if wheels else []:
         with zipfile.ZipFile(whl) as z:
@@ -136,7 +161,7 @@ with tarfile.open(fileobj=raw, mode='w', format=tarfile.PAX_FORMAT) as tar:
 with open(out, 'wb') as fh, gzip.GzipFile(filename='', mode='wb', fileobj=fh, mtime=stamp) as gz:
     gz.write(raw.getvalue())
 print(f'{len(files) + 1} files; ready-made builds: {", ".join(kept) or "none"}; Rust sources: {"yes" if sources else "no"}; '
-      f'vendored: {", ".join(vendored) or "none"}')
+      f'vendored: {", ".join(vendored) or "none"}; Python: {", ".join(pythons) or "none"}')
 PY
 
 ( cd "$OUT" && if command -v sha256sum >/dev/null; then sha256sum switchboard-server-kit.tar.gz; else shasum -a 256 switchboard-server-kit.tar.gz; fi ) >"$KIT.sha256"

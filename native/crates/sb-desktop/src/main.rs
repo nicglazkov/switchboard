@@ -24,12 +24,14 @@ mod library;
 mod link;
 mod logs;
 mod menu;
+mod menubar;
 mod nav;
 mod notices;
 mod palette;
 mod panics;
 mod perf;
 mod place;
+mod qr;
 mod rename;
 mod serversetup;
 mod settings;
@@ -48,7 +50,7 @@ mod usage;
 mod view;
 mod wake;
 
-use gpui::{App, Menu, MenuItem, WindowAppearance};
+use gpui::{App, WindowAppearance};
 
 use crate::state::AppState;
 use crate::theme::{Mode, Theme};
@@ -92,6 +94,7 @@ fn main() {
             Mode::Light => false,
             Mode::System => !matches!(cx.window_appearance(), WindowAppearance::Light | WindowAppearance::VibrantLight),
         };
+        theme::sync_native(mode, cx);
         if mode != Mode::System {
             app.update(cx, |s, _| s.settings.theme = mode.name().map(str::to_string));
         }
@@ -104,35 +107,7 @@ fn main() {
         std::thread::spawn(|| {
             let _ = state::profiles();
         });
-        cx.set_menus(vec![
-            Menu::new("Switchboard").items([
-                MenuItem::action("About Switchboard", view::About),
-                MenuItem::separator(),
-                MenuItem::action("Settings...", view::Settings),
-                MenuItem::separator(),
-                MenuItem::action("Quit Switchboard", view::Quit),
-            ]),
-            Menu::new("File").items([
-                MenuItem::action("New chat...", view::NewSession),
-                MenuItem::separator(),
-                MenuItem::action("Close tab", view::CloseTab),
-            ]),
-            Menu::new("View").items([
-                MenuItem::action("Command palette", view::TogglePalette),
-                MenuItem::action("History", view::Browse),
-                MenuItem::action("Switch light and dark", view::ToggleTheme),
-            ]),
-            Menu::new("Terminal").items([
-                MenuItem::action("New terminal", view::NewTerminal),
-                MenuItem::action("Open a chat in a terminal...", view::ChatPalette),
-                MenuItem::separator(),
-                MenuItem::action("Bigger text", term::TermBigger),
-                MenuItem::action("Smaller text", term::TermSmaller),
-                MenuItem::action("Actual size", term::TermSizeReset),
-                MenuItem::separator(),
-                MenuItem::action("Redraw", term::TermRedraw),
-            ]),
-        ]);
+        menubar::install(cx);
 
         // Clicking a needs-you notification brings the board forward with that chat selected.
         let a2 = app.clone();

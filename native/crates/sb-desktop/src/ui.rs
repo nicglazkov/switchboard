@@ -36,7 +36,19 @@ pub const EDGE: f32 = 20.;
 /// Mac, so the footer's first item sits right under the header's first item (the Switchboard mark); the shared
 /// edge elsewhere. One number, so the two bars can never drift apart again.
 pub fn lead() -> f32 {
-    if MAC { 84. } else { EDGE }
+    lead_for(MAC, FULL_SCREEN.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// A Mac window in full screen has no traffic lights, so nothing to step past.
+fn lead_for(mac: bool, full_screen: bool) -> f32 {
+    if mac && !full_screen { 84. } else { EDGE }
+}
+
+static FULL_SCREEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The board says whether its window is in full screen each time it draws, before anything asks for `lead`.
+pub fn set_full_screen(on: bool) {
+    FULL_SCREEN.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// One radius scale for every rounded thing, so nested shapes read as one family. Rule: a child that sits inside
@@ -633,6 +645,9 @@ pub fn tip(text: &'static str) -> impl Fn(&mut gpui::Window, &mut gpui::App) -> 
     move |_, cx| cx.new(|_| Tip(text.into())).into()
 }
 
+/// How faint a control is drawn while what it does is not available (the app menu's rows use the same).
+pub const OFF: f32 = 0.45;
+
 /// `tip` for text made at run time.
 pub fn tip_text(
     text: impl Into<SharedString>,
@@ -801,6 +816,9 @@ pub struct Drop {
     closed: Option<(SharedString, std::time::Instant)>,
     /// A menu's collapsed section ("More models") is shown; folds again when the menu next opens.
     pub more: bool,
+    /// Where the open menu is scrolled to, for a list longer than the menu is tall (the models): it starts at the
+    /// top each time the menu opens.
+    pub scroll: gpui::ScrollHandle,
 }
 
 impl Drop {
@@ -812,6 +830,7 @@ impl Drop {
         let just = self.closed.take().is_some_and(|(c, at)| c.as_ref() == id && at.elapsed().as_millis() < 400);
         self.open = if self.is_open(id) || just { None } else { Some(SharedString::from(id.to_string())) };
         self.more = false;
+        self.scroll = gpui::ScrollHandle::new();
     }
 
     /// The click outside the menu: closes it, and remembers which one, for its trigger's click right after.
@@ -889,6 +908,7 @@ pub fn choice<V: 'static>(
             t,
             id,
             items,
+            None,
             cx.listener(move |v, _: &gpui::MouseDownEvent, _, cx| {
                 drop(v).close_out();
                 cx.notify();
@@ -909,6 +929,7 @@ pub fn model_pick<V: 'static>(
     id: &'static str,
     open: bool,
     more: bool,
+    scroll: &gpui::ScrollHandle,
     menu: &[sb_core::actions::ModelChoice],
     cur: &str,
     locked: Option<&str>,
@@ -971,6 +992,7 @@ pub fn model_pick<V: 'static>(
             t,
             id,
             items,
+            Some(scroll),
             cx.listener(move |v, _: &gpui::MouseDownEvent, _, cx| {
                 drop(v).close_out();
                 cx.notify();
@@ -1001,24 +1023,23 @@ pub fn drop_menu(
     t: &Theme,
     id: &str,
     items: Vec<DropItem>,
+    scroll: Option<&gpui::ScrollHandle>,
     close: impl Fn(&gpui::MouseDownEvent, &mut gpui::Window, &mut gpui::App) + 'static,
 ) -> gpui::AnyElement {
     let hover = t.hover;
     let press = t.press;
+    // A list longer than the menu is tall scrolls, and fades out at the bottom while more lies below: a row cut
+    // by the menu's edge reads as "scroll", never as the end of the list.
+    let rows_h: f32 = items.iter().map(drop_row_h).sum::<f32>() + 12.;
+    let more_below = scroll.is_some_and(|h| {
+        menu_more_below(f32::from(h.bounds().size.height), f32::from(h.offset().y), f32::from(h.max_offset().y), rows_h)
+    });
     let mut menu = div()
         .id(SharedString::from(format!("{id}-menu")))
-        .min_w(px(180.))
-        .max_w(px(360.))
-        .max_h(px(340.))
+        .max_h(px(DROP_MAX_H))
         .overflow_y_scroll()
+        .when_some(scroll, |d, h| d.track_scroll(h))
         .p(px(6.))
-        .rounded(px(R_POP))
-        .border_1()
-        .border_color(t.line2)
-        .bg(t.panel2)
-        .shadow(t.drop())
-        .occlude()
-        .on_mouse_down_out(close)
         .flex()
         .flex_col();
     for (i, it) in items.into_iter().enumerate() {
@@ -1075,6 +1096,27 @@ pub fn drop_menu(
                 .on_click(move |ev, window, cx| pick(ev, window, cx))
         });
     }
+    let menu = div()
+        .relative()
+        .min_w(px(180.))
+        .max_w(px(360.))
+        .rounded(px(R_POP))
+        .border_1()
+        .border_color(t.line2)
+        .bg(t.panel2)
+        .shadow(t.drop())
+        .occlude()
+        .on_mouse_down_out(close)
+        .child(menu)
+        .when(more_below, |d| {
+            d.child(div().absolute().left_0().right_0().bottom_0().h(px(30.)).rounded_b(px(R_POP - 1.)).bg(
+                gpui::linear_gradient(
+                    180.,
+                    gpui::linear_color_stop(t.panel2.opacity(0.), 0.),
+                    gpui::linear_color_stop(t.panel2, 1.),
+                ),
+            ))
+        });
     div()
         .absolute()
         .top_full()
@@ -1086,6 +1128,27 @@ pub fn drop_menu(
             .with_priority(1),
         )
         .into_any_element()
+}
+
+/// The tallest a dropdown's menu gets; a longer list scrolls inside it.
+const DROP_MAX_H: f32 = 340.;
+
+/// About how tall a menu row is drawn: one line, two with a quieter line under it, or a fold's smaller line.
+fn drop_row_h(it: &DropItem) -> f32 {
+    if it.sub.is_some() {
+        46.
+    } else if it.fold.is_some() {
+        32.
+    } else {
+        30.
+    }
+}
+
+/// Whether a scrolling menu has rows below the ones that show. `view`, `offset` and `max` are the menu as it was
+/// last laid out (its height, how far it is scrolled, how far it can be); before the first layout `view` is zero
+/// and the rows' own heights (`rows`) say whether the list is longer than the menu.
+fn menu_more_below(view: f32, offset: f32, max: f32, rows: f32) -> bool {
+    if view <= 0. { rows > DROP_MAX_H + 1. } else { max > 1. && offset > -max + 1. }
 }
 
 impl gpui::Render for Tip {
@@ -1102,5 +1165,18 @@ impl gpui::Render for Tip {
             .text_size(px(12.))
             .text_color(t.ink2)
             .child(self.0.clone())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_header_steps_past_the_traffic_lights_only_while_a_mac_window_has_them() {
+        assert_eq!(lead_for(true, false), 84.);
+        assert_eq!(lead_for(true, true), EDGE, "full screen: no traffic lights, so no gap where they were");
+        assert_eq!(lead_for(false, false), EDGE);
+        assert_eq!(lead_for(false, true), EDGE);
     }
 }

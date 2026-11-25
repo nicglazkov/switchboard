@@ -232,9 +232,33 @@ impl Theme {
     }
 }
 
+/// What the Mac draws around the app's own pixels (title bars, traffic lights, menus, the folder dialog) in a look:
+/// Light or Dark when the app is set to one, and the system's own, None, when the app follows the system.
+pub fn native_look(mode: Mode) -> Option<gpui::WindowAppearance> {
+    match mode {
+        Mode::Dark => Some(gpui::WindowAppearance::Dark),
+        Mode::Light => Some(gpui::WindowAppearance::Light),
+        Mode::System => None,
+    }
+}
+
+/// Tells the Mac which look its own parts of the windows take, so a dark Settings window does not wear a light
+/// title bar when the system is light. Only when it changes: the Mac repaints every window's frame for it.
+pub fn sync_native(mode: Mode, cx: &App) {
+    static LAST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(u8::MAX);
+    if !cfg!(target_os = "macos") {
+        return;
+    }
+    let now = mode as u8;
+    if LAST.swap(now, std::sync::atomic::Ordering::Relaxed) != now {
+        cx.set_window_appearance(native_look(mode));
+    }
+}
+
 /// Saves the app's look (System follows the window's appearance) and repaints every window.
 pub fn set_mode(mode: Mode, window: &gpui::Window, cx: &mut App) {
     save_look(cx, |s| s.theme = mode.name().map(str::to_string));
+    sync_native(mode, cx);
     let dark = match mode {
         Mode::Dark => true,
         Mode::Light => false,
@@ -277,4 +301,16 @@ pub fn mix(a: Hsla, b: Hsla, t: f32) -> Hsla {
     let (a, b) = (a.to_rgb(), b.to_rgb());
     Rgba { r: a.r + (b.r - a.r) * t, g: a.g + (b.g - a.g) * t, b: a.b + (b.b - a.b) * t, a: a.a + (b.a - a.a) * t }
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_mac_frame_follows_the_app_when_it_is_set_and_the_system_when_it_is_not() {
+        assert_eq!(native_look(Mode::Dark), Some(gpui::WindowAppearance::Dark));
+        assert_eq!(native_look(Mode::Light), Some(gpui::WindowAppearance::Light));
+        assert_eq!(native_look(Mode::System), None, "System: the Mac keeps following its own setting");
+    }
 }

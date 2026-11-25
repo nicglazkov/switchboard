@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# switchboard: start, stop and check the Switchboard server on this machine (macOS or Linux).
+# switchboard: start, stop and check the Switchboard server on this machine (macOS or Linux), link this computer to
+# it (link), say how the other computers reach it (keys on|only|off|status; code, pair, devices and forget are
+# switchboard-node's), and remove Switchboard from this computer (uninstall [--purge]).
 # install-server.sh puts this in ~/.local/bin. It works the same whichever way the server runs:
 # systemd user services (Linux), LaunchAgents (macOS), or plain background processes (a machine with neither).
 set -uo pipefail
@@ -9,7 +11,19 @@ APP="$SHARE/app"
 RUN="$SHARE/run"
 LOGS="$SHARE/logs"
 PARTS="server hub downloads"
-PY="$(command -v python3 || true)"
+BIN="$HOME/.local/bin"
+CFG="$HOME/.config/switchboard"
+# Switchboard's own Python when the installer put one in place, else this computer's.
+PY="$SHARE/python/bin/python3"
+[ -x "$PY" ] || PY="$(command -v python3 || true)"
+case "$(uname -s)" in Darwin) OSN=mac ;; *) OSN=linux ;; esac
+# (these settings are for this script's own tests, and for a server run on other ports beside the real one)
+HUB_URL="${SWITCHBOARD_HUB_URL:-http://127.0.0.1:8132}"
+HUB_WAIT="${SWITCHBOARD_HUB_WAIT:-10}"
+NODE_CFG="${SWITCHBOARD_NODE_CONFIG:-$CFG/node.json}"
+PORT="${SWITCHBOARD_PORT:-8130}"
+DL_PORT="${SWITCHBOARD_DOWNLOADS_PORT:-8131}"
+HUB_PORT="${SWITCHBOARD_HUB_PORT:-8132}"
 
 mode() {
   if [ "$(uname -s)" = Darwin ] && [ -f "$HOME/Library/LaunchAgents/com.switchboard.server.plist" ]; then
@@ -29,18 +43,29 @@ run_part() {
   case "$1" in
     server) exec nohup "$PY" -u "$APP/server/server.py" ;;
     hub) exec nohup "$HOME/.local/bin/switchboard-hub" ;;
-    downloads) exec nohup "$PY" -m http.server 8131 --directory "$SHARE/downloads" ;;
+    downloads) exec nohup "$PY" "$APP/server/downloads.py" --port "$DL_PORT" --directory "$SHARE/downloads" ;;
   esac
 }
 has_part() { [ "$1" != hub ] || [ -x "$HOME/.local/bin/switchboard-hub" ]; }
 
-# What tells a part's process from any other, in its command line.
+# What tells a part's process from any other, in its command line: one mark to a line. The downloads were
+# `python -m http.server 8131` before they were server/downloads.py, and one started that way by an older version
+# of this command is still this part, to be found and stopped.
 mark_of() {
   case "$1" in
     server) echo "server/server.py" ;;
     hub) echo "switchboard-hub" ;;
-    downloads) echo "http.server 8131" ;;
+    downloads) echo "server/downloads.py"; echo "http.server 8131" ;;
   esac
+}
+has_mark() {  # $1 = part, $2 = a command line
+  local m
+  while IFS= read -r m; do
+    case "$2" in *"$m"*) return 0 ;; esac
+  done <<EOF
+$(mark_of "$1")
+EOF
+  return 1
 }
 
 # The pid of a part started in plain mode, if it is still running. A pid file outlives its process (a reboot, a
@@ -55,7 +80,7 @@ plain_pid() {
   c=$(ps -p "$pid" -o command= 2>/dev/null)
   # (a ps that cannot say leaves the pid file's word for it, as before)
   if [ -n "$c" ]; then
-    case "$c" in *"$(mark_of "$1")"*) ;; *) return 1 ;; esac
+    has_mark "$1" "$c" || return 1
   fi
   echo "$pid"
 }
@@ -124,13 +149,64 @@ PY
 
 status() {
   echo "Switchboard on this machine ($(mode))"
-  echo "  server     http://127.0.0.1:8130  $(up http://127.0.0.1:8130/api/summary)"
+  local keys; keys=$(keys_mode)
+  echo "  server     http://127.0.0.1:$PORT  $(up "http://127.0.0.1:$PORT/api/summary")"
   if [ -x "$HOME/.local/bin/switchboard-hub" ]; then
-    echo "  hub        http://127.0.0.1:8132  $(up http://127.0.0.1:8132/healthz)"
+    echo "  hub        http://127.0.0.1:$HUB_PORT  $(up "http://127.0.0.1:$HUB_PORT/healthz")"
   else
     echo "  hub        not installed (terminals and linked machines are off)"
   fi
-  echo "  downloads  http://127.0.0.1:8131  $(up http://127.0.0.1:8131/node/SHA256SUMS)"
+  if [ "$keys" = only ]; then
+    echo "  downloads  not served (keys only)"
+  else
+    echo "  downloads  http://127.0.0.1:$DL_PORT  $(up "http://127.0.0.1:$DL_PORT/node/SHA256SUMS")"
+  fi
+  case "$keys" in
+    both) echo "  keys       on: computers connect with a key or by address" ;;
+    only) echo "  keys       only: computers connect with a key, and the ports are closed to the network" ;;
+  esac
+}
+
+# ---------------------------------------------------------------- keys: how the other computers reach this one
+keys_py() { "$PY" "$APP/server/keys.py" "$@"; }
+keys_mode() {  # off, both or only; off where this server knows nothing of keys
+  [ -f "$APP/server/keys.py" ] && [ -f "$CFG/server.json" ] && keys_py mode 2>/dev/null || echo off
+}
+
+# `switchboard keys on|only|off|status`. The mode is one word in server.json (server/keys.py writes it, and refuses
+# "only" while that would cut a computer off). The server, the hub and the downloads read it when they start, so
+# they are started again here, in that order; the node on this computer looks at the file every few seconds and
+# needs no restart. Then it waits for the node's answer, and says the next step.
+keys() {
+  local what="${1:-status}" rc
+  [ $# -gt 0 ] && shift
+  case "$what" in
+    status) [ $# -eq 0 ] || { keys_usage; return 2; }
+            keys_py status ;;
+    on|only|off)
+      if [ "$what" != off ] && [ ! -x "$BIN/switchboard-node" ]; then
+        echo "Keys need switchboard-node on this home computer, and it is not installed here."
+        echo "Link this computer first: switchboard link"
+        return 1
+      fi
+      case "$what $*" in "only --force"|"$what ") ;; *) keys_usage; return 2 ;; esac
+      keys_py "$what" "$@"; rc=$?
+      case "$rc" in 0) ;; 3) return 0 ;; *) return "$rc" ;; esac
+      stop >/dev/null 2>&1
+      start
+      keys_py wait ;;
+    *) keys_usage; return 2 ;;
+  esac
+}
+keys_usage() { echo "usage: switchboard keys on|only [--force]|off|status" >&2; }
+
+# code, pair, devices and forget are switchboard-node's own: this passes them on, so there is one command to know.
+node_cmd() {
+  if [ ! -x "$BIN/switchboard-node" ]; then
+    echo "switchboard-node is not installed on this computer. On the home computer, run: switchboard link"
+    return 1
+  fi
+  "$BIN/switchboard-node" "$@"
 }
 
 tail_logs() {  # $1 = folder, $2 = lines
@@ -146,6 +222,195 @@ logs() {
   esac
 }
 
+# ---------------------------------------------------------------- link this computer to its own server
+hub_ask() {  # $1 = nodes (prints how many computers the hub has linked) or code (prints a new code)
+  "$PY" - "$1" "$HUB_URL" <<'PY'
+import json, sys, urllib.request
+what, hub = sys.argv[1], sys.argv[2]
+path, data = ('/internal/nodes', None) if what == 'nodes' else ('/internal/pair', b'{}')
+req = urllib.request.Request(hub + path, data=data, headers={'Content-Type': 'application/json'})
+try:  # straight there, never through a proxy from the environment
+    with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=5) as r:
+        v = json.loads(r.read() or b'{}')
+    print(len(v['nodes']) if what == 'nodes' else v['code'])
+except Exception:
+    sys.exit(1)
+PY
+}
+fleet_count() {  # how many computers fleet.json lists; 0 with no file, -1 when it cannot be read
+  "$PY" - "$CFG/fleet.json" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1], encoding='utf-8'))
+except FileNotFoundError:
+    print(0)
+    sys.exit(0)
+except Exception:
+    print(-1)
+    sys.exit(0)
+rows = d if isinstance(d, list) else d.get('machines') if isinstance(d, dict) else None
+print(len(rows) if isinstance(rows, list) else -1)
+PY
+}
+user_systemd() { [ "$OSN" = linux ] && command -v systemctl >/dev/null && systemctl --user show-environment >/dev/null 2>&1; }
+
+# Links this computer to the server it runs, so its own chats show on the board: the helper for Claude Code, a code
+# from the hub (which gives one only to this computer), and switchboard-node. With --first (what install-server.sh
+# asks after a start) it does so only when the server has no computers yet. Ends 0 when it linked, 3 when there was
+# nothing to do, 1 with the reason when it could not. A computer with a node.json is never linked a second time.
+link() {
+  local first=0 n="" code out tmp node="$SHARE/downloads/node/switchboard-node-$OSN" sb="$HOME/.claude/switchboard/sb.py"
+  [ "${1:-}" = --first ] && first=1
+  if [ ! -x "$BIN/switchboard-hub" ]; then
+    [ "$first" = 1 ] && return 3
+    echo "This server has no hub, so computers are added over ssh. Run: switchboard setup"; return 1
+  fi
+  if [ -f "$NODE_CFG" ] && [ -x "$BIN/switchboard-node" ]; then
+    [ "$first" = 1 ] || echo "This computer is linked already. To link it again, first run: switchboard-node uninstall"
+    return 3
+  fi
+  [ -n "$PY" ] || { echo "Python 3 was not found."; return 1; }
+  if [ ! -f "$NODE_CFG" ]; then
+    # (the hub was started a moment ago, so it gets a few seconds to answer)
+    for _ in $(seq 1 "$HUB_WAIT"); do n=$(hub_ask nodes) && break; n=""; sleep 1; done
+    [ -n "$n" ] || { echo "The hub on this computer did not answer."; return 1; }
+    if [ "$first" = 1 ]; then
+      [ "$n" = 0 ] && [ "$(fleet_count)" = 0 ] || return 3
+    fi
+  elif [ "$first" = 1 ]; then
+    return 3  # linked by an earlier run whose last step failed: only `switchboard link` finishes it
+  fi
+  [ -s "$node" ] || { echo "This server has no switchboard-node for this kind of computer."; return 1; }
+  if [ ! -f "$sb" ]; then
+    mkdir -p "$(dirname "$sb")"
+    cp "$APP/agent/sb.py" "$sb.new" && mv -f "$sb.new" "$sb" || { echo "The helper could not be copied to $sb."; return 1; }
+    out=$("$PY" "$sb" install 2>&1) || { rm -f "$sb"; echo "The helper for Claude Code could not be set up: $out"; return 1; }
+  fi
+  tmp=$(mktemp -d) || return 1
+  cp "$node" "$tmp/switchboard-node" && chmod +x "$tmp/switchboard-node"
+  [ "$OSN" = mac ] && xattr -d com.apple.quarantine "$tmp/switchboard-node" 2>/dev/null
+  if [ ! -f "$NODE_CFG" ]; then
+    code=$(hub_ask code) || { rm -rf "$tmp"; echo "The hub on this computer gave no code."; return 1; }
+    out=$("$tmp/switchboard-node" pair "${HUB_URL#*://}" "$code" 2>&1) || { rm -rf "$tmp"; echo "$out"; return 1; }
+  fi
+  if [ "$OSN" = mac ] || user_systemd; then
+    out=$("$tmp/switchboard-node" install 2>&1) || {
+      rm -rf "$tmp"; echo "$out"; echo "The link is saved, but switchboard-node could not be set to run when you log in."; return 1; }
+  else  # no user service manager: a background process, like the server itself here
+    mkdir -p "$BIN" "$LOGS"
+    install -m 755 "$tmp/switchboard-node" "$BIN/switchboard-node"
+    nohup "$BIN/switchboard-node" run >>"$LOGS/node.log" 2>&1 &
+  fi
+  rm -rf "$tmp"
+  echo "This computer is linked to its own server."
+}
+
+# ---------------------------------------------------------------- uninstall
+tilde() { case "$1" in "$HOME"/*) printf '~%s' "${1#"$HOME"}" ;; *) printf '%s' "$1" ;; esac; }
+REMOVED="" LEFT=""
+removed() { REMOVED="$REMOVED  $*"$'\n'; }
+left() { LEFT="$LEFT  $*"$'\n'; }
+
+# Removes Switchboard from this computer, in this order: the helper's changes to Claude Code, switchboard-node, the
+# server with its hub, downloads and services, and Switchboard's own Python. Settings, history and keys stay unless
+# --purge is given. It says what it removed and what it left.
+uninstall() {
+  local purge=0 yes=0 a out="" d app sb="$HOME/.claude/switchboard/sb.py" had_keys=0
+  for a in "$@"; do
+    case "$a" in
+      --purge) purge=1 ;;
+      --yes|-y) yes=1 ;;
+      *) echo "usage: switchboard uninstall [--purge] [--yes]" >&2; return 2 ;;
+    esac
+  done
+  if [ "$yes" = 0 ] && [ -t 0 ]; then
+    if [ "$purge" = 1 ]; then printf 'Remove Switchboard from this computer, with its settings, history and keys? [y/N] '
+    else printf 'Remove Switchboard from this computer? Settings and history are kept. [y/N] '; fi
+    read -r a || a=""
+    case "$a" in y|Y|yes|Yes) ;; *) echo "Nothing was removed."; return 1 ;; esac
+  fi
+
+  # 1. the helper: Claude Code's hooks, status line and tools go back to how they were
+  if [ -f "$sb" ]; then
+    if [ -n "$PY" ] && out=$("$PY" "$sb" uninstall 2>&1); then
+      rm -f "$sb"
+      removed "the helper: its hooks, status line and tools are out of Claude Code ($(tilde "$HOME/.claude"))"
+    else
+      left "$(tilde "$sb")  the helper, which could not take itself out of Claude Code${out:+: $out}"
+    fi
+  fi
+
+  # (this computer's key and its list of paired devices: the node leaves them, unless --purge is given)
+  { [ -f "$CFG/device.key" ] || [ -f "$SHARE/paired.json" ]; } && had_keys=1
+  # 2. switchboard-node, which links this computer to a server
+  if [ -x "$BIN/switchboard-node" ]; then
+    if out=$("$BIN/switchboard-node" uninstall $([ "$purge" = 1 ] && echo --purge) 2>&1); then
+      rm -f "$BIN/switchboard-node"
+      removed "switchboard-node, which linked this computer to a server"
+      [ -z "$out" ] || REMOVED="$REMOVED$(printf '%s\n' "$out" | sed 's/^/    /')"$'\n'
+    else
+      left "$(tilde "$BIN/switchboard-node")  it could not remove itself. Run: switchboard-node uninstall"
+      [ -z "$out" ] || LEFT="$LEFT$(printf '%s\n' "$out" | sed 's/^/    /')"$'\n'
+    fi
+  fi
+
+  # 3. the server, the hub, the downloads and what starts them (kept in step with install-server.sh --uninstall),
+  #    and Switchboard's own Python, which nothing uses once the helper and the server are gone
+  stop >/dev/null 2>&1
+  if [ "$OSN" = mac ]; then
+    for p in $PARTS; do
+      launchctl bootout "gui/$(id -u)/$(label "$p")" 2>/dev/null
+      rm -f "$HOME/Library/LaunchAgents/$(label "$p").plist"
+    done
+  elif command -v systemctl >/dev/null; then
+    for p in $PARTS; do
+      systemctl --user disable --now "$(unit "$p")" >/dev/null 2>&1
+      rm -f "$HOME/.config/systemd/user/$(unit "$p").service"
+    done
+    systemctl --user daemon-reload >/dev/null 2>&1
+  fi
+  [ -d "$APP" ] && removed "the server, its hub, its downloads and what started them"
+  if [ -d "$SHARE/python" ]; then
+    if [ -f "$sb" ]; then left "$(tilde "$SHARE/python")  Switchboard's own Python, which the helper still uses"
+    else removed "Switchboard's own Python"; fi
+  fi
+  for d in app app.old app.new downloads run update env; do rm -rf "${SHARE:?}/$d"; done
+  [ -f "$sb" ] || rm -rf "${SHARE:?}/python" "${SHARE:?}/python.old"
+  rm -f "$BIN/switchboard-hub" "$BIN/switchboard-hub.old"
+
+  # 4. the app has no uninstaller on a Mac or on Linux: it is said, not removed
+  # (SWITCHBOARD_APPLICATIONS: where apps for every user are, for a test on a computer that has the app)
+  for app in "${SWITCHBOARD_APPLICATIONS:-/Applications}/Switchboard.app" "$HOME/Applications/Switchboard.app"; do
+    [ -d "$app" ] && left "$(tilde "$app")  the app. Quit it and move it to the Trash."
+  done
+
+  # 5. settings, history and keys
+  for d in "$CFG|settings and keys" "$SHARE|history and logs" "$HOME/Library/Logs/Switchboard|logs" "$HOME/.claude/switchboard|the helper's own files"; do
+    [ -e "${d%%|*}" ] || continue
+    # (a helper that is still in Claude Code keeps its own folder and the Python it runs with)
+    if [ -f "$sb" ]; then case "${d%%|*}" in "$SHARE"|"$HOME/.claude/switchboard") left "$(tilde "${d%%|*}")  ${d#*|}"; continue ;; esac; fi
+    if [ "$purge" = 1 ] && rm -rf "${d%%|*}"; then removed "$(tilde "${d%%|*}")  ${d#*|}"
+    else left "$(tilde "${d%%|*}")  ${d#*|}"; fi
+  done
+  rm -f "$BIN/switchboard"
+  removed "the switchboard command"
+
+  echo "Switchboard is removed from this computer."
+  echo "Removed:"
+  printf '%s' "$REMOVED"
+  if [ -n "$LEFT" ]; then
+    echo "Left on this computer:"
+    printf '%s' "$LEFT"
+    [ "$purge" = 1 ] || echo "Settings, history and keys are kept in case you install it again. Delete those folders if you do not want them."
+  else
+    echo "Nothing of Switchboard is left on this computer."
+  fi
+  if [ "$purge" = 1 ] && [ "$had_keys" = 1 ] && [ ! -f "$CFG/device.key" ] && [ ! -f "$SHARE/paired.json" ]; then
+    echo "This computer's key and its list of paired devices are removed: every device that was paired with this computer will need to pair again."
+  fi
+  echo "Your other computers each have their own copy. Run this on them too."
+}
+
 case "${1:-status}" in
   start) start; sleep 2; status ;;
   stop) stop; echo "Stopped." ;;
@@ -153,5 +418,9 @@ case "${1:-status}" in
   status) status ;;
   logs) logs "${2:-}" ;;
   setup) shift; exec "$PY" "$APP/install/setup.py" "$@" ;;
-  *) echo "usage: switchboard start|stop|restart|status|logs [lines]|setup" >&2; exit 2 ;;
+  link) shift; link "$@" ;;
+  keys) shift; keys "$@" ;;
+  code|pair|devices|forget|home) node_cmd "$@" ;;
+  uninstall) shift; uninstall "$@" ;;
+  *) echo "usage: switchboard start|stop|restart|status|logs [lines]|setup|link|keys on|only|off|status|code|pair <code-or-link>|devices|forget <name>|home status|move|backup|restore|uninstall [--purge]" >&2; exit 2 ;;
 esac

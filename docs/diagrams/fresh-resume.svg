@@ -1,0 +1,24 @@
+<svg viewBox="0 0 880 400" role="img" aria-labelledby="fig-fresh-resume-t" xmlns="http://www.w3.org/2000/svg">
+<title id="fig-fresh-resume-t">Resume goes back to a cold chat of 180k tokens as it is. The next message reads all 180k again, 29k of it from the cache and 151k in full.</title>
+<text class="d-title" x="40" y="52">Resume: go back to the chat as it is</text>
+<rect class="d-panel" x="40" y="84" width="260" height="256" rx="14"/>
+<g class="d-ico" transform="translate(60 102)"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></g>
+<text x="94" y="120">The cold chat</text>
+<rect class="d-chip" x="60" y="142" width="220" height="178" rx="12"/>
+<text x="80" y="176">180k tokens</text>
+<text class="d-sub" x="80" y="206">Your messages</text>
+<text class="d-sub" x="80" y="228">Claude's replies</text>
+<text class="d-sub" x="80" y="250">Tool output and files read</text>
+<text class="mid t-bad" x="440" y="190">Resume</text>
+<path class="d-bad" d="M320 212H560"/>
+<path class="d-bad" d="M551 204L560 212L551 220"/>
+<text class="d-sub mid" x="440" y="244">Nothing is left out</text>
+<rect class="d-panel" x="580" y="84" width="260" height="256" rx="14"/>
+<g class="d-ico" transform="translate(600 102)"><path d="M5 5h14a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2h-7l-4 3v-3H5a2 2 0 0 1-2-2V7a2 2 0 0 1 2-2z"/></g>
+<text x="634" y="120">The same chat</text>
+<rect class="d-chip-bad" x="600" y="142" width="220" height="178" rx="12"/>
+<text x="620" y="176">All 180k, read again</text>
+<text class="d-sub" x="620" y="206">29k from the cache</text>
+<text class="d-sub" x="620" y="228">151k in full</text>
+<text x="40" y="376">Estimated cost of the next message: about 305k tokens</text>
+</svg>

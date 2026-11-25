@@ -59,6 +59,9 @@ class FleetError(Exception):
     maybe_delivered = False  # True when the machine may have got the request although no answer came back
 
 
+SLOW_POLLS = 3  # polls in a row that reach a machine and get no answer before it is called offline
+
+
 class MaybeDelivered(OSError):
     """A call that left this server but got no answer: the machine may have acted on it (a hub link that timed out
     or dropped mid-call, an ssh session that hung). Never sent again by itself: a second copy of a launch is a
@@ -129,6 +132,20 @@ def check_root(text, windows=False):
 
 def log(msg):
     print(time.strftime('%Y-%m-%d %H:%M:%S'), msg, flush=True)
+
+
+def helper_servers(origins, keys='off', port=8130):
+    """Where each computer's helper reports: the poll's "servers" (docs/plans/2026-11-22-keys-phase-1-2.md, 3.8).
+
+    With keys off this is the server's own addresses, as it always was. With keys on ("both" or "only"), this
+    computer's own address comes first: on the home computer that is the server itself, and on a paired computer it
+    is the node's forwarder into the tunnel. A computer with neither is refused there at once, and its helper goes
+    on to the next address. In "only" the addresses on the network are left out: nothing listens on them."""
+    origins = [o for o in origins or [] if isinstance(o, str)]
+    if keys not in ('both', 'only'):
+        return origins
+    own = f'http://127.0.0.1:{port}'
+    return [own] + ([] if keys == 'only' else [o for o in origins if o.rstrip('/') != own])
 
 
 def icon_of(m):
@@ -333,10 +350,13 @@ class Fleet:
         self.by_user = True  # whether the change being saved is one the user made (False: a machine reported it)
         self.closed = False  # fleet.json was lost: machines that link from now on are kept to their Claude folders
         self.servers = []  # the server's own addresses, told to each machine's agent (where its hooks report)
+        self.keys = 'off'  # server.json's "keys" (keys.py): with keys on, helpers report to 127.0.0.1 first
+        self.port = 8130   # the server's own port, for that address
         self.budget_view = None  # set by the server: the usage budget's status, sent with every poll (budget.py)
         self.options = None  # set by the server: the opt-in settings, sent with every poll (options.py)
         self.compact_at = None  # ... and the compact window that goes with setup_compact_window
         self._digest = {}
+        self._late = {}  # machine: polls in a row that reached it and got no answer in time (_slow)
         # What each chat used this week ("Most used this week"): the week's start as the last poll knew it, each
         # machine's last answer (kept for the week, so a machine that is offline still counts), and what was asked.
         self._since, self.spend, self._spend_asked, self.spend_file = None, {}, {}, None
@@ -503,8 +523,9 @@ class Fleet:
         if m.get('root'):
             req['root'] = m['root']
         req['roam'] = m.get('roam') is not False
-        if self.servers:
-            req['servers'] = list(self.servers)
+        servers = helper_servers(self.servers, getattr(self, 'keys', 'off'), getattr(self, 'port', 8130))
+        if servers:
+            req['servers'] = servers
         if getattr(self, 'summary_model', None):
             req['summary_model'] = self.summary_model
         if isinstance(getattr(self, 'options', None), dict):  # the opt-in settings (options.py), each true or false
@@ -631,12 +652,32 @@ class Fleet:
                    'agents_ok': r.get('agents_ok') is not False,
                    'boot': self._boot(name, got, r.get('up'))}
         except Exception as e:
-            upd, r = {'online': False, 'error': _short(e), 'asked': asked}, None
+            r = None
+            if self._slow(name, e):
+                return  # it is there and did not answer in time: what it last said stands for now
+            upd = {'online': False, 'error': _short(e), 'asked': asked}
+        else:
+            self._late.pop(name, None)
         if r is not None:
             self.learn(name, r)
             if 'spend' in req:
                 self._spend_got(name, r.get('spend'), upd['as_of'])
         self.store(name, upd)
+
+    def _slow(self, name, e):
+        """True when a failed poll says the machine is slow, not gone: the request reached it and no answer came
+        back in time (MaybeDelivered), it was online at its last answer, and this has not happened SLOW_POLLS times
+        in a row. A busy machine can take longer than the wait to list its chats; calling it offline for that
+        closed its chats in the apps and opened them again a few seconds later. A machine that is not linked, or
+        cannot be reached at all, is offline at once as before."""
+        if not isinstance(e, (MaybeDelivered, subprocess.TimeoutExpired)):
+            self._late.pop(name, None)
+            return False
+        with self.lock:
+            if not (self.state.get(name) or {}).get('online'):
+                return False
+            n = self._late[name] = self._late.get(name, 0) + 1
+        return n < SLOW_POLLS
 
     def _boot(self, name, got, up):
         """When the machine last started, by this server's clock, from the uptime it reports (None from an agent
