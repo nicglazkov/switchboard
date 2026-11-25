@@ -13,6 +13,9 @@ use tokio::sync::{Notify, mpsc, oneshot};
 
 /// Output chunks a terminal may have waiting for its viewer before the hub gives up on that viewer.
 const CHAN_BACKLOG: usize = 1024;
+/// ... and the most bytes: a node sends chunks of some tens of KB, but a message on a link may be 4 MiB, and 1024
+/// of those from a node gone wrong would be 4 GiB held for one terminal.
+const CHAN_BYTES: usize = 16 << 20;
 /// Messages waiting to go out on a link (terminal input up to 1 MiB each) before the hub stops adding to it.
 pub const LINK_BACKLOG: usize = 256;
 /// How long a hang-up waits for room on a full link before it is given up.
@@ -28,6 +31,33 @@ pub struct Info {
 struct Chan {
     out: mpsc::Sender<Vec<u8>>,
     exit: Option<oneshot::Sender<Option<i64>>>,
+    /// The sizes of the chunks still waiting in `out`, oldest first, and their sum.
+    sizes: std::collections::VecDeque<usize>,
+    waiting: usize,
+}
+
+impl Chan {
+    /// Queues one chunk of output. False when the viewer is too far behind to take it: too many chunks waiting,
+    /// or more than `max_bytes` with this one.
+    fn push(&mut self, data: &[u8], max_bytes: usize) -> bool {
+        // what the viewer has read since the last chunk no longer waits
+        let queued = self.out.max_capacity() - self.out.capacity();
+        while self.sizes.len() > queued {
+            self.waiting -= self.sizes.pop_front().unwrap_or(0);
+        }
+        if self.waiting + data.len() > max_bytes {
+            return false;
+        }
+        match self.out.try_send(data.to_vec()) {
+            Ok(()) => {
+                self.sizes.push_back(data.len());
+                self.waiting += data.len();
+                true
+            }
+            Err(mpsc::error::TrySendError::Full(_)) => false,
+            Err(mpsc::error::TrySendError::Closed(_)) => true, // the viewer left; the terminal is on its way out
+        }
+    }
 }
 
 pub struct Link {
@@ -129,7 +159,8 @@ impl Link {
         let ch = (self.next.fetch_add(1, Ordering::Relaxed) & 0xffff_ffff) as u32;
         let (out_tx, out_rx) = mpsc::channel(CHAN_BACKLOG);
         let (exit_tx, exit_rx) = oneshot::channel();
-        lock(&self.chans).insert(ch, Chan { out: out_tx, exit: Some(exit_tx) });
+        let chan = Chan { out: out_tx, exit: Some(exit_tx), sizes: Default::default(), waiting: 0 };
+        lock(&self.chans).insert(ch, chan);
         if !self.send(&ToNode::TermOpen { ch, bg: bg.into(), cols, rows }) {
             self.end_chan(ch, Some(255));
         }
@@ -164,10 +195,7 @@ impl Link {
 
     pub fn on_binary(&self, b: &[u8]) {
         let Some((ch, data)) = link_proto::unframe(b) else { return };
-        let full = match lock(&self.chans).get(&ch) {
-            Some(c) => matches!(c.out.try_send(data.to_vec()), Err(mpsc::error::TrySendError::Full(_))),
-            None => false,
-        };
+        let full = lock(&self.chans).get_mut(&ch).is_some_and(|c| !c.push(data, CHAN_BYTES));
         if full {
             // the viewer stopped reading; never stall the whole link (and every other terminal) for one of them
             crate::server::log(format!("node {}: terminal {ch} fell behind, closing it", self.name));
@@ -328,6 +356,34 @@ mod tests {
             }
         }
         assert!(closed, "term.close went out once the link had room");
+    }
+
+    #[tokio::test]
+    async fn output_waiting_for_a_viewer_is_limited_in_bytes_too() {
+        let (tx, _rx) = mpsc::channel(8);
+        let link = Arc::new(Link::new("lab", 1, 0, tx));
+        let (_term, mut io) = link.open_term("c03ef0d9", 80, 24);
+        let ch = 1;
+        // a node gone wrong: messages as large as a link takes, to a viewer that reads nothing
+        let big = link_proto::frame(ch, &vec![b'x'; 4 << 20]);
+        for _ in 0..3 {
+            link.on_binary(&big);
+        }
+        assert_eq!(link.terminals(), 1, "12 MiB waiting is still under the limit");
+        // the viewer reads one: there is room for one more, and no more than that
+        assert_eq!(io.output.recv().await.map(|b| b.len()), Some(4 << 20));
+        link.on_binary(&big);
+        assert_eq!(link.terminals(), 1, "what was read no longer counts");
+        link.on_binary(&link_proto::frame(ch, &vec![b'x'; 4 << 20]));
+        link.on_binary(&link_proto::frame(ch, &[b'x'; 16]));
+        assert_eq!(link.terminals(), 0, "past 16 MiB the terminal ends; the link and the hub's memory do not grow");
+        // ordinary output, read as it comes, is never near it
+        let (_term, mut io) = link.open_term("c03ef0d9", 80, 24);
+        for _ in 0..2000 {
+            link.on_binary(&link_proto::frame(2, &[b'y'; 32 << 10]));
+            assert_eq!(io.output.recv().await.map(|b| b.len()), Some(32 << 10));
+        }
+        assert_eq!(link.terminals(), 1);
     }
 
     #[tokio::test]

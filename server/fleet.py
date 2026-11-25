@@ -127,6 +127,10 @@ def check_root(text, windows=False):
     return str(PurePosixPath(t))
 
 
+def log(msg):
+    print(time.strftime('%Y-%m-%d %H:%M:%S'), msg, flush=True)
+
+
 def icon_of(m):
     """The machine's icon, from what it is (never from its name): a laptop, a desktop Mac, or a PC tower."""
     if m.get('form') == 'laptop':
@@ -148,12 +152,14 @@ class FleetConfig:
     @staticmethod
     def _read(path):
         try:
-            d = json.loads(Path(path).read_text())
+            d = json.loads(Path(path).read_text(encoding='utf-8'))
         except (OSError, ValueError):
             return None
-        rows = d if isinstance(d, list) else d.get('machines') if isinstance(d, dict) else None
-        if not isinstance(rows, list):
-            return None
+        rows = FleetConfig._rows(d)
+        return None if rows is None else FleetConfig._clean(rows)
+
+    @staticmethod
+    def _clean(rows):
         out, seen = [], set()
         for r in rows:
             m = clean_machine(r)
@@ -162,23 +168,54 @@ class FleetConfig:
                 out.append(m)
         return out
 
+    @staticmethod
+    def _rows(d):
+        rows = d if isinstance(d, list) else d.get('machines') if isinstance(d, dict) else None
+        return rows if isinstance(rows, list) else None
+
     def load(self):
-        """The machines. Seeds the file the first time (ssh machines only: linked ones come back from the hub)."""
-        got = self._read(self.path)
-        if got is not None:
-            return got
+        """The machines. Seeds the file the first time (ssh machines only: linked ones come back from the hub).
+
+        A file that is there and cannot be read is not a first time (durable.load). Its last good copy is used, with
+        every machine kept to its Claude folder: the copy may be from before "Anywhere in home" was turned off.
+        With no copy, the machines still come from the hub's file so they keep working, but that file knows nothing
+        of folders or of "Anywhere in home", so they are kept to their Claude folders too, and the list is not
+        written down until someone changes it in Settings."""
+        # keep: Settings may never be saved again, so a good start is when the copy is made
+        d, status = durable.load(self.path, None, (dict, list), check=lambda d: self._rows(d) is not None, keep=True)
+        if status == durable.OK:
+            return self._clean(self._rows(d))
+        if status == durable.RECOVERED:
+            rows = [dict(m, roam=False) for m in self._clean(self._rows(d))]
+            if durable.unopened(self.path):
+                log('fleet.json could not be opened: its last good copy is in use, and the file is left as it is. '
+                    'Each machine is kept to its Claude folder ("Anywhere in home" off) until the file opens again.')
+                return rows
+            log('fleet.json could not be read: its last good copy is in use, and the damaged file is kept beside it. '
+                'Each machine is kept to its Claude folder ("Anywhere in home" off) until you turn it on again in Settings.')
+            try:
+                self.save(rows)  # written down, so a restart does not turn it back on
+            except OSError:
+                pass
+            return rows
         seeded = [m for m in (self._read(self.seed) or []) if not m['target'].startswith('node:')] if self.seed else []
+        if status == durable.BROKEN:
+            log('fleet.json could not be read and has no good copy. The machines the hub knows are kept, each in its own '
+                'Claude folder ("Anywhere in home" off) until you set them again in Settings.')
+            return [dict(m, roam=False) for m in seeded]
         try:
             self.save(seeded)
         except OSError:
             pass
         return seeded
 
-    def save(self, machines):
+    def save(self, machines, force=False):
+        """force: a change the user made, which may start a list that was lost over again (durable.put).
+        The copy beside it is of this list, not the one before: a removed machine is in neither."""
         with self.lock:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             durable.put(self.path, json.dumps({'machines': [clean_machine(m) for m in machines if clean_machine(m)]}, indent=1),
-                        tmp=self.path.with_name(f'.{self.path.name}.{os.getpid()}.tmp'))
+                        tmp=self.path.with_name(f'.{self.path.name}.{os.getpid()}.tmp'), fresh=True, force=force)
 
 
 CHILD_WORK = 15 * 60      # a background chat whose turn is over still works while its subagents or commands wrote this recently
@@ -262,7 +299,9 @@ def ssh_transport(target, req, timeout):
     try:
         r = subprocess.run(['ssh', '-T', '-i', os.path.expanduser(KEY), '-o', 'BatchMode=yes', '-o', 'IdentitiesOnly=yes',
                             '-o', 'ConnectTimeout=5', '-o', 'ServerAliveInterval=5', target],
-                           input=json.dumps(req), capture_output=True, text=True, timeout=timeout)
+                           input=json.dumps(req), capture_output=True, timeout=timeout,
+                           # not the server's own encoding: under LANG=C one accent in a chat title failed the machine
+                           encoding='utf-8', errors='replace')
     except subprocess.TimeoutExpired:
         raise MaybeDelivered('timed out')
     out = r.stdout.strip()
@@ -291,6 +330,8 @@ class Fleet:
         self._held = {}  # machine: the highest weekly number an agent from before merged limits has shown (limits)
         self.on_change = None  # called with a machine's name when what it reports changed (the server's live updates)
         self.on_save = None  # called with the machine list after it changed (the server writes fleet.json and the hub's file)
+        self.by_user = True  # whether the change being saved is one the user made (False: a machine reported it)
+        self.closed = False  # fleet.json was lost: machines that link from now on are kept to their Claude folders
         self.servers = []  # the server's own addresses, told to each machine's agent (where its hooks report)
         self.budget_view = None  # set by the server: the usage budget's status, sent with every poll (budget.py)
         self.options = None  # set by the server: the opt-in settings, sent with every poll (options.py)
@@ -336,18 +377,21 @@ class Fleet:
         with self.lock:
             return [dict(self.machines[n]) for n in self.order]
 
-    def _saved(self):
+    def _saved(self, by_user=True):
         if self.on_save:
             with self._save_lock:  # two quick edits: the later save always carries both
+                self.by_user = by_user
                 try:
                     self.on_save(self.config())
                 except Exception:
                     pass
+                finally:
+                    self.by_user = True
 
-    def add_machine(self, m, save=True):
+    def add_machine(self, m, save=True, by_user=True):
         """A machine added in Settings, or linked through the hub (nodes.py): polled from the next round on. One that is
         already on the list keeps its name for it (the user may have renamed it). True when something changed."""
-        m = clean_machine(m)
+        m = clean_machine(dict(m, roam=False) if self.closed and not by_user and isinstance(m, dict) else m)
         if m is None:
             raise FleetError('That machine needs a short id (a-z, 0-9) and an address.')
         with self.lock:
@@ -359,7 +403,7 @@ class Fleet:
             self.machines = dict(self.machines, **{m['name']: m})
             self.order = self.order + [m['name']]
         if save:
-            self._saved()
+            self._saved(by_user)
         return True
 
     def drop_machine(self, name, save=True):
@@ -449,7 +493,7 @@ class Fleet:
             if new == old:
                 return False
             self.machines = dict(self.machines, **{name: new})
-        self._saved()
+        self._saved(by_user=False)
         return True
 
     def _list_req(self, m):
@@ -486,10 +530,9 @@ class Fleet:
     def keep_spend(self, path):
         """Keep the machines' answers in this file, so a restart does not forget a machine that is offline."""
         self.spend_file = Path(path)
-        try:
-            d = json.loads(self.spend_file.read_text())
-        except (OSError, ValueError):
-            return
+        d, status = durable.load(self.spend_file, None, dict, keep=True)
+        if status in (durable.RECOVERED, durable.BROKEN):
+            log('spend.json could not be read: ' + ('its last good copy is in use' if d is not None else 'the machines are asked again'))
         if isinstance(d, dict):
             with self.lock:
                 for n, r in d.items():
@@ -534,7 +577,7 @@ class Fleet:
                 with self.lock:
                     text = json.dumps(self.spend)
                 try:
-                    durable.put(self.spend_file, text,
+                    durable.put(self.spend_file, text, keep_bak=True, force=True,  # gathered again from the machines
                                 tmp=self.spend_file.with_name(f'{self.spend_file.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
                 except OSError:
                     pass
@@ -1189,18 +1232,27 @@ class WeekHistory:
         self.archive = Path(archive) if archive else self.path.with_name('week_archive.json')
         self.lock = threading.Lock()
         self.reset, self.samples, self.weeks = None, [], []
-        try:
-            weeks = json.loads(self.archive.read_text())['weeks']
-            self.weeks = [w for w in weeks if isinstance(w, dict) and isinstance(w.get('reset'), (int, float))][:self.WEEKS]
-        except (OSError, ValueError, TypeError, KeyError):
-            pass
-        try:
-            d = json.loads(self.path.read_text())
-            reset = float(d['reset'])
-            samples = sorted([float(t), float(p)] for t, p in d['samples'])
-        except (OSError, ValueError, TypeError, KeyError):
+        # A file that cannot be read goes back to its last good copy (durable.load); with none, the history starts
+        # over and the damaged file is kept beside it. keep: the archive is written once a week.
+        d, was = durable.load(self.archive, None, dict, check=lambda d: isinstance(d.get('weeks'), list), keep=True)
+        if d is not None:
+            self.weeks = [w for w in d['weeks'] if isinstance(w, dict) and isinstance(w.get('reset'), (int, float))][:self.WEEKS]
+        d, now = durable.load(self.path, None, dict, check=self._week, keep=True)
+        for name, status in ((self.archive.name, was), (self.path.name, now)):
+            if status in (durable.RECOVERED, durable.BROKEN):
+                log(f'{name} could not be read: ' + ('its last good copy is in use' if status == durable.RECOVERED else 'it starts over'))
+        if d is None:
             return
+        reset, samples = self._week(d)
         self.reset, self.samples = reset, samples[-self.KEEP:]
+
+    @staticmethod
+    def _week(d):
+        """(reset, samples) from the file's JSON, or None when it holds something else."""
+        try:
+            return float(d['reset']), sorted([float(t), float(p)] for t, p in d['samples'])
+        except (ValueError, TypeError, KeyError):
+            return None
 
     def record(self, pct, reset, now):
         """Keeps the weekly percent now if the last sample is 15 minutes old. True when it was written down."""
@@ -1226,7 +1278,7 @@ class WeekHistory:
                 return False
             self.samples = (self.samples + [[float(now), float(pct)]])[-self.KEEP:]
             try:
-                durable.put(self.path, json.dumps({'reset': self.reset, 'samples': self.samples}))
+                durable.put(self.path, json.dumps({'reset': self.reset, 'samples': self.samples}), keep_bak=True, force=True)
             except OSError:
                 pass  # kept in memory; the next sample writes the file again
             return True
@@ -1246,7 +1298,7 @@ class WeekHistory:
         self.weeks = ([week] + [w for w in self.weeks if abs(w['reset'] - old) > RESET_SLACK])[:self.WEEKS]
         self.weeks.sort(key=lambda w: -w['reset'])
         try:
-            durable.put(self.archive, json.dumps({'weeks': self.weeks}))
+            durable.put(self.archive, json.dumps({'weeks': self.weeks}), keep_bak=True, force=True)
         except OSError:
             pass  # kept in memory until the next archive
 

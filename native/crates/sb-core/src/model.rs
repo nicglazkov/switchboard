@@ -9,7 +9,7 @@ use crate::names::{self, TagKind};
 
 pub const GUARD: u64 = 150_000;
 /// Under this a chat is small: going back is cheap even with a cold cache (agent/sb.py SMALL_CTX).
-pub const SMALL: u64 = 60_000;
+pub const SMALL: u64 = 80_000;
 /// Plan numbers younger than this read as now; older ones say how old they are.
 pub const LIMITS_FRESH: f64 = 600.0;
 /// The five-hour window: weekly numbers older than this read "at least".
@@ -125,9 +125,9 @@ pub enum Kind {
 /// A chat's size, in three bands: what going back costs once the cache is cold.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Band {
-    /// Under 60k: going back is cheap.
+    /// Under 80k: going back is cheap.
     Small,
-    /// 60k to 150k: resuming re-reads it all; Start fresh is cheaper if the history is not needed.
+    /// 80k to 150k: resuming re-reads it all; Start fresh is cheaper if the history is not needed.
     Medium,
     /// 150k and up: the guard holds messages once it is cold.
     Big,

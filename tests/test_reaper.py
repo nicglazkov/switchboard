@@ -570,7 +570,7 @@ class HubOpenTest(unittest.TestCase):
         code = ('import sys; sys.path.insert(0, "server"); import features\n'
                 'seen = []\n'
                 'def fake(url, timeout): seen.append(url); raise OSError("no hub")\n'
-                'features.urllib.request.urlopen = fake\n'
+                'features.nodes_mod.direct_open = fake\n'
                 'features.hub_open(); print(seen[0])')
         env = {k: v for k, v in os.environ.items() if k != 'SWITCHBOARD_HUB_URL'}
         env['SWITCHBOARD_HUB_PORT'] = '9000'

@@ -38,9 +38,15 @@ def load_or_create_key(path):
         k = path.read_bytes()
     except FileNotFoundError:
         k = None
+    if k is not None and (len(k) != KEY_LEN or not any(k)):
+        # Cut short or zeroed by a power cut. It used to raise, and every terminal answered 500 until the file was
+        # deleted by hand. It is put aside and a new key made below; a hub that is already running reads its key
+        # when it starts, so it has to be restarted to take the new one.
+        kept = durable.aside(path)
+        print(time.strftime('%Y-%m-%d %H:%M:%S'), f'term.key held {len(k)} bytes that are no key: kept as {kept}, and a new '
+              'key is made. Restart the hub (switchboard restart) if terminals do not open.', flush=True)
+        k = None
     if k is not None:
-        if len(k) != KEY_LEN:
-            raise OSError(f'{path} holds {len(k)} bytes, not {KEY_LEN}')
         try:
             if os.name != 'nt' and path.stat().st_mode & 0o077:
                 os.chmod(path, 0o600)  # someone loosened it: anyone who reads it can mint terminal tickets

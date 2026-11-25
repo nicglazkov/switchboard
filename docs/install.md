@@ -1,5 +1,5 @@
 ---
-description: Install the Switchboard server, link your computers and open the app. About ten minutes.
+description: Install the Switchboard server, link your computers and open the app, and what works with one laptop, on Windows and away from home.
 ---
 
 # Install Switchboard
@@ -14,7 +14,8 @@ Switchboard has three parts:
 
     On one computer that stays on: a Mac mini on a shelf, a desktop that never sleeps, a small Linux box. It keeps
     the list of your computers and chats, so the board is there even when your laptop is closed. If you only have
-    one computer, it can be the server too.
+    one computer, it can be the server too. On a laptop the server is off while it sleeps or its lid is closed,
+    and no other device can reach the board until it wakes.
 
 -   :material-lan-connect:{ .lg .middle } **The helper**
 
@@ -27,11 +28,12 @@ Switchboard has three parts:
 
     ---
 
-    On the computers you look at the board from: Mac, Windows or Linux. It talks only to your server.
+    On the computers you look at the board from: Mac, Windows or Linux. It talks only to your server. There is
+    no phone app to download today. [Phones](apps.md#iphone)
 
 </div>
 
-Setup takes three steps, about ten minutes in all.
+Setup takes three steps, about ten minutes once Python and Claude Code are installed.
 
 ## What you need
 
@@ -57,14 +59,15 @@ with it. On Windows, run `winget install -e --id Python.Python.3.12`.
     On the computer that stays on, in a terminal:
 
     ```sh
-    curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash
+    curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz
     ```
 
     It downloads the server kit from the newest release, checks its SHA-256, and runs the installer from it.
-    Options for the installer go after `bash -s --`:
+    `--kit` says where the kit is: the `get-server.sh` in the release doesn't know that by itself yet, and
+    stops with "no server kit to install from" without it. Options for the installer go after it:
 
     ```sh
-    curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --no-hub
+    curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz --no-hub
     ```
 
 === "From the desktop app"
@@ -74,9 +77,11 @@ with it. On Windows, run `winget install -e --id Python.Python.3.12`.
     installs the server from the copy inside the app, as you, with no administrator password. When it is done
     the app connects to `http://localhost:8130`.
 
-    The Windows app doesn't carry the server, so on Windows use the PowerShell line instead.
+    The Mac app and the Linux app from the `.tar.gz` carry the server. The Windows app and the plain Linux binary
+    don't: there the same button opens this page, so use one of the other tabs.
 
-    Run `switchboard setup` in a terminal afterwards to add your other computers.
+    This installs the server only. To see chats, add each computer, this one included: **Add a machine** on the
+    last screen, or `switchboard setup` in a terminal. [Add your computers](machines.md)
 
 === "From a copy of the repository"
 
@@ -91,7 +96,8 @@ with it. On Windows, run `winget install -e --id Python.Python.3.12`.
 
 === "Windows"
 
-    In PowerShell, in a copy of the repository:
+    In PowerShell, in a copy of the repository. It needs git, Python 3.9 or newer and the OpenSSH client. There
+    is no one-line install for Windows, and the Windows app can't install the server.
 
     ```powershell
     git clone https://github.com/nicglazkov/switchboard.git
@@ -165,6 +171,14 @@ run on Windows yet, so there are two logon tasks instead of three services (the 
 on 8131), and the installer needs the OpenSSH client. It prints a firewall rule for ports 8130 and 8131 to run as
 administrator. `install-server.ps1` takes `-NoStart`, `-NoSetup` and `-Uninstall`.
 
+What that means if Windows is all you have:
+
+- The board works, but there are no terminals, and no computer can be linked with a code.
+- Every computer is [added over ssh](machines.md#over-ssh), the server's own PC included, so each one needs an
+  ssh server running. On Windows that is the OpenSSH Server feature.
+- The tasks start when you sign in to Windows, not when the PC starts.
+- The server can't update itself. [Update it by hand](updates.md#the-server)
+
 If you can, put the server on a Mac or a Linux computer. Any Windows PC can still be one of your computers.
 
 ## 2. First-run setup
@@ -176,7 +190,8 @@ Setup runs at the end of the installer. Run it again any time with `switchboard 
 lists the addresses it finds: this machine on your network, its Tailscale name if Tailscale is running, and its own
 name. Pick one, or type another. The Tailscale name works away from home too.</li>
 <li markdown>**Your computers.** Add each computer where you use Claude Code, with a one-time code (recommended) or
-over ssh. [Add your computers](machines.md) explains both.</li>
+over ssh. [Add your computers](machines.md) explains both. Installing the server doesn't add the server's own
+computer: if you use Claude Code there, add it like the others.</li>
 <li markdown>**Each computer's Claude folder.** This is where new chats start and where folders are picked from.
 Setup lets you browse the computer's folders, starting from its home folder. Change it later in Settings,
 Machines.</li>
@@ -208,6 +223,22 @@ what it keeps, lets you remove any of them and has a field to type one more. Add
     A server installed from the kit announces itself on the network with what the kit carries. One installed from
     a copy of the repository on Linux needs `avahi-utils` or `python3-zeroconf` for that.
 
+## Away from home
+
+From another network, the app reaches the server only over a VPN. There is no relay and no account, and the ports
+must never be forwarded to the internet, so today a VPN is the only way.
+
+With [Tailscale](https://tailscale.com):
+
+1. Install Tailscale on the server and on each device you take with you, signed in to the same account.
+2. Tell the app the server's Tailscale name. Connecting the app once at home does it, since the server passes on
+   its Tailscale address and name. Or type it in **Settings, Server, Server addresses**.
+3. Away from home, turn Tailscale on on the device.
+
+A computer linked with a code keeps the one server address from the line you pasted. For a laptop that leaves home
+and runs chats, pick the Tailscale name in `switchboard setup` before you link it. Another VPN that puts the
+device on your home network works the same way.
+
 ## Updating
 
 The **app** updates itself: when a new release is out it offers **Restart to update** or **Install on quit**.
@@ -219,12 +250,31 @@ installer again. Your computers, settings and history stay.
 ## Uninstalling
 
 ```sh
-curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --uninstall
+curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz --uninstall
 ```
 
-From a copy of the repository, `scripts/install/install-server.sh --uninstall` does the same. On Windows, `install-server.ps1 -Uninstall`. This removes the services, the server, the downloads and the
-`switchboard` command, and keeps your settings and history: delete `~/.config/switchboard` and
-`~/.local/share/switchboard` too if you don't want them.
+From a copy of the repository, `scripts/install/install-server.sh --uninstall` does the same. It stops and removes
+the three services, the server (`~/.local/share/switchboard/app`), the downloads, the hub and the `switchboard`
+command. It keeps your settings, history and logs: delete `~/.config/switchboard` and `~/.local/share/switchboard`
+too if you don't want them, and `~/Library/Logs/Switchboard` on a Mac (the app's own log is there too).
 
-On each computer, `python3 ~/.claude/switchboard/sb.py uninstall` takes the helper out of Claude Code's settings,
-removing only what it added.
+On Windows, `powershell -ExecutionPolicy Bypass -File scripts\install\install-server.ps1 -Uninstall` removes the
+two logon tasks and the whole `%LOCALAPPDATA%\Switchboard` folder, logs included. It keeps
+`%USERPROFILE%\.config\switchboard` and `%USERPROFILE%\.local\share\switchboard`. A firewall rule you added
+stays until you remove it.
+
+If the server's own computer also has a node, uninstalling the server looks at which server that node links to.
+A node whose `node.json` names this same computer as its hub (`localhost`, or one of the computer's own names or
+addresses) is removed with the server, and what it removed is printed. Any other node is left as it is, linked to
+its server, and the uninstaller says so in one line; on Windows its files are then the only thing left in
+`%LOCALAPPDATA%\Switchboard`. When it cannot tell, it leaves the node. The rest stays, on every computer:
+
+- **The helper**, on each computer: `python3 ~/.claude/switchboard/sb.py uninstall` takes it out of Claude Code's
+  settings, removing only what it added.
+- **The node**, on each computer that was linked with a code: `switchboard-node uninstall` stops it, takes it out of
+  what starts it at login (the LaunchAgent, the systemd user service or the Windows logon task) and removes the
+  program and `node.json`, which holds its token. It prints each thing it removed.
+  [Removing a computer](machines.md#removing-a-computer)
+- **The app:** [The apps](apps.md) says how for each system. Uninstalling the app leaves the node alone, so the
+  computer stays linked, unless you also choose to remove your settings: then the node is removed with them, and
+  the uninstaller lists it before it starts.

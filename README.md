@@ -55,14 +55,18 @@ computer, and the one waiting for you is never the one in front of you. Switchbo
 
 Switchboard has three parts: a **server** on one computer that stays on, a small **helper** on each computer where
 you use Claude Code, and the **app** wherever you want to see the board. One computer can be all three.
+[What works today](#what-works-today) says what to expect with only a laptop, only Windows, a phone, or away from
+home.
 
 **1. The server**, on a Mac or Linux computer that stays on:
 
 ```sh
-curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash
+curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz
 ```
 
-Or let the app do it: when it finds no server, the Mac and Linux apps offer **Run the server on this computer**.
+Or let the app do it: when it finds no server, the Mac app and the Linux app from the `.tar.gz` offer **Run the
+server on this computer**. The Windows app and the plain Linux binary don't carry the server, so there the same
+button opens the install guide.
 
 **2. Your computers.** Setup shows a one-time code and a line to paste on each Mac, Linux or Windows computer
 where you use Claude Code.
@@ -81,6 +85,21 @@ releases, signed, and install only when you say so.
 You need [Claude Code](https://claude.com/claude-code) on each computer that runs chats, and Python 3.9 or newer
 on the server and on those computers. **[The full install guide](https://nicglazkov.github.io/switchboard/install/)**
 covers a Windows server, other options and uninstalling.
+
+### What works today
+
+- **Only a laptop.** It can be the server, the helper and the app at once. While it sleeps or its lid is closed
+  the server is off, so no other device can reach the board until it wakes. Nothing keeps it awake for you.
+- **Only Windows.** The app and the helper run on Windows. The server runs there with less: no terminals,
+  no linking with a code, and every computer, that PC included, is added over ssh. It installs from a copy of
+  this repository, not from the one line above.
+  [A Windows server](https://nicglazkov.github.io/switchboard/install/#a-windows-server)
+- **Away from home.** The app reaches the server from another network only over a VPN such as
+  [Tailscale](https://tailscale.com), installed on the server and on the device. There is no other way today.
+  [Away from home](https://nicglazkov.github.io/switchboard/install/#away-from-home)
+- **Phones.** There is no phone app to download: nothing on the App Store, TestFlight or Google Play. An iPhone
+  app exists, but its source isn't in this repository yet, and there is no Android app.
+  [The apps](https://nicglazkov.github.io/switchboard/apps/#iphone)
 
 ## Documentation
 

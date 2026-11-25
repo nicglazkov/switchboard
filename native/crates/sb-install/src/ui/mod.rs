@@ -288,6 +288,7 @@ impl Installer {
             Task::Remove(uninstall::What::App) => 4,
             Task::Remove(uninstall::What::Registry) => 5,
             Task::Remove(uninstall::What::Caches) => 6,
+            Task::Remove(uninstall::What::Node) => 8,
             _ => 7,
         });
         self.rows =

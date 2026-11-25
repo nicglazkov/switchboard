@@ -132,8 +132,8 @@ def transcript_stats(path, nbytes=TAIL_BYTES):
         if d.get('type') == 'custom-title' and 'customTitle' in d:  # an empty one clears the name (Claude Code reads it so too)
             out['custom_title'] = d.get('customTitle') or None
         if d.get('type') == 'user' and not d.get('isSidechain') and _is_real_user(d):
-            t = _text_of(_msg(d).get('content')).strip()
-            if t and not t.startswith('<'):
+            t = typed_text(_text_of(_msg(d).get('content')))
+            if t:
                 out['last_prompt'] = t[:300]
         if d.get('type') == 'bridge-session':
             out['bridge'] = d.get('bridgeSessionId') or out['bridge']
@@ -195,6 +195,37 @@ def _is_real_user(d):
     return True
 
 
+# A long paste reaches Claude Code wrapped in <pasted_content id="1a2b"> ... </pasted_content id="1a2b">, alone or in
+# the middle of what was typed. It is the user's own message (about one in thirteen of them, and the longest), so it
+# is never taken for one of the records Claude Code writes itself, which also start with a tag.
+PASTE_TAG_RE = re.compile(r'(</?pasted_content(?:\s[^>]*)?>)')
+PASTE_START_RE = re.compile(r'\s*<pasted_content[\s>]')
+PASTE_KEEP = 6_000  # characters of one paste that go on to the summary: its start and its end, the middle left out
+
+
+def typed_text(s):
+    """What the person wrote in one user message, pasted text included and its wrapper tags gone. '' for the records
+    Claude Code writes under the user's name: task notifications, slash commands and their output, messages from
+    other agents (they start with a tag)."""
+    s = (s or '').strip()
+    if s.startswith('<') and not PASTE_START_RE.match(s):
+        return ''
+    if '<pasted_content' not in s:
+        return s
+    parts, inside = [], False
+    for piece in PASTE_TAG_RE.split(s):
+        if PASTE_TAG_RE.fullmatch(piece):
+            inside = not piece.startswith('</')
+            continue
+        piece = piece.strip()
+        if inside and len(piece) > PASTE_KEEP:
+            head = PASTE_KEEP // 3
+            piece = piece[:head] + '\n[... middle of the pasted text left out ...]\n' + piece[-(PASTE_KEEP - head):]
+        if piece:
+            parts.append(piece)
+    return '\n\n'.join(parts)
+
+
 def condense(path, max_chars=200_000):
     lines, directives, files, users, title = [], [], set(), [], None
     with open(path, encoding='utf-8', errors='ignore') as fh:
@@ -223,7 +254,8 @@ def condense(path, max_chars=200_000):
                 if s.startswith('This session is being continued'):
                     lines.append('PRIOR COMPACTION SUMMARY: ' + s[:20000])
                     continue
-                if s.startswith('<') or s.startswith('[Request interrupted'):
+                s = typed_text(s)
+                if not s or s.startswith('[Request interrupted'):
                     continue
                 lines.append(f'USER: {s}')
                 users.append(s)
@@ -280,7 +312,8 @@ Things that went wrong or surprised, and how to avoid repeating them.
 ## Key files and places
 Paths and URLs a new session should look at first.
 
-Rules: be specific, no filler, no em dashes. Prefer facts from late in the session when they conflict with early ones. Do not invent anything not in the transcript. Aim for 600-1500 words."""
+Rules: be specific, no filler, no em dashes. Prefer facts from late in the session when they conflict with early ones. Do not invent anything not in the transcript.
+Length: aim for 500 to 900 words, and never more than 1,000 words. The note is loaded straight into the new session's first message, and a longer one is not. Never shorten or drop a standing instruction to fit: keep Decisions made, Gotchas and Key files and places to what a new session cannot work without."""
 
 
 def handoff_path(session_id):
@@ -357,7 +390,7 @@ def prompt_file_ok(runner=None):
     except OSError:
         return False
     p = paths()['state'] / 'prompt_file.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     if d.get('exe') == exe and d.get('mtime') == mt and isinstance(d.get('ok'), bool):
         return d['ok']
     try:
@@ -391,7 +424,9 @@ def prompt_args(exe, system_prompt, by_file=None):
     return ['--system-prompt-file', str(f)], f
 
 
-def run_claude_opus(stdin_text, system_prompt, cwd=None, model='opus', timeout=600):
+def run_claude_opus(stdin_text, system_prompt, cwd=None, model='opus', timeout=600, meter=None):
+    """One `claude -p` run: what it wrote. meter: a dict that is given what the run itself used (run_usage), when
+    Claude Code reports it."""
     env = claude_env()
     exe = _claude_exe()
     how, tmp = prompt_args(exe, system_prompt)
@@ -408,6 +443,8 @@ def run_claude_opus(stdin_text, system_prompt, cwd=None, model='opus', timeout=6
     d = json.loads(r.stdout or '{}')
     if r.returncode != 0 or d.get('is_error') or not d.get('result'):
         raise RuntimeError(f'claude -p failed rc={r.returncode} err={r.stderr[-300:]!r} res={str(d.get("result"))[:200]!r}')
+    if meter is not None:
+        meter.update(run_usage(d))
     return d['result']
 
 
@@ -461,12 +498,19 @@ def _to_disk(f):
         pass  # a disk that cannot be asked (some network folders): the write itself still stands
 
 
-def _write_then_replace(p, raw):
+def _write_then_replace(p, raw, same_mode=False):
+    """same_mode: the new file gets the permissions of the one it replaces. A temp file is made with the default
+    ones, so a file the user had closed to others (600) came out readable by all (644)."""
     tmp = p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp')
     try:
         with open(tmp, 'wb') as f:
             f.write(raw)
             _to_disk(f)
+        if same_mode:
+            try:
+                os.chmod(tmp, os.stat(p).st_mode & 0o7777)
+            except FileNotFoundError:
+                pass  # a new file: the default permissions, as before
     except BaseException:
         try:
             tmp.unlink()
@@ -634,11 +678,13 @@ def locked_update(p, change, wait=UPDATE_LOCK_WAIT):
     """Read the JSON object in p, let change(d) return what to write (None: leave the file alone) and write it, all
     under the file's claim (see held). Returns what change returned."""
     with held(p, wait):
-        d = _jget(p)
-        new = change(d if isinstance(d, dict) else {})
+        d = _jsafe(p)  # a damaged file goes back to its last good copy, not to {}
+        if _unopened(p):
+            return None  # there and it would not open: left alone, and the change is not made from "nothing"
+        new = change(d)
         if new is not None:
             p.parent.mkdir(parents=True, exist_ok=True)
-            _jput(p, new)
+            _jput(p, new, keep=True)
         return new
 
 
@@ -658,11 +704,11 @@ def start_handoff(transcript_path, session_id, now, spawn):
     return True
 
 
-def generate_handoff(transcript_path, session_id, runner=None):
+def generate_handoff(transcript_path, session_id, runner=None, meter=None):
     lock = paths()['handoffs'] / f'{session_id}.generating'
     lock_own(lock, time.time())  # the claim is this run's from here: if it dies, the next Start fresh takes over at once
     try:
-        return _generate_handoff(transcript_path, session_id, runner)
+        return _generate_handoff(transcript_path, session_id, runner, meter)
     finally:
         lock_drop(lock)
 
@@ -676,12 +722,13 @@ def summary_model():
     return m if m in SUMMARY_MODELS else 'opus'
 
 
-def _generate_handoff(transcript_path, session_id, runner=None):
+def _generate_handoff(transcript_path, session_id, runner=None, meter=None):
+    meter = {} if meter is None else meter  # what the summary run used, kept beside the note (summary_cost)
+    model = summary_model()
     if runner is None:  # Claude tells the model its working folder; make that the session's, not the launcher's
         cwd = transcript_stats(transcript_path).get('cwd')
         cwd = cwd if cwd and os.path.isdir(cwd) else str(Path.home())
-        model = summary_model()
-        runner = lambda text, prompt: run_claude_opus(text, prompt, cwd=cwd, model=model)
+        runner = lambda text, prompt: run_claude_opus(text, prompt, cwd=cwd, model=model, meter=meter)
     c = condense(transcript_path)
     when = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
     head = f'# Handoff: {c["title"] or "untitled session"} ({when})\n\n'
@@ -697,6 +744,7 @@ def _generate_handoff(transcript_path, session_id, runner=None):
               'Do not read it whole; grep it for specific details if this note is missing something.\n')
     out = handoff_path(session_id)
     _jput_text(out, head + summary + last + verbatim + footer)
+    summary_cost_put(session_id, meter, model)
     return out
 
 
@@ -726,17 +774,34 @@ def spawn_handoff(transcript_path, session_id):
 # One place for both, so the status line, the guard, the session list and every app say the same thing. The apps
 # only display what is worked out here (the session row's `cost`), picking the warm or cold half as the cache cools.
 #
-# Sizes come in three bands: under 60k a chat is small (going back is cheap), 60k to 150k medium (resuming a cold
-# chat re-reads all of it, so Start fresh is cheaper if the history is not needed), 150k and up big (the guard holds
-# messages to cold big chats). A warm chat is cheap to reply to at any size.
-SMALL_CTX = 60_000
+# Sizes come in three bands: under 80k a chat is small (going back is cheap), 80k to 150k medium (resuming a cold
+# chat re-reads nearly all of it, so Start fresh is cheaper if the history is not needed), 150k and up big (the guard
+# holds messages to cold big chats). A warm chat is cheap to reply to at any size.
+#
+# Every size below is a median measured on real use: 178 fresh starts and 29 cold re-reads on three computers,
+# 2026-10-20 to 2026-11-21 (docs/measurements.md has the table). Before that the model counted only the note for
+# the new chat (6k), which showed Start fresh about 3.5 times too cheap (28k shown, 107k measured), and counted the
+# whole context for a cold Resume, 16% too high.
+MEASURED = '178 fresh starts (2026-10-20 to 2026-11-21)'
+# Where Start fresh starts to pay for a cold chat. Measured break-even: 75k to 80k of context. Under 70k the median
+# fresh start saved 2k and 2 of 5 lost; from 70k to 100k it saved 25k to 44k. It was 60k.
+SMALL_CTX = 80_000
 # Token weights, as API price ratios to plain input. Whether plan usage weighs them the same way is not published,
 # so every estimate says it is based on API prices.
 COST_RATIOS = {'input': 1.0, 'cache_write_5m': 1.25, 'cache_write_1h': 2.0, 'cache_read': 0.1, 'output': 5.0}
 CHARS_PER_TOKEN = 3.6       # condensed transcripts: 200k chars measured at about 55k tokens on large real sessions
-NOTE_TOKENS = 6_000         # a handoff note plus the verbatim directives (real files are 19 to 23 KB)
-SUMMARY_OUT_TOKENS = 2_000  # the 600 to 1500 word note the summary model writes
+# What a new chat holds on its first call before the handoff: Claude Code's instructions, tools, skills, CLAUDE.md
+# and memory (median 57.9k, 54k to 62k for 8 in 10). It depends on the setup, so it is this user's number.
+NEW_CHAT_CTX = 58_000
+# The start of every chat (Claude Code's instructions and tools) is the same, so some other chat keeps it cached:
+# a cold Resume read 29k from the cache 29 times out of 29, and so does a new chat's first call (median 29.1k).
+WARM_PREFIX = 29_000
+RECAP_OUT_TOKENS = 400      # the recap a new chat writes on its first turn
+NOTE_TOKENS = 2_600         # a handoff file, verbatim instructions included (median 9.4 KB). It was guessed at 6k.
+SUMMARY_OUT_TOKENS = 2_400  # what the summary model wrote (median 8.5k characters, under the old 600 to 1500 word ask)
 SUMMARY_PROMPT_TOKENS = 500  # HANDOFF_PROMPT itself
+CONDENSED_SHARE = 0.05      # a condensed transcript against its chat's context (median 5.4%). It was guessed at 40%.
+CONDENSED_MAX = 55_000      # the most a condensed transcript holds (condense() stops at 200k characters)
 CONDENSED_KEEP = 300        # seconds a condensed size is reused for a chat that is still being written to
 
 
@@ -771,7 +836,7 @@ def condensed_size(transcript_path, mtime=None, now=None, cache=None, kept_only=
         return None
     own = cache is None
     if own:
-        cache = _jget(paths()['state'] / 'condensed.json') or {}
+        cache = _jdict(paths()['state'] / 'condensed.json')
     c = cache.get(key)
     if c and (c.get('mtime') == mtime or now - (c.get('at') or 0) < CONDENSED_KEEP):
         return c.get('tokens')
@@ -802,23 +867,36 @@ def _about(n):
     return _k(max(0, n))
 
 
+def new_chat_cost(note, write):
+    """What a new chat started from a note costs: (its first turn, each later reply). The first turn reads the shared
+    start from the cache, writes the rest of its own context and the note to the cache, and writes a recap. Measured:
+    62k when the note loads inline, 78k over all 178 (half of those notes were too long and had to be read from the
+    file, see NOTE_DROP)."""
+    r = COST_RATIOS
+    first = (WARM_PREFIX * r['cache_read'] + (NEW_CHAT_CTX - WARM_PREFIX + note) * write + RECAP_OUT_TOKENS * r['output'])
+    return round(first), round((NEW_CHAT_CTX + note) * r['cache_read'])
+
+
 def cost_model(ctx, condensed=None, summary_ready=False, note=None, ttl=GUARD_IDLE, summary_model='opus'):
     """Resume vs Start fresh for one chat, as token weights (input tokens times COST_RATIOS) for the warm and the cold
-    case. Resume pays the whole context on its first reply once the cache is cold (a full re-cache), then a cache read
-    each later reply. Start fresh pays for writing the summary (the condensed transcript in, the note out; 0 when a
-    current one is already written), then the new chat's note on its first reply, then a cache read of only the note.
+    case. Resume, once the cache is cold, writes the context to the cache again on its first reply, all but the start
+    every chat shares (WARM_PREFIX, still cached), then reads it from the cache each later reply. Start fresh pays for
+    writing the summary (the condensed transcript in, the note out; 0 when a current one is already written), then
+    for a new chat (new_chat_cost): its own start, the note and a recap, then a cache read of those each reply.
     """
     ctx = int(ctx or 0)
     r = COST_RATIOS
     write = r['cache_write_1h'] if ttl > 300 else r['cache_write_5m']
     guessed = condensed is None
-    if guessed:  # no transcript to count: about 40% of the context, as large real sessions measure, at most 55k
-        condensed = min(round(ctx * 0.4), 55_000)
+    if guessed:  # no transcript to count: the measured share of the context, at most what a condensed transcript holds
+        condensed = min(round(ctx * CONDENSED_SHARE), CONDENSED_MAX)
     note = int(note or NOTE_TOKENS)
-    resume = {'warm': round(ctx * r['cache_read']), 'cold': round(ctx * write), 'each': round(ctx * r['cache_read'])}
+    shared = min(ctx, WARM_PREFIX)
+    resume = {'warm': round(ctx * r['cache_read']), 'cold': round((ctx - shared) * write + shared * r['cache_read']),
+              'each': round(ctx * r['cache_read'])}
     summary = 0 if summary_ready else round((condensed + SUMMARY_PROMPT_TOKENS) * r['cache_write_5m'] + SUMMARY_OUT_TOKENS * r['output'])
-    first = round(note * write)
-    fresh = {'summary': summary, 'first': first, 'each': round(note * r['cache_read']), 'total': summary + first}
+    first, each = new_chat_cost(note, write)
+    fresh = {'summary': summary, 'first': first, 'each': each, 'total': summary + first}
 
     def pick(warm):
         if warm or ctx < SMALL_CTX:
@@ -834,14 +912,18 @@ def cost_model(ctx, condensed=None, summary_ready=False, note=None, ttl=GUARD_ID
             rs = f'Resume: about {_about(resume["cold"])}, because the cache is cold and all {_k(ctx)} is read again.'
         return f'{fs} {rs}'
 
-    how = ('How this is estimated: the chat holds {ctx} of context. The summary model reads a condensed transcript of '
-           '{cond}{guess} (your messages, Claude\'s replies and tool names, no tool output) and writes about {out} of '
-           'notes; the new chat starts from that note, about {note}. Weights are API price ratios: plain input 1, '
-           'cache write {w} ({ttl} cache), cache read 0.1, output 5, and the summary run caches its input for 5 minutes '
-           '(1.25). Plan usage may not weigh tokens the same way, so these are estimates based on API prices. '
-           'Claude Code\'s own instructions are left out: both choices pay for them.').format(
-        ctx=_k(ctx), cond=_k(condensed), guess=' (guessed from the size, not counted yet)' if guessed else '',
-        out=_k(SUMMARY_OUT_TOKENS), note=_k(note), w=f'{write:g}', ttl='1 hour' if ttl > 300 else '5 minute')
+    how = ('How this is estimated: the chat holds {ctx} of context. Resume, once the cache is cold, writes all but the '
+           '{pre} every chat shares (Claude Code\'s instructions and tools, which another chat keeps cached) to the '
+           'cache again. The summary model reads a condensed transcript of {cond}{guess} (your messages, Claude\'s '
+           'replies and tool names, no tool output) and writes about {out} of notes. A new chat starts with about '
+           '{new} of its own (Claude Code\'s instructions, tools, CLAUDE.md and memory; {pre} of it is already '
+           'cached), reads the note, about {note}, and writes a short recap. Weights are API price ratios: plain '
+           'input 1, cache write {w} ({ttl} cache), cache read 0.1, output 5, and the summary run caches its input for '
+           '5 minutes (1.25). The sizes are medians measured over {n}. Plan usage may not weigh tokens the same way, '
+           'so these are estimates based on API prices.').format(
+        ctx=_k(ctx), pre=_k(WARM_PREFIX), cond=_k(condensed), guess=' (guessed from the size, not counted yet)' if guessed else '',
+        out=_k(SUMMARY_OUT_TOKENS), new=_k(NEW_CHAT_CTX), note=_k(note), w=f'{write:g}', ttl='1 hour' if ttl > 300 else '5 minute',
+        n=MEASURED)
     return {'v': 1, 'ctx': ctx, 'band': ctx_band(ctx), 'condensed': condensed, 'condensed_guessed': guessed,
             'note': note, 'summary_ready': bool(summary_ready), 'summary_model': summary_model,
             'ratios': dict(r, cache_write=write), 'resume': resume, 'fresh': fresh,
@@ -906,25 +988,25 @@ def combine_thread(pieces, max_chars=THREAD_MAX_CHARS):
 
 
 def compact_cost(tokens, note=None, ttl=GUARD_IDLE):
-    """What compacting costs: the summary model reads the combined text (tokens) and writes a note, then the new
-    chat reads the note. The same weights as cost_model."""
+    """What compacting costs: the summary model reads the combined text (tokens) and writes a note, then a new chat
+    starts from the note. The same weights and the same new chat as cost_model."""
     r = COST_RATIOS
     write = r['cache_write_1h'] if ttl > 300 else r['cache_write_5m']
     note = int(note or NOTE_TOKENS)
     summary = round((int(tokens) + SUMMARY_PROMPT_TOKENS) * r['cache_write_5m'] + SUMMARY_OUT_TOKENS * r['output'])
-    first = round(note * write)
+    first, each = new_chat_cost(note, write)
     text = (f'About {_about(summary + first)} up front: writing one summary of the whole thread {_about(summary)} '
             f'(it reads {_k(int(tokens))} of notes and condensed chats) + the new chat {_about(first)}. '
-            f'Then about {_about(round(note * r["cache_read"]))} each reply. Estimates based on API prices.')
+            f'Then about {_about(each)} each reply. Estimates based on API prices.')
     return {'v': 1, 'tokens': int(tokens), 'summary': summary, 'first': first, 'total': summary + first,
-            'each': round(note * r['cache_read']), 'text': text}
+            'each': each, 'text': text}
 
 
 def make_thread_note(text, sid, runner=None):
     """The combined thread's handoff, written next to the newest chat's own (thread-<sid>.md)."""
+    meter, model = {}, summary_model()
     if runner is None:
-        model = summary_model()
-        runner = lambda t, prompt: run_claude_opus(t, prompt, model=model)
+        runner = lambda t, prompt: run_claude_opus(t, prompt, model=model, meter=meter)
     when = _dt.datetime.now().strftime('%Y-%m-%d %H:%M')
     try:
         summary = runner(text, COMPACT_PROMPT).strip()
@@ -934,7 +1016,124 @@ def make_thread_note(text, sid, runner=None):
         summary = '> Automatic summary failed; these are the thread\'s rules, verbatim.\n' + rules
     out = handoff_path(f'thread-{sid}')
     _jput_text(out, f'# Handoff: the whole thread ({when})\n\n{summary}\n')
+    summary_cost_put(f'thread-{sid}', meter, model)
     return out
+
+# ---------------------------------------------------------------- What a summary cost, and what was done
+# A summary is not free, and until November 2026 nothing wrote down what one used: the saving from Start fresh was
+# worked out from guesses (docs/measurements.md). Now the summary run's own usage is kept beside its note
+# (<sid>.cost.json) and with the job that asked for it, and events.json is a short log of this computer's fresh
+# starts, holds and stops. Rows are only ever added, the oldest go once there are EVENTS_KEEP, and a row holds sizes
+# and ids, never what was typed.
+EVENTS_KEEP, EVENTS_TRIM = 2_000, 1_500  # rows kept: past the first, the oldest go, down to the second
+EVENT_TEXT = 120                         # the longest text a row keeps
+USAGE_KEYS = (('input', 'input_tokens'), ('cache_read', 'cache_read_input_tokens'), ('output', 'output_tokens'))
+
+
+def _ntok(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) and v > 0 else 0
+
+
+def usage_tokens(u):
+    """A usage report (the API's, as `claude -p` and transcripts give it) by kind, named as COST_RATIOS names them.
+    A cache write that does not say how long it is kept counts as the 5 minute kind, which a summary run uses."""
+    if not isinstance(u, dict):
+        return {}
+    out = {k: _ntok(u.get(name)) for k, name in USAGE_KEYS}
+    made = u.get('cache_creation')
+    if isinstance(made, dict):
+        out['cache_write_5m'] = _ntok(made.get('ephemeral_5m_input_tokens'))
+        out['cache_write_1h'] = _ntok(made.get('ephemeral_1h_input_tokens'))
+    else:
+        out['cache_write_5m'], out['cache_write_1h'] = _ntok(u.get('cache_creation_input_tokens')), 0
+    return out
+
+
+def usage_weight(u):
+    """That usage as one number, in the weights every estimate here uses (COST_RATIOS)."""
+    return round(sum(n * COST_RATIOS[k] for k, n in usage_tokens(u).items()))
+
+
+def run_usage(d):
+    """What one `claude -p --output-format json` run used, from its own report: {} when it gave none."""
+    u = d.get('usage') if isinstance(d, dict) else None
+    if not isinstance(u, dict):
+        return {}
+    out = {'tokens': usage_tokens(u), 'weighted': usage_weight(u)}
+    if _ntok(d.get('total_cost_usd')):
+        out['usd'] = d['total_cost_usd']
+    return out
+
+
+def _cost_path(name):
+    return paths()['handoffs'] / f'{name}.cost.json'
+
+
+def summary_cost_put(name, meter, model):
+    """Keep what writing this note used beside it. A note written without a count (the run failed, or gave none)
+    has no file: an older note's cost is never taken for this one's."""
+    try:
+        if isinstance(meter, dict) and _ntok(meter.get('weighted')):
+            _jput(_cost_path(name), dict({k: meter[k] for k in ('tokens', 'weighted', 'usd') if k in meter},
+                                         v=1, at=time.time(), model=model))
+        else:
+            _cost_path(name).unlink()
+    except OSError:
+        pass
+
+
+def summary_cost(name):
+    """What writing this chat's note used: {'weighted', 'tokens', 'usd', 'model', 'at'}, or None when not counted."""
+    d = _jget(_cost_path(name))
+    return d if isinstance(d, dict) and _ntok(d.get('weighted')) else None
+
+
+def events():
+    """The log's rows, oldest first."""
+    rows = _jdict(paths()['state'] / 'events.json').get('rows')
+    return [r for r in rows if isinstance(r, dict)] if isinstance(rows, list) else []
+
+
+def log_event(kind, now, **fields):
+    """Add one row to events.json: {'kind': 'fresh' | 'hold' | 'stop', 'at', ...}. Only numbers, yes/no and short
+    text are kept. It never raises: a hook or a job is not stopped by its own bookkeeping."""
+    row = {'kind': kind, 'at': now}
+    for k, v in fields.items():
+        if isinstance(v, str):
+            row[k] = v[:EVENT_TEXT]
+        elif isinstance(v, (bool, int, float)):
+            row[k] = v
+
+    def change(d):
+        rows = d.get('rows') if isinstance(d.get('rows'), list) else []
+        rows.append(row)
+        return {'v': 1, 'rows': rows[-EVENTS_TRIM:] if len(rows) > EVENTS_KEEP else rows}
+    try:
+        locked_update(paths()['state'] / 'events.json', change)
+    except Exception as e:
+        log(f'events: could not write down a {kind}: {e!r}')
+
+
+def fresh_event(sid, transcript_path, new_sid, now, via, note=None):
+    """Write down one fresh start and what it saved: what the next message in the old chat would have cost (resume),
+    less the summary and the new chat's first turn. The summary is what its run reported (summary_cost); when that
+    was not counted it is the model's estimate and the row says so (summary_est). Negative when going back was
+    cheaper. via: 'app' (Start fresh in an app), 'clear' (/clear after a hold) or 'compact'. note: whose summary it
+    was, when not the chat's own."""
+    try:
+        stats, state = transcript_stats(transcript_path), read_state(sid)
+        ctx = stats.get('ctx_tokens') or 0
+        cold = is_cold(state, stats, now, _jdict(paths()['state'] / TTL_FILE).get(sid))
+        paid = summary_cost(note or sid)
+        c = cost_model(ctx, None if paid else condensed_size(transcript_path, now=now), False, note_size(note or sid),
+                       summary_model=summary_model())
+        resume = c['resume']['cold' if cold else 'warm']
+        summary = paid['weighted'] if paid else c['fresh']['summary']
+        log_event('fresh', now, sid=sid, new=new_sid, via=via, ctx=ctx, cold=cold, resume=resume, summary=summary,
+                  summary_est=not paid, new_chat=c['fresh']['first'], saved=resume - summary - c['fresh']['first'],
+                  model=(paid or {}).get('model'))
+    except Exception:
+        log(f'events: could not write down a fresh start: {traceback.format_exc(limit=2)}')
 
 # ---------------------------------------------------------------- Status line
 RED, YEL, GRN, DIM, BOLD, RST = '\x1b[31m', '\x1b[33m', '\x1b[32m', '\x1b[2m', '\x1b[1m', '\x1b[0m'
@@ -959,7 +1158,7 @@ def _git_branch(cwd):
     for d in [p, *p.parents]:
         head = d / '.git' / 'HEAD'
         if head.is_file():
-            ref = head.read_text(errors='ignore').strip()
+            ref = head.read_text(encoding='utf-8', errors='ignore').strip()
             return ref.rsplit('/', 1)[-1] if ref.startswith('ref:') else ref[:7]
     return None
 
@@ -1271,7 +1470,7 @@ def ctx_limit(window, size):
 
 def read_state(session_id):
     try:
-        d = json.loads((paths()['state'] / f'{session_id}.json').read_text())
+        d = json.loads((paths()['state'] / f'{session_id}.json').read_text(encoding='utf-8'))
         return d if isinstance(d, dict) else {}
     except (OSError, ValueError):
         return {}
@@ -1332,7 +1531,51 @@ INJECTED_RE = re.compile(r'\s*(?:Another [^\n<]{1,60} sent a message:[ \t]*\n\s*
 
 
 def is_injected(prompt):
+    """Claude Code wrote this prompt itself. Never a message that starts with pasted text: that tag wraps what the
+    user pasted (see typed_text), and it used to pass the guard and the budget unheld."""
+    if PASTE_START_RE.match(prompt or ''):
+        return False
     return bool(INJECTED_RE.match(prompt or ''))
+
+
+# A prompt fired by a schedule (a cron task, a loop's wake-up) is the task's own plain words, with no tag, and the
+# hook is told nothing else about it. What tells it apart is the transcript: right before the prompt Claude Code
+# writes a system record, scheduled_task_fire, with the first FIRE_PROMPT_CHARS characters of the prompt.
+FIRE_AGE = 120           # seconds a fire record covers the prompt that follows it (measured: under 2)
+FIRE_PROMPT_CHARS = 200  # how much of the prompt the record carries
+FIRE_TAIL = 256 * 1024   # the end of the transcript that is read for it
+
+
+def scheduled_fire(transcript_path, prompt, now):
+    """A schedule fired this prompt just now, so nobody is there to answer a guard card. Only when the transcript
+    ends with a fire record for these very words, written in the last FIRE_AGE seconds, with no message or reply
+    after it. Anything less sure is a typed message, and is held as one."""
+    p = (prompt or '').strip()
+    if not p:
+        return False
+    try:
+        lines = _read_tail_lines(transcript_path, FIRE_TAIL)
+    except OSError:
+        return False
+    for raw in reversed(lines[-40:]):
+        if not raw.strip():
+            continue
+        try:
+            d = json.loads(raw)
+        except ValueError:
+            return False
+        if not isinstance(d, dict):
+            return False
+        if d.get('type') in ('user', 'assistant'):
+            return False  # the chat went on after any fire before this
+        if d.get('type') != 'system' or d.get('subtype') != 'scheduled_task_fire':
+            continue  # bookkeeping between the fire and the prompt (the queue, a title)
+        fired, t = d.get('prompt'), _ts(d.get('timestamp')) if isinstance(d.get('timestamp'), str) else None
+        if d.get('isSidechain') or not isinstance(fired, str) or not fired.strip() or t is None or not -5 <= now - t <= FIRE_AGE:
+            return False
+        fired = fired.strip()
+        return p == fired or (len(fired) >= FIRE_PROMPT_CHARS - 1 and p.startswith(fired))
+    return False
 
 
 def _task_dirs(sid, bg_id=None):
@@ -1475,7 +1718,7 @@ def waiting_tail(path, mtime=None):
 
 def _subagent_label(f):
     """A subagent's description, from its meta file when Claude Code wrote one, else the start of its task."""
-    meta = _jget(f.with_name(f.stem + '.meta.json')) or {}
+    meta = _jdict(f.with_name(f.stem + '.meta.json'))
     for k in ('description', 'agentType', 'name'):
         if isinstance(meta.get(k), str) and meta[k].strip():
             return meta[k].strip()[:60]
@@ -1594,13 +1837,114 @@ def guard_decision(prompt, ctx, cold, held, has_pass, now):
 
 def _jget(p):
     try:
-        return json.loads(p.read_text())
+        return json.loads(p.read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return None
 
 
-def _jput(p, obj):
+def _jdict(p):
+    """The JSON object in p for a reader: {} when it is not there, cannot be read, or holds something else (a list
+    there used to fail every caller that looks a key up, on every list, until the file was deleted)."""
+    d = _jget(p)
+    return d if isinstance(d, dict) else {}
+
+
+def _jput(p, obj, keep=False):
+    """keep: the file as it is now stays beside it as <name>.bak, for _jsafe to go back to. OSError when _jsafe
+    could not open the file: what the caller holds was made from "nothing", and is not written over it."""
+    if keep:
+        if _unopened(p):
+            raise OSError(f'{p.name} could not be opened, so it is not written over')
+        _jkeep(p)
     _write_then_replace(p, json.dumps(obj).encode('utf-8'))
+
+
+BAD_KEEP = 3  # damaged copies of one file that are kept (<name>.bad-<time>), the same as the server's durable.py
+_UNOPENED = set()  # files _jsafe found there and could not open: not damaged, and not to be written over
+
+
+def _unopened(*ps):
+    """Whether _jsafe could not open one of these the last time it read it."""
+    return any(str(p) in _UNOPENED for p in ps)
+
+
+def _jgood(p, ok=None):
+    """The JSON object in p, or None when it cannot be read, is no object, or fails ok(d)."""
+    return _jobject(_jget(p), ok)
+
+
+def _jobject(d, ok=None):
+    try:
+        return d if isinstance(d, dict) and (ok is None or ok(d)) else None
+    except Exception:
+        return None
+
+
+def _jkeep(p, copy=False):
+    """Keep p as <name>.bak when it holds a JSON object. A hard link where the disk has them (p is replaced right
+    after, never changed in place, so the link keeps the old contents), else a copy with the same mode. copy: always
+    a copy, for a .bak made after the write, which a link would tie to the file it is there to stand in for."""
+    try:
+        if _jgood(p) is None:
+            return  # nothing there, or damaged: the copy from before stays
+        bak = p.with_name(p.name + '.bak')
+        try:
+            bak.unlink()
+        except FileNotFoundError:
+            pass
+        try:
+            if copy:
+                raise OSError('a copy was asked for')
+            os.link(p, bak)
+        except OSError:
+            fd = os.open(bak, os.O_WRONLY | os.O_CREAT | os.O_TRUNC | getattr(os, 'O_BINARY', 0), os.stat(p).st_mode & 0o777)
+            with os.fdopen(fd, 'wb') as f:
+                f.write(p.read_bytes())
+                _to_disk(f)
+    except OSError:
+        pass
+
+
+def _jsafe(p, ok=None):
+    """For a file that is read, changed and written back (names, the library's index, secrets): its JSON object, and
+    never "nothing" for a file that is there and cannot be read. That used to be read as {} and the next write put
+    one entry over the whole list. The damaged file is renamed <name>.bad-<time> (the newest BAD_KEEP are kept) and
+    the copy from before its last write (<name>.bak, see _jput) is used; {} only when there is no copy either. Call
+    it under the file's claim (held).
+
+    Damaged means its contents: not JSON, or not what the file holds. A file that is there and will not open (no
+    permission, too many open files, another program holding it) says nothing about its contents, so it is left
+    where it is. The caller still gets {}, and _unopened(p) is true until it reads again: _jput will not write to
+    it, and a caller with more than one file to change asks first."""
+    try:
+        raw = p.read_bytes()
+    except FileNotFoundError:
+        _UNOPENED.discard(str(p))
+        return {}
+    except OSError as e:
+        _UNOPENED.add(str(p))
+        log(f'{p.name} could not be opened ({e.__class__.__name__}): it is left as it is and not written over')
+        return {}
+    _UNOPENED.discard(str(p))
+    try:
+        d = _jobject(json.loads(raw.decode('utf-8')), ok)
+    except ValueError:
+        d = None
+    if d is not None:
+        return d
+    if not raw and ok is None and not p.with_name(p.name + '.bak').exists():
+        return {}  # made empty and never written: nothing was lost
+    kept = p.with_name(f'{p.name}.bad-{time.strftime("%Y%m%d-%H%M%S")}')
+    try:
+        os.replace(p, kept)
+        old = sorted(n for n in os.listdir(p.parent) if n.startswith(p.name + '.bad-'))
+        for n in old[:-BAD_KEEP]:
+            (p.parent / n).unlink()
+    except OSError:
+        pass
+    d = _jgood(p.with_name(p.name + '.bak'), ok)
+    log(f'{p.name} could not be read: kept as {kept.name}, ' + ('and its last good copy is used' if d is not None else 'and it starts empty'))
+    return d if d is not None else {}
 
 
 def held_get(sid):
@@ -1644,7 +1988,7 @@ def pass_take(sid, now):
     """The app's one-time "Send anyway". Used up by the next prompt it lets through, and void after PENDING_TTL."""
     p = paths()['state'] / f'{sid}.pass'
     try:
-        raw = p.read_text()
+        raw = p.read_text(encoding='utf-8')
         p.unlink()
     except OSError:
         return False
@@ -1669,7 +2013,7 @@ def pending_discard(pid):
 def pending_discard_session(sid):
     """Drop any terminal's pending /clear injection for this session (it was started fresh elsewhere)."""
     for p in paths()['pending'].glob('*.json'):
-        if (_jget(p) or {}).get('session_id') == sid:
+        if _jdict(p).get('session_id') == sid:
             try:
                 p.unlink()
             except OSError:
@@ -1738,7 +2082,7 @@ def process_table():
             ok = k32.Process32NextW(snap, ctypes.byref(e))
         k32.CloseHandle(snap)
         return table
-    out = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,comm='], capture_output=True, text=True).stdout
+    out = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,comm='], capture_output=True, encoding='utf-8', errors='replace').stdout
     table = {}
     for line in out.splitlines():
         parts = line.split(None, 2)
@@ -1817,7 +2161,7 @@ def machine_name():
     said, else this computer's own name (until the first poll)."""
     try:
         f = os.environ.get('SB_NODE_JSON') or Path.home() / '.config' / 'switchboard' / 'node.json'
-        n = json.loads(Path(f).read_text()).get('machine')
+        n = json.loads(Path(f).read_text(encoding='utf-8')).get('machine')
         if isinstance(n, str) and MACHINE_RE.fullmatch(n):
             return n
     except (OSError, ValueError, AttributeError):
@@ -1835,7 +2179,7 @@ def os_name():
 def device_form():
     """'laptop' or 'desktop', from whether the machine has a battery (never from its name). Remembered once known."""
     p = paths()['state'] / 'device.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     if d.get('form') in ('laptop', 'desktop'):
         return d['form']
     form = None
@@ -1877,6 +2221,18 @@ def guard_card(ctx, idle_s, link, cost=None):
 # ---------------------------------------------------------------- Hooks
 import urllib.request
 
+_direct = None
+
+
+def _urlopen(req, timeout=None):
+    """urlopen for the Switchboard server: straight there, never through a proxy. urllib takes http_proxy from the
+    environment, and with no no_proxy beside it every hook's call to the server on your own network went to the
+    proxy, which cannot reach it."""
+    global _direct
+    if _direct is None:
+        _direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _direct.open(req, timeout=timeout)
+
 
 SERVERS = ()  # nothing built in: the server's poll says where it is (agent.json), SB_SERVER overrides
 
@@ -1909,7 +2265,7 @@ def _post_any(event, wait, bases, send=None, stagger=None):
     def post(base):
         req = urllib.request.Request(base + '/api/event', data=json.dumps(event).encode(),
                                      headers={'Content-Type': 'application/json', 'X-Switchboard': '1'}, method='POST')
-        urllib.request.urlopen(req, timeout=max(wait, NET_FLOOR)).close()
+        _urlopen(req, timeout=max(wait, NET_FLOOR)).close()
     send, done, step, t0 = send or post, threading.Event(), threading.Event(), time.time()
     lock, st = threading.Lock(), {'out': 0, 'all': False, 'took': False}  # out: sends still on their way
 
@@ -1965,13 +2321,13 @@ def ping_due(sid, now, every=PING_EVERY):
     """True (and written down) when this session has not pinged in the last `every` seconds."""
     p = paths()['state'] / f'{sid}.ping'
     try:
-        if 0 <= now - float(p.read_text() or 0) < every:
+        if 0 <= now - float(p.read_text(encoding='utf-8') or 0) < every:
             return False
     except (OSError, ValueError):
         pass
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        p.write_text(str(now))
+        p.write_text(str(now), encoding='utf-8')
     except OSError:
         pass
     return True
@@ -1993,7 +2349,7 @@ def hook_ping(inp, out, now, ping=None):
         ev['kind'] = inp['notification_type'][:40]
     ping_server(ev, wait=net_left(PING_WAIT)) if ping is None else ping(ev)
     try:
-        (paths()['state'] / f'{sid}.ping').write_text(str(now))
+        (paths()['state'] / f'{sid}.ping').write_text(str(now), encoding='utf-8')
     except OSError:
         pass
     return True
@@ -2057,7 +2413,7 @@ def budget_put(status, now):
 def budget_fetch(wait=BUDGET_WAIT, servers=None, get=None):
     """GET /api/budget from every server address at once; the first answer wins, nobody waits past `wait`."""
     def fetch(base):
-        with urllib.request.urlopen(base + '/api/budget', timeout=wait) as r:
+        with _urlopen(base + '/api/budget', timeout=wait) as r:
             return json.loads(r.read().decode('utf-8'))
     get, got, done = get or fetch, [], threading.Event()
 
@@ -2145,6 +2501,34 @@ def budget_merge(out, sid, b):
 
 
 INJECT_MAX = 9500  # Claude Code moves larger hook output to a file; keep the essentials inline
+# A note over that used to be cut off with "Read the whole file first": a second call in the new chat, about 30k more
+# on its first turn (measured: 92k against 62k), for half of all real handoffs (96 of 190). Now the summary is asked
+# for 1,000 words at most (HANDOFF_PROMPT), and a note that is still too long gives up whole sections in this order.
+# Goal, the standing instructions and the verbatim list are never left out.
+NOTE_DROP = ('Key files and places', 'Gotchas', 'Decisions made', 'Current state', 'Open threads and next steps')
+NOTE_FILE_RE = re.compile(r'\(Handoff file: ([^\n]+)\)\n')
+
+
+def _fit_note(text, room, path):
+    """The note in at most `room` characters, by leaving whole sections out (NOTE_DROP, the least needed first) and
+    saying which and where they are. None when even that is too long: the caller has the chat read the file."""
+    parts = re.split(r'(?m)^(?=## )', text)
+    names = [p[3:].split('\n', 1)[0].strip() if p.startswith('## ') else None for p in parts]
+    m = NOTE_FILE_RE.match(text)
+    where = m.group(1) if m else path
+    gone = set()
+
+    def out():
+        kept = ''.join(p for i, p in enumerate(parts) if i not in gone).rstrip('\n')
+        left = ', '.join(names[i] for i in sorted(gone))
+        return kept + (f'\n\nLeft out of this copy to keep it short: {left}. The whole note is in {where}: '
+                       'Read it when you need those parts.' if gone else '')
+    for drop in NOTE_DROP:
+        if len(out()) <= room:
+            break
+        gone.update(i for i, n in enumerate(names) if n and n.startswith(drop))
+    fitted = out()
+    return fitted if len(fitted) <= room else None
 
 
 def _fresh_context(handoff_text, held_prompt, path=None, extra=''):
@@ -2156,6 +2540,9 @@ def _fresh_context(handoff_text, held_prompt, path=None, extra=''):
     tail += extra
     if len(pre) + len(handoff_text) + len(tail) <= INJECT_MAX or not path:
         return pre + handoff_text + tail
+    fitted = _fit_note(handoff_text, INJECT_MAX - len(pre) - len(tail), path)
+    if fitted is not None:
+        return pre + fitted + tail
     note = (f'The handoff is long. Before doing anything else, Read the whole file {path} '
             '(especially "Your instructions, verbatim" at the end). Its beginning:\n\n')
     room = INJECT_MAX - len(pre) - len(note) - len(tail) - 20
@@ -2170,7 +2557,7 @@ def handle_hook(inp, now, claude_pid, spawn=None, notify=None, budget=None):
         return block
     prev = None
     if inp.get('hook_event_name') == 'SessionStart' and claude_pid:  # before _handle_hook writes the new chat there
-        prev = (_jget(paths()['state'] / 'seen' / f'{claude_pid}.json') or {}).get('sid')
+        prev = _jdict(paths()['state'] / 'seen' / f'{claude_pid}.json').get('sid')
     out = _handle_hook(inp, now, claude_pid, spawn, notify)
     if prev and inp.get('source') == 'clear' and not os.environ.get('SB_INTERNAL'):
         try:
@@ -2227,6 +2614,9 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
         p = (inp.get('prompt') or '').lstrip()
         log(f'guard: let through an injected prompt for {sid[:8]}: {p[:40]!r} (keys {sorted(inp)})')
         return None
+    if ev == 'UserPromptSubmit' and sid and tp and scheduled_fire(tp, inp.get('prompt'), now):
+        log(f'guard: let through a scheduled prompt for {sid[:8]}')
+        return None
     if ev == 'UserPromptSubmit' and sid and tp:
         stats, state = transcript_stats(tp), read_state(sid)
         last = stats.get('last_assistant_ts')
@@ -2235,7 +2625,7 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
         if stats.get('compacted_ts') and (state.get('updated') or 0) < stats['compacted_ts']:
             state = {}  # compacted since the status line last rendered: its size is from before
         ctx = max(stats['ctx_tokens'], state.get('ctx_tokens') or 0)
-        cold = is_cold(state, stats, now, (_jget(paths()['state'] / TTL_FILE) or {}).get(sid))
+        cold = is_cold(state, stats, now, _jdict(paths()['state'] / TTL_FILE).get(sid))
         if cold and ctx >= GUARD_CTX and now - children_active_ts(sid) < GUARD_IDLE:
             cold = False  # its subagents or background commands wrote within the hour: working, not idle
         held = held_get(sid)
@@ -2269,6 +2659,7 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
             return {'decision': 'block', 'reason': 'Writing a handoff of this chat (about a minute). Type /clear now. '
                     'The new chat waits for it and loads your instructions on its own.'}
         held_set(sid, prompt, now)
+        log_event('hold', now, sid=sid, ctx=ctx, idle=int(now - (stats['last_assistant_ts'] or now)))
         if claude_pid:
             pending_put(claude_pid, {'session_id': sid, 'transcript_path': tp, 'held': prompt, 'ts': now})
         # No summary yet: the user may well say "go". Only the cheap count runs now, for the estimate on the card.
@@ -2313,6 +2704,8 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
                 time.sleep(1)
             if hp.exists():
                 text, path = hp.read_text(encoding='utf-8'), hp
+                if rec.get('transcript_path'):
+                    fresh_event(rec['session_id'], rec['transcript_path'], sid, now, 'clear')
             else:  # a summary of a big chat can take longer: say where it lands, so it is not lost
                 text, path = (f'(The automatic handoff was not ready in time. It is still being written to {hp}: '
                               f'before answering, check whether that file exists now and Read it if so. Until it does, '
@@ -2330,7 +2723,7 @@ def _handle_hook(inp, now, claude_pid, spawn=None, notify=None):
                 start_handoff(tp, sid, now, spawn)
             except Exception:
                 log(f'handoff at /clear: {traceback.format_exc(limit=2)}')
-        m = (_jget(paths()['state'] / 'replaced.json') or {}).get(sid) or {}
+        m = _jdict(paths()['state'] / 'replaced.json').get(sid) or {}
         if not (m.get('by') and now - (m.get('ts') or 0) < 600):  # the new chat's SessionStart may have named itself first
             mark_replaced(sid, 'cleared', now)
     # SessionEnd writes no summary: most chats are never started fresh. The summary is written when someone first
@@ -2486,7 +2879,7 @@ def compose_name(topic, tag=None, stamp=None):
 
 def session_topic(meta, sid=None):
     """(topic, how many times started fresh). A name given in Switchboard wins over everything the transcript says."""
-    given = (_jget(paths()['state'] / 'names.json') or {}).get(sid) if sid else None
+    given = _jdict(paths()['state'] / 'names.json').get(sid) if sid else None
     if isinstance(given, str) and given.strip():
         topic, fresh = split_title(given)
         if topic:
@@ -2638,8 +3031,8 @@ def _head_meta(path):
         o = d.get('origin')  # {'kind': 'human'} or, in some records, the bare word
         if d.get('type') == 'user' and not d.get('isMeta') and (o.get('kind') if isinstance(o, dict) else o) in (None, 'human') \
                 and isinstance(d.get('message') or {}, dict):
-            t = _text_of(_msg(d).get('content')).strip()
-            if t and not t.startswith('<'):
+            t = typed_text(_text_of(_msg(d).get('content')))
+            if t:
                 j = i + 1  # and what hooks added to it, up to Claude's first answer
                 while j < len(head) and j < i + 8 and '"type":"assistant"' not in head[j].replace(' ', '') and \
                         '"type":"user"' not in head[j].replace(' ', ''):
@@ -3125,7 +3518,7 @@ def prune_state(now, force=False):
     AND the chat's transcript is gone or as old; nothing is touched when the transcripts cannot be listed at all.
     Returns how many files went (None when it was not due)."""
     stamp = paths()['state'] / 'pruned.json'
-    if not force and 0 <= now - ((_jget(stamp) or {}).get('at') or 0) < PRUNE_EVERY:
+    if not force and 0 <= now - (_jdict(stamp).get('at') or 0) < PRUNE_EVERY:
         return None
     try:
         _jput(stamp, {'at': now})
@@ -3328,7 +3721,7 @@ def cleared_by(old, new, now):
     the chat's history carry over). A Start fresh mark already naming a chat is left alone."""
     if not (isinstance(new, str) and SID_RE.fullmatch(new) and SID_RE.fullmatch(old or '')) or old == new:
         return
-    m = (_jget(paths()['state'] / 'replaced.json') or {}).get(old) or {}
+    m = _jdict(paths()['state'] / 'replaced.json').get(old) or {}
     if (m.get('by') or {}).get('sid'):
         return
     mark_replaced(old, 'cleared', now, {'machine': machine_name(), 'sid': new})
@@ -3634,7 +4027,7 @@ def _cmdlines(pids, loose=None):
 def _roster_args():
     """{session id: launch args} for background sessions, from the background service's own roster."""
     out = {}
-    for w in ((_jget(claude_dir() / 'daemon' / 'roster.json') or {}).get('workers') or {}).values():
+    for w in (_jdict(claude_dir() / 'daemon' / 'roster.json').get('workers') or {}).values():
         if not isinstance(w, dict):
             continue
         d = w.get('dispatch') or {}
@@ -3663,7 +4056,7 @@ def launch_flags(agents, now, full=None):
     Remembered in flags.json, so a closed session keeps its chips. full, when given, gets {sid: {'flags', 'other',
     'from'}}: every flag, for the flags drawer."""
     p = paths()['state'] / 'flags.json'
-    known = _jget(p) or {}
+    known = _jdict(p)
     changed = False
     try:
         roster = _roster_args()
@@ -4050,7 +4443,7 @@ def _spend_titles(sids, known):
     want = set(sids) - set(known)
     if not want:
         return {}
-    idx, names = _jget(paths()['state'] / 'index.json') or {}, _jget(paths()['state'] / 'names.json') or {}
+    idx, names = _jdict(paths()['state'] / 'index.json'), _jdict(paths()['state'] / 'names.json')
     out = {}
     for key, c in idx.items():
         sid = Path(key).stem
@@ -4107,18 +4500,18 @@ def list_sessions(now, agents, replaced_out=None, procs=None):
 def _list_sessions(now, agents, replaced_out, procs, skip, at):
     root = machine_root()
     state_dir = paths()['state']
-    idx = _jget(state_dir / 'index.json') or {}
-    dismissed = _jget(state_dir / 'dismissed.json') or {}
+    idx = _jdict(state_dir / 'index.json')
+    dismissed = _jdict(state_dir / 'dismissed.json')
     turn_over = {}
-    marks = _jget(state_dir / 'replaced.json') or {}
+    marks = _jdict(state_dir / 'replaced.json')
     known = agents_known(agents)  # False: Claude Code was not asked or did not answer, so nothing counts as stopped
     try:
         if known:
             flush_names(agents)
     except OSError:
         log(f'names: {traceback.format_exc(limit=1)}')
-    names = _jget(state_dir / 'names.json') or {}  # renamed in Switchboard
-    pending_names = _jget(state_dir / 'names_pending.json') or {}
+    names = _jdict(state_dir / 'names.json')  # renamed in Switchboard
+    pending_names = _jdict(state_dir / 'names_pending.json')
     by_sid = {a.get('sessionId'): a for a in agents if a.get('sessionId')}
     new_idx, rows = {}, []
     show, gone = [], []
@@ -4175,14 +4568,14 @@ def _list_sessions(now, agents, replaced_out, procs, skip, at):
     except Exception:
         log(f'flags failed: {traceback.format_exc(limit=2)}')
         launched, base = {}, {'effort': 'high', 'model': 'opus', 'perm': 'default'}
-    condensed = _jget(state_dir / 'condensed.json') or {}
+    condensed = _jdict(state_dir / 'condensed.json')
     cond_before = dict(condensed)
     cond_spent = 0.0  # after an update every row is uncounted at once: a poll counts for a few seconds, the next go on
     model = summary_model()
-    ttls = _jget(state_dir / TTL_FILE) or {}
+    ttls = _jdict(state_dir / TTL_FILE)
     here = (compact_or_none() or {}).get('value')  # this computer's compact window, for a chat with no reading yet
     ttls_before = dict(ttls)
-    cu_cj = (_jget(claude_json_path()) or {}) if sys.platform == 'darwin' or IS_WIN else None  # computer use, per folder
+    cu_cj = _jdict(claude_json_path()) if sys.platform == 'darwin' or IS_WIN else None  # computer use, per folder
     for r in show[:LIST_MAX]:
         sid, f, c, a, active = r['sid'], r['f'], r['c'], r['a'], r['active']
         at['sid'] = sid
@@ -5091,7 +5484,7 @@ def folder_children(parent):
     if not base.is_dir():
         raise ValueError('folder does not exist')
     recent = {}
-    for c in (_jget(paths()['state'] / 'index.json') or {}).values():
+    for c in _jdict(paths()['state'] / 'index.json').values():
         rel = _rel(root, c.get('cwd')) if c.get('cwd') else None
         if rel:
             parts = WORKTREE_RE.split(rel)[0].split('/')
@@ -5209,7 +5602,7 @@ def list_files(folder, name=None):
 def list_folders(now):
     root = machine_root()
     seen, out = set(), []
-    idx = _jget(paths()['state'] / 'index.json') or {}
+    idx = _jdict(paths()['state'] / 'index.json')
     for c in sorted(idx.values(), key=lambda c: -(c.get('mtime') or 0)):
         rel = folder_of(c.get('cwd'), root) if c.get('cwd') else None
         if rel:  # a session in a worktree belongs to its repo; the worktree itself is temporary
@@ -5251,6 +5644,7 @@ def budget_stop(agents, run=None):
         try:
             run(['stop', a['id']])
             stopped.append({'sid': sid, 'bg_id': a['id']})
+            log_event('stop', time.time(), sid=sid, by='budget')
         except Exception as e:
             failed.append({'sid': sid, 'bg_id': a['id'], 'error': str(e)[:160]})
     log(f'budget: hard limit stopped {len(stopped)} background chats' + (f', {len(failed)} failed' if failed else ''))
@@ -5354,7 +5748,7 @@ def rpc(req, now, agents=None):
             return {'ok': True, 'folder': folder_of(str(p))}
         if verb == 'pass':
             sid = _need_sid(req)
-            (paths()['state'] / f'{sid}.pass').write_text(str(now))
+            (paths()['state'] / f'{sid}.pass').write_text(str(now), encoding='utf-8')
             return {'ok': True}
         if verb == 'supersede':  # the server moved this session to another machine (Continue)
             by = req.get('by') if isinstance(req.get('by'), dict) else {}
@@ -5391,6 +5785,7 @@ def rpc(req, now, agents=None):
                 if a.get('status') == 'stopped':
                     return {'ok': True, 'note': 'not running'}
                 stop_bg(a['id'])
+                log_event('stop', now, sid=sid, by='idle' if req.get('if_idle') else 'user')
                 return {'ok': True}
             if verb == 'stop':
                 if a:
@@ -5448,12 +5843,12 @@ def agent_view_children(pid):
     """Pids of `claude agents` started by the `claude attach` at `pid`: the agent list Claude Code opens in the same
     terminal when the person leaves the chat."""
     try:
-        r = subprocess.run(['pgrep', '-P', str(pid)], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(['pgrep', '-P', str(pid)], capture_output=True, encoding='utf-8', errors='replace', timeout=5)
         kids = [int(x) for x in r.stdout.split()]
         if not kids:
             return []
         r = subprocess.run(['ps', '-ww', '-o', 'pid=,args=', '-p', ','.join(map(str, kids))], capture_output=True,
-                           text=True, timeout=5)
+                           encoding='utf-8', errors='replace', timeout=5)
     except (OSError, ValueError, subprocess.SubprocessError):
         return []
     out = []
@@ -5584,7 +5979,7 @@ def paths_q():
 
 def find_session(sid):
     """(transcript path, meta) for a session on this machine, from the index or a direct lookup."""
-    for key, c in (_jget(paths()['state'] / 'index.json') or {}).items():
+    for key, c in _jdict(paths()['state'] / 'index.json').items():
         if Path(key).stem == sid and isinstance(c, dict) and not c.get('bad'):
             return key, c
     for f in (claude_dir() / 'projects').glob(f'*/{sid}.jsonl'):
@@ -5930,7 +6325,7 @@ def _claude_help(refresh=False, runner=None):
     except OSError:
         return None
     p = paths()['state'] / 'claude_help.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     # 'v': how the text is read. A copy an older helper cached counted flags named in prose, so it is read again.
     if not refresh and d.get('exe') == exe and d.get('mtime') == mt and isinstance(d.get('flags'), list) \
             and isinstance(d.get('models'), list) and isinstance(d.get('perms'), list) and d.get('v') == 2:
@@ -6150,7 +6545,7 @@ def _computer_use():
     if sys.platform != 'darwin':
         return {'supported': False, 'why': 'Claude Code has computer use on Macs and, through Windows-MCP, Windows PCs.',
                 'note': None}
-    cj = _jget(claude_json_path()) or {}
+    cj = _jdict(claude_json_path())
     gate = ((cj.get('cachedGrowthBookFeatures') or {}).get('tengu_malort_pedway') or {})
     if isinstance(gate, dict) and gate.get('enabled') is False:
         return {'supported': False, 'why': 'Computer use is not turned on for this Claude account yet (it needs a Pro, '
@@ -6177,7 +6572,7 @@ def _git_top(cwd):
         git = _which('git')
         if git and Path(cwd).is_dir():
             try:
-                r = subprocess.run([git, '-C', cwd, 'rev-parse', '--show-toplevel'], capture_output=True, text=True,
+                r = subprocess.run([git, '-C', cwd, 'rev-parse', '--show-toplevel'], capture_output=True, encoding='utf-8', errors='replace',
                                    timeout=PROBE_S, stdin=subprocess.DEVNULL,
                                    **({'creationflags': 0x08000000} if IS_WIN else {}))
                 top = r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else None
@@ -6295,7 +6690,7 @@ def carry_over(path, model=None, sid=None):
     instructions. A worktree is not carried: it is made once, when a chat first starts. One pass over the
     transcript, a few MB at a time."""
     out, ultra = {}, None
-    rec = ((_jget(paths()['state'] / 'flags.json') or {}).get(sid) or {}) if sid else {}
+    rec = (_jdict(paths()['state'] / 'flags.json').get(sid) or {}) if sid else {}
     rec = rec if isinstance(rec, dict) else {}
     launched, _ = whole_flags(rec)
     first = rec.get('launch') if isinstance(rec.get('launch'), dict) else {}
@@ -6598,6 +6993,7 @@ def _do_job(job, runner, find_url, make_handoff, now, live, progress, turn, slot
             a = _agent_for(job['sid'], ags)
             if a and a.get('kind') == 'background' and a.get('id'):
                 run_claude_cmd(['stop', a['id']])
+                log_event('stop', time.time(), sid=job['sid'], by='user')
         return {'state': 'done', 'handoff': True}
     turn.take()
     launch = dict(job)
@@ -6708,6 +7104,11 @@ def _do_job(job, runner, find_url, make_handoff, now, live, progress, turn, slot
     else:
         return {'state': 'error', 'error': 'Claude started the chat, but it never came up. Try again in a minute.'}
     new_sid = bg_session_id(bg)
+    paid = summary_cost(f'thread-{job["compacted"]}' if job.get('compacted') else job['sid']) if verb == 'fresh' or job.get('compacted') else None
+    if verb == 'fresh':
+        fresh_event(job['sid'], job['transcript'], new_sid, max(now, time.time()), 'app')
+    elif job.get('compacted') and job.get('transcript'):
+        fresh_event(job['compacted'], job['transcript'], new_sid, max(now, time.time()), 'compact', f'thread-{job["compacted"]}')
     if verb == 'fresh':  # only now: if the launch had failed, the held message would still be there to send
         held_clear(job['sid'])
         pending_discard_session(job['sid'])
@@ -6732,6 +7133,8 @@ def _do_job(job, runner, find_url, make_handoff, now, live, progress, turn, slot
     if new_sid and tools is not None and not launch.get('bare'):
         _jput(paths()['state'] / f'{new_sid}.tools', tools_rec(tools, versions, tmode, skipped, tmeta, cands))
     out = {'state': 'done', 'bg_id': bg, 'url': find_url(bg), 'cwd': cwd, 'name': launch.get('name'), 'sid': new_sid}
+    if paid:  # what writing the summary used, kept with the job that asked for it
+        out['summary_cost'] = {k: paid[k] for k in ('weighted', 'usd', 'tokens') if k in paid}
     if missing and not launch.get('bare'):
         out['missing_tools'] = missing
     if tools is not None and not launch.get('bare'):
@@ -6791,7 +7194,23 @@ def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=N
                     pass
         return [p for _, _, p in sorted(jobs)]  # the order they were asked in
 
+    def failed(stem, msg):
+        try:
+            _jput(q / f'{stem}.result.json', {'state': 'error', 'error': msg, 'finished': time.time()})
+        except OSError:
+            log(f'job {stem}: its result could not be written: {traceback.format_exc(limit=2)}')
+
     try:
+        # A claim that is still here was left by a launcher that died between taking the job and saying it runs
+        # (only the holder of the queue's claim makes these, and that is this process now). Whoever asked would
+        # wait out the whole timeout for it: it is answered now, and never run late.
+        for c in q.glob('*.claimed'):
+            if _jget(q / f'{c.stem}.result.json') is None:
+                failed(c.stem, 'The helper stopped before this started. Try again.')
+            try:
+                c.unlink()
+            except OSError:
+                pass
         while True:
             running = [th for th in running if th.is_alive()]
             jobs = waiting()[:max(0, JOBS_PARALLEL - len(running))]
@@ -6804,19 +7223,27 @@ def launch_queue(runner=None, find_url=None, make_handoff=None, now=None, live=N
                 except OSError:
                     continue
                 job = _jget(claimed)
-                try:
-                    claimed.unlink()
-                except OSError:
-                    pass
-                if not job:
+
+                def unclaim():
+                    try:
+                        claimed.unlink()
+                    except OSError:
+                        pass
+                if not isinstance(job, dict):  # cut short by a power cut, or not a job: say so, do not drop it
+                    failed(jp.stem, 'This request could not be read, so it was dropped. Try again.')
+                    unclaim()
                     continue
+                job.setdefault('id', jp.stem)  # the file is named by the id: whoever asked looks for <stem>.result.json
                 t = clock()
-                rp = q / f'{job["id"]}.result.json'
-                if t - job.get('created', t) > JOB_QUEUED_TTL:  # nobody watched it fail; still never run it late
+                rp = q / f'{jp.stem}.result.json'
+                created = job.get('created')
+                if t - (created if isinstance(created, (int, float)) else t) > JOB_QUEUED_TTL:  # nobody watched it fail; still never run it late
                     _jput(rp, {'state': 'error', 'error': 'This waited too long to start, so it was dropped. Try again.',
                                'finished': time.time()})
+                    unclaim()
                     continue
                 _jput(rp, {'state': 'running', 'started': t})
+                unclaim()  # only now: a launcher that dies before this line leaves the claim for the next one to answer
                 th = threading.Thread(target=work, args=(job, rp, t), name=f'job-{job["id"]}', daemon=True)
                 th.start()
                 running.append(th)
@@ -6884,11 +7311,11 @@ def heal_launcher(now):
     """Re-load the launcher from a GUI-context process, at most every 10 minutes."""
     stamp = paths()['state'] / 'launcher-heal'
     try:
-        if now - float(stamp.read_text()) < HEAL_EVERY:
+        if now - float(stamp.read_text(encoding='utf-8')) < HEAL_EVERY:
             return
     except (OSError, ValueError):
         pass
-    stamp.write_text(str(now))
+    stamp.write_text(str(now), encoding='utf-8')
     ensure_launcher()
     try:
         heal_statusline()
@@ -6952,7 +7379,7 @@ def _pid_alive_win(pid):
 
 
 def launcher_status(now):
-    d = _jget(paths_q()['queue'] / '.launcher') or {}
+    d = _jdict(paths_q()['queue'] / '.launcher')
     return {'alive': bool(d) and _pid_alive(d.get('pid')) and now - (d.get('ts') or 0) < LAUNCHER_STALE, 'beat': d.get('ts')}
 
 
@@ -6970,7 +7397,7 @@ def launcher_daemon(me=None, sleep=time.sleep):
     mine, stop = os.getpid(), threading.Event()
 
     def rival():
-        d = _jget(beat) or {}
+        d = _jdict(beat)
         return d.get('pid') not in (None, mine) and _pid_alive(d.get('pid')) and time.time() - (d.get('ts') or 0) < LAUNCHER_STALE
 
     def pulse():  # the opening beat is written below, so a racing launcher's beat is never overwritten at start
@@ -6998,7 +7425,7 @@ def launcher_daemon(me=None, sleep=time.sleep):
     finally:
         stop.set()
         beater.join(timeout=2)
-        if (_jget(beat) or {}).get('pid') == mine:
+        if _jdict(beat).get('pid') == mine:
             try:
                 beat.unlink()
             except OSError:
@@ -7055,7 +7482,7 @@ def is_claude_cli(name):
 
 def _procs_mac():
     """{pid: {ppid, mb, age, tty, name}} for every process, from one ps call."""
-    out = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,rss=,etime=,tty=,comm='], capture_output=True, text=True,
+    out = subprocess.run(['ps', '-A', '-o', 'pid=,ppid=,rss=,etime=,tty=,comm='], capture_output=True, encoding='utf-8', errors='replace',
                          timeout=10).stdout
     procs = {}
     for line in out.splitlines():
@@ -7358,7 +7785,7 @@ def uptime_s():
                 return None
             up = time.time() - tv.sec
             return up if tv.sec > 0 and up >= 0 else None
-        return float(Path('/proc/uptime').read_text().split()[0])
+        return float(Path('/proc/uptime').read_text(encoding='utf-8').split()[0])
     except Exception:
         return None
 
@@ -7396,12 +7823,12 @@ def rpc_browse(req, now, budget=BROWSE_BUDGET):
     if not isinstance(since, (int, float)):
         raise ValueError('since is a time')
     cache_p = paths()['state'] / 'browse.json'
-    cache = _jget(cache_p) or {}
+    cache = _jdict(cache_p)
     if cache.get('v') != BROWSE_V:
         cache = {'v': BROWSE_V, 'files': {}}
     files, root = cache['files'], machine_root()
-    marks = _jget(paths()['state'] / 'replaced.json') or {}
-    names = _jget(paths()['state'] / 'names.json') or {}
+    marks = _jdict(paths()['state'] / 'replaced.json')
+    names = _jdict(paths()['state'] / 'names.json')
     t0, rows, seen, partial, dirty = time.time(), [], {}, False, False
     found = []
     for f in (claude_dir() / 'projects').glob('*/*.jsonl'):
@@ -7464,8 +7891,8 @@ def rpc_summary(req):
         if not isinstance(d, dict) or d.get('isSidechain'):
             continue
         if d.get('type') == 'user' and _is_real_user(d):
-            t = _text_of(_msg(d).get('content')).strip()
-            if t and not t.startswith('<'):
+            t = typed_text(_text_of(_msg(d).get('content')))
+            if t:
                 users.append({'ts': _ts(d.get('timestamp')), 'text': t[:600]})
         elif d.get('type') == 'assistant':
             t = _text_of(_msg(d).get('content')).strip()
@@ -7497,7 +7924,7 @@ def _names_files():
 
 
 def given_name(sid):
-    n = (_jget(_names_files()[0]) or {}).get(sid)
+    n = _jdict(_names_files()[0]).get(sid)
     return n if isinstance(n, str) and n.strip() else None
 
 
@@ -7515,7 +7942,9 @@ def set_given_name(sid, name, tp, running):
     chat to stop, None when there was nothing to change."""
     np, pp, wp = _names_files()
     with held(np):  # one claim for the three files: a rename, a /clear and a list pass never undo each other
-        names, pending, was = _jget(np) or {}, _jget(pp) or {}, _jget(wp) or {}
+        names, pending, was = _jsafe(np), _jsafe(pp), _jsafe(wp)
+        if _unopened(np, pp, wp):
+            raise OSError('The names could not be read just now. Try again.')  # before any of the three is written
         if name:
             if sid not in names and sid not in was:
                 was[sid] = transcript_stats(tp, BROWSE_TAIL).get('custom_title') or ''
@@ -7525,15 +7954,15 @@ def set_given_name(sid, name, tp, running):
                 return None  # never named here: Claude Code's own title stays
             names.pop(sid, None)
             title = was.pop(sid, '') or ''
-        _jput(np, names)
-        _jput(wp, was)
+        _jput(np, names, keep=True)
+        _jput(wp, was, keep=True)
         if running:
             pending[sid] = title
-            _jput(pp, pending)
+            _jput(pp, pending, keep=True)
             return False
         _write_title(tp, sid, title)
         if pending.pop(sid, None) is not None:
-            _jput(pp, pending)
+            _jput(pp, pending, keep=True)
         return True
 
 
@@ -7546,10 +7975,12 @@ def carry_name(old, new, now=None):
     name = compose_name(topic or n, f'part {fresh + 2}')
     np, pp, _ = _names_files()
     with held(np):
-        names, pending = _jget(np) or {}, _jget(pp) or {}
+        names, pending = _jsafe(np), _jsafe(pp)
+        if _unopened(np, pp):
+            return  # not carried, rather than one name written over the list
         names[new], pending[new] = name, name  # the new chat is running: its transcript gets the name once it stops
-        _jput(np, names)
-        _jput(pp, pending)
+        _jput(np, names, keep=True)
+        _jput(pp, pending, keep=True)
 
 
 def flush_names(agents):
@@ -7558,7 +7989,9 @@ def flush_names(agents):
     if not _jget(pp):
         return
     with held(np):
-        pending = _jget(pp) or {}
+        pending = _jsafe(pp)
+        if _unopened(pp):
+            return  # the next list pass tries again
         left = {}
         for sid, title in pending.items():
             if _chat_running(_agent_for(sid, agents)):
@@ -7569,7 +8002,7 @@ def flush_names(agents):
                 _write_title(tp, sid, title)
             except (ValueError, OSError):
                 pass  # gone from this machine: nothing to write
-        _jput(pp, left)
+        _jput(pp, left, keep=True)
 
 
 def name_overruled(sid, custom, names, pending):
@@ -7581,11 +8014,13 @@ def name_overruled(sid, custom, names, pending):
 def drop_given_name(sid):
     np, _, wp = _names_files()
     with held(np):
-        names, was = _jget(np) or {}, _jget(wp) or {}
+        names, was = _jsafe(np), _jsafe(wp)
+        if _unopened(np, wp):
+            return
         names.pop(sid, None)
         was.pop(sid, None)
-        _jput(np, names)
-        _jput(wp, was)
+        _jput(np, names, keep=True)
+        _jput(wp, was, keep=True)
 
 
 def rpc_rename(req, get_agents):
@@ -7815,7 +8250,7 @@ def _service_path(roster=None):
     pid = (roster if roster is not None else (_roster() or {})).get('supervisorPid')
     if isinstance(pid, int) and pid > 1:
         try:
-            out = subprocess.run(['ps', '-E', '-ww', '-o', 'command=', '-p', str(pid)], capture_output=True, text=True,
+            out = subprocess.run(['ps', '-E', '-ww', '-o', 'command=', '-p', str(pid)], capture_output=True, encoding='utf-8', errors='replace',
                                  timeout=5).stdout
             for tok in out.split():
                 if tok.startswith('PATH='):
@@ -7828,7 +8263,7 @@ def _service_path(roster=None):
 def _login_path(now):
     """PATH in the user's login shell (nvm, Homebrew, ~/.local/bin), cached a day."""
     p = paths()['state'] / 'login_path.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     if d.get('path') and now - (d.get('at') or 0) < 86400:
         return d['path']
     sh = os.environ.get('SHELL') or '/bin/zsh'
@@ -7884,7 +8319,7 @@ def _chrome_bg_issue(sessions):
 
 def setup_issues(sessions, now, force=False):
     p = paths()['state'] / 'setup.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     if not force and now - (d.get('at') or 0) < SETUP_EVERY and isinstance(d.get('issues'), list):
         cached = d['issues']
     else:
@@ -7959,7 +8394,7 @@ def claude_version(runner=None):
     except OSError:
         return None
     p = paths()['state'] / 'claude_version.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     if d.get('exe') == exe and d.get('mtime') == mt and d.get('version'):
         return d['version']
     try:
@@ -8052,8 +8487,8 @@ def mcp_server_info(name, conf, scope, plugin=None):
 def _plugin_mcps():
     """(plugin, name, conf) for every enabled plugin's MCP servers: its .mcp.json, or mcpServers in its plugin.json."""
     cd = claude_dir()
-    inst = _jget(cd / 'plugins' / 'installed_plugins.json') or {}
-    enabled = (_jget(cd / 'settings.json') or {}).get('enabledPlugins')
+    inst = _jdict(cd / 'plugins' / 'installed_plugins.json')
+    enabled = _jdict(cd / 'settings.json').get('enabledPlugins')
     plugins = inst.get('plugins') if isinstance(inst.get('plugins'), dict) else {}
     out = []
     for pid, recs in plugins.items():
@@ -8064,9 +8499,9 @@ def _plugin_mcps():
             if not isinstance(ip, str):
                 continue
             base = Path(ip)
-            servers = (_jget(base / '.mcp.json') or {}).get('mcpServers')
+            servers = _jdict(base / '.mcp.json').get('mcpServers')
             if not isinstance(servers, dict):
-                pj = _jget(base / '.claude-plugin' / 'plugin.json') or _jget(base / 'plugin.json') or {}
+                pj = _jget(base / '.claude-plugin' / 'plugin.json') or _jdict(base / 'plugin.json')
                 servers = pj.get('mcpServers') if isinstance(pj.get('mcpServers'), dict) else {}
             for n, c in servers.items():
                 out.append((pid.split('@')[0], n, c))
@@ -8078,7 +8513,7 @@ def _mcp_raw():
     """(name, conf, scope, plugin, folder) for every MCP server configured here, values and all. Never leaves the
     machine as is: mcp_servers redacts it, and a library import keeps only what mcp_bundle allows."""
     out, root = [], machine_root()
-    cj = _jget(claude_json_path()) or {}
+    cj = _jdict(claude_json_path())
     for n, c in (cj.get('mcpServers') or {}).items() if isinstance(cj.get('mcpServers'), dict) else ():
         out.append((n, c, 'user', None, None))
     projects = cj.get('projects') if isinstance(cj.get('projects'), dict) else {}
@@ -8094,7 +8529,7 @@ def _mcp_raw():
         rel = _rel(root, path) or ''
         for n, c in servers.items():
             out.append((n, c, 'local', None, rel))
-    for n, c in ((_jget(root / '.mcp.json') or {}).get('mcpServers') or {}).items():
+    for n, c in (_jdict(root / '.mcp.json').get('mcpServers') or {}).items():
         out.append((n, c, 'project', None, ''))
     try:
         for plugin, n, c in _plugin_mcps():
@@ -8218,7 +8653,7 @@ def _ram():
             page = int(_ver(vm, r'page size of (\d+)') or 4096)
             pages = sum(int(_ver(vm, rf'Pages {k}:\s+(\d+)') or 0) for k in ('free', 'inactive', 'speculative', 'purgeable'))
             return round(total), (round(min(total, pages * page / 2 ** 30), 1) if vm else None)
-        info = {l.split(':')[0]: int(l.split()[1]) for l in Path('/proc/meminfo').read_text().splitlines() if l.split()[1:2] and l.split()[1].isdigit()}
+        info = {l.split(':')[0]: int(l.split()[1]) for l in Path('/proc/meminfo').read_text(encoding='utf-8').splitlines() if l.split()[1:2] and l.split()[1].isdigit()}
         return round(info['MemTotal'] / 2 ** 20), round(info.get('MemAvailable', 0) / 2 ** 20, 1) or None
     except (OSError, ValueError, AttributeError, KeyError):
         return None, None
@@ -8232,7 +8667,7 @@ def _cpu():
                 return ' '.join(str(winreg.QueryValueEx(k, 'ProcessorNameString')[0]).split())
         if sys.platform == 'darwin':
             return ' '.join(_out(['/usr/sbin/sysctl', '-n', 'machdep.cpu.brand_string']).split()) or None
-        for line in Path('/proc/cpuinfo').read_text().splitlines():
+        for line in Path('/proc/cpuinfo').read_text(encoding='utf-8').splitlines():
             if line.startswith('model name'):
                 return ' '.join(line.split(':', 1)[1].split())
     except (OSError, ValueError, ImportError):
@@ -8369,7 +8804,7 @@ def _java():
         if not home or not Path(home).is_dir():  # Android Studio brings its own
             home = '/Applications/Android Studio.app/Contents/jbr/Contents/Home'
         try:
-            return _ver(Path(home, 'release').read_text(), r'JAVA_VERSION="(\d+)')
+            return _ver(Path(home, 'release').read_text(encoding='utf-8'), r'JAVA_VERSION="(\d+)')
         except OSError:
             return None
     pf = os.environ.get('ProgramFiles', r'C:\Program Files')
@@ -8377,7 +8812,7 @@ def _java():
         if not jh:
             continue
         try:
-            return _ver(Path(jh, 'release').read_text(), r'JAVA_VERSION="(\d+)')
+            return _ver(Path(jh, 'release').read_text(encoding='utf-8'), r'JAVA_VERSION="(\d+)')
         except OSError:
             pass
     return _ver(_out(['java', '-version']), r'version "(?:1\.)?(\d+)')
@@ -8503,7 +8938,7 @@ def live_caps(caps, root=None):
 
 def machine_caps(now, force=False):
     p = paths()['state'] / 'caps.json'
-    d = _jget(p) or {}
+    d = _jdict(p)
     # A copy from an older helper lacks what this one measures: measure again rather than wait out CAPS_TTL.
     if not force and isinstance(d.get('caps'), dict) and 'computer_use' in d['caps'] and 0 <= now - (d.get('at') or 0) < CAPS_TTL:
         return dict(live_caps(d['caps']), measured=d['at'])
@@ -8641,7 +9076,7 @@ def seen_put(claude_pid, sid, tp, now):
     if not (claude_pid and isinstance(sid, str) and SID_RE.fullmatch(sid)):
         return
     f = paths()['state'] / 'seen' / f'{claude_pid}.json'
-    cur = _jget(f) or {}
+    cur = _jdict(f)
     if cur.get('sid') == sid and now - (cur.get('ts') or 0) < 600:
         return
     f.parent.mkdir(parents=True, exist_ok=True)
@@ -8672,7 +9107,7 @@ def hub(method, path, body=None, timeout=20, servers=None):
             data = json.dumps(body).encode() if body is not None else None
             req = urllib.request.Request(base + path, data=data, method=method,
                                          headers={'Content-Type': 'application/json', 'X-Switchboard': '1'})
-            with urllib.request.urlopen(req, timeout=timeout) as r:
+            with _urlopen(req, timeout=timeout) as r:
                 return json.loads(r.read().decode('utf-8'))
         except urllib.error.HTTPError as e:
             try:
@@ -9310,7 +9745,7 @@ def pack_folder(path, tool=None, description=None):
         plugin = _jget(pj)
         if not isinstance(plugin, dict):
             raise ValueError(".claude-plugin/plugin.json isn't valid JSON.")
-        sbj = _jget(p / '.claude-plugin' / 'switchboard.json') or {}
+        sbj = _jdict(p / '.claude-plugin' / 'switchboard.json')
         sbj = sbj if isinstance(sbj, dict) else {}
         tool = tool or (plugin.get('name') if valid_tool(plugin.get('name')) else tool_slug(p.name))
         desc = description or sbj.get('description') or plugin.get('description') or ''
@@ -9497,13 +9932,21 @@ def library_chunk(req):
 
 
 def lib_index():
-    d = _jget(lib_root() / 'index.json')
-    return d if isinstance(d, dict) and isinstance(d.get('tools'), dict) else {'tools': {}}
+    p, ok = lib_root() / 'index.json', lambda d: isinstance(d.get('tools'), dict)
+    d = _jgood(p, ok)
+    if d is None and p.exists():
+        # Damaged: read as "no tools", the next install wrote an index of one and every other tool's folder was
+        # forgotten. Its last good copy is used, and the damaged file kept (_jsafe).
+        with held(p):
+            d = _jsafe(p, ok)
+    elif d is not None:
+        _UNOPENED.discard(str(p))  # it opens again: what is made from this read may be saved
+    return d if d and ok(d) else {'tools': {}}
 
 
 def _lib_save(idx):
     lib_root().mkdir(parents=True, exist_ok=True)
-    _jput(lib_root() / 'index.json', idx)
+    _jput(lib_root() / 'index.json', idx, keep=True)
 
 
 def tool_dir(tool, idx=None):
@@ -9643,8 +10086,8 @@ def _tool_local_meta(tool):
     d = tool_dir(tool)
     if d is None:
         return {'when': '', 'kinds': []}
-    pj = _jget(d / '.claude-plugin' / 'plugin.json') or {}
-    sj = _jget(d / '.claude-plugin' / 'switchboard.json') or {}
+    pj = _jdict(d / '.claude-plugin' / 'plugin.json')
+    sj = _jdict(d / '.claude-plugin' / 'switchboard.json')
     kinds = (['skill'] if any((d / 'skills').glob('*/SKILL.md')) else []) + (['mcp'] if (d / '.mcp.json').is_file() else [])
     desc = (sj.get('description') if isinstance(sj, dict) else None) or (pj.get('description') if isinstance(pj, dict) else None)
     return {'when': str(desc or ''), 'kinds': kinds}
@@ -9858,7 +10301,7 @@ def tool_declares(tool, folder=None):
     if d is None:
         return []
     try:
-        return [s['name'] for s in check_secrets((_jget(d / '.claude-plugin' / 'switchboard.json') or {}).get('secrets'))]
+        return [s['name'] for s in check_secrets(_jdict(d / '.claude-plugin' / 'switchboard.json').get('secrets'))]
     except (ValueError, AttributeError):
         return []
 
@@ -9956,8 +10399,10 @@ class FileSecrets:
         return d if isinstance(d, dict) else {}
 
     def _save(self, d):
+        if _unopened(self.path):  # _jsafe gave {} for a file that would not open: the other secrets are still in it
+            raise OSError('The secrets file could not be opened, so nothing was changed. Try again.')
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self.path.with_name(f'.secrets.{os.getpid()}.tmp')
+        tmp = self.path.with_name(f'.secrets.{os.getpid()}.{threading.get_ident()}.tmp')  # two threads never share one
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, 'w') as f:
             json.dump(d, f)
@@ -9965,6 +10410,9 @@ class FileSecrets:
         if not IS_WIN:
             os.chmod(tmp, 0o600)
         os.replace(tmp, self.path)
+        # The copy _jsafe goes back to is of what was just written (same mode), never of the file before: a secret
+        # that was removed or replaced must not stay on disk in it.
+        _jkeep(self.path, copy=True)
 
     def get(self, tool, name):
         v = self._all().get(key_account(tool, name))
@@ -9974,16 +10422,20 @@ class FileSecrets:
         return self.get(tool, name) is not None
 
     def set(self, tool, name, value):
-        d = self._all()
-        d[key_account(tool, name)] = check_secret_value(value)
-        self._save(d)
+        value = check_secret_value(value)
+        self.path.parent.mkdir(parents=True, exist_ok=True)  # the claim file lives there too
+        with held(self.path):  # read, change and save as one step; a damaged file goes back to its copy, not to {}
+            d = _jsafe(self.path)
+            d[key_account(tool, name)] = value
+            self._save(d)
 
     def rm(self, tool, name):
-        d = self._all()
-        gone = d.pop(key_account(tool, name), None) is not None
-        if gone:
-            self._save(d)
-        return gone
+        with held(self.path):
+            d = _jsafe(self.path)
+            gone = d.pop(key_account(tool, name), None) is not None
+            if gone or _unopened(self.path):  # not "there was none" for a file that would not open
+                self._save(d)
+            return gone
 
 
 class LinuxSecrets(FileSecrets):
@@ -10317,14 +10769,14 @@ def _setup_have(cdir):
     """Which of the three are in place now, written the way Switchboard writes them."""
     sp, ex, cm = cdir / 'settings.json', cdir / 'agents' / 'Explore.md', cdir / 'CLAUDE.md'
     try:
-        d = json.loads(sp.read_text()) if sp.exists() else {}
+        d = json.loads(sp.read_text(encoding='utf-8')) if sp.exists() else {}
     except ValueError:
         d = {}
     env = d.get('env') if isinstance(d, dict) else None
     env = env if isinstance(env, dict) else {}  # a settings file of some other shape has no entry of Switchboard's
-    text = cm.read_text() if cm.exists() else ''
+    text = _text_get(cm) if cm.exists() else ''
     return {'setup_compact_window': env.get(COMPACT_KEY) == COMPACT_WINDOW,
-            'setup_explore_agent': ex.exists() and ex.read_text() == EXPLORE_MD,
+            'setup_explore_agent': ex.exists() and _text_get(ex) == EXPLORE_MD,
             'setup_subagent_rule': _strip_rule(text) != text}
 
 
@@ -10350,7 +10802,7 @@ def compact_state(cdir=None):
     cdir = Path(cdir) if cdir else claude_dir()
     sp = cdir / 'settings.json'
     try:
-        s = json.loads(sp.read_text()) if sp.exists() else {}
+        s = json.loads(sp.read_text(encoding='utf-8')) if sp.exists() else {}
     except (OSError, ValueError):
         return None  # a settings file that cannot be read: nothing is claimed about it
     s = s if isinstance(s, dict) else {}
@@ -10369,6 +10821,22 @@ def _setup_owned(cdir):
     if isinstance(d, dict) and isinstance(d.get('added'), dict):
         return {k: d['added'].get(k) is True for k in SETUP_ITEMS}
     return _setup_have(cdir)
+
+
+def _text_get(p):
+    """A text file the user also edits (CLAUDE.md, Explore.md). Always read as UTF-8: with none given, Python takes
+    the computer's own encoding (cp1252 on Windows, ASCII under LANG=C), and a UTF-8 CLAUDE.md then failed to read
+    after settings.json had already been changed. Bytes that are not UTF-8 are carried through and written back
+    as they were (surrogateescape). Line ends read as \n, as read_text gives them."""
+    return Path(p).read_bytes().decode('utf-8', 'surrogateescape').replace('\r\n', '\n').replace('\r', '\n')
+
+
+def _text_put(p, text):
+    """Write it back with this system's line ends, as write_text did, but never half-written: a temp file forced to
+    disk, then renamed over the real file (the one a link points at, so a linked CLAUDE.md stays a link). The file
+    keeps the permissions it had."""
+    _write_then_replace(Path(os.path.realpath(p)), text.replace('\n', os.linesep).encode('utf-8', 'surrogateescape'),
+                        same_mode=True)
 
 
 def _strip_rule(text):
@@ -10429,11 +10897,11 @@ def apply_setup(cdir, opts, dry_run=False, compact=None):
         _backup(sp)
         cfg_write(sp, s)
 
-    mine = ex.exists() and ex.read_text() == EXPLORE_MD
+    mine = ex.exists() and _text_get(ex) == EXPLORE_MD
     if want('setup_explore_agent') and not ex.exists():
         if not dry_run:
             ex.parent.mkdir(parents=True, exist_ok=True)
-            ex.write_text(EXPLORE_MD)
+            _text_put(ex, EXPLORE_MD)
         owned['setup_explore_agent'], done['setup_explore_agent'] = True, 'added'
     elif want('setup_explore_agent'):  # an Explore.md the user wrote is never replaced
         owned['setup_explore_agent'] = owned['setup_explore_agent'] and mine
@@ -10444,13 +10912,13 @@ def apply_setup(cdir, opts, dry_run=False, compact=None):
             done['setup_explore_agent'] = 'removed'
         owned['setup_explore_agent'] = False
 
-    text = cm.read_text() if cm.exists() else ''
+    text = _text_get(cm) if cm.exists() else ''
     present = _strip_rule(text) != text
     if want('setup_subagent_rule') and '- Subagent models:' not in text:  # a rule the user wrote wins
         if not dry_run:
             _backup(cm)
-            cm.write_text((text.rstrip('\n') + '\n\n' if text.strip() else '') +
-                          f'{CLAUDE_MD_OPEN}\n{CLAUDE_MD_RULE}\n{CLAUDE_MD_CLOSE}\n')
+            _text_put(cm, (text.rstrip('\n') + '\n\n' if text.strip() else '') +
+                      f'{CLAUDE_MD_OPEN}\n{CLAUDE_MD_RULE}\n{CLAUDE_MD_CLOSE}\n')
         owned['setup_subagent_rule'], done['setup_subagent_rule'] = True, 'added'
     elif want('setup_subagent_rule'):
         owned['setup_subagent_rule'] = owned['setup_subagent_rule'] and present
@@ -10458,7 +10926,7 @@ def apply_setup(cdir, opts, dry_run=False, compact=None):
         if owned['setup_subagent_rule'] and present:
             if not dry_run:
                 _backup(cm)
-                cm.write_text(_strip_rule(text))
+                _text_put(cm, _strip_rule(text))
             done['setup_subagent_rule'] = 'removed'
         owned['setup_subagent_rule'] = False
 
@@ -10492,7 +10960,7 @@ def install(dry_run=False, home=None):
         _jput(sbdir / 'setup.json', {'added': {k: False for k in SETUP_ITEMS}})
     prev = sbdir / 'statusline.prev.json'
     if 'statusLine' in cur and 'sb.py' not in cur['statusLine'].get('command', '') and not prev.exists():
-        prev.write_text(json.dumps(cur['statusLine']))
+        prev.write_text(json.dumps(cur['statusLine']), encoding='utf-8')
     _backup(sp)
     cfg_write(sp, new)
     install_launcher(home, sb_path)
@@ -10533,7 +11001,7 @@ def uninstall(home=None):
         s['env'].pop(COMPACT_KEY)
     prev = cdir / 'switchboard' / 'statusline.prev.json'
     if prev.exists():
-        s['statusLine'] = json.loads(prev.read_text())
+        s['statusLine'] = json.loads(prev.read_text(encoding='utf-8'))
     elif 'sb.py' in (s.get('statusLine') or {}).get('command', ''):
         s.pop('statusLine')
     for ev in list(s.get('hooks', {})):
@@ -10542,11 +11010,11 @@ def uninstall(home=None):
             del s['hooks'][ev]
     cfg_write(sp, s)
     ex = cdir / 'agents' / 'Explore.md'  # only what Switchboard added; anything the user wrote stays
-    if owned['setup_explore_agent'] and ex.exists() and ex.read_text() == EXPLORE_MD:
+    if owned['setup_explore_agent'] and ex.exists() and _text_get(ex) == EXPLORE_MD:
         ex.unlink()
     cm = cdir / 'CLAUDE.md'
     if owned['setup_subagent_rule'] and cm.exists():
-        cm.write_text(_strip_rule(cm.read_text()))
+        _text_put(cm, _strip_rule(_text_get(cm)))
     try:
         (cdir / 'switchboard' / 'setup.json').unlink()
     except OSError:

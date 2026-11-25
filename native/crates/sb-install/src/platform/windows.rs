@@ -50,6 +50,8 @@ pub struct Places {
     pub run_key: String,
     /// Where Windows looks up the name the app's notifications show (GPUI writes it the first time).
     pub aumid_key: String,
+    /// Where `switchboard-node install` puts the node: %LOCALAPPDATA%\Switchboard\switchboard-node.exe.
+    pub node: PathBuf,
     /// Running against a test sandbox.
     pub test: bool,
 }
@@ -80,6 +82,7 @@ impl Places {
             settings,
             cache,
             logs: local.join(NAME).join("logs"),
+            node: local.join("Switchboard").join("switchboard-node.exe"),
             uninstall_key: format!(r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{DESKTOP_ID}"),
             run_key: r"Software\Microsoft\Windows\CurrentVersion\Run".into(),
             aumid_key: format!(r"Software\Classes\AppUserModelId\{DESKTOP_ID}"),
@@ -105,6 +108,7 @@ impl Places {
             settings: root.join("Roaming").join(NAME),
             cache: root.join("Local").join(NAME).join("cache"),
             logs: root.join("Local").join(NAME).join("logs"),
+            node: root.join("Local").join("Switchboard").join("switchboard-node.exe"),
             uninstall_key: format!(r"{reg}\Uninstall\{DESKTOP_ID}"),
             run_key: format!(r"{reg}\Run"),
             aumid_key: format!(r"{reg}\AppUserModelId\{DESKTOP_ID}"),
@@ -514,6 +518,7 @@ mod real {
                 entries,
                 caches: std::iter::once(p.cache.clone()).chain(super::super::app_log_files(&p.logs)).collect(),
                 data: vec![p.settings.clone()],
+                node: Some(p.node.clone()),
                 ..Default::default()
             }
         }

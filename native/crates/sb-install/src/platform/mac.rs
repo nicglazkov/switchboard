@@ -184,6 +184,7 @@ impl Platform for Mac {
             in_dock: in_dock(app),
             caches,
             data,
+            node: Some(super::node_program()),
             ..Default::default()
         }
     }

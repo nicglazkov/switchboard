@@ -137,8 +137,9 @@ fn new_code() -> String {
 
 impl Nodes {
     /// The paired list from `path`. A file that does not parse is moved aside (nodes.json.bad) so it is never
-    /// overwritten, and the hub starts with no nodes. A file that is there but cannot be read (a disk or
-    /// permission error) is left alone and read again before anything is written.
+    /// overwritten, and the hub starts with the last good copy (nodes.json.bak), or with no nodes when there is
+    /// none. A file that is there but cannot be read (a disk or permission error) is left alone and read again
+    /// before anything is written.
     pub fn load(path: &Path) -> Nodes {
         let (list, unread) = match read(path) {
             Ok(list) => (list, None),
@@ -313,34 +314,91 @@ impl Nodes {
             return Ok(false);
         }
         let next: Vec<Node> = list.iter().filter(|n| n.name != name).cloned().collect();
+        // (gone from the copy too: `save` keeps nothing there that is not in the list it saves)
         save(&self.path, &next)?;
         *list = next;
         Ok(true)
     }
 }
 
-/// The nodes in the file at `path`: none when there is no file. A file that does not parse is moved aside
-/// (nodes.json.bad) and counts as none. Err only when the file is there and reading it failed.
+/// The copy of the list as it was before the last change (nodes.json.bak).
+fn bak_path(path: &Path) -> PathBuf {
+    path.with_extension("json.bak")
+}
+
+fn parse(bytes: &[u8]) -> Result<Vec<Node>, serde_json::Error> {
+    let f = serde_json::from_slice::<NodeFile>(bytes)?;
+    Ok(f.nodes.into_iter().filter(|n| crate::ticket::valid_machine(&n.name)).collect())
+}
+
+/// The nodes in the file at `path`: none when there is no file. A file that does not parse (cut short by a power
+/// loss or a full disk) is moved aside (nodes.json.bad), and the last good copy (nodes.json.bak) is put back in
+/// its place and used; with no good copy either it counts as none. Err only when the file is there and reading it
+/// failed.
 fn read(path: &Path) -> Result<Vec<Node>, String> {
     let text = match std::fs::read(path) {
         Ok(t) => t,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
         Err(e) => return Err(e.to_string()),
     };
-    match serde_json::from_slice::<NodeFile>(&text) {
-        Ok(f) => Ok(f.nodes.into_iter().filter(|n| crate::ticket::valid_machine(&n.name)).collect()),
-        Err(e) => {
-            crate::server::log(format!("{}: {e}; moved to .bad, starting with no linked machines", path.display()));
-            let _ = std::fs::rename(path, path.with_extension("json.bad"));
+    let e = match parse(&text) {
+        Ok(list) => return Ok(list),
+        Err(e) => e,
+    };
+    let _ = std::fs::rename(path, path.with_extension("json.bad"));
+    let bak = bak_path(path);
+    match std::fs::read(&bak).map_err(|e| e.to_string()).and_then(|b| parse(&b).map_err(|e| e.to_string())) {
+        Ok(list) => {
+            crate::server::log(format!(
+                "{}: {e}; moved to .bad, using the last good copy ({}, {} linked machines). A machine paired or \
+                 removed since that copy has to be done again.",
+                path.display(),
+                bak.display(),
+                list.len()
+            ));
+            if let Err(e) = write_private(path, &list) {
+                crate::server::log(format!("{}: could not put the last good copy back ({e})", path.display()));
+            }
+            Ok(list)
+        }
+        Err(why) => {
+            crate::server::log(format!(
+                "{}: {e}; moved to .bad, and there is no good copy to fall back on ({}: {why}): starting with no \
+                 linked machines",
+                path.display(),
+                bak.display()
+            ));
             Ok(vec![])
         }
     }
 }
 
+/// Saves the list in place of the file at `path`, whole or not at all, and keeps the file as it was before as
+/// nodes.json.bak, so a list that is later cut short still has a good copy one change behind it.
+///
+/// The copy never holds a name and token that the list being saved does not: a machine that was removed, or
+/// paired again (which gives it a new token), is taken out of the copy in the same save. Falling back to the copy
+/// can then lose a machine, which has to pair again, but can never bring back a token that was taken away.
 fn save(path: &Path, nodes: &[Node]) -> std::io::Result<()> {
-    let dir = path.parent().unwrap_or(Path::new("."));
+    let bak = bak_path(path);
+    let read = |p: &Path| std::fs::read(p).ok().and_then(|b| parse(&b).ok());
+    // The file as it is when it reads (a broken one must never take the place of the good copy); when it does
+    // not, the copy there already is, which still has to lose what this save takes away.
+    if let Some(old) = read(path).or_else(|| read(&bak)) {
+        let still = |o: &Node| nodes.iter().any(|n| n.name == o.name && same(&n.token, &o.token));
+        let copy: Vec<Node> = old.into_iter().filter(still).collect();
+        write_private(&bak, &copy)?;
+    }
+    write_private(path, nodes)
+}
+
+/// Writes a list to `to` (mode 600) through a temporary file next to it: written, flushed to the disk, then
+/// renamed over `to`, and the folder flushed so the rename itself survives a power cut.
+fn write_private(to: &Path, nodes: &[Node]) -> std::io::Result<()> {
+    let dir = to.parent().unwrap_or(Path::new("."));
     std::fs::create_dir_all(dir)?;
-    let tmp = dir.join(format!(".nodes.json.{}.tmp", std::process::id()));
+    let name = to.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let tmp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
     let text = serde_json::to_string_pretty(&NodeFile { nodes: nodes.to_vec() }).map_err(std::io::Error::other)?;
     {
         use std::io::Write;
@@ -355,7 +413,15 @@ fn save(path: &Path, nodes: &[Node]) -> std::io::Result<()> {
         f.write_all(text.as_bytes())?;
         f.sync_all()?;
     }
-    std::fs::rename(&tmp, path)
+    if let Err(e) = std::fs::rename(&tmp, to) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
+    #[cfg(unix)]
+    if let Ok(d) = std::fs::File::open(dir) {
+        let _ = d.sync_all();
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -513,5 +579,92 @@ mod tests {
         assert!(n.list().is_empty());
         assert!(p.with_extension("json.bad").exists());
         let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn a_machine_paired_again_does_not_get_its_old_token_back_from_the_copy() {
+        let p = tmp("repair");
+        let n = Nodes::load(&p);
+        let (code, _) = n.mint(1);
+        let (_, old) = n.pair(&code, "lab", "Lab", "linux", None, 1).unwrap();
+        let (code, _) = n.mint(2);
+        let (_, desk) = n.pair(&code, "desk", "Desk", "mac", None, 2).unwrap();
+        // lab is paired again (its token was lost, or leaked): the old token must be dead everywhere
+        let (code, _) = n.mint(3);
+        let (_, new) = n.pair(&code, "lab", "Lab", "linux", None, 3).unwrap();
+        assert_eq!(n.find(&old), None);
+        let copy = std::fs::read_to_string(bak_path(&p)).unwrap();
+        assert!(!copy.contains(&hash(&old)), "the copy still holds the old token");
+        assert!(copy.contains(&hash(&desk)), "what did not change is still in the copy");
+        // the list is cut short: the hub falls back to the copy, and the old token still opens nothing
+        std::fs::write(&p, "{\"nodes\": [").unwrap();
+        let n = Nodes::load(&p);
+        assert_eq!(n.find(&old), None, "a token that was replaced came back");
+        assert_eq!(n.find(&desk).map(|x| x.name), Some("desk".into()));
+        assert_eq!(n.find(&new), None, "paired after the copy: it pairs again, as the log says");
+        let _ = std::fs::remove_dir_all(p.parent().unwrap());
+    }
+
+    #[test]
+    fn a_file_cut_short_falls_back_to_the_last_good_copy() {
+        let p = tmp("cut");
+        let n = Nodes::load(&p);
+        let (code, _) = n.mint(1);
+        let (_, lab) = n.pair(&code, "lab", "Lab", "linux", None, 1).unwrap();
+        assert!(!bak_path(&p).exists(), "nothing came before the first save");
+        let (code, _) = n.mint(2);
+        let (_, desk) = n.pair(&code, "desk", "Desk", "mac", None, 2).unwrap();
+        // the copy is the list one change back, and as private as the list
+        let names = |path: &Path| -> Vec<String> {
+            parse(&std::fs::read(path).unwrap()).unwrap().into_iter().map(|x| x.name).collect()
+        };
+        assert_eq!(names(&bak_path(&p)), ["lab"]);
+        assert_eq!(names(&p), ["lab", "desk"]);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(bak_path(&p)).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        let dir = p.parent().unwrap();
+        let left: Vec<String> =
+            std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(left.iter().all(|f| !f.ends_with(".tmp")), "{left:?}");
+
+        // a power cut leaves half a file: the hub starts with the copy, not with no machines at all
+        let whole = std::fs::read(&p).unwrap();
+        std::fs::write(&p, &whole[..whole.len() / 2]).unwrap();
+        let n = Nodes::load(&p);
+        assert_eq!(n.find(&lab).map(|x| x.name), Some("lab".into()), "the machines in the copy still link");
+        assert_eq!(n.find(&desk), None, "the one paired after the copy has to pair again");
+        assert_eq!(std::fs::read(p.with_extension("json.bad")).unwrap(), &whole[..whole.len() / 2]);
+        assert_eq!(names(&p), ["lab"], "the copy is back in place, so the next start reads it");
+        assert_eq!(Nodes::load(&p).list().len(), 1);
+
+        // a machine that was removed is not in the copy either: a later fall back cannot link it again
+        let (code, _) = n.mint(3);
+        let (_, nas) = n.pair(&code, "nas", "NAS", "linux", None, 3).unwrap();
+        assert!(n.remove("nas").unwrap());
+        assert_eq!(names(&bak_path(&p)), ["lab"]);
+        std::fs::write(&p, "").unwrap();
+        assert_eq!(Nodes::load(&p).find(&nas), None);
+
+        // a broken file never takes the place of the good copy
+        let kept = parse(&std::fs::read(bak_path(&p)).unwrap()).unwrap();
+        std::fs::write(&p, "{nope").unwrap();
+        assert!(save(&p, &kept).is_ok());
+        assert_eq!(names(&bak_path(&p)), ["lab"]);
+        // ... and even then the copy loses what the save takes away
+        std::fs::write(&p, "{nope").unwrap();
+        assert!(save(&p, &[]).is_ok());
+        assert!(names(&bak_path(&p)).is_empty());
+        save(&p, &kept).unwrap();
+        save(&p, &kept).unwrap();
+        assert_eq!(names(&bak_path(&p)), ["lab"]);
+
+        // both broken: no machines, as before
+        std::fs::write(&p, "{nope").unwrap();
+        std::fs::write(bak_path(&p), "").unwrap();
+        assert!(Nodes::load(&p).list().is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

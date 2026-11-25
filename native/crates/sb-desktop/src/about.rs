@@ -19,6 +19,25 @@ use crate::ui;
 /// What each version changed, newest first. Add an entry with every version bump.
 pub const RELEASES: &[(&str, &[&str])] = &[
     (
+        "0.8.23",
+        &[
+            "Only your own networks: the server now looks at the address each request really comes from, and answers only this computer, home and office networks, link-local addresses and Tailscale. A request from anywhere else is refused, whatever name it asks for. Nothing changes on a home network or Tailscale. To let another network in, add it to \"peers\" in server.json.",
+            "Damaged files: a settings or state file that cannot be read after a power cut or a full disk is no longer taken for an empty one and written over. The server keeps a copy of each file from before its last change and goes back to it, and keeps the damaged file beside it. With no copy to go back to it picks the careful answer, not the open one: a lost settings file no longer turns the opt-in settings on, a lost computer list no longer gives every computer its whole home folder, a lost server.json answers this computer only, and chats do not stop by themselves while the list of kept chats or open tabs is lost. A terminal key that was cut short is replaced instead of failing every terminal.",
+            "Damaged files on each computer: the names you gave chats, the list of installed tools, and the secrets file on a Linux computer without a keychain are kept the same way. A damaged one goes back to its last good copy instead of being written over with the one entry that changed. A state file that holds the wrong kind of thing no longer breaks the list of chats.",
+            "Budget: two devices changing the budget at the same moment both keep their change, and lifting the hard limit while it is being checked is not lost.",
+            "A request that got lost: a chat you started, resumed or moved always gets an answer. If the helper stopped right after taking the request, or could not read it, you are told to try again at once instead of waiting for the timeout.",
+            "Behind a proxy: the server's calls to its own hub and each computer's calls to your server no longer go through http_proxy, which made linked computers look offline.",
+            "Accents and other alphabets: text files are always read as UTF-8, so a CLAUDE.md with accents on Windows no longer stops the setup changes halfway, and a chat title with an accent no longer fails its computer. CLAUDE.md is never left half-written.",
+            "Server update: a server that cannot read its own version no longer takes whatever version it is sent. Run the install line again to fix it.",
+            "Less work when idle: Refresh from several devices at once shares one round of asking the computers, and the server no longer rewrites a file to disk every 20 seconds.",
+            "Honest costs: what Resume and Start fresh are said to cost now matches a month of real use (178 fresh starts). Start fresh was shown about 3.5 times too cheap, because a new chat was counted as only its summary; it holds about 58k tokens of its own before that. A cold Resume was shown 16% too high. Chats under 80k (it was 60k) are now called small, since that is where Start fresh starts to pay.",
+            "Pasted text: text you paste into a message now reaches the summary, and a pasted message to a cold big chat is held like a typed one. Both used to be dropped as if Claude Code had written them.",
+            "Scheduled prompts are not held: a prompt fired by a schedule or a loop goes through to a cold chat instead of waiting on a hold nobody is there to answer. A message you type is still held.",
+            "Shorter handoffs: summaries are asked to stay under 1,000 words, and a long one loads without its least needed sections instead of making the new chat read a file first. Your standing instructions are never cut.",
+            "What a summary costs: each summary's own usage is now recorded and counted against what Start fresh saved, and each computer keeps a short log of fresh starts, holds and stops (sizes and times, never chat text).",
+        ],
+    ),
+    (
         "0.8.22",
         &[
             "Several chats at once: Start fresh, Resume or Compact on several chats in a row no longer queues them behind each other. A computer used to write one summary at a time, about 45 seconds each, so the sixth chat waited five minutes and a plain new chat waited behind all of them. Summaries are now written three at a time, a new chat or a resume starts right away, and a large batch is no longer dropped for waiting too long.",

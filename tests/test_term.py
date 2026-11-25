@@ -156,9 +156,9 @@ class TicketTest(unittest.TestCase):
         self.assertEqual(stat.S_IMODE(os.stat(p).st_mode), 0o600)
         self.assertEqual(stat.S_IMODE(os.stat(p.parent).st_mode), 0o700)
         self.assertEqual([x.name for x in p.parent.iterdir()], ['term.key'])  # no temp file left behind
-        p.write_bytes(b'short')
-        with self.assertRaises(OSError):
-            term.load_or_create_key(p)
+        p.write_bytes(b'short')  # a key cut short is put aside and a new one made (tests/test_safe_stores.py)
+        b = term.load_or_create_key(p)
+        self.assertEqual((len(b), b != a, p.read_bytes()), (32, True, b))
 
     def test_same_vector_as_the_hub(self):
         """native/crates/sb-hub/src/ticket.rs checks this exact ticket."""

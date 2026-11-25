@@ -85,14 +85,25 @@ impl Hub {
         v
     }
 
-    fn admit(self: &Arc<Self>, c: &Claims) -> Option<Slot> {
+    /// A place for one more view of the chat in `c`, or what to tell the viewer when there is none.
+    fn admit(self: &Arc<Self>, c: &Claims) -> Result<Slot, String> {
         let mut open = self.open.lock().unwrap_or_else(|e| e.into_inner());
-        if open.len() >= self.cfg.max_terms {
-            return None;
+        if let Some(msg) = full(&open, c, self.cfg.max_terms, self.cfg.max_viewers) {
+            return Err(msg);
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         open.insert(id, OpenTerm { machine: c.m.clone(), bg: c.b.clone(), since: unix_now() });
-        Some(Slot { hub: self.clone(), id })
+        Ok(Slot { hub: self.clone(), id })
+    }
+
+    /// `admit`'s answer without taking the place: asked before the ticket is spent.
+    fn full(&self, c: &Claims) -> Option<String> {
+        let open = self.open.lock().unwrap_or_else(|e| e.into_inner());
+        full(&open, c, self.cfg.max_terms, self.cfg.max_viewers)
+    }
+
+    fn terminals(&self) -> usize {
+        terminals(&self.open.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
     fn origins(&self, file: &[String]) -> Vec<String> {
@@ -130,6 +141,25 @@ impl Hub {
     }
 }
 
+/// How many terminals `open` holds: one for each chat, however many devices are looking at it.
+fn terminals(open: &HashMap<u64, OpenTerm>) -> usize {
+    open.values().map(|t| (&t.machine, &t.bg)).collect::<std::collections::HashSet<_>>().len()
+}
+
+/// Why one more view of the chat in `c` cannot open, if it cannot. The terminal limit counts chats, not viewers: a
+/// second device looking at a chat that is already open takes no terminal, only one of the (many more) views.
+fn full(open: &HashMap<u64, OpenTerm>, c: &Claims, max_terms: usize, max_viewers: usize) -> Option<String> {
+    if open.len() >= max_viewers {
+        return Some(format!(
+            "{max_viewers} views of terminals are open over all your devices, the most at once. Close one, then \
+             try again."
+        ));
+    }
+    let shown = open.values().any(|t| t.machine == c.m && t.bg == c.b);
+    (!shown && terminals(open) >= max_terms)
+        .then(|| format!("{max_terms} terminals are open, the most at once. Close one, then try again."))
+}
+
 pub fn router(hub: Arc<Hub>) -> Router {
     Router::new()
         .route("/term", get(term))
@@ -165,9 +195,9 @@ fn internal_ok(h: &HeaderMap, method: &axum::http::Method) -> bool {
 }
 
 async fn healthz(State(hub): State<Arc<Hub>>) -> impl IntoResponse {
-    let open = hub.open.lock().map(|o| o.len()).unwrap_or(0);
+    let (open, viewers) = hub.open.lock().map(|o| (terminals(&o), o.len())).unwrap_or((0, 0));
     let body = json!({"ok": true, "service": "switchboard-hub", "version": env!("CARGO_PKG_VERSION"), "open": open, "max": hub.cfg.max_terms,
-                      "linked": hub.links.len()});
+                      "viewers": viewers, "max_viewers": hub.cfg.max_viewers, "linked": hub.links.len()});
     ([(header::CACHE_CONTROL, "no-store")], Json(body))
 }
 
@@ -267,13 +297,8 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         log(format!("term refused: origin {:?}", origin.unwrap_or_default()));
         return refuse(&mut ws, proto::CLOSE_ORIGIN, "This page is not allowed to open terminals.").await;
     }
-    if hub.open.lock().map(|o| o.len()).unwrap_or(0) >= hub.cfg.max_terms {
-        // full: say so before the ticket is spent, so a full hub never burns the client's one try (admit checks again)
-        let msg = format!("{} terminals are open, the most at once. Close one, then try again.", hub.cfg.max_terms);
-        return refuse(&mut ws, proto::CLOSE_LIMIT, &msg).await;
-    }
-    // Checked here, spent further down: a ticket works once, and a machine that is not linked this second (or a
-    // hub with no machine list yet) must not use that one time up.
+    // Checked here, spent further down: a ticket works once, and a full hub, a machine that is not linked this
+    // second or a hub with no machine list yet must not use that one time up.
     let claims = match ticket::verify(&hub.key, q.t.as_deref().unwrap_or(""), unix_now()) {
         Ok(c) => c,
         Err(e) => {
@@ -281,6 +306,10 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
             return refuse(&mut ws, proto::CLOSE_TICKET, e.message()).await;
         }
     };
+    if let Some(msg) = hub.full(&claims) {
+        // (which chat the ticket is for decides whether it needs a terminal of its own; admit checks again)
+        return refuse(&mut ws, proto::CLOSE_LIMIT, &msg).await;
+    }
     let paired = hub.nodes.get(&claims.m);
     let route = match (hub.links.get(&claims.m), &paired, &file) {
         (Some(link), _, _) => {
@@ -319,10 +348,12 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         log(format!("term refused: ticket {e:?}"));
         return refuse(&mut ws, proto::CLOSE_TICKET, e.message()).await;
     }
-    let Some(slot) = hub.admit(&claims) else {
-        log(format!("term refused: {} terminals open", hub.cfg.max_terms));
-        let msg = format!("{} terminals are open, the most at once. Close one, then try again.", hub.cfg.max_terms);
-        return refuse(&mut ws, proto::CLOSE_LIMIT, &msg).await;
+    let slot = match hub.admit(&claims) {
+        Ok(slot) => slot,
+        Err(msg) => {
+            log(format!("term refused: {} terminals open, {} views", hub.terminals(), hub.open_terms().len()));
+            return refuse(&mut ws, proto::CLOSE_LIMIT, &msg).await;
+        }
     };
     let (cols, rows) = size_from(&q);
     let hello =
@@ -375,7 +406,7 @@ async fn session(hub: Arc<Hub>, mut ws: WebSocket, origin: Option<String>, q: Te
         claims.b,
         shared.via,
         shared.viewers(),
-        hub.open_terms().len()
+        hub.terminals()
     ));
     let end = relay(&hub, &mut ws, &shared, seat).await;
     drop(slot); // and the reaper may stop the session again
@@ -629,4 +660,31 @@ async fn relay(hub: &Hub, ws: &mut WebSocket, shared: &Arc<Shared>, seat: Seat) 
 
 pub async fn serve(hub: Arc<Hub>, listener: tokio::net::TcpListener) -> std::io::Result<()> {
     axum::serve(listener, router(hub).into_make_service_with_connect_info::<SocketAddr>()).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_terminal_limit_counts_chats_and_the_viewer_limit_counts_views() {
+        let claims = |m: &str, b: &str| Claims { m: m.into(), b: b.into(), x: 0, n: String::new() };
+        let mut open = HashMap::new();
+        // two devices each showing the same two chats: four views, two terminals
+        for (id, m) in ["lab", "desk", "lab", "desk"].into_iter().enumerate() {
+            open.insert(id as u64, OpenTerm { machine: m.into(), bg: "c03ef0d9".into(), since: 0 });
+        }
+        assert_eq!((terminals(&open), open.len()), (2, 4));
+        // at the terminal limit a third device still opens the chats that are open, but no new one
+        assert_eq!(full(&open, &claims("lab", "c03ef0d9"), 2, 64), None);
+        let msg = full(&open, &claims("lab", "b52d78ef"), 2, 64).unwrap();
+        assert!(msg.starts_with("2 terminals are open"), "{msg}");
+        assert_eq!(full(&open, &claims("lab", "b52d78ef"), 3, 64), None);
+        // the same chat id on another machine is another terminal
+        assert!(full(&open, &claims("nas", "c03ef0d9"), 2, 64).is_some());
+        // the viewer limit stops even a chat that is open
+        let msg = full(&open, &claims("lab", "c03ef0d9"), 16, 4).unwrap();
+        assert!(msg.starts_with("4 views of terminals are open"), "{msg}");
+        assert_eq!(full(&open, &claims("lab", "c03ef0d9"), 16, 5), None);
+    }
 }

@@ -53,8 +53,8 @@ computer:
 
 ## No passwords, on purpose
 
-Switchboard has no passwords. Anyone who can reach its ports (8130 to 8132) can read your chats, type into their
-terminals and start new chats on your computers. It is meant for your own home network or your own
+Switchboard has no passwords. Anyone on your network who can reach its ports (8130 to 8132) can read your chats,
+type into their terminals and start new chats on your computers. It is meant for your own home network or your own
 [Tailscale](https://tailscale.com) network.
 
 !!! danger "Never forward ports 8130 to 8132 to the internet"
@@ -65,6 +65,12 @@ What it does protect:
 - **Linking a computer** takes a one-time code that works once and expires after 10 minutes.
 - **A computer added over ssh** gets a key that can only run the Switchboard helper: no shell and no port
   forwarding.
+- **The server answers only your own networks.** It looks at the address each request really comes from, and
+  answers only this computer, home and office networks (10.x, 172.16 to 172.31, 192.168.x), link-local addresses,
+  Tailscale (100.64.0.0/10) and their IPv6 kinds. Anything else gets "forbidden address", whatever it claims to be,
+  and the server's log says so at most once a minute. This covers the server's API on port 8130; ports 8131 and
+  8132 still rely on your network. To let another network in, see
+  [server.json](reference.md#serverjson).
 - **The server answers only to its own names.** It checks the `Host` of each request against the addresses it
   knows, so a web page you visit can't reach it by renaming itself (DNS rebinding).
 - **Updates are signed.** The app installs only builds signed with the release key, and checks each file's

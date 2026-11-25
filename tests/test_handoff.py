@@ -85,10 +85,106 @@ class SummaryModelTest(unittest.TestCase):
         tmp = tempfile.mkdtemp(); sb = fresh_sb(tmp)
         t = write_transcript(tmp, [user('2026-10-10T10:00:00Z', 'hi'), assistant('2026-10-10T10:00:05Z', 'ok')])
         seen = []
-        with mock.patch.object(sb, 'run_claude_opus', lambda text, prompt, cwd=None, model='opus': seen.append(model) or '## Goal\nx'):
+        with mock.patch.object(sb, 'run_claude_opus', lambda text, prompt, cwd=None, model='opus', meter=None: seen.append(model) or '## Goal\nx'):
             sb.generate_handoff(t, 'S1')
             sb.remember_identity({'summary_model': 'sonnet'})
             sb.generate_handoff(t, 'S1')
             sb.remember_identity({'summary_model': 'gpt'})  # anything else is ignored
             sb.generate_handoff(t, 'S1')
         self.assertEqual(seen, ['opus', 'sonnet', 'sonnet'])
+
+
+class InlineNoteTest(unittest.TestCase):
+    """Half of the real handoffs (96 of 190) were over what a hook may add to a chat, so the new chat was told to
+    Read the file first: a second call, about 30k more on the first turn. The summary is asked to be shorter, and a
+    note that is still too long gives up whole sections, never the user's instructions."""
+
+    PATH = '/tmp/sbhome/handoffs/S1.md'
+
+    def setUp(self):
+        self.sb = fresh_sb(tempfile.mkdtemp())
+
+    def note(self, each=1200, rules=20, verbatim=3, sections=None):
+        body = lambda name: f'## {name}\n' + (f'{name} detail. ' * (each // (len(name) + 9))).strip() + '\n'
+        names = sections or ['Goal', 'Standing instructions from the user', 'Decisions made', 'Current state',
+                             'Open threads and next steps', 'Gotchas', 'Key files and places']
+        parts = []
+        for n in names:
+            if n.startswith('Standing'):
+                parts.append(f'## {n}\n' + ''.join(f'- Standing rule {i}: never skip the tests.\n' for i in range(rules)))
+            elif n == 'Goal':
+                parts.append('## Goal\nShip the lights fix.\n')
+            else:
+                parts.append(body(n))
+        return (f'(Handoff file: {self.PATH})\n\n# Handoff: lights (2026-10-10 10:00)\n\n' + ''.join(parts) +
+                '\n\n## Your instructions, verbatim\n' + ''.join(f'- Verbatim rule {i}: always run the tests.\n' for i in range(verbatim)) +
+                '\n---\nFull transcript of the old session: `/tmp/t.jsonl`. Do not read it whole; grep it for specific details if this note is missing something.\n')
+
+    def test_the_summary_is_asked_to_fit(self):
+        p = self.sb.HANDOFF_PROMPT
+        self.assertNotIn('600-1500', p)
+        self.assertIn('never more than 1,000 words', p)
+        self.assertIn('Never shorten or drop a standing instruction to fit', p)
+        self.assertIn('never more than 1,000 words', self.sb.COMPACT_PROMPT)
+        # what is asked for fits beside the usual verbatim list, at the 6.5 characters a word real notes run to
+        self.assertLess(1000 * 6.5 + 1400 + 400, self.sb.INJECT_MAX)
+
+    def test_a_note_that_fits_is_delivered_whole(self):
+        note = self.note(each=600)
+        ctx = self.sb._fresh_context(note, None, '/tmp/seed.used.md')
+        self.assertIn(note, ctx)
+        self.assertNotIn('Left out', ctx)
+
+    def test_a_long_note_gives_up_whole_sections_and_no_read_is_forced(self):
+        note = self.note(each=2200)
+        self.assertGreater(len(note), self.sb.INJECT_MAX)
+        ctx = self.sb._fresh_context(note, 'fix the lights', '/tmp/seed.used.md')
+        self.assertLessEqual(len(ctx), self.sb.INJECT_MAX)
+        self.assertNotIn('Before doing anything else', ctx)
+        self.assertNotIn('[...]', ctx)
+        for i in range(20):  # every instruction, in the summary's words and verbatim
+            self.assertIn(f'- Standing rule {i}: never skip the tests.', ctx)
+        for i in range(3):
+            self.assertIn(f'- Verbatim rule {i}: always run the tests.', ctx)
+        self.assertIn('## Goal\nShip the lights fix.', ctx)
+        self.assertIn('Full transcript of the old session', ctx)
+        self.assertIn('fix the lights', ctx)
+        self.assertNotIn('## Key files and places', ctx)   # the least needed goes first
+        self.assertNotIn('## Gotchas', ctx)
+        self.assertIn('## Open threads and next steps', ctx)
+        self.assertRegex(ctx, r'Left out of this copy to keep it short: .*Gotchas, Key files and places\. '
+                              r'The whole note is in /tmp/sbhome/handoffs/S1\.md: Read it when you need those parts\.')
+
+    def test_only_as_many_sections_go_as_have_to(self):
+        note = self.note(each=1800)
+        ctx = self.sb._fresh_context(note, None, '/tmp/seed.used.md')
+        self.assertLessEqual(len(ctx), self.sb.INJECT_MAX)
+        self.assertIn('Left out of this copy to keep it short: Key files and places.', ctx)
+        self.assertIn('## Gotchas', ctx)
+
+    def test_a_section_with_more_in_its_heading_is_still_known(self):
+        names = ['Goal', 'Standing instructions from the user', 'Decisions made', 'Current state (as of 2026-10-10)',
+                 'Open threads and next steps', 'Gotchas', 'Key files and places']
+        ctx = self.sb._fresh_context(self.note(each=4000, sections=names), None, '/tmp/seed.used.md')
+        self.assertLessEqual(len(ctx), self.sb.INJECT_MAX)
+        self.assertNotIn('## Current state', ctx)
+        self.assertIn('Current state', ctx.split('Left out of this copy')[1])
+
+    def test_instructions_too_long_on_their_own_are_read_from_the_file(self):
+        # nothing of the user's is ever cut to make room: the chat reads the whole file instead, as before
+        note = self.note(each=300, rules=150, verbatim=140)
+        ctx = self.sb._fresh_context(note, None, '/tmp/seed.used.md')
+        self.assertLessEqual(len(ctx), self.sb.INJECT_MAX)
+        self.assertIn('Before doing anything else, Read the whole file /tmp/seed.used.md', ctx)
+
+    def test_a_fallback_note_is_read_from_the_file(self):
+        note = ('# Handoff: lights (2026-10-10 10:00)\n\n' + self.sb.FALLBACK_MARK + '\n\n## Last messages from the user\n' +
+                ''.join(f'- message {i} ' + 'word ' * 150 + '\n' for i in range(20)) + '\n\n## Your instructions, verbatim\n- never X\n')
+        ctx = self.sb._fresh_context(note, None, '/tmp/h.md')
+        self.assertLessEqual(len(ctx), self.sb.INJECT_MAX)
+        self.assertIn('Before doing anything else, Read the whole file /tmp/h.md', ctx)
+
+    def test_without_a_handoff_line_the_file_it_came_from_is_named(self):
+        note = self.note(each=2200).split('\n\n', 1)[1]  # the terminal's /clear: the note as it is on disk
+        ctx = self.sb._fresh_context(note, None, '/tmp/sbhome/handoffs/S9.md')
+        self.assertIn('The whole note is in /tmp/sbhome/handoffs/S9.md: Read it', ctx)

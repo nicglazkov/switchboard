@@ -34,6 +34,7 @@ DRAIN_MAX, DRAIN_S = 48 * 1024 * 1024, 5  # how much of an unread request is rea
 WIDGET_EVERY = 60     # iPhone widget pushes: at most one a minute (Apple budgets them), the last change always goes out
 PRESETS_MAX = 12
 DEVICES_MAX = 16    # push tokens kept (each phone or iPad, and its reinstalls); the oldest go first
+FRESH_BAK = ('devices.json', 'widget_tokens.json')  # their .bak never holds a token that was taken out (durable.put fresh)
 NAME_RE = re.compile(r"[A-Za-z0-9 ._,:'+#()-]{1,64}")
 JOB_KEEP, WATCH_FOR, WATCH_GRACE = 3600, 1800, 6
 LIVE_END_RETRY = (3, 15)  # seconds before a Live Activity's last push is tried again, when Apple could not be reached
@@ -109,7 +110,7 @@ SCHEMES_JSON = Path(__file__).resolve().parents[1] / 'native' / 'crates' / 'sb-c
 
 def _scheme_ids():
     try:
-        return {s['id'] for s in json.loads(SCHEMES_JSON.read_text())['schemes']}
+        return {s['id'] for s in json.loads(SCHEMES_JSON.read_text(encoding='utf-8'))['schemes']}
     except (OSError, ValueError, KeyError, TypeError):
         return set()
 
@@ -157,6 +158,37 @@ def _private_ip(h):
     return ip.is_private or ip.is_link_local or (ip.version == 4 and ip in CGNAT)
 
 
+# Where a request may come from when server.json says nothing more: this computer, a home or office network, a
+# link-local address, Tailscale. The Host a client sends is its own claim; the address it connects from is not.
+PEER_NETS = tuple(ipaddress.ip_network(n) for n in (
+    '127.0.0.0/8', '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16',  # leakscan: allow
+    '169.254.0.0/16', '100.64.0.0/10', '::1/128', 'fc00::/7', 'fe80::/10'))
+PEER_ANY = 'any'
+PEER_LOG_EVERY = 60  # refused addresses are logged at most this often, with a count
+
+
+def peer_nets(extra):
+    """server.json's "peers" as networks: each an address or a CIDR. Anything else is left out."""
+    out = []
+    for x in extra or []:
+        try:
+            out.append(ipaddress.ip_network(x.strip(), strict=False))
+        except (ValueError, AttributeError):
+            pass
+    return tuple(out)
+
+
+def peer_ok(addr, extra=(), nets=PEER_NETS):
+    """Whether a request from this address is answered. An IPv4 address written the IPv6 way (::ffff:10.0.0.7)
+    counts as the IPv4 one."""
+    try:
+        ip = ipaddress.ip_address(str(addr).split('%')[0])  # fe80::1%en0
+    except ValueError:
+        return False
+    ip = getattr(ip, 'ipv4_mapped', None) or ip
+    return any(ip.version == n.version and ip in n for n in tuple(nets) + tuple(extra))
+
+
 def _local_addresses():
     """This machine's names and addresses, best effort, for a first start with nothing to go on."""
     names = {socket.gethostname().split('.')[0].lower()}
@@ -177,7 +209,7 @@ def _local_addresses():
 class ServerConfig:
     """Where the server listens and which addresses are its own, in ~/.config/switchboard/server.json:
     {"bind": ["10.0.0.5", ...], "hosts": ["10.0.0.5", "studio", ...], "origins": ["http://10.0.0.5:8130", ...],
-     "allow": ["private", "local", "tailscale"]}.
+     "allow": ["private", "local", "tailscale"], "peers": ["203.0.113.0/24"]}.
     Nothing is built in. The first start seeds it from the origins an earlier server listed for the hub (so a
     server that was already set up keeps its addresses), else from this machine's own names and addresses, on all
     interfaces. Requests whose Host is not one of these are refused (DNS rebinding).
@@ -185,50 +217,67 @@ class ServerConfig:
     "allow" also takes, by kind, addresses a phone may have been given: "private" any LAN, link-local or Tailscale IP
     typed as a number, "local" any Bonjour name (studio.local), "tailscale" any MagicDNS name (*.ts.net). A rebinding
     page cannot send any of those as its Host (it needs a public name of its own), so they stay closed to the world.
-    Left out, all three are on; [] turns them off."""
+    Left out, all three are on; [] turns them off.
+
+    "peers" is about where a request really comes from (peer_ok). This computer, home and office networks and
+    Tailscale are always let in. "peers" names more, each an address or a CIDR; ["any"] lets every address in."""
 
     def __init__(self, cfg_dir, state_dir, port=PORT, local=_local_addresses):
         self.path = Path(cfg_dir) / 'server.json'
-        d = self._read(self.path)
-        if d is None:
+        # keep: this file is written once and read at every start, so a good start is when its copy is made
+        d, self.status = durable.load(self.path, None, dict, keep=True)
+        d = self._clean(d) if d is not None else None
+        if self.status == durable.BROKEN:
+            # Not the defaults: they listen on every address and take every home name, and this server may have
+            # been told to do neither. Nothing is written, so it stays this way until the file is put right.
+            log('server.json could not be read and has no good copy, so the server answers this computer only. '
+                'Put a good server.json back, or delete it and its .bad copies to start from the defaults, then restart.')
+            d = {'bind': ['127.0.0.1'], 'hosts': [], 'origins': [], 'allow': [], 'peers': []}
+        elif d is None:
             d = self._seed(Path(state_dir) / 'machines.json', port, local)
             try:
                 self.path.parent.mkdir(parents=True, exist_ok=True)
                 durable.put(self.path, json.dumps(d, indent=1))  # never written in place: a cut would leave half of it
             except OSError:
                 pass
+        elif self.status == durable.RECOVERED and durable.unopened(self.path):
+            log('server.json could not be opened: its last good copy is in use, and the file is left as it is')
+        elif self.status == durable.RECOVERED:
+            log('server.json could not be read: its last good copy is in use, and the damaged file is kept beside it')
         self.bind = d['bind'] or ['0.0.0.0']
         self.origins = d['origins']
         self.hosts = set(h.lower() for h in d['hosts']) | set(LOCAL_HOSTS)
         self.allow = set(ALLOW_DEFAULT if d.get('allow') is None else d['allow']) & ALLOW_KINDS
+        self.any_peer = PEER_ANY in [p.strip().lower() for p in d['peers']]
+        self.peers = peer_nets(d['peers'])
         # a tailnet name of any of its hosts (studio.tail1234.ts.net) is its own too
         self.ts_names = [h for h in self.hosts if not _is_ip(h) and '.' not in h and h not in LOCAL_HOSTS]
 
     @staticmethod
-    def _read(path):
-        try:
-            d = json.loads(Path(path).read_text())
-        except (OSError, ValueError):
-            return None
-        if not isinstance(d, dict):
-            return None
+    def _clean(d):
         lst = lambda k: [x for x in d.get(k) or [] if isinstance(x, str) and x.strip()]
         return {'bind': lst('bind'), 'hosts': lst('hosts'), 'origins': lst('origins'),
-                'allow': lst('allow') if isinstance(d.get('allow'), list) else None}
+                'allow': lst('allow') if isinstance(d.get('allow'), list) else None,
+                'peers': lst('peers') if isinstance(d.get('peers'), list) else []}
 
     @staticmethod
     def _seed(old_file, port, local):
         try:
-            origins = [o for o in json.loads(old_file.read_text()).get('origins') or [] if isinstance(o, str)]
+            origins = [o for o in json.loads(old_file.read_text(encoding='utf-8')).get('origins') or [] if isinstance(o, str)]
         except (OSError, ValueError, AttributeError):
             origins = []
         hosts = [urlsplit(o).hostname for o in origins if urlsplit(o).hostname]
         if hosts:  # and this machine's own name, which its tailnet name starts with
             own = socket.gethostname().split('.')[0].lower()
             return {'bind': [h for h in dict.fromkeys(hosts) if _is_ip(h)] or ['0.0.0.0'],
-                    'hosts': list(dict.fromkeys(hosts + ([own] if own else []))), 'origins': origins}
+                    'hosts': list(dict.fromkeys(hosts + ([own] if own else []))), 'origins': origins, 'peers': []}
         hosts = local()
-        return {'bind': ['0.0.0.0'], 'hosts': hosts, 'origins': [f'http://{h}:{port}' for h in hosts]}
+        return {'bind': ['0.0.0.0'], 'hosts': hosts, 'origins': [f'http://{h}:{port}' for h in hosts], 'peers': []}
+
+    def peer_ok(self, addr):
+        if self.status == durable.BROKEN:  # server.json was lost: this computer only, whatever it used to let in
+            return peer_ok(addr, nets=[n for n in PEER_NETS if n.is_loopback])
+        return self.any_peer or peer_ok(addr, self.peers)
 
     def host_ok(self, host):
         host = (host or '').lower()
@@ -272,6 +321,7 @@ class App:
         for d in (self.state_dir, self.cfg_dir):  # temp files of a run that died before its rename
             durable.sweep(d)
         self.server_cfg = server_cfg  # None in tests: only localhost is its own
+        self._peer_lock, self._peer_said, self._peer_more = threading.Lock(), float('-inf'), 0  # refused addresses, for the log
         # the addresses the apps are told to remember (only for a real server: tests have no network of their own)
         self.addresses = addresses_mod.Addresses(PORT, allowed=server_cfg.host_ok, bind=server_cfg.bind) if server_cfg else None
         self.live_pusher = None  # Live Activity pushes (main wires it to APNs)
@@ -281,6 +331,7 @@ class App:
         if hasattr(fleet, 'on_save'):
             fleet.on_save = self._fleet_saved
             fleet.servers = list(server_cfg.origins) if server_cfg else []
+            fleet.closed = durable.broken(self.fleet_cfg.path)  # fleet.json was lost: see FleetConfig.load
         self._migrate_options(had_state)
         fleet.summary_model = self.prefs()['summary_model']  # the agents hear it on every poll
         fleet.options = self.options()  # ... and the opt-in settings (options.py)
@@ -293,6 +344,7 @@ class App:
         self.guard = GuardTimer(guard_delay, self._push_guard, clock=clock)
         self.clock, self.sleep, self.poll_every, self.retry_waits = clock, sleep, poll_every, retry_waits
         self.jobs, self.jobs_lock = {}, threading.Lock()
+        self._refresh_cv, self._refresh_on, self._refresh_n, self._refresh_done = threading.Condition(), False, 0, 0
         self.chrome_lock = threading.Lock()
         self.devices_lock = threading.Lock()  # devices.json and widget_tokens.json: read, change and save as one step
         self._names_lock, self._name_tries = threading.Lock(), {}  # names given in Switchboard (set_name)
@@ -308,12 +360,12 @@ class App:
         self._terms_setup(clock)
 
     # ---- helpers
+    def _load_json(self, name):
+        """One of the server's own {...} files, read safely (durable.load): {} when it is not there or was lost."""
+        return durable.load(self.state_dir / name, {}, dict)[0]
+
     def devices(self):
-        try:
-            d = json.loads((self.state_dir / 'devices.json').read_text())
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return self._load_json('devices.json')
 
     def _token_add(self, file, tok, name, keep):
         """A phone's push token joins devices.json or widget_tokens.json; the oldest beyond `keep` go."""
@@ -324,7 +376,7 @@ class App:
             added = lambda k: d[k].get('added') if isinstance(d[k].get('added'), (int, float)) else 0
             for old in sorted(d, key=added)[:-keep]:  # a reinstall makes a new token: never grows without limit
                 d.pop(old, None)
-            self._save_json(file, d)
+            self._save_json(file, d, force=True)  # a phone asking is the list starting again
 
     def token_gone(self, file, tok):
         """Apple says this token is no longer in use. Taken out of the file as it is now, not as it was when the
@@ -535,7 +587,7 @@ class App:
 
     def _look_for_builds(self):
         try:
-            url = json.loads((self.cfg_dir / 'downloads.json').read_text()).get('url')
+            url = json.loads((self.cfg_dir / 'downloads.json').read_text(encoding='utf-8')).get('url')
         except (OSError, ValueError, AttributeError):
             url = None
         if isinstance(url, str) and re.fullmatch(r'https?://[A-Za-z0-9.:\-]+(?:/[A-Za-z0-9._\-/]*)?', url):
@@ -941,14 +993,13 @@ class App:
 
     # ---- iPhone widgets: a WidgetKit push when what they show changed
     def widget_tokens(self):
-        try:
-            d = json.loads((self.state_dir / 'widget_tokens.json').read_text())
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return self._load_json('widget_tokens.json')
 
-    def _save_json(self, name, d):
-        durable.put(self.state_dir / name, json.dumps(d, indent=1),
+    def _save_json(self, name, d, force=False):
+        """force: the user's own save, which may start a file that was lost over again. What the server writes by
+        itself never does (durable.Broken, an OSError). The lists of push tokens keep a copy of what was just
+        written, not of the file before: a phone that was taken off is in neither."""
+        durable.put(self.state_dir / name, json.dumps(d, indent=1), keep_bak=True, force=force, fresh=name in FRESH_BAK,
                     tmp=self.state_dir / f'{name}.{os.getpid()}.{threading.get_ident()}.tmp')
 
     def _widget_check(self, quiet=False):
@@ -992,9 +1043,32 @@ class App:
             h = h.split(':')[0]
         return self.server_cfg.host_ok(h) if self.server_cfg else h in LOCAL_HOSTS
 
+    def peer_ok(self, addr):
+        """Whether a request from this address is answered at all (peer_ok, and server.json's "peers")."""
+        if self.server_cfg.peer_ok(addr) if self.server_cfg else peer_ok(addr):
+            return True
+        with self._peer_lock:
+            now, self._peer_more = self.clock(), self._peer_more + 1
+            if now - self._peer_said >= PEER_LOG_EVERY:
+                more = f' ({self._peer_more - 1} more since the last line)' if self._peer_more > 1 else ''
+                log(f'refused a request from {addr}: not an address on your own network{more}. '
+                    'To let it in, add it to "peers" in server.json and restart.')
+                self._peer_said, self._peer_more = now, 0
+        return False
+
+    def stores(self):
+        """The server's own files that could not be read since it started (durable.status), and the library's list
+        when that was lost: what GET /api/server tells the apps."""
+        out = durable.status()
+        lib = getattr(getattr(self, 'feat', None), 'library', None)
+        if getattr(lib, 'broken', False):
+            out.append({'file': 'library.json', 'status': durable.BROKEN, 'at': None, 'kept': 'library.json.bad', 'replaced': False})
+        return out
+
     def _fleet_saved(self, machines):
-        try:
-            self.fleet_cfg.save(machines)
+        try:  # by_user: a change made in Settings, not something a machine reported
+            self.fleet_cfg.save(machines, force=getattr(self.fleet, 'by_user', True))
+            self.fleet.closed = False
         except OSError as e:
             log(f'could not save the machine list: {e}')
         try:
@@ -1083,11 +1157,7 @@ class App:
 
     # ---- names given in Switchboard, and the New sheet's settings
     def names(self):
-        try:
-            d = json.loads((self.state_dir / 'names.json').read_text())
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return self._load_json('names.json')
 
     def set_name(self, key, name):
         """A name given in Switchboard, or '' to clear it. Kept here until the machine's own list says it, so every
@@ -1098,7 +1168,7 @@ class App:
                 d[key] = name
             else:
                 d.pop(key, None)
-            self._save_json('names.json', d)
+            self._save_json('names.json', d, force=True)
             now = time.time()
             if len(self._name_tries) > 500:  # tries for names long since delivered
                 self._name_tries = {k: t for k, t in self._name_tries.items() if now - t < 3600}
@@ -1129,11 +1199,7 @@ class App:
     # ---- each chat's own Chrome machine: where its Chrome work goes (Auto, Start fresh, Continue), never one for all
     def chrome_machines(self):
         """{"<machine>/<sid>": "<chrome machine>"} for the chats that picked one."""
-        try:
-            d = json.loads((self.state_dir / 'chrome.json').read_text())
-            return d if isinstance(d, dict) else {}
-        except (OSError, ValueError):
-            return {}
+        return self._load_json('chrome.json')
 
     def chrome_for(self, name, sid):
         return self.chrome_machines().get(f'{name}/{sid}') if name and sid else None
@@ -1147,15 +1213,11 @@ class App:
             d.pop(f'{name}/{sid}', None)
             if chrome:
                 d[f'{name}/{sid}'] = chrome
-            self._save_json('chrome.json', dict(list(d.items())[-2000:]))
+            self._save_json('chrome.json', dict(list(d.items())[-2000:]), force=True)
         self.bump()
 
     def _prefs_raw(self):
-        try:
-            d = json.loads((self.state_dir / 'prefs.json').read_text())
-        except (OSError, ValueError):
-            d = {}
-        return d if isinstance(d, dict) else {}
+        return self._load_json('prefs.json')
 
     def prefs(self):
         d = self._prefs_raw()
@@ -1183,12 +1245,19 @@ class App:
     def _migrate_options(self, had_state):
         """Once: the opt-in settings start off on a new server, and on for one that was already running, so an
         existing install keeps working as before. Recorded in prefs.json so it never runs again."""
+        path = self.state_dir / 'prefs.json'
+        raw, status = durable.load(path, {}, dict, keep=True)
+        if status in (durable.BROKEN, durable.RECOVERED):
+            log('prefs.json could not be read: ' + ('its last good copy is in use' if status == durable.RECOVERED else
+                'it has no good copy, so every setting is at its default and the opt-in settings are off until you save Settings again'))
+        if status == durable.BROKEN:
+            return  # a file that was lost says nothing about what was on: nothing is turned on, nothing written
         d = self.prefs()
         opts, done, ran = options_mod.migrate(d, had_state)
         if not ran:
             return
         d.update(opts, migrations=done)
-        self._save_json('prefs.json', d)
+        self._save_json('prefs.json', dict(raw, **d))
         log('options: ' + ('this server ran before this change, so every opt-in setting stays on' if had_state
                            else 'a new server: every opt-in setting starts off'))
 
@@ -1218,7 +1287,10 @@ class App:
             return self._set_prefs(body)
 
     def _set_prefs(self, body):
+        raw, lost = self._prefs_raw(), durable.broken(self.state_dir / 'prefs.json')
         d = self.prefs()
+        if lost and options_mod.MIGRATION not in d['migrations']:
+            d['migrations'] = d['migrations'] + [options_mod.MIGRATION]  # saved by hand now: never "an older install"
         if 'chrome_machine' in body:
             v = body['chrome_machine']
             if v not in (None, '') and (not isinstance(v, str) or v not in self.fleet.machines):
@@ -1264,7 +1336,7 @@ class App:
                 if not isinstance(body[k], bool):
                     raise HttpError(400, f'{k} is true or false')
                 d[k] = body[k]
-        self._save_json('prefs.json', d)
+        self._save_json('prefs.json', dict(raw, **d), force=True)  # keys this server does not know stay in the file
         self.fleet.summary_model = d['summary_model']
         self.fleet.options = options_mod.clean(d)
         self.fleet.compact_at = d['compact_at']
@@ -1278,7 +1350,9 @@ class App:
             with self.prefs_lock:
                 d = self.prefs()
                 d['last'] = last
-                self._save_json('prefs.json', d)
+                self._save_json('prefs.json', dict(self._prefs_raw(), **d))
+        except durable.Broken:
+            pass  # prefs.json was lost: only a save in Settings starts it again
         except Exception:
             log('could not remember the setup: ' + traceback.format_exc(limit=1))
 
@@ -1349,11 +1423,32 @@ class App:
                     self.jobs[jid].pop('live', None)
                     self._jobs_save()
 
+    def refresh(self):
+        """Ask every machine now, for Refresh. Each request used to run a whole poll of its own, so eight taps (or
+        eight apps) were eight rounds of ssh at once. Now a request waits for a poll that began after it asked:
+        the one in flight began before, so those who came during it share one more, and that is all."""
+        with self._refresh_cv:
+            need = self._refresh_n + 1
+            while self._refresh_done < need:
+                if not self._refresh_on:
+                    break
+                self._refresh_cv.wait()
+            else:
+                return
+            self._refresh_on, self._refresh_n = True, self._refresh_n + 1
+            mine = self._refresh_n
+        try:
+            self.fleet.poll()
+        finally:
+            with self._refresh_cv:
+                self._refresh_on, self._refresh_done = False, mine  # also when it failed: nobody waits for ever
+                self._refresh_cv.notify_all()
+
     def _recover_jobs(self):
         """After a restart: keep watching launches already handed to a machine; anything earlier cannot be known."""
         path = self.state_dir / 'jobs.json'
         try:
-            jobs = json.loads(path.read_text())
+            jobs = json.loads(path.read_text(encoding='utf-8'))
         except FileNotFoundError:
             jobs = {}
         except (OSError, ValueError):
@@ -1369,19 +1464,21 @@ class App:
             except OSError:
                 pass
             jobs = {k: j for k, j in jobs.items() if isinstance(k, str) and ok(j)} if isinstance(jobs, dict) else {}
-        self.jobs = jobs
-        now = self.clock()
-        for jid, j in self.jobs.items():
-            if j.get('state') in ('done', 'error'):
-                continue
-            created = j.get('created') if isinstance(j.get('created'), (int, float)) else 0
-            if isinstance(j.get('inner'), str) and now - created < WATCH_FOR:
-                threading.Thread(target=self._rewatch, args=(jid,), daemon=True).start()
-            else:
-                j.update(state='error', finished=now,
-                         error='Switchboard restarted before this reached the machine. Check the list, then try again.')
-        with self.jobs_lock:
+        now, watch = self.clock(), []
+        with self.jobs_lock:  # the watchers change these jobs too: they start once all of it is put right and saved
+            self.jobs = jobs
+            for jid, j in self.jobs.items():
+                if j.get('state') in ('done', 'error'):
+                    continue
+                created = j.get('created') if isinstance(j.get('created'), (int, float)) else 0
+                if isinstance(j.get('inner'), str) and now - created < WATCH_FOR:
+                    watch.append(jid)
+                else:
+                    j.update(state='error', finished=now,
+                             error='Switchboard restarted before this reached the machine. Check the list, then try again.')
             self._jobs_save()
+        for jid in watch:
+            threading.Thread(target=self._rewatch, args=(jid,), daemon=True).start()
 
     def _submit(self, kind, machine, plan, title):
         jid = 's-' + uuid.uuid4().hex[:12]
@@ -1742,7 +1839,7 @@ class App:
         if path == '/api/models':  # the New sheet's and flags drawer's model picker (models.py)
             return models_mod.view(self.fleet.snapshot()['machines'])
         if path == '/api/server':  # Settings > Server (serverctl.py)
-            return serverctl.info(self.state_dir)
+            return dict(serverctl.info(self.state_dir), stores=self.stores())
         if path == '/api/server/logs':
             q = query or {}
             try:
@@ -1848,7 +1945,7 @@ class App:
         if path == '/api/flags':
             return self.flags_plan(body)
         if path == '/api/refresh':
-            self.fleet.poll()
+            self.refresh()
             return self.sessions()
         if path == '/api/usage/refresh':  # Refresh on the usage page: Claude Code's own report, asked for now
             asked = self.fleet.refresh_account()
@@ -2031,7 +2128,7 @@ class App:
     def home_page(self):
         """The page at /: Switchboard is the native apps now, with the downloads (when publish.sh said where they are)."""
         try:
-            url = json.loads((self.cfg_dir / 'downloads.json').read_text()).get('url')
+            url = json.loads((self.cfg_dir / 'downloads.json').read_text(encoding='utf-8')).get('url')
         except (OSError, ValueError, AttributeError):
             url = None
         ok = isinstance(url, str) and re.fullmatch(r'https?://[A-Za-z0-9.:\-]+(?:/[A-Za-z0-9._\-/]*)?', url)
@@ -2090,19 +2187,32 @@ def make_handler(app):
             self._left = 0
             return self.rfile.read(n) if n else b''
 
-        def _host_ok(self):
-            return app.host_ok(self.headers.get('Host'))
+        def _refused(self):
+            """Answers 403 and says True when this request is not for us: it comes from an address outside the
+            user's own networks (whatever Host it sends), or it asks for a Host that is not this server's."""
+            if not app.peer_ok(self.client_address[0] if self.client_address else ''):
+                self._send(403, {'ok': False, 'error': 'forbidden address'})
+            elif not app.host_ok(self.headers.get('Host')):
+                self._send(403, {'ok': False, 'error': 'forbidden host'})
+            else:
+                return False
+            return True
 
         def _length(self):
             """Content-Length, never negative: read(-1) would read until the client stops sending."""
             v = (self.headers.get('Content-Length') or '0').strip()
+            if self.headers.get('Transfer-Encoding'):
+                # A body sent in chunks was taken for no body at all, and its bytes stayed in the socket to be read
+                # as the next request. This server reads a length only (_left is None here, so _send ends the
+                # connection).
+                raise HttpError(411, 'Send a Content-Length: this server does not read a body sent in chunks.')
             if not v.isdigit():
                 raise HttpError(400, 'bad Content-Length')
             return int(v)
 
         def _guarded(self, fn):
-            if not self._host_ok():
-                return self._send(403, {'ok': False, 'error': 'forbidden host'})
+            if self._refused():
+                return
             try:
                 self._send(200, fn())
             except HttpError as e:
@@ -2114,8 +2224,8 @@ def make_handler(app):
         def _app_file(self, name):
             """GET /api/app/files/<file>: a build from the newest GitHub release, passed on as it comes (the app checks
             its size and SHA-256 against the signed list). Range requests too, so a stopped download resumes."""
-            if not self._host_ok():
-                return self._send(403, {'ok': False, 'error': 'forbidden host'})
+            if self._refused():
+                return
             src = app.app_file(name) if releases_mod.FILE_RE.fullmatch(name) else None
             if not src:
                 return self._send(404, {'ok': False, 'error': 'not a file of the newest release'})
@@ -2142,8 +2252,8 @@ def make_handler(app):
 
         def _stream(self):
             """Server-sent events: 'change' whenever a session or a machine changed, so pages load again at once."""
-            if not self._host_ok():
-                return self._send(403, {'ok': False, 'error': 'forbidden host'})
+            if self._refused():
+                return
             if not app.stream_slot(True):
                 return self._send(503, {'ok': False, 'error': 'too many live pages'})
             try:
@@ -2186,8 +2296,8 @@ def make_handler(app):
             if path.startswith('/api/'):
                 return self._guarded(lambda: app.get(path, parse_qs(u.query, keep_blank_values=True),
                                                      self.headers.get('Host') or ''))
-            if not self._host_ok():
-                return self._send(403, {'ok': False, 'error': 'forbidden host'})
+            if self._refused():
+                return
             if path == '/':
                 return self._send(200, app.home_page(), 'text/html; charset=utf-8', 'no-cache')
             p = app.static(path)
@@ -2318,7 +2428,7 @@ def main():
     cfg = home / '.config' / 'switchboard'
     apns = None
     try:
-        conf = json.loads((cfg / 'apns.json').read_text())
+        conf = json.loads((cfg / 'apns.json').read_text(encoding='utf-8'))
         apns = Apns(apns_key_path(cfg, conf), conf['key_id'], conf['team'], conf['topic'], sandbox=conf.get('sandbox', True))
     except Exception as e:
         log(f'push disabled: {e}')

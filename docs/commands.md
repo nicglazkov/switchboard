@@ -87,6 +87,7 @@ Installed in `~/.local/bin` (`%LOCALAPPDATA%\Switchboard` on Windows).
 | `switchboard-node install` | Copy itself into place and run at login (needs pairing first) |
 | `switchboard-node run` | Keep the link open (what the login item runs) |
 | `switchboard-node status` | Which machine it is linked as, and to which hub |
+| `switchboard-node uninstall` | Stop it, take it out of what starts it at login, and remove the program and `node.json` (its token). Says what it removed. The computer stays in Settings, Machines until you remove it there |
 | `switchboard-node --version` | Its version |
 
 Its settings are in `~/.config/switchboard/node.json`. Its log: `~/Library/Logs/switchboard-node.log` on a Mac,
@@ -126,7 +127,7 @@ The other commands (`hook`, `statusline`, `rpc`, `mcp` and so on) are what Claud
 | `--desktop-shortcut` | Add a desktop shortcut (Windows) |
 | `--open` | Open Switchboard when done |
 | `--force-quit` | Stop a running copy that does not quit when asked |
-| `--remove-data` | With `--uninstall`: remove settings too |
+| `--remove-data` | With `--uninstall`: remove settings too, and `switchboard-node` when this computer has one |
 | `--eject` | Eject the disk image when done (Mac) |
 | `--help` | All of the above |
 

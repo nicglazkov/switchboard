@@ -65,3 +65,70 @@ class CondenseTest(unittest.TestCase):
         p = write_transcript(self.tmp, rows)
         t = time.time(); self.sb.condense(p)
         self.assertLess(time.time() - t, 3.0)
+
+
+PASTE = '\n\n<pasted_content id="797f">\n{}\n</pasted_content id="797f">\n'
+
+
+class PastedContentTest(unittest.TestCase):
+    """Claude Code wraps a long paste in <pasted_content id="...">. Those are the user's own words (often their
+    longest messages), and they used to be dropped with the harness records that also start with a tag."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(); self.sb = fresh_sb(self.tmp)
+
+    def condense(self, *texts, **kw):
+        rows = [user(f'2026-10-10T10:00:{i:02d}Z', t) for i, t in enumerate(texts)]
+        return self.sb.condense(write_transcript(self.tmp, rows), **kw)
+
+    def test_a_message_that_is_one_paste_is_kept_without_its_tags(self):
+        c = self.condense(PASTE.format('From now on never push to main. The plan has three steps.'))
+        self.assertIn('USER: From now on never push to main. The plan has three steps.', c['body'])
+        self.assertNotIn('pasted_content', c['body'])
+        self.assertIn('From now on never push to main.', c['directives'])
+        self.assertEqual(c['user_messages'], ['From now on never push to main. The plan has three steps.'])
+
+    def test_typed_words_around_a_paste_are_kept_too(self):
+        c = self.condense('Here is the log' + PASTE.format('error: disk full') + '\nAlways check the disk first.')
+        self.assertIn('USER: Here is the log\n\nerror: disk full\n\nAlways check the disk first.', c['body'])
+        self.assertIn('Always check the disk first.', c['directives'])
+
+    def test_several_pastes_and_one_never_closed(self):
+        c = self.condense(PASTE.format('first part') + PASTE.format('second part'), 'see <pasted_content>\nthe tail')
+        self.assertIn('USER: first part\n\nsecond part', c['body'])
+        self.assertIn('USER: see\n\nthe tail', c['body'])
+
+    def test_a_pasted_page_that_starts_with_a_tag_is_still_the_users(self):
+        c = self.condense(PASTE.format('<html><body>Never cache this page.</body></html>'))
+        self.assertIn('USER: <html><body>Never cache this page.</body></html>', c['body'])
+
+    def test_a_very_long_paste_keeps_its_start_and_end(self):
+        big = 'START of the paste. ' + 'filler ' * 20_000 + 'END of the paste.'
+        c = self.condense('Read this:' + PASTE.format(big))
+        self.assertIn('START of the paste.', c['body'])
+        self.assertIn('END of the paste.', c['body'])
+        self.assertIn('[... middle of the pasted text left out ...]', c['body'])
+        self.assertLess(len(c['body']), self.sb.PASTE_KEEP + 300)
+
+    def test_harness_records_are_still_dropped(self):
+        noise = ['<system-reminder>be careful</system-reminder>', '<task-notification>\n<task-id>b1</task-id>',
+                 '<command-name>/model</command-name>', '<local-command-stdout>Set model to opus</local-command-stdout>',
+                 '<bash-input>ls</bash-input>', '<bash-stdout>a.txt</bash-stdout>', '<agent-message from="a1">done',
+                 '<<autonomous-loop-dynamic>>', '[Request interrupted by user]']
+        c = self.condense(*noise, 'the one real message')
+        self.assertEqual(c['user_messages'], ['the one real message'])
+        self.assertEqual(c['body'], 'USER: the one real message')
+
+    def test_the_fallback_note_carries_a_pasted_message(self):
+        t = write_transcript(self.tmp, [user('2026-10-10T10:00:00Z', PASTE.format('Remember the staging key rotates on Monday.')),
+                                        assistant('2026-10-10T10:00:05Z', 'Noted.')])
+        def runner(text, prompt):
+            raise RuntimeError('offline')
+        text = self.sb.generate_handoff(t, 'S1', runner=runner).read_text()
+        self.assertIn('- Remember the staging key rotates on Monday.', text.split('## Your instructions, verbatim')[1])
+
+    def test_the_list_shows_a_pasted_message_as_the_last_prompt(self):
+        t = write_transcript(self.tmp, [user('2026-10-10T10:00:00Z', 'older'), assistant('2026-10-10T10:00:05Z', 'ok'),
+                                        user('2026-10-10T10:01:00Z', PASTE.format('the newest words'))])
+        self.assertEqual(self.sb.transcript_stats(t)['last_prompt'], 'the newest words')
+

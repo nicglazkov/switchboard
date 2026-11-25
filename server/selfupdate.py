@@ -32,14 +32,21 @@ class State:
     def __init__(self, d):
         self.f = d / 'state.json'
         try:
-            self.s = json.loads(self.f.read_text())
+            self.s = json.loads(self.f.read_text(encoding='utf-8'))
         except (OSError, ValueError):
+            self.s = {}
+        if not isinstance(self.s, dict):
             self.s = {}
 
     def put(self, **kw):
+        """Forced to disk before the rename, like every other state file (durable.py; this file runs alone, from a
+        copy, so it cannot import it): a power cut mid-update must not leave zeros where the progress was."""
         self.s.update(kw, at=time.time())
         tmp = self.f.with_suffix('.tmp')
-        tmp.write_text(json.dumps(self.s))
+        with open(tmp, 'w', encoding='utf-8') as f:
+            f.write(json.dumps(self.s))
+            f.flush()
+            os.fsync(f.fileno())
         os.replace(tmp, self.f)
 
 
@@ -136,7 +143,7 @@ def main():
                 raise ValueError("the download doesn't match the release's signed list, so it was not installed")
             st.put(step='unpacking')
             top = unpack(kit, work / 'kit')
-            v = (top / 'VERSION').read_text().split()[0] if (top / 'VERSION').is_file() else ''
+            v = (top / 'VERSION').read_text(encoding='utf-8').split()[0] if (top / 'VERSION').is_file() else ''
             if v != a.version:
                 raise ValueError(f'the kit says {v or "no version"}, not {a.version}')
             st.put(step='checking')

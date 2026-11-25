@@ -1,7 +1,7 @@
 //! One terminal: a process (ssh to the machine) in a PTY, with its output read on a thread and paced to a byte
 //! rate, its input written on another thread, and its exit code reported once.
 
-use portable_pty::{ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
+use portable_pty::{Child, ChildKiller, CommandBuilder, MasterPty, PtySize, native_pty_system};
 use std::io::{Read, Write};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -53,6 +53,14 @@ fn size(cols: u16, rows: u16) -> PtySize {
     PtySize { rows, cols, pixel_width: 0, pixel_height: 0 }
 }
 
+/// Stops a process `spawn` started and cannot hand out, and waits for it; `e` is why, passed through. Left alone
+/// it would run on (an ssh to the machine, holding the chat's terminal there) with no Term to hang it up.
+fn stop(mut child: Box<dyn Child + Send + Sync>, e: std::io::Error) -> std::io::Error {
+    let _ = child.kill();
+    let _ = child.wait();
+    e
+}
+
 pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     let pair = native_pty_system().openpty(size(s.cols, s.rows)).map_err(io_err)?;
     let mut cmd = CommandBuilder::new(&s.argv[0]);
@@ -66,12 +74,36 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     if let Some(d) = s.cwd {
         cmd.cwd(d);
     }
-    let mut child = pair.slave.spawn_command(cmd).map_err(io_err)?;
+    let child = pair.slave.spawn_command(cmd).map_err(io_err)?;
     drop(pair.slave); // the child holds the only slave side, so its exit ends our reads
-    let mut reader = pair.master.try_clone_reader().map_err(io_err)?;
-    let mut writer = pair.master.take_writer().map_err(io_err)?;
+    // The process runs from here on, so nothing below may fail and just return: see `stop`.
+    let (mut reader, mut writer) = match (pair.master.try_clone_reader(), pair.master.take_writer()) {
+        (Ok(r), Ok(w)) => (r, w),
+        (Err(e), _) | (_, Err(e)) => return Err(stop(child, io_err(e))),
+    };
     let killer = Arc::new(Mutex::new(Some(child.clone_killer())));
     let master = Arc::new(Mutex::new(Some(pair.master)));
+
+    // The thread that waits for the process starts first and is handed the process once it runs, so that a
+    // thread that cannot be started does not take the process with it.
+    let (exit_tx, exit_rx) = oneshot::channel();
+    let (reaped, console) = (killer.clone(), master.clone());
+    let (child_tx, child_rx) = std::sync::mpsc::sync_channel::<Box<dyn Child + Send + Sync>>(1);
+    let waits = std::thread::Builder::new().name("pty-wait".into()).spawn(move || {
+        let Ok(mut child) = child_rx.recv() else { return };
+        let code = child.wait().ok().map(|st| st.exit_code() as i64);
+        reaped.lock().unwrap_or_else(|e| e.into_inner()).take(); // a hang up after this would signal a stranger
+        if cfg!(windows) {
+            // ConPTY keeps the output open after the process ends; closing it lets the reader drain it and stop
+            let m = console.lock().unwrap_or_else(|e| e.into_inner()).take();
+            drop(m);
+        }
+        let _ = exit_tx.send(code);
+    });
+    if let Err(e) = waits {
+        return Err(stop(child, e));
+    }
+    let _ = child_tx.send(child);
 
     let (in_tx, mut in_rx) = mpsc::channel::<Vec<u8>>(INPUT_BACKLOG);
     let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>(64);
@@ -79,6 +111,8 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
     // Only the start of the output needs an answer; the clone goes once it is given (or given up on), so dropping
     // the Term still closes the input.
     let mut answer = cfg!(windows).then(|| (in_tx.clone(), Asked::default()));
+    // Dropped if a thread below cannot be started: that hangs the process up, and the thread above waits for it.
+    let term = Term { master, killer, input: in_tx };
     // The reader hands what it reads to a second thread, which sends it on in fewer, larger messages (`GATHER`).
     let (read_tx, read_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(8);
     std::thread::Builder::new().name("pty-read".into()).spawn(move || {
@@ -145,20 +179,7 @@ pub fn spawn(s: Spawn) -> std::io::Result<(Term, TermIo)> {
         }
     })?;
 
-    let (exit_tx, exit_rx) = oneshot::channel();
-    let (reaped, console) = (killer.clone(), master.clone());
-    std::thread::Builder::new().name("pty-wait".into()).spawn(move || {
-        let code = child.wait().ok().map(|st| st.exit_code() as i64);
-        reaped.lock().unwrap_or_else(|e| e.into_inner()).take(); // a hang up after this would signal a stranger
-        if cfg!(windows) {
-            // ConPTY keeps the output open after the process ends; closing it lets the reader drain it and stop
-            let m = console.lock().unwrap_or_else(|e| e.into_inner()).take();
-            drop(m);
-        }
-        let _ = exit_tx.send(code);
-    })?;
-
-    Ok((Term { master, killer, input: in_tx }, TermIo { output: out_rx, exited: exit_rx }))
+    Ok((term, TermIo { output: out_rx, exited: exit_rx }))
 }
 
 /// `out` and everything else read before `until`, as one piece. It stops early at `max` bytes (the piece may run
@@ -282,6 +303,41 @@ mod tests {
         assert_eq!(io.exited.await.unwrap(), Some(3));
         assert!(term.killer.lock().unwrap().is_none(), "its PID may be someone else's now");
         drop(term); // hangs up nothing
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: u32) -> bool {
+        let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", &pid.to_string()]).output().unwrap();
+        // (gone, or a zombie nobody waited for, are both not running; only the first is right)
+        !String::from_utf8_lossy(&out.stdout).trim().is_empty()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_process_spawn_cannot_hand_out_is_stopped_and_waited_for() {
+        let pair = native_pty_system().openpty(size(80, 24)).unwrap();
+        let mut cmd = CommandBuilder::new("/bin/sh");
+        cmd.args(["-c", "sleep 600"]);
+        let child = pair.slave.spawn_command(cmd).unwrap();
+        let pid = child.process_id().unwrap();
+        assert!(alive(pid));
+        let e = stop(child, std::io::Error::other("no more threads"));
+        assert_eq!(e.to_string(), "no more threads", "the reason is passed through");
+        assert!(!alive(pid), "still running, or never waited for");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_terminal_dropped_before_it_is_used_hangs_its_process_up() {
+        // what a thread that cannot be started leaves behind: the Term is dropped inside `spawn`
+        let argv = ["/bin/sh", "-c", "echo $$; sleep 600"].map(String::from);
+        let (term, mut io) = run(&argv);
+        let first = io.output.recv().await.unwrap();
+        let pid: u32 = String::from_utf8_lossy(&first).trim().parse().unwrap();
+        assert!(alive(pid));
+        drop(term);
+        let _ = tokio::time::timeout(Duration::from_secs(10), io.exited).await.expect("never waited for");
+        assert!(!alive(pid));
     }
 
     #[test]

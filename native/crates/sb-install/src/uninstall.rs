@@ -1,6 +1,7 @@
 //! What the uninstaller removes and what it keeps. The app, its login item and its caches always go; the user's
-//! settings and data go only when the user asks. The lists shown before anything happens are the same lists the
-//! uninstaller then works through, so what it says is what it does.
+//! settings and data go only when the user asks, and with them switchboard-node when this computer has one (it is
+//! not part of the app: it is what makes this computer one of the server's machines). The lists shown before
+//! anything happens are the same lists the uninstaller then works through, so what it says is what it does.
 
 use std::path::{Path, PathBuf};
 
@@ -20,6 +21,9 @@ pub struct Layout {
     pub caches: Vec<PathBuf>,
     /// The user's: settings, saved places and the first-run record.
     pub data: Vec<PathBuf>,
+    /// Where `switchboard-node install` puts the node, when this system has such a place. Kept unless the user
+    /// asks for their data to go too; then the node removes itself (`switchboard-node uninstall`).
+    pub node: Option<PathBuf>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +36,8 @@ pub enum What {
     Registry,
     Caches,
     Data,
+    /// switchboard-node: its program, what starts it at login, and its token for the server.
+    Node,
 }
 
 impl What {
@@ -44,6 +50,7 @@ impl What {
             What::Registry => "Its entry in Settings > Apps",
             What::Caches => "Caches, logs and saved window state",
             What::Data => "Your settings and saved layout",
+            What::Node => "This computer's link to the server",
         }
     }
 }
@@ -87,6 +94,9 @@ pub fn plan(layout: &Layout, remove_data: bool, exists: impl Fn(&Path) -> bool) 
     }
     for d in &layout.data {
         add(What::Data, d, remove_data);
+    }
+    if let Some(n) = &layout.node {
+        add(What::Node, n, remove_data);
     }
     p
 }
@@ -147,6 +157,21 @@ mod tests {
         let p = plan(&layout(), true, |_| true);
         assert!(p.keep.is_empty());
         assert_eq!(p.remove.iter().filter(|i| i.what == What::Data).count(), 2);
+    }
+
+    #[test]
+    fn the_node_is_kept_with_the_data_and_goes_with_it() {
+        let l = Layout { node: Some("/Users/you/.local/bin/switchboard-node".into()), ..layout() };
+        let p = plan(&l, false, |_| true);
+        assert_eq!(whats(&p.keep), [What::Data, What::Data, What::Node]);
+        assert!(!whats(&p.remove).contains(&What::Node));
+        assert_eq!(Plan::labels(&p.keep), ["Your settings and saved layout", "This computer's link to the server"]);
+        let p = plan(&l, true, |_| true);
+        assert_eq!(whats(&p.remove).last(), Some(&What::Node));
+        assert!(p.keep.is_empty());
+        // a computer with no node: nothing about one is listed either way
+        let p = plan(&l, true, |q| !q.ends_with("switchboard-node"));
+        assert!(!whats(&p.remove).contains(&What::Node) && p.keep.is_empty());
     }
 
     #[test]

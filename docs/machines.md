@@ -36,6 +36,10 @@ Get a code in any of these places:
 The code works **once, for 10 minutes**. Pick the new computer's system and paste the line there, in a terminal
 (PowerShell on Windows). The computer shows up on the board within a minute.
 
+The computer keeps the server address that is in the line. If the server's address changes later, or the computer
+moves to a network where that address doesn't reach the server, link it again with a new code.
+[Away from home](install.md#away-from-home)
+
 === "Mac and Linux"
 
     The line `switchboard setup` shows:
@@ -75,7 +79,8 @@ when the computer has none.
 
 ### Adding the server itself
 
-If you use Claude Code on the server too, paste the line there like on any other computer.
+Installing the server doesn't add the server's own computer. If you use Claude Code there too, which is always
+the case when you have one computer, paste the line there like on any other computer.
 
 ## Over ssh
 
@@ -118,7 +123,23 @@ settings, until you remove it there or link it again. On the computer itself:
 python3 ~/.claude/switchboard/sb.py uninstall   # takes the helper out of Claude Code's settings
 ```
 
-`sb.py uninstall` removes only what it added (on Windows, also its logon task `SwitchboardLaunch`). To stop the node, remove its login item: on a Mac
-`launchctl bootout gui/$(id -u)/com.switchboard.node` and delete
-`~/Library/LaunchAgents/com.switchboard.node.plist`; on Linux `systemctl --user disable --now switchboard-node`;
-on Windows `schtasks /Delete /TN SwitchboardNode /F`.
+`sb.py uninstall` removes only what it added (on Windows, also its logon task `SwitchboardLaunch`). The
+`~/.claude/switchboard` folder stays; delete it if you don't want it. A computer that was linked with a code also
+has the node:
+
+```sh
+switchboard-node uninstall   # stops it, removes its login item, the program and its token
+```
+
+It prints what it removed. An older node has no `uninstall`: update it first, or remove it by hand:
+
+- **Mac:** `launchctl bootout gui/$(id -u)/com.switchboard.node`, then delete
+  `~/Library/LaunchAgents/com.switchboard.node.plist`.
+- **Linux:** `systemctl --user disable --now switchboard-node`, then delete
+  `~/.config/systemd/user/switchboard-node.service`. Without systemd it is a background process: stop it with
+  `pkill -f 'switchboard-node run'`.
+- **Windows:** `schtasks /End /TN SwitchboardNode`, then `schtasks /Delete /TN SwitchboardNode /F`.
+
+Then delete the program (`~/.local/bin/switchboard-node`, or `switchboard-node.exe` and `switchboard-node.vbs` in
+`%LOCALAPPDATA%\Switchboard` on Windows) and its settings, `~/.config/switchboard/node.json`. On a computer that
+is also the server, keep the rest of `~/.config/switchboard`.

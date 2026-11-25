@@ -208,6 +208,75 @@ class ServerUpdate(Scripts):
         self.assertFalse(old.exists())
 
 
+NODE = '''#!/bin/sh
+echo "$*" >> "$FAKE_LOG"
+[ "$1" = uninstall ] || exit 2
+rm -f "$HOME/.config/switchboard/node.json" "$0"
+echo "Removed the program: $0"
+'''
+
+
+class Uninstall(Scripts):
+    """--uninstall and a switchboard-node on the same machine: the installer never put it there."""
+
+    def node(self, hub):
+        cfg = self.home / '.config' / 'switchboard'
+        cfg.mkdir(parents=True, exist_ok=True)
+        (cfg / 'node.json').write_text('{\n  "hub": "%s",\n  "machine": "lab",\n  "token": "t"\n}\n' % hub)
+        self.bin.mkdir(parents=True, exist_ok=True)
+        p = self.bin / 'switchboard-node'
+        p.write_text(NODE)
+        p.chmod(0o755)
+        (self.bin / 'switchboard-hub').write_text('x')
+        self.shim('launchctl', LOGGED)
+        self.shim('systemctl', LOGGED)
+        return p, cfg / 'node.json'
+
+    def uninstall(self):
+        code, out = self.run_script(INSTALL / 'install-server.sh', '--uninstall', '--plain')
+        self.assertEqual(code, 0, out)
+        self.assertFalse((self.bin / 'switchboard-hub').exists(), 'the server itself is removed either way')
+        return out
+
+    def test_a_node_linked_to_another_server_is_left_and_said(self):
+        for hub in ('192.0.2.10:8132', 'tower.example.com:8132', '[2001:db8::1]:8132', 'http://192.0.2.10:8151/', ''):
+            with self.subTest(hub=hub):
+                node, cfg = self.node(hub)
+                out = self.uninstall()
+                self.assertTrue(node.exists() and cfg.exists(), out)
+                self.assertIn('still linked to a Switchboard server', out)
+                self.assertIn('switchboard-node uninstall', out)
+                calls = (self.tmp / 'calls.log').read_text() if (self.tmp / 'calls.log').exists() else ''
+                self.assertNotIn('uninstall', calls, 'the node was not even asked')
+
+    def test_a_node_linked_to_this_machines_own_hub_goes_with_it_and_says_what_it_removed(self):
+        import socket as s
+        for hub in ('127.0.0.1:8132', 'localhost:8132', 'http://LOCALHOST:8151', '[::1]:8132', s.gethostname() + ':8132'):
+            with self.subTest(hub=hub):
+                node, cfg = self.node(hub)
+                out = self.uninstall()
+                self.assertFalse(node.exists() or cfg.exists(), out)
+                self.assertIn('which was removed too', out)
+                self.assertIn(f'Removed the program: {node}', out, "the node's own words are shown")
+                self.assertNotIn('still linked', out)
+
+    def test_no_node_no_word_about_one(self):
+        self.bin.mkdir(parents=True, exist_ok=True)
+        (self.bin / 'switchboard-hub').write_text('x')
+        out = self.uninstall()
+        self.assertNotIn('switchboard-node', out)
+        self.assertIn('Switchboard is removed from this machine', out)
+
+    def test_a_node_too_old_to_remove_itself_is_said_to_be_still_there(self):
+        node, cfg = self.node('127.0.0.1:8132')
+        node.write_text('#!/bin/sh\necho "usage: switchboard-node pair <hub> <code>" >&2\nexit 2\n')
+        out = self.uninstall()
+        self.assertTrue(node.exists() and cfg.exists())
+        self.assertIn('could not remove itself', out)
+        self.assertIn('usage: switchboard-node pair', out)
+        self.assertIn('It is still installed', out)
+
+
 class Command(Scripts):
     """The `switchboard` command with the server laid out by hand."""
 

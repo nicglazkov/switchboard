@@ -4,6 +4,7 @@
 //!   switchboard-node pair <hub> <code> [--name NAME] [--label LABEL]   trade an Add a machine code for a token
 //!   switchboard-node run                                               keep the link up (the user service runs this)
 //!   switchboard-node status                                            what this machine is linked as
+//!   switchboard-node uninstall                                         stop it and remove it from this machine
 //!
 //! <hub> is the hub's address: 192.0.2.10, 192.0.2.10:8132, a tailnet name, or an http:// URL.
 //! Settings live in ~/.config/switchboard/node.json (mode 600): {hub, machine, token, sb?, python?}.
@@ -11,16 +12,17 @@
 //! (default ~/.claude/switchboard/sb.py, run with python3, or python on Windows).
 
 mod link;
+mod uninstall;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 const HUB_PORT: u16 = 8132;
-/// How often `run` looks at node.json again while it has no token the hub takes.
+/// How often `run` looks at node.json again, and at whether a wait is over, while it has no token the hub takes.
 const RECHECK: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,7 +71,13 @@ fn load() -> Result<NodeConfig, String> {
 
 fn load_from(p: &Path) -> Result<NodeConfig, String> {
     let text = std::fs::read_to_string(p).map_err(|_| "This machine is not paired yet.".to_string())?;
-    serde_json::from_str(&text).map_err(|e| format!("{} is not readable ({e}). Pair again.", p.display()))
+    let c: NodeConfig =
+        serde_json::from_str(&text).map_err(|e| format!("{} is not readable ({e}). Pair again.", p.display()))?;
+    // (a hub address written by hand: `pair` never saves one like this)
+    match asks_for_tls(&c.hub) {
+        Some(why) => Err(format!("{}: {why}", p.display())),
+        None => Ok(c),
+    }
 }
 
 fn save(c: &NodeConfig) -> std::io::Result<PathBuf> {
@@ -94,10 +102,26 @@ fn save(c: &NodeConfig) -> std::io::Result<PathBuf> {
     Ok(p)
 }
 
-/// "192.0.2.10", "http://host:8132/", "ws://[fd7a::1]" -> "host:port".
+/// Why an address that asks for TLS is refused, if `s` is one. The link is plain ws: dropping the "s" quietly
+/// would send the token in the clear to an address its owner believes is encrypted.
+fn asks_for_tls(s: &str) -> Option<String> {
+    let low = s.trim().to_ascii_lowercase();
+    let scheme = ["https://", "wss://"].into_iter().find(|p| low.starts_with(p))?;
+    Some(format!(
+        "{} asks for an encrypted link ({scheme}), which Switchboard does not have yet: the node talks to the hub \
+         in plain ws. Use the hub's plain address, like 192.0.2.10 or http://192.0.2.10:{HUB_PORT}, on a network \
+         you trust (your own LAN or a tailnet).",
+        s.trim()
+    ))
+}
+
+/// "192.0.2.10", "http://host:8132/", "ws://[fd7a::1]" -> "host:port". An https:// or wss:// address is refused.
 pub fn hub_addr(s: &str) -> Result<String, String> {
+    if let Some(why) = asks_for_tls(s) {
+        return Err(why);
+    }
     let mut h = s.trim();
-    for scheme in ["http://", "https://", "ws://", "wss://"] {
+    for scheme in ["http://", "ws://"] {
         if let Some(rest) = h.strip_prefix(scheme) {
             h = rest;
         }
@@ -373,6 +397,8 @@ fn service_text(exe: &str, home: &str) -> String {
 }
 
 const LABEL: &str = "com.switchboard.node";
+/// The Windows logon task.
+const TASK: &str = "SwitchboardNode";
 
 /// The Windows logon task: this user's logon only, no window, never stopped for running long or on battery.
 fn task_xml(user: &str, vbs: &str) -> String {
@@ -509,24 +535,161 @@ fn install() -> i32 {
     }
 }
 
-/// `run`: link with the token in node.json. With no token, one the hub turned down, or one another node took the
-/// link with, it waits for `pair` to write a new one (or a restart) instead of exiting, since the user service
-/// (KeepAlive, Restart=always) would only start it again at once, over and over. A node that was replaced does not
-/// link again by itself: two with one token would take the link from each other for good.
-async fn run(path: &Path, every: Duration) -> i32 {
+/// `uninstall`: stop the node, take it out of what starts it at login, and remove the program, node.json (with the
+/// token) and node.lock. Says each thing it removed. See uninstall.rs.
+fn uninstall() -> i32 {
+    use uninstall::{Os, Places};
+    let (config, program) = (config_path(), install_path());
+    let machine = load_from(&config).ok().map(|c| c.machine);
+    let same = |a: &Path, b: &Path| a.canonicalize().ok().zip(b.canonicalize().ok()).is_some_and(|(a, b)| a == b);
+    let places = Places {
+        os: Os::here(),
+        home: home(),
+        lock: lock_path(&config),
+        config,
+        uid: if cfg!(target_os = "macos") { sh("id", &["-u"]).unwrap_or_default() } else { String::new() },
+        pid: std::process::id(),
+        running_from_program: std::env::current_exe().is_ok_and(|me| same(&me, &program)),
+        old: if cfg!(windows) { uninstall::old_programs(&program) } else { vec![] },
+        program,
+    };
+    let sh = |cmd: &str, args: &[String]| sh(cmd, &args.iter().map(String::as_str).collect::<Vec<_>>());
+    let patience = if cfg!(windows) { uninstall::WINDOWS_PATIENCE } else { Duration::ZERO };
+    // Each line is printed as its step is done, and the reminder with the first of them: on a Mac and on Linux
+    // the last step stops the node, which may be what this is running under.
+    let mut any = false;
+    let failed = uninstall::carry_out_saying(&uninstall::plan(&places), &sh, patience, &mut |line| {
+        if !any && let Some(m) = &machine {
+            println!("Switchboard still lists this machine, as {m}, until you remove it in Settings, Machines.");
+        }
+        any = true;
+        println!("{line}");
+    });
+    if !any {
+        println!("switchboard-node was not installed on this machine: there was nothing to remove.");
+        return 0;
+    }
+    if failed { fail("not everything could be removed (see above).", 1) } else { 0 }
+}
+
+/// How long `run` waits before it asks the hub again about a token the hub turned down or another node took:
+/// `first`, then twice as long each time, up to `max`.
+#[derive(Clone, Copy)]
+struct Slow {
+    first: Duration,
+    max: Duration,
+    /// Being replaced this many times in a row is another computer with this token, not a node that came and
+    /// went: the node then stops taking the link back.
+    replaced_most: u32,
+    /// ... unless it had the link for this long in between, which starts the count again.
+    steady: Duration,
+}
+
+const SLOW: Slow = Slow {
+    first: Duration::from_secs(5 * 60),
+    max: Duration::from_secs(30 * 60),
+    replaced_most: 3,
+    steady: Duration::from_secs(60 * 60),
+};
+
+/// A token `run` is not using for now, and when it asks the hub about it again.
+struct Parked {
+    token: String,
+    replaced: bool,
+    /// how many times in a row it was replaced
+    times: u32,
+    wait: Duration,
+    /// None: not again, until node.json has another token (or the node is started again)
+    until: Option<Instant>,
+}
+
+/// The file a node holds locked while it has the link (link.rs): node.lock next to node.json.
+fn lock_path(config: &Path) -> PathBuf {
+    config.with_extension("lock")
+}
+
+fn minutes(d: Duration) -> String {
+    match d.as_secs().div_ceil(60) {
+        1 => "1 minute".into(),
+        m => format!("{m} minutes"),
+    }
+}
+
+/// `run`: link with the token in node.json. With no token it waits for `pair` to write one instead of exiting,
+/// since the user service (KeepAlive, Restart=always) would only start it again at once, over and over.
+///
+/// A token the hub turned down, or one another node took the link with, is not given up for good: a hub that
+/// lost its list of machines and got it back, or a second node run by hand for a minute, would otherwise leave
+/// this machine offline until someone signed in again. It is tried again on a slow timer (`slow`: minutes, each
+/// wait twice the last), so a machine that really was removed costs the hub next to nothing, and at once when
+/// `pair` writes a new token. Each change is logged once.
+///
+/// Two nodes with one token take the link from each other in turns, and every turn drops the terminals open on
+/// it. On one computer that is seen and avoided: a replaced node does not try while another node here holds
+/// node.lock. Another computer with the same token (a cloned disk, a restored backup, a copied node.json) cannot
+/// be seen that way, so a node that is replaced `slow.replaced_most` times in a row stops for good and says so;
+/// it starts again when `pair` writes a new token, or when it is restarted.
+async fn run(path: &Path, every: Duration, slow: Slow) -> i32 {
     let own = Own::here();
-    let mut tried = None::<String>;
+    let lock = lock_path(path);
+    let mut parked = None::<Parked>;
     let mut said = false;
     loop {
         match load_from(path) {
-            Ok(c) if tried.as_deref() != Some(c.token.as_str()) => {
-                said = false;
-                match link::run(c.clone(), own.as_ref()).await {
-                    link::UNPAIRED | link::REPLACED => tried = Some(c.token),
-                    code => return code,
+            Ok(c) => {
+                let fresh = parked.as_ref().is_none_or(|p| p.token != c.token);
+                let due = parked.as_ref().is_some_and(|p| {
+                    p.until.is_some_and(|t| Instant::now() >= t) && !(p.replaced && link::held_elsewhere(&lock))
+                });
+                if fresh || due {
+                    said = false;
+                    let before = parked.take().filter(|_| !fresh);
+                    let began = Instant::now();
+                    let (why, linked, replaced) =
+                        match link::run(c.clone(), own.as_ref(), &lock, before.is_some()).await {
+                            link::End::Exit(code) => return code,
+                            link::End::Unpaired { why, linked } => (why, linked, false),
+                            link::End::Replaced => (String::new(), true, true),
+                        };
+                    // the same answer again, soon: wait twice as long. Anything else starts over.
+                    let wait = match &before {
+                        Some(p) if p.replaced == replaced && began.elapsed() < slow.max * 2 => {
+                            (p.wait * 2).min(slow.max)
+                        }
+                        _ => slow.first,
+                    };
+                    // replaced again without having kept the link for long in between
+                    let times = match &before {
+                        _ if !replaced => 0,
+                        Some(p) if p.replaced && began.elapsed() < slow.steady => p.times + 1,
+                        _ => 1,
+                    };
+                    let stop = replaced && times >= slow.replaced_most;
+                    if stop {
+                        link::log(format!(
+                            "another switchboard-node took over the link {times} times in a row: another computer                              is using this machine's link (a copy of this disk, or of node.json). This node has                              stopped taking it back. Pair this computer again so it has a link of its own:                              switchboard-node pair {} <code>",
+                            c.hub
+                        ));
+                    } else if linked || before.is_none_or(|p| p.replaced != replaced) {
+                        let (next, most) = (minutes(wait), minutes(slow.max));
+                        link::log(if replaced {
+                            format!(
+                                "another switchboard-node for this machine took over the link. This one waits, and \
+                                 takes the link back in {next} if no node on this computer has it (then less often, \
+                                 up to every {most})."
+                            )
+                        } else {
+                            format!(
+                                "{why} Pair it again: switchboard-node pair {} <code>. Until then this node asks \
+                                 the hub again in {next}, then less often, up to every {most}.",
+                                c.hub
+                            )
+                        });
+                    }
+                    let until = (!stop).then(|| Instant::now() + wait);
+                    parked = Some(Parked { token: c.token, replaced, times, wait, until });
                 }
             }
-            Ok(_) => {} // still the token the hub turned down, or another node uses
             Err(e) if !said => {
                 fail(&format!("{e} Get a code from Add a machine, then run: switchboard-node pair <hub> <code>"), 2);
                 said = true;
@@ -545,6 +708,7 @@ fn usage() -> i32 {
     eprintln!("       switchboard-node install");
     eprintln!("       switchboard-node run");
     eprintln!("       switchboard-node status");
+    eprintln!("       switchboard-node uninstall");
     2
 }
 
@@ -553,9 +717,10 @@ async fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
         Some("pair") => pair(&args[1..]).await,
-        Some("run") => run(&config_path(), RECHECK).await,
+        Some("run") => run(&config_path(), RECHECK, SLOW).await,
         Some("status") => status(),
         Some("install") => install(),
+        Some("uninstall") => uninstall(),
         Some("--version" | "version") => {
             println!("switchboard-node {VERSION}");
             0
@@ -581,6 +746,29 @@ mod tests {
         for bad in ["", "-oProxy", "a b", "host;rm"] {
             assert!(hub_addr(bad).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn an_address_that_asks_for_tls_is_refused_not_downgraded() {
+        for s in ["https://hub.example.com", "wss://192.0.2.10:8132/", " HTTPS://hub.example.com:443 "] {
+            let e = hub_addr(s).unwrap_err();
+            assert!(e.contains("does not have yet") && e.contains(s.trim()), "{e}");
+            assert!(e.contains("http://192.0.2.10:8132"), "it says what to type instead: {e}");
+        }
+        // plain addresses are read as before
+        assert_eq!(hub_addr("http://192.0.2.10").unwrap(), "192.0.2.10:8132");
+        assert_eq!(hub_addr("ws://192.0.2.10:9").unwrap(), "192.0.2.10:9");
+        assert_eq!(hub_addr("https.example.com").unwrap(), "https.example.com:8132");
+        // a node.json edited by hand to say https is refused when it is read, before any token is sent
+        let d = scratch("tls");
+        let path = d.join("node.json");
+        let json = |hub: &str| format!(r#"{{"hub": "{hub}", "machine": "lab", "token": "t"}}"#);
+        std::fs::write(&path, json("wss://hub.example.com:8132")).unwrap();
+        let e = load_from(&path).unwrap_err();
+        assert!(e.contains("node.json") && e.contains("wss://"), "{e}");
+        std::fs::write(&path, json("192.0.2.10:8132")).unwrap();
+        assert_eq!(load_from(&path).unwrap().hub, "192.0.2.10:8132");
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]
@@ -719,7 +907,7 @@ mod tests {
     async fn run_waits_instead_of_exiting_when_not_paired() {
         let d = scratch("unpaired");
         let path = d.join("node.json");
-        let gone = tokio::time::timeout(Duration::from_millis(300), run(&path, Duration::from_millis(10)));
+        let gone = tokio::time::timeout(Duration::from_millis(300), run(&path, Duration::from_millis(10), SLOW));
         assert!(gone.await.is_err(), "still running, so the service does not start it again and again");
         let _ = std::fs::remove_dir_all(&d);
     }
@@ -749,7 +937,7 @@ mod tests {
         write("old");
         let node = tokio::spawn({
             let path = path.clone();
-            async move { run(&path, Duration::from_millis(10)).await }
+            async move { run(&path, Duration::from_millis(10), SLOW).await }
         });
         tokio::time::sleep(Duration::from_millis(500)).await;
         assert_eq!(tries.load(SeqCst), 1, "once, then it waits");
@@ -761,11 +949,51 @@ mod tests {
         let _ = std::fs::remove_dir_all(&d);
     }
 
+    /// Waits of 100 ms, then 200, then 400 at most: the slow timer, sped up.
+    const QUICK: Slow = Slow {
+        first: Duration::from_millis(100),
+        max: Duration::from_millis(400),
+        replaced_most: 3,
+        steady: Duration::from_secs(3600),
+    };
+
     #[tokio::test]
-    async fn a_replaced_node_does_not_take_the_link_back() {
+    async fn a_turned_down_token_is_asked_about_again_slowly() {
+        // a hub that lost its list of machines: 401 to every link, until the list is back
+        let hub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = hub.local_addr().unwrap().to_string();
+        let tries = Arc::new(AtomicUsize::new(0));
+        let n = tries.clone();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = hub.accept().await {
+                n.fetch_add(1, SeqCst);
+                let mut buf = [0u8; 4096];
+                let _ = s.read(&mut buf).await;
+                let _ = s.write_all(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\n\r\n").await;
+            }
+        });
+        let d = scratch("slow");
+        let path = d.join("node.json");
+        let c = NodeConfig { hub: addr, machine: "lab".into(), token: "t".into(), sb: None, python: None };
+        std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        let node = tokio::spawn({
+            let path = path.clone();
+            async move { run(&path, Duration::from_millis(10), QUICK).await }
+        });
+        // asked at 0, 100, 300, 700, 1100 and 1500 ms: each wait twice the last, up to the most
+        tokio::time::sleep(Duration::from_millis(1600)).await;
+        let n = tries.load(SeqCst);
+        assert!(n >= 3, "{n}: it never asked again, and stays offline once the hub knows it again");
+        assert!(n <= 7, "{n}: it asks far more often than the timer allows");
+        assert!(!node.is_finished());
+        node.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// A hub where another node with this token already took over: it closes every link as replaced.
+    async fn replacing_hub() -> (String, Arc<AtomicUsize>) {
         use futures_util::StreamExt;
         use tokio_tungstenite::tungstenite::protocol::{CloseFrame, frame::coding::CloseCode};
-        // a hub where another node with this token already took over: it closes the link as replaced
         let hub = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = hub.local_addr().unwrap().to_string();
         let tries = Arc::new(AtomicUsize::new(0));
@@ -781,19 +1009,105 @@ mod tests {
                 });
             }
         });
+        (addr, tries)
+    }
+
+    #[tokio::test]
+    async fn a_replaced_node_does_not_take_the_link_back_at_once() {
+        let (addr, tries) = replacing_hub().await;
         let d = scratch("replaced");
         let path = d.join("node.json");
         let c = NodeConfig { hub: addr, machine: "lab".into(), token: "same".into(), sb: None, python: None };
         std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
         let node = tokio::spawn({
             let path = path.clone();
-            async move { run(&path, Duration::from_millis(10)).await }
+            async move { run(&path, Duration::from_millis(10), SLOW).await }
         });
         tokio::time::sleep(Duration::from_millis(800)).await;
         assert_eq!(tries.load(SeqCst), 1, "it links once and then leaves the link to the other node");
         assert!(!node.is_finished());
         node.abort();
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_replaced_node_takes_the_link_back_only_when_no_node_here_has_it() {
+        let (addr, tries) = replacing_hub().await;
+        let d = scratch("replaced-again");
+        let path = d.join("node.json");
+        let c = NodeConfig { hub: addr, machine: "lab".into(), token: "same".into(), sb: None, python: None };
+        std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        // the other node on this computer has the link: it holds node.lock
+        let other = std::fs::File::create(lock_path(&path)).unwrap();
+        other.try_lock().unwrap();
+        assert!(link::held_elsewhere(&lock_path(&path)));
+        let node = tokio::spawn({
+            let path = path.clone();
+            async move { run(&path, Duration::from_millis(10), QUICK).await }
+        });
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        assert_eq!(tries.load(SeqCst), 1, "the two would take the link from each other in turns");
+        // that node is gone (it was run by hand, and stopped): this one is the machine's node again
+        drop(other);
+        assert!(!link::held_elsewhere(&lock_path(&path)));
+        tokio::time::sleep(Duration::from_millis(900)).await;
+        let n = tries.load(SeqCst);
+        assert!((2..=6).contains(&n), "{n}: it links again, on the slow timer");
+        assert!(!node.is_finished());
+        node.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_node_replaced_three_times_in_a_row_stops_taking_the_link_back() {
+        // another computer has this token: nothing on this one holds node.lock, and the hub keeps saying replaced
+        let (addr, tries) = replacing_hub().await;
+        let d = scratch("replaced-elsewhere");
+        let path = d.join("node.json");
+        let c = NodeConfig { hub: addr, machine: "lab".into(), token: "same".into(), sb: None, python: None };
+        std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        let node = tokio::spawn({
+            let path = path.clone();
+            async move { run(&path, Duration::from_millis(10), QUICK).await }
+        });
+        // (waits of 100 and 200 ms, then it would be every 400 ms for good)
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        assert_eq!(tries.load(SeqCst), 3, "the two computers would trade the link for ever");
+        assert!(!node.is_finished(), "it stays up, waiting to be paired again");
+        // pairing this computer again gives it a token of its own, and it links at once
+        let c = NodeConfig { token: "its-own".into(), ..c };
+        std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert!(tries.load(SeqCst) >= 4, "a new token is tried");
+        node.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[tokio::test]
+    async fn a_link_kept_for_a_long_stretch_starts_the_count_of_replacements_again() {
+        // (here every link counts as kept long enough, so no run of three ever builds up)
+        let (addr, tries) = replacing_hub().await;
+        let d = scratch("replaced-steady");
+        let path = d.join("node.json");
+        let c = NodeConfig { hub: addr, machine: "lab".into(), token: "same".into(), sb: None, python: None };
+        std::fs::write(&path, serde_json::to_string(&c).unwrap()).unwrap();
+        let slow = Slow { steady: Duration::ZERO, ..QUICK };
+        let node = tokio::spawn({
+            let path = path.clone();
+            async move { run(&path, Duration::from_millis(10), slow).await }
+        });
+        tokio::time::sleep(Duration::from_millis(2500)).await;
+        let n = tries.load(SeqCst);
+        assert!(n > 3, "{n}: it went on asking, on the slow timer");
+        node.abort();
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn waits_read_as_minutes() {
+        assert_eq!(minutes(SLOW.first), "5 minutes");
+        assert_eq!(minutes(SLOW.max), "30 minutes");
+        assert_eq!(minutes(Duration::from_secs(20)), "1 minute");
     }
 
     #[test]

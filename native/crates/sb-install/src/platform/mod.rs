@@ -228,6 +228,12 @@ pub fn home() -> PathBuf {
     dirs::home_dir().unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Where `switchboard-node install` puts the node on a Mac and on Linux (sb-node's install_path).
+#[cfg_attr(windows, allow(dead_code))]
+pub fn node_program() -> PathBuf {
+    home().join(".local/bin/switchboard-node")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

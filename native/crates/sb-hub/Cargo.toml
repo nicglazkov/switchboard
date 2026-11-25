@@ -25,7 +25,8 @@ serde_json.workspace = true
 # The shared screen (shared.rs): the same serializer the desktop app replays.
 sb-core = { path = "../sb-core", features = ["grid"] }
 alacritty_terminal.workspace = true
+# A link's socket is split so one task reads it and another writes (nodeapi.rs). Already in Cargo.lock.
+futures-util = "=0.3.34"
 
 [dev-dependencies]
 tokio-tungstenite = "=0.29.0"
-futures-util = "=0.3.34"

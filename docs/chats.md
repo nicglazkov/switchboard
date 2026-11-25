@@ -16,8 +16,8 @@ known yet says **cache ?**.
 
 | Size | Cold, going back... |
 |---|---|
-| **Under 60k tokens** | is cheap anyway. Resume |
-| **60k to 150k** | reads it all again. Start fresh is cheaper if you don't need the whole history |
+| **Under 80k tokens** | is cheap anyway. Resume |
+| **80k to 150k** | reads it all again. Start fresh is cheaper if you don't need the whole history |
 | **150k or more** | reads it all again at full price, and the guard holds your message first |
 
 ## In a chat's terminal
@@ -61,10 +61,17 @@ message suggests Start fresh; a warm chat, Resume; a chat within a tenth of wher
     or 2 (1-hour cache), plain input 1, and output 5. Your plan may weigh them differently, so they are
     estimates.
 
-    - **Resume:** the whole chat, read from the cache (warm) or written to it again (cold).
+    - **Resume:** the whole chat, read from the cache (warm) or written to it again (cold). Cold, about 29k of it
+      is still cached (Claude Code's own instructions and tools, the same in every chat), so that part is cheap.
     - **Start fresh:** writing the summary (a condensed copy of the chat: your messages and Claude's replies,
-      without tool output, plus about 2,000 tokens of summary) and the new chat reading that summary. When a summary
-      written after the last reply already exists, it is used again for free.
+      without tool output, plus about 2,400 tokens of summary) and starting the new chat. A new chat is not empty:
+      it holds about 58k tokens of its own before your summary (Claude Code's instructions, tools, CLAUDE.md and
+      memory), about half of it already cached, and it writes a short recap. That comes to about 68k. When a
+      summary written after the last reply already exists, it is used again for free.
+
+    These sizes are medians measured over 178 fresh starts (October 20 to November 21, 2026) on one setup; yours
+    will differ with your tools and CLAUDE.md. In that sample Start fresh paid off from about 75k to 80k tokens of
+    context, which is why chats under 80k are called small.
 
     The details' **How is this estimated?** link shows the numbers for that chat.
 
@@ -82,7 +89,10 @@ the whole chat again by surprise. In the terminal you see what it would cost, an
 - **Keep going:** send the same message again, or type `go`, within 15 minutes.
 
 On the board the chat moves to **Needs you** with **Message on hold**, and its details offer **Send anyway** and
-**Start fresh**. Commands starting with `/` are never held.
+**Start fresh**. Commands starting with `/` are never held. Neither is anything nobody typed: a prompt a scheduled
+task or a loop fires, a background task reporting back, or a message from another agent. Nobody is there to
+answer, so holding one would only stall the work. A message that starts with pasted text is yours, and is held
+like any other.
 
 ## Start a new chat
 

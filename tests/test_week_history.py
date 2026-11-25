@@ -174,7 +174,8 @@ class WeekHistoryTest(unittest.TestCase):
         self.assertEqual(again.view(32, RESET, NOW), self.h.view(32, RESET, NOW))
         self.assertEqual(len(again.view(32, RESET, NOW)[1]), 4)   # 75:40 to 78:25 after the reset: four hours
         self.assertFalse(again.record(32, RESET, NOW - 3 * HOUR + 11 * 15 * MIN + MIN))  # still 15 minutes apart
-        self.assertEqual(list(self.path.parent.iterdir()), [self.path])            # written in place, no temp left
+        self.assertEqual(sorted(p.name for p in self.path.parent.iterdir()),       # no temp left; the file from
+                         [self.path.name, self.path.name + '.bak'])                # before its last write is kept
 
     def test_a_broken_file_starts_empty(self):
         for text in ('', '{', '[]', '{"reset": "x", "samples": []}', '{"reset": 1, "samples": [[1]]}'):

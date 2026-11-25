@@ -76,10 +76,11 @@ class CombineTest(CompactBase):
 class CostTest(CompactBase):
     def test_the_same_weights_as_start_fresh(self):
         c = self.sb.compact_cost(30_000)
-        self.assertEqual(c['summary'], round((30_000 + 500) * 1.25 + 2_000 * 5))
-        self.assertEqual(c['first'], 12_000)
+        self.assertEqual(c['summary'], round((30_000 + 500) * 1.25 + 2_400 * 5))
+        self.assertEqual(c['first'], 68_100)  # a new chat's own start, as in cost_model
+        self.assertEqual(c['each'], 6_060)
         self.assertEqual(c['total'], c['summary'] + c['first'])
-        self.assertTrue(c['text'].startswith('About 60k up front: writing one summary of the whole thread 48k'))
+        self.assertTrue(c['text'].startswith('About 118k up front: writing one summary of the whole thread 50k (it reads 30k of notes and condensed chats) + the new chat 68k'))
         self.assertIn('API prices', c['text'])
         r = self.sb.rpc({'verb': 'thread_cost', 'sids': [SID_1], 'tokens': 30_000}, NOW, agents=[])
         self.assertEqual(r['total'], c['total'])

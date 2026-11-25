@@ -174,3 +174,36 @@ usage that will expire unused protects nothing.
   addresses, and `SB_SERVER_TS_URL` the server on Tailscale. The Android app gets its server addresses at build
   time and generates its cleartext network config from them. The design lab works out the live app from its own
   address. Fixtures use documentation addresses (192.0.2.x, 100.64.0.x).
+- 2026-11-21: The server checks the address each request comes from, not only its `Host`: loopback, RFC 1918, link-local, 100.64.0.0/10, IPv6 ULA and link-local are let in by default, written out as networks because Python's `is_private` also takes documentation and benchmark ranges. `peers` in server.json adds networks and `["any"]` turns the check off; the default bind stays every address, so no existing setup changes.
+- 2026-11-21: One way to read a store (`durable.load`): absent, ok, recovered from `.bak`, or broken. A broken file is renamed `.bad-<time>` (three kept), never overwritten by something the server does by itself, and only a save the user makes starts it again. Each store names its own closed state instead of its defaults: server.json loopback only, fleet.json `roam` off, prefs.json no opt-in migration and no auto-stop, keep/tabs no auto-stop. The stores in features.py and budget.py are all user saves or data the server gathers again, so their writers always force. `GET /api/server` carries the list as `stores`; `Library.broken` was not in any API before and is added there too. The apps show nothing yet.
+- 2026-11-21: For the stores read with `keep` (server.json, fleet.json, prefs.json, the spend and week files) the `.bak` is made to match the file on every good load, not only when there is none. A copy made once went stale: someone who tightened server.json by hand and later made a typo got the older, wider file back.
+- 2026-11-21: A store that is there and will not open (EACCES, EMFILE, a Windows sharing violation) is not damage. `durable.load` reads it again twice (0.05 s, 0.2 s; only the first time, so a store that stays shut does not slow every read), then answers from `.bak` without putting anything aside or writing the copy back. It is `recovered` with nothing kept, and the mark goes when the file opens again. `broken` only when the copy is no good either.
+- 2026-11-21: A `.bak` must not keep what the user took out. For fleet.json, devices.json, widget_tokens.json (`durable.put(fresh=True)`) and the helper's secrets.json the copy is written after the save, from the new file, as a file of its own, so a removed machine, push token or secret (or a replaced secret) is in neither. If that copy cannot be made the old one is deleted. The other stores keep "the file before its last change": nothing in them is a grant. A fleet.json read from its copy has `roam` forced off and saved that way, as the broken path does, since a hand edit that turned it off may be what was lost.
+- 2026-11-21: In the helper, damage is what a file holds (not JSON, wrong shape), never a failed open. `_jsafe` leaves a file it could not open where it is, hands back `{}` and remembers the path (`_unopened`) until the next read works; `_jput(keep=True)` and the secrets save refuse a remembered path, so nothing made from that `{}` is written. A rename or a secret change fails with "try again"; housekeeping (dropping, carrying and flushing names, marks) skips the pass. No retry and no read of `.bak` here, unlike the server: every one of these runs again soon.
+- 2026-11-21: The helper has its own small copy of the safe read (`_jsafe`, `_jput(keep=True)`), because sb.py is copied alone to each machine. Same names on disk (`.bak`, `.bad-<time>`, three kept), but no "broken, refuse to write": its processes are short and its writers are things the user just did. Only the read-change-write files use it (names, replaced and dismissed marks, the library index, the secrets file). Readers on the hot path (`_jdict`) only check the shape and never move a file. flags.json stays a plain cache.
+- 2026-11-21: `POST /api/server/update` refuses when the server cannot read its own version, since the step-back check has nothing to compare with. The server still does not check the release signature itself: it has no public key and no Ed25519 in the standard library (the apps hold the key and check `latest.json.sig`; the server only passes it on). The kit's SHA-256 comes from the client, so a caller on your network can still pick any official release at or above the current one. Checking the signature on the server needs the key shipped in the kit and a verifier, and is left for later.
+- 2026-11-21: Calls to the hub and from the helper to the server use an opener with no proxies. GitHub calls keep the proxy. Tool output is decoded as UTF-8 with stray bytes replaced, except the Windows tools (`schtasks`, `whoami`), which answer in the console's code page.
+- 2026-11-21: A node the hub turned down (401) or that another node replaced no longer waits for good. It asks
+  again after 5 minutes, then twice as long each time up to 30, and at once when it is paired again. A replaced
+  node holds back while another node on the same computer has the link (a lock on `node.lock` next to
+  `node.json`), so two nodes there never take the link from each other in turns.
+- 2026-11-21: The hub keeps the list of linked machines as it was before the last change (`nodes.json.bak`) and
+  starts from that copy when `nodes.json` does not read, instead of with no machines. A machine that is removed
+  is taken out of the copy too, so falling back never links it again; one paired since the copy pairs again.
+- 2026-11-21: The hub's limit of 16 terminals counts chats with a terminal open, not the devices looking at them.
+  Views have a limit of their own, four for each terminal allowed (64), set with `SWITCHBOARD_HUB_MAX_VIEWERS`;
+  `SWITCHBOARD_HUB_MAX` still sets the terminals, and the views follow it.
+- 2026-11-21: `switchboard-node uninstall` does not tell the hub: the computer stays listed, offline, until it is
+  removed in Settings, Machines. The app's uninstaller keeps the node unless the user also removes their data,
+  since the node is what links the computer, not part of the app; the server's uninstall removes it only when
+  node.json names that same machine as its hub.
+- 2026-11-21: A node replaced three times in a row, without an hour on the link in between, stops taking the link
+  back until it is paired again or restarted: that is another computer with the same token, which the lock file
+  cannot see, and the two would otherwise trade the link for ever. A turned-down token is still asked about.
+- 2026-11-21: A request still running when a node's link ends gets ten seconds to finish before its sb.py is
+  stopped, and the next link does not wait for it: stopped at once, a hub restart could catch a verb between two
+  steps (library_put between removing a tool's folder and putting the new one in place, a relaunch after it took
+  the carried message and before it queued the job).
+- 2026-11-21: switchboard-node uninstall on a Mac and on Linux removes the files first and stops the node last, and
+  prints each line as it goes: run from a terminal the node opened, stopping the node ends the uninstaller too.
+  Windows still stops the node first, since it cannot delete a program that is running.

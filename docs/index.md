@@ -104,7 +104,7 @@ one window, and tells you what each one would cost to go back to.
 <li markdown>**Install the server** on a computer that stays on, with one line:
 
 ```sh
-curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash
+curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz
 ```
 </li>
 <li markdown>**Add your computers.** Setup shows a one-time code and a line to paste on each Mac, Linux or Windows
@@ -112,6 +112,10 @@ computer where you use Claude Code. [More](machines.md)</li>
 <li markdown>**Open the app** on the computers you look at the board from. On your home network it finds the server
 by itself. [Get the app](apps.md)</li>
 </ol>
+
+The apps are for Mac, Windows and Linux; there is no phone app to download today. The server is best on a Mac or
+Linux computer that stays on: a [Windows server](install.md#a-windows-server) does less, and a laptop's server is
+off while it sleeps. [Away from home](install.md#away-from-home) the app needs a VPN such as Tailscale.
 
 [Read the full install guide :octicons-arrow-right-24:](install.md){ .md-button }
 

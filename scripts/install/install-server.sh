@@ -281,6 +281,48 @@ if [ "$FANCY" = 1 ]; then
 fi
 
 # ---------------------------------------------------------------- uninstall
+# A switchboard-node on this machine was not put here by this installer: it is what links a computer to a server,
+# and that server may be another one. It goes with the server only when node.json says its hub is this machine.
+node_hub_is_here() {  # unsure counts as no
+  local cfg="${SWITCHBOARD_NODE_CONFIG:-$CFG/node.json}" hub host mine
+  [ -f "$cfg" ] || return 1
+  hub=$(sed -n 's/.*"hub"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$cfg" | head -n 1)
+  host=${hub#*://}; host=${host%%/*}
+  case "$host" in
+    \[*) host=${host#\[}; host=${host%%\]*} ;;  # [fd7a::1]:8132
+    *:*:*) ;;                                   # a bare IPv6 address
+    *) host=${host%:*} ;;
+  esac
+  host=$(printf '%s' "$host" | tr 'A-Z' 'a-z')
+  [ -n "$host" ] || return 1
+  case "$host" in localhost|127.*|::1) return 0 ;; esac
+  # this machine's own names and addresses, as it gives them itself (nothing is looked up)
+  for mine in $({ hostname; hostname -s; hostname -I; ifconfig | awk '$1 == "inet" || $1 == "inet6" { print $2 }'
+                  ip -o addr | awk '{ print $4 }'; } 2>/dev/null | tr 'A-Z' 'a-z'); do
+    [ "${mine%%[/%]*}" = "$host" ] && return 0
+  done
+  return 1
+}
+NODE_GONE=0 NODE_SAID=""
+node_part() {
+  [ -x "$BIN/switchboard-node" ] || return 0
+  if node_hub_is_here; then
+    if NODE_SAID=$("$BIN/switchboard-node" uninstall 2>&1); then NODE_GONE=1; else NODE_GONE=2; fi
+  else
+    NODE_GONE=3
+  fi
+}
+node_lines() {  # what became of the node, one line each
+  case "$NODE_GONE" in
+    1) printf '%s\n' "This machine was linked to its own server with switchboard-node, which was removed too:"
+       printf '%s\n' "$NODE_SAID" | sed 's/^/  /' ;;
+    2) printf '%s\n' "This machine is linked to its own server with switchboard-node, which could not remove itself:"
+       printf '%s\n' "$NODE_SAID" | sed 's/^/  /'
+       printf '%s\n' "It is still installed. Update it and run: switchboard-node uninstall" ;;
+    3) printf '%s\n' "This computer is still linked to a Switchboard server as one of its computers: switchboard-node"
+       printf '%s\n' "was left as it is. To remove that too, run: switchboard-node uninstall" ;;
+  esac
+}
 uninstall() {
   [ -x "$BIN/switchboard" ] && "$BIN/switchboard" stop >/dev/null 2>&1 || true
   if [ "$OSN" = mac ]; then
@@ -295,6 +337,7 @@ uninstall() {
     done
     systemctl --user daemon-reload >/dev/null 2>&1 || true
   fi
+  node_part
   rm -rf "$APP" "$SHARE/app.old" "$SHARE/downloads" "$SHARE/run" "$BIN/switchboard-hub" "$BIN/switchboard-hub.old" "$BIN/switchboard"
 }
 if [ "$UNINSTALL" = 1 ]; then
@@ -302,6 +345,7 @@ if [ "$UNINSTALL" = 1 ]; then
     uninstall
     say "Switchboard is removed from this machine. Your settings ($CFG) and history ($SHARE) are still there;"
     say "delete those two folders too if you don't want them."
+    node_lines
     exit 0
   fi
   header "removing the server"
@@ -312,6 +356,7 @@ if [ "$UNINSTALL" = 1 ]; then
   printf '    %s%-29s%s %ssettings%s\n' "$ACC" "$(tilde "$CFG")" "$R" "$D" "$R" >&3
   printf '    %s%-29s%s %shistory and logs%s\n' "$ACC" "$(tilde "$SHARE")" "$R" "$D" "$R" >&3
   printf '  %sDelete those two folders too if you do not want them.%s\n\n' "$D" "$R" >&3
+  [ "$NODE_GONE" = 0 ] || { node_lines | sed 's/^/  /'; printf '\n'; } >&3
   exit 0
 fi
 

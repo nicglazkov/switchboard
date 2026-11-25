@@ -629,8 +629,32 @@ pub fn state_path() -> Option<PathBuf> {
     crate::cache::settings_dir().map(|d| d.join("update.json"))
 }
 
+/// Reads update.json. One that does not read (cut short, edited by hand) counts as nothing noted, as before, but
+/// the file as it was is copied to update.json.bad first and the log says so: the next save writes over it, and
+/// with it would go which build was rolled back and is not to be offered again.
 pub fn load_state(path: &Path) -> UpdState {
-    std::fs::read(path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default()
+    let Ok(bytes) = std::fs::read(path) else { return UpdState::default() };
+    match serde_json::from_slice(&bytes) {
+        Ok(s) => s,
+        Err(e) => {
+            let mut bad = path.as_os_str().to_owned();
+            bad.push(".bad");
+            // (it is read many times before anything saves over it: kept and said once)
+            if std::fs::read(&bad).ok().as_deref() != Some(&bytes[..]) {
+                match std::fs::write(&bad, &bytes) {
+                    Ok(()) => log::warn!(
+                        "{} does not read ({e}): starting from nothing noted; it is kept as {}",
+                        path.display(),
+                        Path::new(&bad).display()
+                    ),
+                    Err(w) => {
+                        log::warn!("{} does not read ({e}), and no copy of it could be kept: {w}", path.display())
+                    }
+                }
+            }
+            UpdState::default()
+        }
+    }
 }
 
 pub fn save_state(path: &Path, s: &UpdState) -> std::io::Result<()> {
@@ -1152,6 +1176,36 @@ mod tests {
         save_state(&path, &UpdState::default()).unwrap();
         assert!(!path.exists());
         assert_eq!(load_state(&path), UpdState::default());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_state_file_that_does_not_read_is_kept_as_bad_before_it_counts_as_empty() {
+        let dir = std::env::temp_dir().join(format!("sb-upd-bad-{}", std::process::id()));
+        let path = dir.join("update.json");
+        let bad = dir.join("update.json.bad");
+        assert_eq!(load_state(&path), UpdState::default());
+        assert!(!bad.exists(), "a missing file is not a bad one");
+        // one cut short reads as nothing noted, and what was in it is kept beside it
+        let s = UpdState { bad_build: Some("20261013120000".into()), ..Default::default() };
+        save_state(&path, &s).unwrap();
+        let whole = std::fs::read(&path).unwrap();
+        let cut = &whole[..whole.len() / 2];
+        std::fs::write(&path, cut).unwrap();
+        assert_eq!(load_state(&path), UpdState::default());
+        assert_eq!(std::fs::read(&bad).unwrap(), cut);
+        assert_eq!(std::fs::read(&path).unwrap(), cut, "the file itself is left for the next save");
+        // read again, the copy is not written again
+        std::fs::remove_file(&bad).unwrap();
+        std::fs::write(&bad, cut).unwrap();
+        let first = std::fs::metadata(&bad).unwrap().modified().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(30));
+        assert_eq!(load_state(&path), UpdState::default());
+        assert_eq!(std::fs::metadata(&bad).unwrap().modified().unwrap(), first);
+        // and a good file after it reads as it always did, with the copy still there
+        save_state(&path, &s).unwrap();
+        assert_eq!(load_state(&path), s);
+        assert_eq!(std::fs::read(&bad).unwrap(), cut);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

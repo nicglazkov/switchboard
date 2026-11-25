@@ -19,6 +19,18 @@ HUB = (os.environ.get('SWITCHBOARD_HUB_URL') or f'http://127.0.0.1:{HUB_PORT}').
 PREFIX = 'node:'
 
 
+_direct = None
+
+
+def direct_open(req, timeout=None):
+    """urlopen for the hub on this computer: straight there, never through a proxy. urllib takes http_proxy from
+    the environment, and with no no_proxy beside it a call to 127.0.0.1 went to the proxy, which cannot reach it."""
+    global _direct
+    if _direct is None:
+        _direct = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    return _direct.open(req, timeout=timeout)
+
+
 def hub_call(method, path, body=None, timeout=10, hub=None):
     """JSON from the hub's /internal routes; OSError with the hub's own words when it says no.
 
@@ -28,7 +40,7 @@ def hub_call(method, path, body=None, timeout=10, hub=None):
     data = None if body is None else json.dumps(body).encode()
     req = urllib.request.Request((hub or HUB) + path, data=data, method=method, headers={'Content-Type': 'application/json'})
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as r:
+        with direct_open(req, timeout=timeout) as r:
             return json.loads(r.read() or b'{}')
     except urllib.error.HTTPError as e:
         try:
@@ -84,7 +96,7 @@ def sync(fleet, hub=None):
         try:  # one machine that cannot be taken (an odd name, a full list) never stops the others
             text = lambda k: n[k] if isinstance(n.get(k), str) else ''
             m = {'name': name, 'label': text('label') or name, 'target': PREFIX + name, 'os': text('os')}
-            changed |= fleet.add_machine(m)
+            changed |= fleet.add_machine(m, by_user=False)
             if n.get('online') and seen.get(name) != n.get('since') and (fleet.machines.get(name) or {}).get('target') == m['target']:
                 seen[name] = n.get('since')
                 fleet.poll_one(name)  # just linked (or linked again): it shows now, not at the next poll
@@ -118,7 +130,7 @@ def downloads_base(cfg_dir, host=None, kit_node=KIT_NODE):
     if os.environ.get('SWITCHBOARD_DOWNLOADS'):
         return os.environ['SWITCHBOARD_DOWNLOADS'].rstrip('/')
     try:
-        d = json.loads((Path(cfg_dir) / 'downloads.json').read_text()) if cfg_dir else {}
+        d = json.loads((Path(cfg_dir) / 'downloads.json').read_text(encoding='utf-8')) if cfg_dir else {}
     except (OSError, ValueError):
         d = {}
     d = d if isinstance(d, dict) else {}

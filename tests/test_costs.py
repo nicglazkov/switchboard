@@ -7,18 +7,48 @@ class CostModelTest(unittest.TestCase):
     def setUp(self):
         self.sb = fresh_sb(tempfile.mkdtemp())
 
-    def test_145k_cold_matches_the_measured_example(self):
+    def test_145k_cold(self):
         c = self.sb.cost_model(145_000, condensed=55_000)
-        self.assertEqual(c['resume']['cold'], 290_000)            # a full re-cache at the 1 hour write ratio
-        self.assertEqual(c['fresh']['first'], 12_000)             # the note, about 6k, cached for the new chat
-        self.assertEqual(c['fresh']['summary'], 79_375)            # 55.5k in (cached 5 min) + 2k out at 5x
-        self.assertEqual(c['fresh']['total'], 91_375)
+        self.assertEqual(c['resume']['cold'], 234_900)            # 116k written again at the 1 hour ratio, 29k still cached
+        self.assertEqual(c['fresh']['first'], 68_100)             # a new chat's own 58k (29k of it cached), the note, the recap
+        self.assertEqual(c['fresh']['summary'], 81_375)            # 55.5k in (cached 5 min) + 2.4k out at 5x
+        self.assertEqual(c['fresh']['total'], 149_475)
+        self.assertEqual(c['fresh']['each'], 6_060)               # every later reply reads the new chat's 60.6k from cache
         self.assertEqual(c['pick'], {'warm': 'resume', 'cold': 'fresh'})
-        self.assertEqual(c['text']['cold'], 'Start fresh: about 91k (summary 79k + new chat 12k). '
-                                            'Resume: about 290k, because the cache is cold and all 145k is read again.')
+        self.assertEqual(c['text']['cold'], 'Start fresh: about 149k (summary 81k + new chat 68k). '
+                                            'Resume: about 235k, because the cache is cold and all 145k is read again.')
         self.assertIn('because the cache is warm', c['text']['warm'])
         self.assertEqual(c['resume']['warm'], 14_500)
         self.assertEqual(c['band'], 'medium')
+
+    def test_the_constants_are_the_measured_ones(self):
+        # 178 fresh starts, 2026-10-20 to 2026-11-21 (docs/measurements.md)
+        sb = self.sb
+        self.assertEqual((sb.SMALL_CTX, sb.NEW_CHAT_CTX, sb.WARM_PREFIX), (80_000, 58_000, 29_000))
+        self.assertEqual((sb.NOTE_TOKENS, sb.SUMMARY_OUT_TOKENS, sb.RECAP_OUT_TOKENS, sb.CONDENSED_SHARE), (2_600, 2_400, 400, 0.05))
+
+    def test_the_median_measured_chat_comes_out_near_what_it_cost(self):
+        # the median fresh start: a 158k chat, 9.8k condensed. Measured: going back 260k, Start fresh 107k (87k when
+        # the note loaded inline). The old model said 316k and 28k.
+        c = self.sb.cost_model(158_000, condensed=9_800)
+        self.assertAlmostEqual(c['resume']['cold'], 260_000, delta=260_000 * 0.05)
+        self.assertGreater(c['fresh']['total'], 85_000)
+        self.assertLess(c['fresh']['total'], 110_000)
+        self.assertAlmostEqual(c['fresh']['summary'], 25_000, delta=2_500)
+
+    def test_a_cold_chat_smaller_than_the_shared_start_is_all_cache(self):
+        c = self.sb.cost_model(20_000, condensed=1_000)
+        self.assertEqual(c['resume']['cold'], 2_000)
+        self.assertEqual(c['pick']['cold'], 'resume')
+
+    def test_start_fresh_is_only_picked_where_it_was_measured_to_pay(self):
+        # measured break-even: 75k to 80k of context (under 70k, 2 of 5 fresh starts lost)
+        pick = lambda ctx: self.sb.cost_model(ctx, condensed=round(ctx * 0.05))['pick']['cold']
+        self.assertEqual([pick(n) for n in (40_000, 60_000, 70_000, 79_999, 80_000, 100_000, 200_000)],
+                         ['resume', 'resume', 'resume', 'resume', 'fresh', 'fresh', 'fresh'])
+        c = self.sb.cost_model(90_000, condensed=55_000)  # a chat that is nearly all conversation: the summary costs more
+        self.assertEqual(c['pick']['cold'], 'resume')
+        self.assertGreater(c['fresh']['total'], c['resume']['cold'])
 
     def test_40k_is_small_and_resume_stays_the_pick(self):
         for warm in (True, False):
@@ -31,31 +61,34 @@ class CostModelTest(unittest.TestCase):
     def test_300k_is_big(self):
         c = self.sb.cost_model(300_000, condensed=55_000)
         self.assertEqual(c['band'], 'big')
-        self.assertEqual(c['resume']['cold'], 600_000)
+        self.assertEqual(c['resume']['cold'], 544_900)
         self.assertEqual(c['pick']['cold'], 'fresh')
         self.assertEqual(c['band_text']['cold'], '300k, big: resuming re-reads all 300k at full price')
 
     def test_a_written_summary_costs_nothing(self):
         c = self.sb.cost_model(145_000, condensed=55_000, summary_ready=True, note=5_000)
         self.assertEqual(c['fresh']['summary'], 0)
-        self.assertEqual(c['fresh']['total'], 10_000)
-        self.assertTrue(c['text']['cold'].startswith('Start fresh: about 10k (summary already written, new chat 10k).'))
+        self.assertEqual(c['fresh']['total'], 72_900)
+        self.assertTrue(c['text']['cold'].startswith('Start fresh: about 73k (summary already written, new chat 73k).'))
 
     def test_no_count_yet_is_a_labelled_guess(self):
         c = self.sb.cost_model(145_000)
         self.assertTrue(c['condensed_guessed'])
-        self.assertEqual(c['condensed'], 55_000)
+        self.assertEqual(c['condensed'], 7_250)  # 5% of the context, the measured median
         self.assertIn('guessed from the size', c['how'])
+        self.assertEqual(self.sb.cost_model(2_000_000)['condensed'], 55_000)  # never more than a condensed transcript holds
 
     def test_how_names_every_input_and_ratio(self):
         how = self.sb.cost_model(145_000, condensed=55_000)['how']
         for bit in ('145k of context', 'condensed transcript of 55k', 'cache write 2', 'cache read 0.1', 'output 5',
-                    'API prices', 'Plan usage may not weigh'):
+                    'API prices', 'Plan usage may not weigh', 'about 58k of its own', '29k of it', 'recap',
+                    'all but the 29k', '178 fresh starts'):
             self.assertIn(bit, how)
+        self.assertNotIn('are left out', how)
         self.assertNotIn('\u2014', how)
 
     def test_bands(self):
-        self.assertEqual([self.sb.ctx_band(n) for n in (0, 59_999, 60_000, 149_999, 150_000)],
+        self.assertEqual([self.sb.ctx_band(n) for n in (0, 79_999, 80_000, 149_999, 150_000)],
                          ['small', 'small', 'medium', 'medium', 'big'])
         self.assertEqual(self.sb.band_words(145_000, False),
                          '145k, resuming re-reads 145k; Start fresh is cheaper if you do not need the history')
@@ -136,6 +169,6 @@ class ListCarriesTheCostTest(RpcBase):
         self.assertGreater(s['condensed'], 0)
         c = s['cost']
         self.assertEqual((c['ctx'], c['band'], c['condensed_guessed']), (145_000, 'medium', False))
-        self.assertEqual(c['resume']['cold'], 290_000)
+        self.assertEqual(c['resume']['cold'], 234_900)
         self.assertEqual(set(c['text']), {'warm', 'cold'})
         self.assertIn('How this is estimated', c['how'])

@@ -16,8 +16,9 @@
 # Everything else goes to install-server.sh (see its --help: --no-hub, --no-service, --yes, --plain, ...).
 set -euo pipefail
 
-# pack-server-kit.sh --base URL fills this in. Empty in the repository: there is no public download yet.
-KIT_DEFAULT=""
+# Where the kit comes from when nothing else says: the newest public release. pack-server-kit.sh --base URL
+# replaces it for a kit published somewhere else.
+KIT_DEFAULT="https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz"
 
 main() {
   local kit="${SWITCHBOARD_KIT_URL:-$KIT_DEFAULT}" sum="" pass=()

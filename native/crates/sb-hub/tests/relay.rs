@@ -233,6 +233,47 @@ async fn at_most_max_terminals() {
     assert!(s3.out.contains("PID"), "{s3:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn the_terminal_limit_counts_chats_not_the_devices_looking_at_them() {
+    let lab = lab(|c| {
+        c.max_terms = 1;
+        c.max_viewers = 3;
+    })
+    .await;
+    let opened = |s: &Seen| has_type(s, "snapshot_end") || s.close.is_some();
+    // one chat, shown on three devices: one terminal, so the limit of one is not in the way
+    let mut views = vec![];
+    for _ in 0..3 {
+        let mut v = lab.connect(&lab.ticket("c03ef0d9"), None, "&proto=2").await;
+        let mut s = Seen::default();
+        read_until(&mut v, &mut s, Duration::from_secs(10), opened).await;
+        assert_eq!(s.close, None, "{s:?}");
+        views.push(v);
+    }
+    let h = lab.get("/healthz").await;
+    assert_eq!((h["open"].as_u64(), h["viewers"].as_u64(), h["max_viewers"].as_u64()), (Some(1), Some(3), Some(3)));
+    // a fourth view is past the viewer limit, and says so
+    let t4 = lab.ticket("c03ef0d9");
+    let mut v = lab.connect(&t4, None, "&proto=2").await;
+    let mut s = Seen::default();
+    read_until(&mut v, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
+    assert_eq!(s.close, Some(4429));
+    assert!(s.texts[0]["error"].as_str().unwrap().contains("3 views of terminals are open"), "{s:?}");
+    // with a view to spare, another chat is still a second terminal
+    drop(views.pop());
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    let mut v = lab.connect(&lab.ticket("b52d78ef"), None, "&proto=2").await;
+    let mut s = Seen::default();
+    read_until(&mut v, &mut s, Duration::from_secs(5), |s| s.close.is_some()).await;
+    assert_eq!(s.close, Some(4429));
+    assert!(s.texts[0]["error"].as_str().unwrap().contains("1 terminals are open"), "{s:?}");
+    // ... and the refused ticket for the open chat was not spent
+    let mut v = lab.connect(&t4, None, "&proto=2").await;
+    let mut s = Seen::default();
+    read_until(&mut v, &mut s, Duration::from_secs(10), opened).await;
+    assert_eq!(s.close, None, "{s:?}");
+}
+
 /// Running and not a zombie. `ps` rather than /proc, so the test also runs on macOS.
 fn alive(pid: &str) -> bool {
     let out = std::process::Command::new("ps").args(["-o", "stat=", "-p", pid]).output();

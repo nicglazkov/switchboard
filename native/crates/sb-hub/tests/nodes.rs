@@ -416,3 +416,41 @@ async fn a_node_that_stopped_reading_is_unlinked() {
     typing.abort();
     drop(node);
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_send_that_waits_on_a_slow_node_does_not_hold_up_what_the_node_says() {
+    let lab = lab_with(|c| c.link_patience = Duration::from_secs(30)).await;
+    let token = lab.pair("lab").await;
+    let mut node = lab.node(&token).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let mut term = lab.term("c03ef0d9").await;
+    let Got::Msg(ToNode::TermOpen { ch, .. }) = from_hub(&mut node).await else { panic!("expected term.open") };
+    node.send(Message::Binary(link_proto::frame(ch, b"up\r\n").into())).await.unwrap();
+    viewer(&mut term, |_, o| o.contains("up")).await;
+    // The node is busy and takes nothing for a while (not for good: the hub's patience is long here), while a
+    // viewer's paste fills the connection, so the hub's next send to it waits.
+    let typing = tokio::spawn(async move {
+        let piece = vec![b'x'; 256 * 1024];
+        for _ in 0..128 {
+            if term.send(Message::Binary(piece.clone().into())).await.is_err() {
+                break;
+            }
+        }
+        term
+    });
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    // What the node says meanwhile is still heard: the hub reads the link while that send waits.
+    let hello = FromNode::Hello { version: "9.9.10".into(), os: "linux".into(), label: "labhost".into() };
+    node.send(Message::Text(link_proto::encode(&hello).into())).await.unwrap();
+    let end = std::time::Instant::now() + Duration::from_secs(5);
+    let mut version = String::new();
+    while version != "9.9.10" && std::time::Instant::now() < end {
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        let (_, v) = lab.http("GET", "/internal/nodes", "").await;
+        assert_eq!(v["nodes"][0]["online"], true, "the link is still up");
+        version = v["nodes"][0]["version"].as_str().unwrap_or("").to_string();
+    }
+    assert_eq!(version, "9.9.10", "the hub did not read the link while its send waited");
+    typing.abort();
+    drop(node);
+}

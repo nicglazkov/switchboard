@@ -47,12 +47,13 @@ and `switchboard logs` shows the last lines of each. On a Windows server, use
     the server to pick the address it gives out.
 
     Once connected, the app saves every address the server knows, so it still connects from elsewhere when the
-    server is reachable there. **Settings, Machines, Server addresses** lists them.
+    server is reachable there. **Settings, Server, Server addresses** lists them.
 
 ??? failure "A computer is offline, or not answering"
     Its chats come back when it does. On that computer:
 
-    - **Linked with a code:** `switchboard-node status` says which server it's linked to. Its log is
+    - **Linked with a code:** `switchboard-node status` says which server it's linked to. It keeps that one
+      address: if the server's address changed, link the computer again with a new code. Its log is
       `~/Library/Logs/switchboard-node.log` on a Mac, `journalctl --user -u switchboard-node` on Linux with
       systemd, and `~/.local/share/switchboard/node.log` on Linux without it.
     - **Added over ssh:** check that its ssh server is on and that `ssh <computer>` works from the server.
@@ -91,6 +92,10 @@ and `switchboard logs` shows the last lines of each. On a Windows server, use
     The message says why, like "GitHub didn't answer", or "The download page didn't answer" when your server
     uses its own download page. The server does the looking, so check that it can reach the internet.
     **Check now** in **Settings, Updates** tries again. [Updates](updates.md)
+
+??? failure "After a power cut my settings are back to defaults, or only the server's own computer can connect"
+    A settings file could not be read and had no good copy. The server's log names it, and the damaged file is
+    kept beside it as `<name>.bad-<date>-<time>`. [What each file does until you fix it](reference.md#copies-of-its-files)
 
 ??? failure "The terminal looks garbled"
     **Redraw** (++cmd+shift+r++, or ++ctrl+shift+r++ on Windows and Linux) asks for a fresh copy of the screen.

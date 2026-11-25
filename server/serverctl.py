@@ -13,6 +13,7 @@ and installs it only if it matches.
 import json, os, platform, re, shutil, socket, subprocess, sys, threading, time, urllib.request
 from pathlib import Path
 
+import durable
 import releases as releases_mod
 
 KIT = 'switchboard-server-kit.tar.gz'
@@ -36,14 +37,14 @@ def version():
     Cargo.toml when it runs from a checkout. ("", "") when neither says."""
     for f in (HERE.parent / 'VERSION',):
         try:
-            text = f.read_text().strip().splitlines()[0]
+            text = f.read_text(encoding='utf-8').strip().splitlines()[0]
         except (OSError, IndexError):
             continue
         m = re.match(r'(\d+\.\d+\.\d+)(?:\s*\(([0-9a-f]{4,40})\))?', text)
         if m:
             return m.group(1), m.group(2) or ''
     try:
-        toml = (HERE.parent / 'native' / 'Cargo.toml').read_text()
+        toml = (HERE.parent / 'native' / 'Cargo.toml').read_text(encoding='utf-8')
         m = re.search(r'^version = "(\d+\.\d+\.\d+)"', toml, re.M)
         if m:
             return m.group(1), ''
@@ -84,7 +85,8 @@ def why_not(m=None):
 
 def _probe(url, timeout=1.5):
     try:
-        with urllib.request.urlopen(url, timeout=timeout) as r:
+        # this computer's own hub and download page: never through a proxy (see nodes.direct_open)
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(url, timeout=timeout) as r:
             return r.read(4000)
     except Exception:
         return None
@@ -121,7 +123,7 @@ def update_dir(state):
 def update_state(state, now=None):
     """The last update's progress (selfupdate.py): {step, version, from, started, at, ok, error, ...}, or None."""
     try:
-        s = json.loads((update_dir(state) / 'state.json').read_text())
+        s = json.loads((update_dir(state) / 'state.json').read_text(encoding='utf-8'))
     except (OSError, ValueError):
         return None
     if not isinstance(s, dict):
@@ -155,7 +157,7 @@ def _os_name():
         return 'macOS ' + (platform.mac_ver()[0] or '')
     if sys.platform.startswith('linux'):
         try:
-            for line in Path('/etc/os-release').read_text().splitlines():
+            for line in Path('/etc/os-release').read_text(encoding='utf-8').splitlines():
                 if line.startswith('PRETTY_NAME='):
                     return line.split('=', 1)[1].strip().strip('"')
         except OSError:
@@ -232,7 +234,12 @@ def start_update(state, want, sha, busy_ok=False, now=None):
     if not r:
         raise PermissionError('Updates from GitHub are turned off on this server (SWITCHBOARD_RELEASES=off).')
     cur, _ = version()
-    if cur and vkey(want) < vkey(cur):
+    if not cur:
+        # It used to take any version then, an old one too: the check below needs something to compare with. The
+        # install line puts the VERSION file back.
+        raise ValueError('This server does not know its own version (its VERSION file is missing or damaged), so it '
+                         'cannot tell an update from a step back. Run the install line again on the server.')
+    if vkey(want) < vkey(cur):
         raise ValueError(f'This server already has {cur}.')
     now = now or time.time()
     d = update_dir(state)
@@ -248,7 +255,7 @@ def start_update(state, want, sha, busy_ok=False, now=None):
         _take_lock(d, now, running, busy_ok)
         first = {'step': 'starting', 'version': want, 'from': cur, 'started': now, 'at': now, 'ok': None, 'error': None}
         try:
-            (d / 'state.json').write_text(json.dumps(first))
+            durable.put(d / 'state.json', json.dumps(first))
             # The updater runs from a copy: the installer replaces the folder this one is in.
             tool = d / 'selfupdate.py'
             shutil.copyfile(HERE / 'selfupdate.py', tool)
@@ -259,7 +266,7 @@ def start_update(state, want, sha, busy_ok=False, now=None):
             detach(argv, 'switchboard-update', log_to=d / 'update.log')
         except BaseException as e:  # it never started: nothing is left that says an update is running
             try:
-                (d / 'state.json').write_text(json.dumps(dict(first, ok=False, error=f"The update couldn't start ({e}).")))
+                durable.put(d / 'state.json', json.dumps(dict(first, ok=False, error=f"The update couldn't start ({e}).")))
             except OSError:
                 pass
             (d / LOCK).unlink(missing_ok=True)

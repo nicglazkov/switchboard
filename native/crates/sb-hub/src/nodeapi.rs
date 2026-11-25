@@ -19,6 +19,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use futures_util::{Sink, SinkExt, StreamExt};
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::net::SocketAddr;
@@ -209,7 +210,7 @@ async fn node(ws: WebSocketUpgrade, State(hub): State<Arc<Hub>>, headers: Header
 
 /// Sends one message on a link. False if the node left, or took nothing for `patience`. A large message (a piece
 /// of a file) gets a second more for each 32 KB, so a slow link that is still moving is not dropped.
-async fn send(ws: &mut WebSocket, m: Message, patience: Duration) -> bool {
+async fn send(ws: &mut (impl Sink<Message> + Unpin), m: Message, patience: Duration) -> bool {
     let size = match &m {
         Message::Text(t) => t.len(),
         Message::Binary(b) => b.len(),
@@ -219,22 +220,45 @@ async fn send(ws: &mut WebSocket, m: Message, patience: Duration) -> bool {
     matches!(tokio::time::timeout(patience, ws.send(m)).await, Ok(Ok(())))
 }
 
-async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
+async fn serve_link(hub: Arc<Hub>, ws: WebSocket, name: String) {
     let patience = hub.cfg.link_patience;
     let (tx, mut rx) = tokio::sync::mpsc::channel(crate::link::LINK_BACKLOG);
     let link = Arc::new(Link::new(&name, hub.links.next_era(), unix_now(), tx));
     hub.links.insert(link.clone());
     log(format!("node {name} linked ({} linked)", hub.links.len()));
+    // Writing has a task of its own, as on the node. A send to a node that is slow to take it can wait for as long
+    // as `patience`, and done in the loop below it held up everything else on the link for that long: what the
+    // node was saying went unread (output, answers, a terminal's exit), and so did the check that it still says
+    // anything.
+    let (mut sink, mut stream) = ws.split();
+    // Pings and the closing message, which go ahead of whatever is waiting in `rx`.
+    let (first_tx, mut first_rx) = tokio::sync::mpsc::channel::<Message>(2);
+    let mut writer = tokio::spawn(async move {
+        loop {
+            let m = tokio::select! {
+                biased;
+                Some(m) = first_rx.recv() => m,
+                m = rx.recv() => match m {
+                    Some(m) => m,
+                    None => return "closed",
+                },
+            };
+            let last = matches!(m, Message::Close(_));
+            if !send(&mut sink, m, patience).await {
+                return "send failed";
+            }
+            if last {
+                return "closed by the hub";
+            }
+        }
+    });
     let mut ping = tokio::time::interval(PING_EVERY);
     ping.tick().await;
     let mut heard = Instant::now();
     let why = loop {
         tokio::select! {
-            m = rx.recv() => match m {
-                Some(m) => if !send(&mut ws, m, patience).await { break "send failed" },
-                None => break "closed",
-            },
-            m = ws.recv() => {
+            end = &mut writer => break end.unwrap_or("send failed"),
+            m = stream.next() => {
                 heard = Instant::now();
                 match m {
                     Some(Ok(Message::Text(t))) => link.on_text(t.as_str()),
@@ -247,17 +271,23 @@ async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
                 if heard.elapsed() > PING_EVERY * 3 {
                     break "went quiet";
                 }
-                if !send(&mut ws, Message::Ping(Vec::new().into()), patience).await {
-                    break "send failed";
-                }
+                // (no room: the last ping has not gone out yet, and a second one behind it would add nothing)
+                let _ = first_tx.try_send(Message::Ping(Vec::new().into()));
             }
             _ = link.closing.notified() => {
                 let (code, reason) = link.close_reason();
-                send(&mut ws, Message::Close(Some(CloseFrame { code, reason: reason.into() })), patience).await;
+                let close = Message::Close(Some(CloseFrame { code, reason: reason.into() }));
+                // The writer may be in the middle of a send: it gets as long as any send does to finish that one
+                // and this one.
+                let sent = async {
+                    let _ = first_tx.send(close).await;
+                    let _ = (&mut writer).await;
+                };
+                let _ = tokio::time::timeout(patience * 2 + Duration::from_secs(1), sent).await;
                 // Wait a moment for the node's answering close before dropping the socket. Dropping it at once can
                 // reset the connection on Windows, and the node then never reads why it was closed.
                 let _ = tokio::time::timeout(Duration::from_secs(2), async {
-                    while let Some(Ok(m)) = ws.recv().await {
+                    while let Some(Ok(m)) = stream.next().await {
                         if matches!(m, Message::Close(_)) {
                             break;
                         }
@@ -268,6 +298,7 @@ async fn serve_link(hub: Arc<Hub>, mut ws: WebSocket, name: String) {
             }
         }
     };
+    writer.abort();
     hub.links.remove(&link);
     link.shut();
     log(format!("node {name} unlinked: {why}"));

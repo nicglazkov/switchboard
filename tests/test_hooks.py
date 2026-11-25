@@ -23,7 +23,7 @@ class HookTest(unittest.TestCase):
         self.assertEqual(out['decision'], 'block')
         self.assertIn('640k tokens', out['reason'])
         self.assertIn('Start fresh: about', out['reason'])  # the whole cost, explained on the card
-        self.assertIn('Resume: about 1.3M', out['reason'])
+        self.assertIn('Resume: about 1.2M', out['reason'])  # 640k less the 29k that is still cached, written again
         self.assertIn('API price', out['reason'])
         self.assertEqual(self.spawned, [])  # the user may say "go": no summary until Start fresh is picked
         self.assertEqual(self.notified[0]['event'], 'guard')
@@ -245,12 +245,12 @@ class GuardEventTest(unittest.TestCase):
             class R:
                 def close(self): pass
             return R()
-        with mock.patch.object(self.sb.urllib.request, 'urlopen', fake_open):
+        with mock.patch.object(self.sb, '_urlopen', fake_open):
             self.sb.notify_server({'event': 'x'})
         self.assertEqual(tried, [], 'no server is built in: nothing is sent until the server has said where it is')
         # the server's poll says where it is; the agent keeps it and tries each address in that order
         self.sb.remember_identity({'verb': 'list', 'as': 'desk', 'servers': ['http://10.0.0.5:8130', 'http://100.64.0.5:8130/']})
-        with mock.patch.object(self.sb.urllib.request, 'urlopen', fake_open):
+        with mock.patch.object(self.sb, '_urlopen', fake_open):
             self.sb.notify_server({'event': 'x'})
         self.assertEqual([u.split('/api')[0] for u in tried], ['http://10.0.0.5:8130', 'http://100.64.0.5:8130'])
 
@@ -287,7 +287,7 @@ class GuardEventTest(unittest.TestCase):
             hang.wait(10)
             raise OSError('timed out')
         t0 = time.time()
-        with mock.patch.object(self.sb.urllib.request, 'urlopen', never):
+        with mock.patch.object(self.sb, '_urlopen', never):
             self.assertFalse(self.sb.notify_server({'event': 'guard'}))
             self.assertFalse(self.sb.notify_server({'event': 'guard_answer'}))
             self.sb.hook_ping({'hook_event_name': 'UserPromptSubmit', 'session_id': 'S1'}, None, self.now)
@@ -307,7 +307,7 @@ class GuardEventTest(unittest.TestCase):
                 raise OSError('timed out')
             got.append(json.loads(req.data))
             return mock.Mock()
-        with mock.patch.object(self.sb.urllib.request, 'urlopen', one_up):
+        with mock.patch.object(self.sb, '_urlopen', one_up):
             self.assertTrue(self.sb.notify_server({'event': 'guard'}))
         hang.set()
         self.assertEqual(got, [{'event': 'guard'}])

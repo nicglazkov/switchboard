@@ -24,23 +24,25 @@ def log(msg):
 
 
 def jload(p, default):
-    try:
-        d = json.loads(Path(p).read_text())
-        return d if isinstance(d, type(default)) else default
-    except (OSError, ValueError):
-        return default
+    """A store's JSON, or `default` when it is not there. One that cannot be read is put aside and its last good
+    copy used (durable.load); with none it reads as `default`, and durable.broken(p) says so to whoever must not
+    take "nothing" for an answer (Reaper.auto_due)."""
+    return durable.load(p, default, type(default))[0]
 
 
 def jsave(p, obj):
+    """Every store here is either saved because the user changed it, or gathered by the server itself: both may
+    start a lost file over (force). The file from before stays as its .bak."""
     p = Path(p)
-    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
+    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'),
+                keep_bak=True, force=True)
 
 
 def hub_open_known(url=None, timeout=1.5):
     """{(machine, bg)} with a terminal open on the hub right now; None when the hub could not be asked.
     The hub is the one nodes.py talks to, so a hub on SWITCHBOARD_HUB_PORT or SWITCHBOARD_HUB_URL is found too."""
     try:
-        with urllib.request.urlopen(url or nodes_mod.HUB + '/internal/open', timeout=timeout) as r:
+        with nodes_mod.direct_open(url or nodes_mod.HUB + '/internal/open', timeout=timeout) as r:  # never a proxy
             d = json.loads(r.read() or b'[]')
     except Exception:
         return None
@@ -174,7 +176,7 @@ class Reaper:
     def config(self):
         """reaper.json, read on every run so a change needs no restart. A broken file turns suggestions off."""
         try:
-            d = json.loads(self.cfg_path.read_text())
+            d = json.loads(self.cfg_path.read_text(encoding='utf-8'))
             if not isinstance(d, dict):
                 raise ValueError('not an object')
         except FileNotFoundError:
@@ -325,7 +327,9 @@ class Reaper:
     def auto_wait(self):
         """Hours a finished, cold chat is left alone before it stops by itself; 0 when the setting is off."""
         try:
-            return auto_hours(self.app.prefs().get('auto_stop_h'))
+            h = auto_hours(self.app.prefs().get('auto_stop_h'))
+            # prefs.json was lost, and with it whether this was turned off: off until Settings is saved again
+            return 0 if durable.broken(self.app.state_dir / 'prefs.json') else h
         except Exception:
             return 0
 
@@ -398,6 +402,8 @@ class Reaper:
         skip, used = self._auto_later, self.auto_used(now)
         acfg = self.auto_cfg(cfg)
         keep = set(self.keep()) | self.tab_keys()
+        if durable.broken(self.keep_path) or durable.broken(self.tabs_path):
+            return []  # which chats are kept or open in a tab is not known: nothing stops until it is saved again
         pick = lambda ms: [d for d in self.decide(ms, now, acfg, keep, opened)
                            if d.get('sid') and d['reason'] in AUTO_REASONS and skip.get(self.key(d), 0) <= now
                            and (self.key(d) not in used or now - used[self.key(d)] >= acfg[d['reason'] + '_h'] * 3600)]
@@ -508,13 +514,15 @@ class Reaper:
                 log('stopping idle chats failed: ' + traceback.format_exc())
             now, items = self.app.clock(), self.decisions(cfg)
             seen = jload(self.seen_path, {})
+            was = json.dumps(seen, sort_keys=True)
             keys = {self.key(d) for d in items}
             new = [d for d in items if self.key(d) not in seen.get('keys', {})]
             seen['keys'] = {k: seen.get('keys', {}).get(k, now) for k in keys}  # forget what went away
             tell = new and now - (seen.get('pushed') or 0) >= PUSH_EVERY
             if tell:
                 seen['pushed'] = now
-            jsave(self.seen_path, seen)  # written down first: a push that fails is not sent again at every poll
+            if json.dumps(seen, sort_keys=True) != was:  # not at every poll: each write is forced to disk
+                jsave(self.seen_path, seen)  # written down first: a push that fails is not sent again at every poll
             if tell:
                 self.app._push(*self.notice(items, bool(self.auto_wait())), 'cleanup', 'cleanup')
         except Exception:

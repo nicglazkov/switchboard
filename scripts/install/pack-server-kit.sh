@@ -18,7 +18,7 @@
 #
 # Options:
 #   --base URL        the folder the three files are served from (bakes <base>/switchboard-server-kit.tar.gz into
-#                     get-server.sh; without it, get-server.sh needs --kit or SWITCHBOARD_KIT_URL)
+#                     get-server.sh; without it, get-server.sh uses the newest public release)
 #   --out DIR         where to write them (default dist/server-kit)
 #   --no-binaries     leave out the ready-made hub and node builds
 #   --no-sources      leave out the Rust sources (native/, as git has it)
@@ -141,7 +141,7 @@ PY
 
 ( cd "$OUT" && if command -v sha256sum >/dev/null; then sha256sum switchboard-server-kit.tar.gz; else shasum -a 256 switchboard-server-kit.tar.gz; fi ) >"$KIT.sha256"
 if [ -n "$BASE" ]; then
-  sed "s|^KIT_DEFAULT=\"\"|KIT_DEFAULT=\"$BASE/switchboard-server-kit.tar.gz\"|" "$HERE/get-server.sh" >"$OUT/get-server.sh"
+  sed "s|^KIT_DEFAULT=\".*\"|KIT_DEFAULT=\"$BASE/switchboard-server-kit.tar.gz\"|" "$HERE/get-server.sh" >"$OUT/get-server.sh"
 else
   cp "$HERE/get-server.sh" "$OUT/get-server.sh"
 fi
@@ -153,6 +153,6 @@ if [ -n "$BASE" ]; then
   echo "Serve that folder at $BASE, then on the new server machine:"
   echo "  curl -fsSL $BASE/get-server.sh | bash"
 else
-  echo "No --base given, so get-server.sh needs to be told where the kit is:"
+  echo "No --base given, so get-server.sh downloads the kit from the newest public release. For this kit:"
   echo "  curl -fsSL <base>/get-server.sh | SWITCHBOARD_KIT_URL=<base>/switchboard-server-kit.tar.gz bash"
 fi

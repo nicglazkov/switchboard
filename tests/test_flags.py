@@ -527,9 +527,15 @@ class LaunchWordsTest(RpcBase):
     @unittest.skipUnless(sys.platform == 'darwin', 'kern.procargs2 is a Mac thing')
     def test_a_mac_is_asked_for_exact_words_before_ps(self):
         import subprocess
-        p = subprocess.Popen(['/bin/sleep', '30', 'a b'], stderr=subprocess.DEVNULL)
+        # sleep itself will not do: it takes 'a b' for a bad number and is gone before it can be looked at
+        words = [sys.executable, '-c', 'import time; print("up", flush=True); time.sleep(30)', 'a b']
+        p = subprocess.Popen(words, stdout=subprocess.PIPE)
         try:
-            self.assertEqual(self.sb._cmdlines([p.pid]), {p.pid: ['/bin/sleep', '30', 'a b']})
+            self.assertEqual(p.stdout.readline(), b'up\n')  # it has started, and with these words
+            got = self.sb._cmdlines([p.pid])
+            self.assertEqual(got[p.pid][1:], words[1:])
+            self.assertEqual(os.path.basename(got[p.pid][0]).lower()[:6], 'python')
         finally:
             p.kill()
             p.wait()
+            p.stdout.close()

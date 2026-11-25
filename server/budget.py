@@ -25,17 +25,17 @@ def log(msg):
 
 
 def _jload(p, default):
-    try:
-        d = json.loads(Path(p).read_text())
-        return d if isinstance(d, type(default)) else default
-    except (OSError, ValueError):
-        return default
+    """One that cannot be read is put aside and its last good copy used (durable.load)."""
+    return durable.load(p, default, type(default))[0]
 
 
 def _jsave(p, obj):
+    """The settings are saved when the user changes them and the rest is the server's own record, so both may
+    start a lost file over (force). The file from before stays as its .bak."""
     p = Path(p)
     p.parent.mkdir(parents=True, exist_ok=True)
-    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'))
+    durable.put(p, json.dumps(obj, indent=1), tmp=p.with_name(f'{p.name}.{os.getpid()}.{threading.get_ident()}.tmp'),
+                keep_bak=True, force=True)
 
 
 class BudgetError(ValueError):
@@ -297,7 +297,10 @@ class Budget:
         self.path = Path(cfg_dir) / 'budget.json'
         self.state_path = app.state_dir / 'budget_state.json'
         self.events_path = app.state_dir / 'budget_events.json'
-        self.lock, self.busy = threading.Lock(), threading.Lock()
+        # lock: every read-change-save of budget.json and budget_state.json is one step under it (it can be taken
+        # again by the thread that holds it). Two devices changing the budget, or a lift during a check, each read
+        # the file, changed their part and wrote all of it back, and one of the two changes was lost.
+        self.lock, self.busy = threading.RLock(), threading.Lock()
 
     # ---- settings
     def settings(self):
@@ -316,22 +319,26 @@ class Budget:
         now = self.app.clock()
         if op == 'set':
             try:
-                self._save(apply_set(self.settings(), body))
+                with self.lock:
+                    self._save(apply_set(self.settings(), body))
             except BudgetError as e:
                 raise self.HttpError(400, str(e))
         elif op == 'lift':
             if len(body) != 1:
                 raise self.HttpError(400, 'lift takes no fields.')
             until = fleet_mod.end_of_day(now, self._tz())
-            self._save(dict(self.settings(), lifted_until=until))
-            st = self._state()
-            st['lift_day'] = self.status(now)['day']
-            _jsave(self.state_path, st)
+            with self.lock:
+                self._save(dict(self.settings(), lifted_until=until))
+                day = self.status(now)['day']
+                st = self._state()
+                st['lift_day'] = day
+                _jsave(self.state_path, st)
             self._event({'kind': 'lift', 'until': until, 'text': 'Hard limit lifted for the rest of today.'})
         elif op == 'unlift':
             if len(body) != 1:
                 raise self.HttpError(400, 'unlift takes no fields.')
-            self._save(dict(self.settings(), lifted_until=None))
+            with self.lock:
+                self._save(dict(self.settings(), lifted_until=None))
         else:
             raise self.HttpError(400, 'unknown budget op (set, lift or unlift)')
         if hasattr(self.app, 'bump'):
@@ -398,11 +405,12 @@ class Budget:
         st = self.status(now)
         if not st['blocking']:
             return None
-        state = self._state()
-        if state.get('hard_day') == st['day'] or state.get('lift_day') == st['day']:
-            return None  # once a day, and never again on a day it was lifted
-        state['hard_day'] = st['day']
-        _jsave(self.state_path, state)
+        with self.lock:  # not while the machines are asked to stop: only the read, the change and the save
+            state = self._state()
+            if state.get('hard_day') == st['day'] or state.get('lift_day') == st['day']:
+                return None  # once a day, and never again on a day it was lifted
+            state['hard_day'] = st['day']
+            _jsave(self.state_path, state)
         stopped, failed = self.stop_all()
         n = len(stopped)
         text = stop_text(n, st)

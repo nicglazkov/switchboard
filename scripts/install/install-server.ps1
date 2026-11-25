@@ -36,9 +36,46 @@ $Tasks = @('SwitchboardServer', 'SwitchboardDownloads')
 if ($Uninstall) {
     if (Test-Path $Ctl) { & powershell -NoProfile -ExecutionPolicy Bypass -File $Ctl stop | Out-Null }
     foreach ($t in $Tasks) { schtasks /Delete /TN $t /F 2>$null | Out-Null }
-    Remove-Item -Recurse -Force $Base -ErrorAction SilentlyContinue
+    # A switchboard-node on this PC lives in the folder the server is in, but this installer did not put it there:
+    # it is what links a computer to a server, and that server may be another one. It goes with the server only
+    # when node.json says its hub is this PC (unsure counts as no). Otherwise its files are the one thing left in
+    # the folder, so the PC stays linked.
+    $NodeExe = Join-Path $Base 'switchboard-node.exe'
+    $NodeNote = @()
+    $KeepNode = $false
+    if (Test-Path $NodeExe) {
+        $Here = $false
+        try {
+            $cfg = if ($env:SWITCHBOARD_NODE_CONFIG) { $env:SWITCHBOARD_NODE_CONFIG } else { Join-Path $HOME '.config\switchboard\node.json' }
+            $hub = [string](Get-Content -Raw $cfg | ConvertFrom-Json).hub
+            $h = ($hub -replace '^[a-zA-Z]+://', '') -replace '/.*$', ''
+            if ($h -match '^\[([^\]]+)\]') { $h = $Matches[1] } elseif (($h -split ':').Count -eq 2) { $h = ($h -split ':')[0] }
+            $h = $h.ToLower()
+            $mine = @('localhost', '::1', $env:COMPUTERNAME, [System.Net.Dns]::GetHostName())
+            $mine += [System.Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() |
+                ForEach-Object { $_.GetIPProperties().UnicastAddresses } | ForEach-Object { ($_.Address.ToString() -split '%')[0] }
+            $Here = $h -and (($h -like '127.*') -or (($mine | Where-Object { $_ } | ForEach-Object { $_.ToLower() }) -contains $h))
+        } catch { $Here = $false }
+        if ($Here) {
+            $out = @()
+            try { $out = @(& $NodeExe uninstall 2>&1 | ForEach-Object { "$_" }) } catch { $out += "$_" }
+            $NodeNote += 'This PC was linked to its own server with switchboard-node, which took itself out too:'
+            $NodeNote += $out | ForEach-Object { "  $_" }
+        } else {
+            $KeepNode = $true
+            $NodeNote += 'This PC is still linked to a Switchboard server as one of its computers: switchboard-node was left'
+            $NodeNote += "as it is, in $Base. To remove that too, run: `"$NodeExe`" uninstall"
+        }
+    }
+    if ($KeepNode) {
+        Get-ChildItem -Force $Base | Where-Object { $_.Name -notlike 'switchboard-node*' } |
+            Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    } else {
+        Remove-Item -Recurse -Force $Base -ErrorAction SilentlyContinue
+    }
     Say "Switchboard is removed from this PC. Your settings ($HOME\.config\switchboard) and history ($HOME\.local\share\switchboard) are still there;"
     Say 'delete those two folders too if you don''t want them.'
+    foreach ($l in $NodeNote) { Say $l }
     exit 0
 }
 

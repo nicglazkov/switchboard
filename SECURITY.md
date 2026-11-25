@@ -6,6 +6,11 @@ Switchboard has no passwords. Anyone who can reach its ports (8130 to 8132) can 
 terminals and start new chats on your computers. That is on purpose: it is meant for your own home network or your
 own Tailscale network. Never forward its ports to the internet.
 
+The server's API (port 8130) answers only requests that come from this computer, a private network (10.x,
+172.16 to 172.31, 192.168.x), a link-local address, Tailscale (100.64.0.0/10) or the IPv6 kinds of those. It goes
+by the address a request comes from, not by the `Host` it sends. `peers` in `server.json` lets more networks in.
+This narrows who can reach it. It is not a password: everyone on a network that is let in can use the server.
+
 Linking a computer uses a one-time code that expires after 10 minutes. A computer added over ssh gets a key that
 can only run the Switchboard helper, not a shell.
 

@@ -92,7 +92,7 @@ it once by hand:
 Run the install line again on the server:
 
 ```sh
-curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash
+curl -fsSL https://github.com/nicglazkov/switchboard/releases/latest/download/get-server.sh | bash -s -- --kit https://github.com/nicglazkov/switchboard/releases/latest/download/switchboard-server-kit.tar.gz
 ```
 
 Or, in a copy of the repository, `git pull` and run `scripts/install/install-server.sh` again. The installer

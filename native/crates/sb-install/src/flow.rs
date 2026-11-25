@@ -424,7 +424,8 @@ pub fn uninstall(
     let mut out = Outcome::default();
     // The login item, the Dock icon and the shortcuts first, so nothing points at a missing app if a later step fails;
     // the Settings > Apps entry after the app, so a failed removal can still be retried from there.
-    let order = [What::LoginItem, What::Dock, What::Shortcuts, What::App, What::Registry, What::Caches, What::Data];
+    let order =
+        [What::LoginItem, What::Dock, What::Shortcuts, What::App, What::Registry, What::Caches, What::Data, What::Node];
     for what in order {
         let items: Vec<_> = plan.remove.iter().filter(|i| i.what == what).collect();
         if items.is_empty() {
@@ -438,6 +439,7 @@ pub fn uninstall(
                 What::Dock => p.set_in_dock(&app, false),
                 What::Registry => p.unregister(&app),
                 What::App => p.remove_app(&i.path).map(|_| Applied::Done),
+                What::Node => remove_node(&i.path),
                 _ => swap::remove_tree(&i.path).map(|_| Applied::Done),
             };
             match res {
@@ -454,6 +456,30 @@ pub fn uninstall(
         let _ = std::fs::remove_file(record::path(&d));
     }
     Ok(out)
+}
+
+/// Has switchboard-node take itself out (stop, leave what starts it at login, remove its token), then removes the
+/// program if it is still there: on Windows a program cannot delete itself. A node that cannot do that at all (one
+/// from before it had `uninstall`, or one that will not run) is left whole. One that began and then reported that
+/// something would not go has removed the rest by then: nothing more of it is touched here, the program stays so
+/// that `switchboard-node uninstall` can be run again, and the note says it did not finish.
+fn remove_node(node: &Path) -> std::io::Result<Applied> {
+    let mut cmd = std::process::Command::new(node);
+    cmd.arg("uninstall").stdin(std::process::Stdio::null());
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    match cmd.output() {
+        Ok(out) if out.status.success() => swap::remove_tree(node).map(|_| Applied::Done),
+        Ok(out) => {
+            let err = String::from_utf8_lossy(&out.stderr);
+            let last = err.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("it gave no reason").trim();
+            Ok(Applied::Skipped(format!("switchboard-node could not remove itself ({last})")))
+        }
+        Err(e) => Ok(Applied::Skipped(format!("switchboard-node could not be run ({e})"))),
+    }
 }
 
 pub fn lowercase_first(s: &str) -> String {
@@ -500,6 +526,7 @@ mod tests {
                 app: app.into(),
                 caches: vec![self.root.join("home/cache")],
                 data: vec![self.root.join("home/settings")],
+                node: Some(self.root.join("home/bin/switchboard-node")),
                 ..Default::default()
             }
         }
@@ -652,8 +679,73 @@ mod tests {
         assert!(!t.root.join("home/settings").exists());
     }
 
+    /// A stand-in for switchboard-node: `uninstall` removes its token and says so, or fails when told to.
+    #[cfg(unix)]
+    fn fake_node(t: &Test, works: bool) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let node = t.root.join("home/bin/switchboard-node");
+        std::fs::create_dir_all(node.parent().unwrap()).unwrap();
+        std::fs::write(t.root.join("home/node.json"), "{}").unwrap();
+        let body = if works {
+            "#!/bin/sh\n[ \"$1\" = uninstall ] || exit 2\nrm \"$(dirname \"$0\")/../node.json\"\n"
+        } else {
+            "#!/bin/sh\necho 'usage: switchboard-node pair <hub> <code>' >&2\nexit 2\n"
+        };
+        std::fs::write(&node, body).unwrap();
+        std::fs::set_permissions(&node, std::fs::Permissions::from_mode(0o755)).unwrap();
+        node
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn uninstall_leaves_the_node_alone_unless_data_goes_too() {
+        let t = setup("uninstall-node", false);
+        let s = prepare(&t, &opts(&t, "1.0.0")).unwrap();
+        install(&t, &s, Choices::default(), &mut || false, &mut |_| {}).unwrap();
+        let node = fake_node(&t, true);
+        let token = t.root.join("home/node.json");
+
+        let plan = uninstall_plan(&t, &s.dest, false);
+        assert_eq!(plan.keep.last().map(|i| i.what), Some(uninstall::What::Node));
+        uninstall(&t, &plan, &mut || false, &mut |_| {}).unwrap();
+        assert!(node.exists() && token.exists(), "the computer stays linked");
+
+        app(&s.dest, "1.0.0");
+        let plan = uninstall_plan(&t, &s.dest, true);
+        let mut done = vec![];
+        let out = uninstall(&t, &plan, &mut || false, &mut |e| {
+            if let Event::Done(t, _) = e {
+                done.push(t);
+            }
+        })
+        .unwrap();
+        assert!(!token.exists(), "the node was asked to take itself out");
+        assert!(!node.exists(), "and its program is gone");
+        assert_eq!(done.last(), Some(&Task::Remove(uninstall::What::Node)), "last, after everything of the app's");
+        assert!(out.notes.is_empty(), "{:?}", out.notes);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_node_that_cannot_remove_itself_is_left_whole_and_said() {
+        let t = setup("uninstall-old-node", false);
+        let s = prepare(&t, &opts(&t, "1.0.0")).unwrap();
+        install(&t, &s, Choices::default(), &mut || false, &mut |_| {}).unwrap();
+        let node = fake_node(&t, false);
+        let plan = uninstall_plan(&t, &s.dest, true);
+        let out = uninstall(&t, &plan, &mut || false, &mut |_| {}).unwrap();
+        assert!(!s.dest.exists(), "the app itself is still uninstalled");
+        assert!(node.exists() && t.root.join("home/node.json").exists(), "not half removed");
+        assert_eq!(
+            out.notes,
+            ["Left this computer's link to the server: switchboard-node could not remove itself (usage: \
+              switchboard-node pair <hub> <code>)."]
+        );
+    }
+
     #[test]
     fn task_labels() {
+        assert_eq!(Task::Remove(uninstall::What::Node).label(), "Removing this computer's link to the server");
         assert_eq!(Task::Remove(uninstall::What::Dock).label(), "Removing the icon in the Dock");
         assert_eq!(Task::Remove(uninstall::What::Registry).label(), "Removing the entry in Settings > Apps");
         assert_eq!(Task::Remove(uninstall::What::Caches).label(), "Removing caches, logs and saved window state");

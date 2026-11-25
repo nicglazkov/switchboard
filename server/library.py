@@ -53,7 +53,7 @@ def log(msg):
 
 def jload(p, default):
     try:
-        d = json.loads(Path(p).read_text())
+        d = json.loads(Path(p).read_text(encoding='utf-8'))
         return d if isinstance(d, type(default)) else default
     except (OSError, ValueError):
         return default
@@ -195,7 +195,7 @@ class Library:
         until a readable library.json is back and the server starts again, nothing is dropped from any machine."""
         bad = self.file.with_name(self.file.name + '.bad')
         try:
-            d = json.loads(self.file.read_text())
+            d = json.loads(self.file.read_text(encoding='utf-8'))
         except FileNotFoundError:
             d = {}
             self.broken = bad.exists()  # put aside by an earlier start, and nobody has looked at it yet
